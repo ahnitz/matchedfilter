@@ -615,30 +615,30 @@ void innermost_0(array<float2, int(16)> thread* r_3)
 }
 
 
-#line 820
+#line 823
 void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 820
+#line 823
     uint _S20;
 
-#line 820
+#line 823
     uint k2_1;
 
-#line 820
+#line 823
     float cr_0;
 
-#line 820
+#line 823
     float ci_0;
 
-#line 820
+#line 823
     uint _S21;
 
-#line 820
+#line 823
     for(;;)
     {
 
-#line 820
+#line 823
         for(;;)
         {
 
@@ -817,7 +817,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 56
     innermost_0(r_4);
 
-#line 823 "tc_fwd2_4194304.slang"
+#line 826 "tc_fwd2_4194304.slang"
     return;
 }
 
@@ -887,92 +887,92 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 2053
+#line 2080
 [[kernel]] void tcForwardStage3(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], packed_float2 device* entryPointParams_scratch_1 [[buffer(0)]], packed_float2 device* entryPointParams_spectra_1 [[buffer(1)]])
 {
 
-#line 2053
+#line 2080
     thread KernelContext_0 kernelContext_4;
 
-#line 2053
+#line 2080
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 2053
+#line 2080
     (&kernelContext_4)->entryPointParams_spectra_0 = entryPointParams_spectra_1;
 
-#line 2053
+#line 2080
     threadgroup array<uint, int(2048)> stg_1;
 
-#line 2053
+#line 2080
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint _S31 = gid_0.x;
 
-#line 2057
+#line 2084
     uint _S32 = _S31 / 2048U;
 
-#line 2057
+#line 2084
     uint _S33 = _S31 % 2048U;
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 2061
+#line 2088
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 2062
+#line 2089
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 2062
+#line 2089
             break;
         }
 
-#line 2063
+#line 2090
         r_5[m_1] = float2(*((&kernelContext_4)->entryPointParams_scratch_0+(_S32 * 4194304U + _S33 * 2048U + tid_1 + 128U * m_1))) ;
 
-#line 2062
+#line 2089
         m_1 = m_1 + 1U;
 
-#line 2062
+#line 2089
     }
 
-#line 2062
+#line 2089
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 2062
+#line 2089
     uint i_5 = 0U;
 
 
     for(;;)
     {
 
-#line 2065
+#line 2092
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 2065
+#line 2092
             break;
         }
 
-#line 2065
+#line 2092
         *((&kernelContext_4)->entryPointParams_spectra_0+(_S32 * 4194304U + slotToIndex_0(tid_1 * 16U + i_5) * 2048U + _S33)) = packed_float2(float2(r_5[i_5].x, - r_5[i_5].y)) ;
 
-#line 2065
+#line 2092
         i_5 = i_5 + 1U;
 
-#line 2065
+#line 2092
     }
 
 

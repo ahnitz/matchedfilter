@@ -634,8 +634,7 @@ class HierarchicalFilter(MatchedFilter):
             nblk = 0
         if not (full and nblk >= 2):
             # not the work the trial decides (a follow-up, one block): run as it stands
-            with _AUTOTUNE_LOCK:
-                w = tr.tick()
+            w = tr.tick()
             if w is not None:
                 self.lock_arm(w)
             return run()

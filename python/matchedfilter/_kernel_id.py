@@ -21,9 +21,17 @@ from functools import lru_cache
 #: compiled one, its library.
 BACKENDS = {
     "vulkan": ("spirv", (".spv",), ("sha256",)),
-    "cuda": ("ptx", (".ptx",), ("sha256",)),
+    "cuda": ("ptx", (".ptx.gz",), ("sha256",)),
     "metal": ("metal", (".metal", ".metallib"), ("sha256", "metallib_sha256")),
 }
+
+
+def _stem_of(name, suffixes):
+    """Strip the first matching artifact suffix from `name` (handles multi-part `.ptx.gz`)."""
+    for s in suffixes:
+        if name.endswith(s):
+            return name[:-len(s)]
+    return name.rsplit(".", 1)[0]
 
 
 def file_sha256(path):
@@ -90,7 +98,7 @@ def _ids(backend):
             out[rec["file"][:-len(".metal")] + ".metallib"] = lib
     if not kernels and folder.is_dir():          # no manifest at all: what is on disk
         for path in sorted(folder.iterdir()):
-            if path.suffix in BACKENDS[backend][1] and path.is_file():
+            if any(path.name.endswith(s) for s in BACKENDS[backend][1]) and path.is_file():
                 out[path.name] = file_sha256(path)
     return out
 
@@ -121,7 +129,8 @@ def kernel_id(backend, stems):
 def family_id(backend, prefix):
     """Identity of every shipped kernel of a backend whose stem starts with prefix (all the
     coarse builds of one band, "tierb_256_c16", for instance)."""
-    return kernel_id(backend, [n.rsplit(".", 1)[0] for n in _ids(backend)
+    suffixes = BACKENDS[backend][1]
+    return kernel_id(backend, [_stem_of(n, suffixes) for n in _ids(backend)
                                if n.startswith(prefix)] or [prefix])
 
 

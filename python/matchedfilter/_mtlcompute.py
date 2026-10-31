@@ -15,6 +15,7 @@ job. It is written to fail loudly rather than plausibly.
 """
 import ctypes
 import sys
+import weakref
 from contextlib import contextmanager
 from functools import wraps
 
@@ -339,6 +340,8 @@ class _Device:
         self.pending_writes = []
         #: A _FusedBatch while filter_series_many is collecting (fused()), else None.
         self.collector = None
+        #: Live contexts on this device, so _x_after_readers can finish readers on other queues.
+        self.contexts = weakref.WeakSet()
 
 
 _DEVICES = {}
@@ -587,6 +590,7 @@ class Context(Executor, InputUploads):
 
     def _initialize(self, index, dev):
         self._device_state = dev
+        dev.contexts.add(self)
         self.device = dev.handle
         self.name = dev.name
         self.max_shared_memory = dev.max_shared_memory
@@ -1224,7 +1228,16 @@ class Context(Executor, InputUploads):
         pass
 
     def _x_after_readers(self):
-        pass                # no wait added (open question: docs/unification-plan.md log)
+        # Other contexts' queues and the fused batch queue share no order with self.queue:
+        # finish in-flight readers before overwriting an output they may still read.
+        dev = getattr(self, "_device_state", None)
+        if dev is None:
+            return
+        if dev.collector is not None:
+            dev.collector.flush()
+        for ctx in list(getattr(dev, "contexts", ())):
+            if ctx is not self and getattr(ctx, "_inflight", None):
+                ctx._drain()
 
     @staticmethod
     def _x_release(native, done=False):

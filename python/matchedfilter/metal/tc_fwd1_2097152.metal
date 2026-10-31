@@ -624,30 +624,30 @@ void innermost_0(array<float2, int(16)> thread* r_3)
 }
 
 
-#line 820
+#line 823
 void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 820
+#line 823
     uint _S20;
 
-#line 820
+#line 823
     uint k2_1;
 
-#line 820
+#line 823
     float cr_0;
 
-#line 820
+#line 823
     float ci_0;
 
-#line 820
+#line 823
     uint _S21;
 
-#line 820
+#line 823
     for(;;)
     {
 
-#line 820
+#line 823
         for(;;)
         {
 
@@ -826,7 +826,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 56
     innermost_0(r_4);
 
-#line 823 "tc_fwd1_2097152.slang"
+#line 826 "tc_fwd1_2097152.slang"
     return;
 }
 
@@ -896,38 +896,38 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 2025
+#line 2052
 [[kernel]] void tcForwardStage1(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_scratch_1 [[buffer(3)]])
 {
 
-#line 2025
+#line 2052
     thread KernelContext_0 kernelContext_4;
 
-#line 2025
+#line 2052
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 2025
+#line 2052
     (&kernelContext_4)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 2025
+#line 2052
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 2025
+#line 2052
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 2025
+#line 2052
     threadgroup array<uint, int(2048)> stg_1;
 
-#line 2025
+#line 2052
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 2031
+#line 2058
     uint _S31 = gid_0.x;
 
-#line 2031
+#line 2058
     uint block_0 = _S31 / 1024U;
 
-#line 2031
+#line 2058
     uint _S32 = _S31 % 1024U;
     uint tid_1 = lid_0.x;
     uint _S33 = entryPointParams_starts_1[block_0];
@@ -935,107 +935,107 @@ uint slotToIndex_0(uint slot_0)
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 2036
+#line 2063
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 2037
+#line 2064
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 2037
+#line 2064
             break;
         }
 
-#line 2038
+#line 2065
         uint j_3 = _S32 + 1024U * (tid_1 + 128U * m_1);
         float2 _S34 = float2(0.0f, 0.0f);
 
-#line 2039
+#line 2066
         bool _S35;
         if(_S33 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
-#line 2040
+#line 2067
             _S35 = j_3 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S33);
 
-#line 2040
+#line 2067
         }
         else
         {
 
-#line 2040
+#line 2067
             _S35 = false;
 
-#line 2040
+#line 2067
         }
 
-#line 2040
+#line 2067
         float2 x_1;
 
-#line 2040
+#line 2067
         if(_S35)
         {
 
-#line 2040
+#line 2067
             x_1 = float2(*((&kernelContext_4)->entryPointParams_series_0+(_S33 + j_3))) ;
 
-#line 2040
+#line 2067
         }
         else
         {
 
-#line 2040
+#line 2067
             x_1 = _S34;
 
-#line 2040
+#line 2067
         }
 
         r_5[m_1] = float2(x_1.x / 2.097152e+06f, - x_1.y / 2.097152e+06f);
 
-#line 2037
+#line 2064
         m_1 = m_1 + 1U;
 
-#line 2037
+#line 2064
     }
 
-#line 2037
+#line 2064
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 2037
+#line 2064
     uint i_5 = 0U;
 
-#line 2045
+#line 2072
     for(;;)
     {
 
-#line 2045
+#line 2072
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 2045
+#line 2072
             break;
         }
 
-#line 2046
+#line 2073
         uint k2_2 = slotToIndex_0(tid_1 * 16U + i_5);
 
-#line 2046
+#line 2073
         *((&kernelContext_4)->entryPointParams_scratch_0+(block_0 * 2097152U + k2_2 * 1024U + _S32)) = packed_float2(cmul_0(r_5[i_5], mfTwiddle_0(6.28318548202514648f * float(_S32 * k2_2) / 2.097152e+06f))) ;
 
-#line 2045
+#line 2072
         i_5 = i_5 + 1U;
 
-#line 2045
+#line 2072
     }
 
-#line 2050
+#line 2077
     return;
 }

@@ -16,6 +16,7 @@ synchronization that completes it, ``(label, device_ms)`` is appended to
 ``self.timing_log``. With it off no event is recorded anywhere.
 """
 import ctypes
+import gzip
 import struct
 import threading
 
@@ -912,7 +913,9 @@ class Context(Executor, InputUploads):
         """(function, threads per block) of a manifest record: its entry point at the block
         size it was built for."""
         wg = int(rec["local_size"][0])
-        return self._load(rec["file"][:-len(".ptx")], _PTX_DIR / rec["file"], rec["entry"], wg), wg
+        fn = rec["file"]
+        stem = fn[:-len(".ptx.gz")] if fn.endswith(".ptx.gz") else fn[:-len(".ptx")]
+        return self._load(stem, _PTX_DIR / fn, rec["entry"], wg), wg
 
     def _load(self, stem, ptx_file, fn_name, wg):
         """Load (once) a PTX module and return one of its functions."""
@@ -920,7 +923,10 @@ class Context(Executor, InputUploads):
         if mkey not in self._modules:
             self._bind()
             mod = ctypes.c_void_p()
-            ptx_bytes = ptx_file.read_bytes() + b"\0"
+            raw = ptx_file.read_bytes()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            ptx_bytes = raw + b"\0"
             # A block of wg threads must fit the SM's 64K-register file, or the
             # launch fails with CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES: cap the JIT's
             # allocation at 65536 / wg (64 at 1024 threads, 128 at 512).
@@ -1331,8 +1337,9 @@ class Context(Executor, InputUploads):
             self._modules.clear()
             self._pipelines.clear()
         for _, pending in self._pending_events.items():
-            for _, e0, e1 in pending:
-                self._event_pool.extend((e0, e1))
+            for label, e0, e1 in pending:
+                for _, r0, r1 in (e1 if e0 is None else ((label, e0, e1),)):
+                    self._event_pool.extend((r0, r1))
         self._pending_events.clear()
         for e in self._event_pool:
             if e.value:

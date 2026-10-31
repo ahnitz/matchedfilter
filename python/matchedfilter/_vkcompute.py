@@ -583,6 +583,7 @@ class _FusedBatch:
             # Serials are never reused, so a hit IS these recordings; they are live (add()
             # accepts only registered recordings, and eviction flushes the batch first).
             cache.move_to_end(key)
+            hit[2] = self
             self._submit_fused(hit[0])
             return
         # A fused recording is a recording each constituent context built (Executor.built):
@@ -628,9 +629,10 @@ class _FusedBatch:
                 prof._stamp(cmd, "fused " + phase)
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
         self.prof = prof
-        cache[key] = (cmd, [list(cmds) for _, cmds in self.items])
+        cache[key] = [cmd, [list(cmds) for _, cmds in self.items], self]
         while len(cache) > 64:
-            _, (old_cmd, _) = cache.popitem(last=False)
+            _, (old_cmd, _, old_batch) = cache.popitem(last=False)
+            old_batch.wait()
             self._free(old_cmd)
         self._submit_fused(cmd)
 
@@ -1981,7 +1983,14 @@ class Context(Executor, InputUploads):
         pass
 
     def _x_after_readers(self):
-        pass                # no wait added (open question: docs/unification-plan.md log)
+        # Readers in filter_series_many run either in the fused collector (queue 0) or across
+        # queues 1..3: flush any open batch onto queue 0 and wait for queues 1..3 before this
+        # submission on queue 0 overwrites an output they read.
+        dev = getattr(self, "_device_state", None)
+        if dev is not None and dev.collector is not None and dev.collector.items:
+            dev.collector.flush()
+        for q in getattr(self, "queues", ())[1:]:
+            _check(self.vk.vkQueueWaitIdle(q), "vkQueueWaitIdle")
 
     @staticmethod
     def _x_release(native, done=False):
@@ -2114,6 +2123,9 @@ class Context(Executor, InputUploads):
             return
         self._retire()
         self.clear_cache()
+        dummy = self.__dict__.pop("_dummy_buf", None)
+        if dummy is not None:
+            dummy.destroy()
         vk = self.vk
         for fence in getattr(self, "_fences", {}).values():
             vk.vkDestroyFence(self.device, fence, None)

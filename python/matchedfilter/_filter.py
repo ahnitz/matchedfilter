@@ -664,13 +664,13 @@ class MatchedFilter:
     def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
                     **kw):
         nd, nt = D.shape[0], H.shape[0]
-        limit = self._gpu_pair_limit()
+        nb = 1 + (end - start - 1) // binsize
+        limit = min(self._gpu_pair_limit(), max(1, (2**31 - 1) // max(nb, 1)))
         if nd * nt <= limit:
             # No signature probing: a TypeError raised after a submit would
             # have dispatched the same work twice.
             return self._gpu_dispatch(D, H, binsize, threshold, start, end,
                                       slot=slot, async_submit=async_submit, **kw)
-        nb = 1 + (end - start - 1) // binsize
         idx = np.empty((nd, nt, nb), np.int32)
         val = np.empty((nd, nt, nb), np.complex64)
         for t0 in range(0, nt, limit):

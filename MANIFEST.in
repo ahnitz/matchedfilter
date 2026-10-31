@@ -28,6 +28,6 @@ include python/matchedfilter/execution-policy.json
 # be rebuilt with tools/kernel_variants.py, which needs slangc and is therefore a
 # build-time tool rather than something a user ever invokes.
 recursive-include python/matchedfilter/spirv *.spv manifest.json
-recursive-include python/matchedfilter/ptx *.ptx manifest.json
+recursive-include python/matchedfilter/ptx *.ptx.gz manifest.json
 recursive-include python/matchedfilter/metal *.metal *.metallib manifest.json
 recursive-include src/gpu *.slang

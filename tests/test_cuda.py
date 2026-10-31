@@ -5,6 +5,7 @@ Checks both:
    no StructuredBuffer count padding).
 2. Live hardware execution against CPU reference when an NVIDIA GPU is present.
 """
+import gzip
 import json
 import pathlib
 import pytest
@@ -48,12 +49,17 @@ def build_ptx(monkeypatch):
     return importlib.import_module("kernel_variants")
 
 
+def _read_ptx(path):
+    raw = path.read_bytes()
+    return (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8")
+
+
 def test_every_size_has_ptx(manifest, build_ptx):
     """Every supported transform size must have PTX blobs shipped."""
     for n in build_ptx.TIER_B:
         ptx = PTX_DIR / _flat(manifest, n)
         assert ptx.is_file(), f"{ptx} missing"
-        assert ptx.stat().st_size > 1000, f"{ptx} looks empty"
+        assert len(_read_ptx(ptx)) > 1000, f"{ptx} looks empty"
 
 
 def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(manifest, build_ptx):
@@ -62,7 +68,8 @@ def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(m
     (build_ptx.STATIC_SHARED_MAX). The bytes are read from each module's .shared declarations,
     and the reading is checked against the staging the 32 KB builds were made with, so a parse
     that found nothing could not pass."""
-    shared = {p.name: build_ptx.static_shared(p.read_text()) for p in sorted(PTX_DIR.glob("*.ptx"))}
+    shared = {p.name: build_ptx.static_shared(_read_ptx(p))
+              for p in sorted(PTX_DIR.glob("*.ptx.gz"))}
     portable = [rec for stem, rec in manifest["kernels"].items()
                 if stem.startswith("tierb_") and stem.endswith("_lds32") and "_c16" not in stem]
     assert portable and all(shared[r["file"]] == build_ptx.lds_bytes(r["n"], build_ptx.PORTABLE_CAP)
@@ -101,8 +108,8 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
                 (stem, path), _ = ctx.pipeline(n, entry, one_bin=one_bin)
             except UnsupportedSize as e:
                 pytest.fail("n=%d %s one_bin=%s: %s" % (n, entry, one_bin, e))
-            assert path.is_file() and stem == path.stem, (n, entry, stem)
-            assert build_ptx.static_shared(path.read_text()) <= build_ptx.STATIC_SHARED_MAX
+            assert path.is_file() and path.name == stem + ".ptx.gz", (n, entry, stem)
+            assert build_ptx.static_shared(_read_ptx(path)) <= build_ptx.STATIC_SHARED_MAX
             assert not one_bin or n < 256 or "_onebin" in stem, (n, entry, stem)
             served[(n, entry, one_bin)] = stem
     assert served[(8192, "fusedTierB", False)] == "tierb_8192_lds32"
@@ -114,7 +121,7 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
 @pytest.mark.parametrize("n", [1024, 4096, 16384])
 def test_ptx_targets_sm75_and_64bit_pointers(manifest, n):
     """Verify PTX code declares .target sm_75 and 64-bit device pointers."""
-    text = (PTX_DIR / _flat(manifest, n)).read_text()
+    text = _read_ptx(PTX_DIR / _flat(manifest, n))
     assert ".target sm_75" in text or ".target sm_" in text
     assert ".address_size 64" in text
     # fusedTierB buffer params must be 8 bytes (.b8 ...[8]), not 16 bytes
@@ -123,8 +130,43 @@ def test_ptx_targets_sm75_and_64bit_pointers(manifest, n):
 
 
 def test_pack_and_compact_kernels_shipped(manifest):
-    assert (PTX_DIR / "pack_coarse.ptx").is_file()
-    assert (PTX_DIR / "compact.ptx").is_file()
+    assert (PTX_DIR / "pack_coarse.ptx.gz").is_file()
+    assert (PTX_DIR / "compact.ptx.gz").is_file()
+
+
+def test_destroy_handles_nested_pending_timing_regions():
+    import ctypes
+    from types import SimpleNamespace
+    from matchedfilter import _cudacompute as C
+
+    destroyed = []
+    e0, e1 = ctypes.c_void_p(0x101), ctypes.c_void_p(0x202)
+    ctx = C.Context.__new__(C.Context)
+    ctx.ctx = ctypes.c_void_p(0x1)
+    ctx.device = ctypes.c_int(0)
+    ctx._using_primary_ctx = False
+    ctx._shared_modules = True
+    ctx._modules = {}
+    ctx._pipelines = {}
+    ctx._pending_events = {1: [("hier", None, [("coarse", e0, e1)])]}
+    ctx._event_pool = []
+    ctx.streams = []
+    ctx._inflight = {}
+    ctx._exec_records = {}
+    ctx._exec_lru = []
+    ctx._exec_bytes = 0
+    ctx._uploaded = {"data": {}, "tmpl": {}}
+    ctx._cache_order = {}
+    ctx.cuda = SimpleNamespace(
+        cuCtxSetCurrent=lambda c: 0,
+        cuCtxSynchronize=lambda: 0,
+        cuEventDestroy_v2=lambda e: destroyed.append(e.value) or 0,
+        cuStreamDestroy_v2=lambda s: 0,
+        cuCtxDestroy_v2=lambda c: 0,
+    )
+    ctx.destroy()
+    assert destroyed == [0x101, 0x202]
+    assert not ctx.ctx.value
 
 
 @pytest.mark.skipif(not _cuda.enumerate_devices()[0], reason="No NVIDIA CUDA GPU available on host")

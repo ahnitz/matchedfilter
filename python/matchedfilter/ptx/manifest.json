@@ -6,7 +6,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "compactPairs",
-   "file": "compact.ptx",
+   "file": "compact.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 0,
    "local_size": [
@@ -17,14 +17,14 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "81237fdb4c2b3b62cdbb1048283b3cc535916e21c15c83b5b078d6de1e6e084e",
+   "sha256": "a27cf59b2596c6a4f25f3e02c62ef66eb61658fd8574a5368de52b5508269742",
    "single_bin": 0,
    "tile": 1
   },
   "compact_peaks": {
    "coarse16": 0,
    "entry": "compactPeaks",
-   "file": "compact_peaks.ptx",
+   "file": "compact_peaks.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 0,
    "local_size": [
@@ -35,7 +35,7 @@
    "n": 0,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ea14a95cfa09acb22a842f44e863f92b1f4a3ddc75bf04149ca3d2caf5cee434",
+   "sha256": "c9b69dee5622406b81fddf7344c24e15df686980b21be208f8d9ac9db488c80c",
    "single_bin": 0,
    "tile": 1
   },
@@ -43,7 +43,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "compactListed",
-   "file": "compactl.ptx",
+   "file": "compactl.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 0,
    "local_size": [
@@ -54,7 +54,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "3c48d15b4b561e3753c23255b7947a2f9875c43db3fb92a6c20cbd35763edb39",
+   "sha256": "b9d19d7608fadce3327e341bc13fea931c8b842632524206d891e21a24b09693",
    "single_bin": 0,
    "tile": 1
   },
@@ -62,7 +62,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_1024.ptx",
+   "file": "forward_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -73,7 +73,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9114ac4773755a7037ecded1a082c5a84122cfafa599c1aec95174d5292011b9",
+   "sha256": "ee69b8b7589f5c3534cb4849f760d5ecc21db215ae5047fad17f8edc6d82f584",
    "single_bin": 0,
    "tile": 1
   },
@@ -81,7 +81,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_128.ptx",
+   "file": "forward_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -92,7 +92,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d075388dcb92e37708a45d473e428524f10b73d4185e74404a7e425968aef80c",
+   "sha256": "3f3b1645b557b174c7c8eec12a78032b75ca773a47958d1c6506e7cd661d08d2",
    "single_bin": 0,
    "tile": 1
   },
@@ -100,7 +100,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_16384.ptx",
+   "file": "forward_16384.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -111,7 +111,7 @@
    "n": 16384,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f8067746209261877950f022aa140a557bfefb71e7d014c334870e558da7708d",
+   "sha256": "c90bfa2a2c738246ef3deeb180c5eb032eaf00e033bb921e42a0a46526702150",
    "single_bin": 0,
    "tile": 1
   },
@@ -119,7 +119,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_2048.ptx",
+   "file": "forward_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -130,7 +130,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f99bccb9ed3c0b6ae943089fd9064aa48dc4f150fad1fd73f286da1f4f0f6260",
+   "sha256": "a34e0d8b2fd27b318128f92dffd22a0c0781ec14082313d8c8602f44a1f00b78",
    "single_bin": 0,
    "tile": 1
   },
@@ -138,7 +138,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_256.ptx",
+   "file": "forward_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -149,7 +149,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "4fe7d992266bdb11c71d55ce14dfc840731e065fd6117ee526bc871a122e6304",
+   "sha256": "75e2382f2a4b2e30faa294bde814b6cc2d8eb83697d7c34115038d85539667b4",
    "single_bin": 0,
    "tile": 1
   },
@@ -157,7 +157,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_32768.ptx",
+   "file": "forward_32768.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -168,7 +168,7 @@
    "n": 32768,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f310d66ca0828a0c1bbfd0bd51b8932a3f6ff577a396aba4e8d24e86c309dcfe",
+   "sha256": "12eceeace500f8ee9977f96aaec3128751829d740c4ac352b1ce91ff69ddc442",
    "single_bin": 0,
    "tile": 1
   },
@@ -176,7 +176,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_4096.ptx",
+   "file": "forward_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -187,7 +187,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "3ddebef0d908340cf508b5e711ede9f4cdb9445560a0aa67ec9066afe183745f",
+   "sha256": "feab99be89f511da6426cc50e37a19b2ce2dd563f165877880721473bb945661",
    "single_bin": 0,
    "tile": 1
   },
@@ -195,7 +195,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_512.ptx",
+   "file": "forward_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -206,7 +206,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "0958c4cf0554ce4c53f6d22250e721f2d7d0e49a953803aea6c21c8a666b2b76",
+   "sha256": "26c6cf85ea88f94493b5ec5dd48155e13fffced9d9ee43582049a153f5a6af2e",
    "single_bin": 0,
    "tile": 1
   },
@@ -214,7 +214,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_64.ptx",
+   "file": "forward_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -225,7 +225,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d9e5faf9d5e87e842ddfe168f61010613232c110b2f45729fab38683fba7d7b5",
+   "sha256": "df7148f357664b96267eb835ca58cb51810e21632ef36dcb8112df074afe2702",
    "single_bin": 0,
    "tile": 1
   },
@@ -233,7 +233,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_65536.ptx",
+   "file": "forward_65536.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -244,7 +244,7 @@
    "n": 65536,
    "portable": 0,
    "ppg": 1,
-   "sha256": "795e2d94d1b862b55b84535b6fd8200aadfe2abdc9a2beb6f19dde9b20783ccf",
+   "sha256": "1a5e576ee53bd7255352f8e6ddf16e3fbdfadcb256869f45c900c8cd3bce2a57",
    "single_bin": 0,
    "tile": 1
   },
@@ -252,7 +252,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForward",
-   "file": "forward_8192.ptx",
+   "file": "forward_8192.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -263,7 +263,7 @@
    "n": 8192,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9d8d5a47d70f7c352ce819cbf4eb83802daa61901754c3df2bfa950dbb300f81",
+   "sha256": "c220749c2ce8e77a8fb56fd8a656a5d6f835e2aba97ae42ca82a088e2ba27bfc",
    "single_bin": 0,
    "tile": 1
   },
@@ -271,7 +271,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_1024.ptx",
+   "file": "forward_bands_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -282,7 +282,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ee5b138b12db0bd629685647c7fe5f35b7ec2092576de76580c882273b67ea7c",
+   "sha256": "8fc79935e405f998605a9036d3b86999a2c215a4c0ee26e3a913e6a00791d2c6",
    "single_bin": 0,
    "tile": 1
   },
@@ -290,7 +290,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_128.ptx",
+   "file": "forward_bands_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -301,7 +301,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "016c83514be6857ec94ef037bf49640e367321c12be94f5da2b30fa955351e75",
+   "sha256": "12405c876be8947168a88a99f791be3928da1f6d1a26c7cc01fd18492a7a7bf6",
    "single_bin": 0,
    "tile": 1
   },
@@ -309,7 +309,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_16384.ptx",
+   "file": "forward_bands_16384.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -320,7 +320,7 @@
    "n": 16384,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f3f14164c89fe9b5219860a6f47a06deeef41f02a8c5d5066e7fd04433da3a5e",
+   "sha256": "601e36e83b9a3286ed78a66836577b8e762816c657c5a291a47c878fb0f0851a",
    "single_bin": 0,
    "tile": 1
   },
@@ -328,7 +328,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_2048.ptx",
+   "file": "forward_bands_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -339,7 +339,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "aeb43a38bf3ca0b067788aff1fa0fc08db88bc94b93714c40789c62bc0b84efe",
+   "sha256": "27cb127fcb507a417b3fed5115f7fd307e406b7623cf2aecd9ee9908dfbc35fb",
    "single_bin": 0,
    "tile": 1
   },
@@ -347,7 +347,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_256.ptx",
+   "file": "forward_bands_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -358,7 +358,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "eba41136fa2cc6de0a264de450a8cbe5b393c780a8c3c55219421020f02c2898",
+   "sha256": "723711899ba8da63cb078166a7c0971a56be6e03803d9539050d6c6de329263f",
    "single_bin": 0,
    "tile": 1
   },
@@ -366,7 +366,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_32768.ptx",
+   "file": "forward_bands_32768.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -377,7 +377,7 @@
    "n": 32768,
    "portable": 0,
    "ppg": 1,
-   "sha256": "09b748448b39bce4e18d67235a696fda3fffd2dae15dca4c8f06a6267e03ae01",
+   "sha256": "42c291a9d815d170719125d47f3fb161c5850dec8aea959aec23132b073accc3",
    "single_bin": 0,
    "tile": 1
   },
@@ -385,7 +385,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_4096.ptx",
+   "file": "forward_bands_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -396,7 +396,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d757c4b58719d701af8d5653b5c028e9b4b2798cf41d1214f64e0ba1fd49e5a4",
+   "sha256": "56fef8986d736873c006fe12eba1ff7783be274bb314ebb94a5b6d9735f6f705",
    "single_bin": 0,
    "tile": 1
   },
@@ -404,7 +404,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_512.ptx",
+   "file": "forward_bands_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -415,7 +415,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "3f1efb68b56b6619d42358af37d64bf0897f071d03dbcb73dfa1cabb95f4e662",
+   "sha256": "b8288da07a1feb04f6851b64866d4d663e1f878f26a5dc5e4c3ca22dfeb3d98b",
    "single_bin": 0,
    "tile": 1
   },
@@ -423,7 +423,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_64.ptx",
+   "file": "forward_bands_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -434,7 +434,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "8515e413693c2286c45a1adb9b25a9326c24fa21e563dba6ea1620cc223d8558",
+   "sha256": "921df782e8b7fe90909ed049ed3e0e02203c3c93dc7d073cafb8ab3b03074c85",
    "single_bin": 0,
    "tile": 1
   },
@@ -442,7 +442,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_65536.ptx",
+   "file": "forward_bands_65536.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -453,7 +453,7 @@
    "n": 65536,
    "portable": 0,
    "ppg": 1,
-   "sha256": "a09aa732d7048d5270bf7d461ac6c305b4bc70220932ed3628f0c2e29eda340f",
+   "sha256": "7bc14df6f3ca473261bd26ddd8e98ecd37673b16a020a57bc8120172c7088098",
    "single_bin": 0,
    "tile": 1
   },
@@ -461,7 +461,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardBands",
-   "file": "forward_bands_8192.ptx",
+   "file": "forward_bands_8192.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -472,7 +472,7 @@
    "n": 8192,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d6f227e363a5f7da9fedf85567023f0f6d6dd902b4c73ad09e5983100f56b96f",
+   "sha256": "808c4fc788768838a16b1b1ce2f9681bec825d6e14c2f7de41887a5611152868",
    "single_bin": 0,
    "tile": 1
   },
@@ -480,7 +480,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_1024.ptx",
+   "file": "forward_listed_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -491,7 +491,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "103b990b638bc463d3c0a2062d5f6efa695a06fe3d7bb0f9ba437d9184b6f5d2",
+   "sha256": "5bf07a2995c3393ffe7ea7353b1c6e044c2bf90a78ef42bba3644757049edc37",
    "single_bin": 0,
    "tile": 1
   },
@@ -499,7 +499,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_128.ptx",
+   "file": "forward_listed_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -510,7 +510,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "459d279714ce93f0b618ea3a6c5427f1511eb08c7b3eca5e456ed04acb74184e",
+   "sha256": "2114be101b1973579795aaff39468347f4fd6629c978b565dd06cde1f98f2d90",
    "single_bin": 0,
    "tile": 1
   },
@@ -518,7 +518,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_16384.ptx",
+   "file": "forward_listed_16384.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -529,7 +529,7 @@
    "n": 16384,
    "portable": 0,
    "ppg": 1,
-   "sha256": "2615e28d22539a7a9befdf63daf18a2d18341f23608ca983deadfdd704c6d8b2",
+   "sha256": "04b0cb95462e7c9cfd4bde3c5fa34d8acf8120da71b11a248dcd6c607ffc714e",
    "single_bin": 0,
    "tile": 1
   },
@@ -537,7 +537,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_2048.ptx",
+   "file": "forward_listed_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -548,7 +548,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "fe82af694a33e3f099902ca651de5daeddc085acd4b4ab3bbc7e3f58a3e24f58",
+   "sha256": "6363bc2a6b4698aa4f5c2da6180f622b1fec50271dd5d7544b4d9b96f2eda57f",
    "single_bin": 0,
    "tile": 1
   },
@@ -556,7 +556,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_256.ptx",
+   "file": "forward_listed_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -567,7 +567,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "3db22e9197cf1b7a1dc972f72102fbb29d5a6174ac4995b1bb17d52413b32686",
+   "sha256": "a8eb23bec936cd4b331e7bbde1039954c65a8dc7452297b5de5f7de86baea31b",
    "single_bin": 0,
    "tile": 1
   },
@@ -575,7 +575,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_32768.ptx",
+   "file": "forward_listed_32768.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -586,7 +586,7 @@
    "n": 32768,
    "portable": 0,
    "ppg": 1,
-   "sha256": "6917f39b4cd83b94c2a4faef032f26326444d201d89fb0bb3cf6d69fcc373823",
+   "sha256": "ca7fc1c3007f0d5e08dd71d04f3bf45e451e73aa37d03fc71308851da65a2fc0",
    "single_bin": 0,
    "tile": 1
   },
@@ -594,7 +594,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_4096.ptx",
+   "file": "forward_listed_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -605,7 +605,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "eb6808ae750be0743322def6097150c12d63fae1d2975d320b9d1f287cc1ea3d",
+   "sha256": "fade7666ab8cd0562fcc76d68e533191012a1d0ac4cc84b25f17e2419bc6bba2",
    "single_bin": 0,
    "tile": 1
   },
@@ -613,7 +613,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_512.ptx",
+   "file": "forward_listed_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -624,7 +624,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "46606cbbd003b05dd5a561fad90d7902cccb6770a2b058159660c85498b6da2d",
+   "sha256": "333faf1cbd038a20f581e7725198443e02f2a2b4cd681cde15f5a7693d7d2a5a",
    "single_bin": 0,
    "tile": 1
   },
@@ -632,7 +632,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_64.ptx",
+   "file": "forward_listed_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -643,7 +643,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "33796808b5fe976c43998a6adb1a1ad3abd0c946f2ba95fcacf846691586820d",
+   "sha256": "84aed0d7bbc49febbf01fe52507fb2d5b57499f29eaed056ffcfac3c8216ac7d",
    "single_bin": 0,
    "tile": 1
   },
@@ -651,7 +651,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_65536.ptx",
+   "file": "forward_listed_65536.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -662,7 +662,7 @@
    "n": 65536,
    "portable": 0,
    "ppg": 1,
-   "sha256": "4c3374d42b127a95e6a909b3d08ef47fface9cd0f1e46e1f2ed5ea7b4a308d67",
+   "sha256": "57d40cf742a5961eb1e643144ea444f03562e52db34d2d5eccd74b7b6ccc601f",
    "single_bin": 0,
    "tile": 1
   },
@@ -670,7 +670,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "seriesForwardListed",
-   "file": "forward_listed_8192.ptx",
+   "file": "forward_listed_8192.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -681,7 +681,7 @@
    "n": 8192,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9b307326e37258066f1a09938fdb07188aa5857295ff58816853f1f4c78a1171",
+   "sha256": "820fed13359b7325c8911e096f4b4aab6c09c9ea10108bcc9580d98de31401a4",
    "single_bin": 0,
    "tile": 1
   },
@@ -689,7 +689,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_1024.ptx",
+   "file": "forward_tier0_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -700,7 +700,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ee467e4ea5d7d99f2abf8427bf7db0af2e4f294606ed59548b1027aa1ea0a3f5",
+   "sha256": "6d36db81d347a2789ec6635b532eb5668b97e6d9416a538f1c628b92802c97de",
    "single_bin": 0,
    "tile": 1
   },
@@ -708,7 +708,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_128.ptx",
+   "file": "forward_tier0_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -719,7 +719,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9b2ce4b8cb418428c5056f952364079d02262fe43311fbed3cd09f5e8d0d4973",
+   "sha256": "2b5a08ee97cfd40521594d851abcc7dddf1a268cf9998fdf826f77f3911229ab",
    "single_bin": 0,
    "tile": 1
   },
@@ -727,7 +727,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_16384.ptx",
+   "file": "forward_tier0_16384.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -738,7 +738,7 @@
    "n": 16384,
    "portable": 0,
    "ppg": 1,
-   "sha256": "0abcd63e476e882e96afd5db28fb21abc30f0558019ce70759dd5bd0b8fe21b2",
+   "sha256": "239273f28bc2a55f7a17ddb7629eafa935e554b821efb758731419a0046bab4e",
    "single_bin": 0,
    "tile": 1
   },
@@ -746,7 +746,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_2048.ptx",
+   "file": "forward_tier0_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -757,7 +757,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "fecdfd9ac15774adbf93ca0b0ea0eff4f327dc9223fd173b90c2d8042f6cdc1e",
+   "sha256": "a9bd710f5bda5f2983673e9a82cdeb72f192689a572ca5ec191769087320315d",
    "single_bin": 0,
    "tile": 1
   },
@@ -765,7 +765,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_256.ptx",
+   "file": "forward_tier0_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -776,7 +776,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "0f8189f18933c02a91782eb1e9933194ebbe7eed847854c175738e6ff74186c8",
+   "sha256": "ecaf3f802d9cbdae19711249373045769fa51425aff15aad4e0f9e2c67818de0",
    "single_bin": 0,
    "tile": 1
   },
@@ -784,7 +784,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_32768.ptx",
+   "file": "forward_tier0_32768.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -795,7 +795,7 @@
    "n": 32768,
    "portable": 0,
    "ppg": 1,
-   "sha256": "92280558d5a46fead454a6f07e3aa61808bdd6ba80d59e0c5e9ca08a77f5b9cd",
+   "sha256": "05cd01d8963854033375a93dc1a1ccdb94f230fe0dd74ef77dc230b09046ca6e",
    "single_bin": 0,
    "tile": 1
   },
@@ -803,7 +803,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_4096.ptx",
+   "file": "forward_tier0_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -814,7 +814,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "293ae39436783674e5c09e1ed34b80381ee43ce6ef0822ce74ff759efb7e4d0e",
+   "sha256": "d831458ee594a0ec10e396ba39c359098c01cf66a0f5350c0cdcc427baeba449",
    "single_bin": 0,
    "tile": 1
   },
@@ -822,7 +822,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_512.ptx",
+   "file": "forward_tier0_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -833,7 +833,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "de93c5b2e7c3b1e0fbfcbf46662ea55126865bdd12f5bbb8164ce3bacd43c17a",
+   "sha256": "a753922164ca891771e40c9a0ca82cab52ecf744cea651ed9c6862fcf57ae50f",
    "single_bin": 0,
    "tile": 1
   },
@@ -841,7 +841,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_64.ptx",
+   "file": "forward_tier0_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -852,7 +852,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "57d35ecd0075e4c32fe0202309b1ff14536dd79d198494951f5fe0d14fa54199",
+   "sha256": "3b7673b93fb9ec01529dcaea1f7bd4a08eefa529aee483deaebaf5f51845c6be",
    "single_bin": 0,
    "tile": 1
   },
@@ -860,7 +860,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_65536.ptx",
+   "file": "forward_tier0_65536.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -871,7 +871,7 @@
    "n": 65536,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f92c32a1ec5a1bf9ea297a2446d039e880ecb024b8cb0e8d65a6fd572c63aec1",
+   "sha256": "049f29227067c384aa08e5b3e43246c00b2cc99b38438d1d44669d9a8f162b49",
    "single_bin": 0,
    "tile": 1
   },
@@ -879,7 +879,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "forwardTier0",
-   "file": "forward_tier0_8192.ptx",
+   "file": "forward_tier0_8192.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -890,7 +890,7 @@
    "n": 8192,
    "portable": 0,
    "ppg": 1,
-   "sha256": "343aa0b3ed6c7eb3ffeb5d6ab84e7d89ddeebf8feb644cbf898d0353eefb4adf",
+   "sha256": "1ada5c396b3388e475b0429f384da52805db549c5471e43db657009165237a68",
    "single_bin": 0,
    "tile": 1
   },
@@ -898,7 +898,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_1024.ptx",
+   "file": "full_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -909,7 +909,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "52c0cfd00f2ae7d5e8b27ea1b693887d3dfa3696040a8922b3bbc4e5638b135f",
+   "sha256": "59f993a43f26f44e7c303160f6e99fc5cbb0410b8071362cf0c7728de596d07d",
    "single_bin": 0,
    "tile": 1
   },
@@ -917,7 +917,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_16384_lds32.ptx",
+   "file": "full_16384_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -928,7 +928,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "3171d977db73e1c8cc0131b4d1fae4adbd3b74b403ad3afea7a70ff27e2bb50f",
+   "sha256": "6b4382f54eac64280acaf1bb083e9b83726766f4e8656874f5293f260f03af1e",
    "single_bin": 0,
    "tile": 1
   },
@@ -936,7 +936,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_2048.ptx",
+   "file": "full_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -947,7 +947,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ed2ecd7d1500239921dd5126db82449265714ea8ecd8a99bc25c6dae8e91daab",
+   "sha256": "f6f4f7c1acef285a486a20f155162a0945e2a1e1eb788ed5e3ade77b7ae2e93d",
    "single_bin": 0,
    "tile": 1
   },
@@ -955,7 +955,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_32768_lds32.ptx",
+   "file": "full_32768_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -966,7 +966,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "78958ea80e4e8d844f2d6133911cd520ccbbeef3f8b5a962613afddb46446245",
+   "sha256": "02acdb52780e5d8bf7898cc86bdf5c83e68dd8188a708d3977a184b1311f929d",
    "single_bin": 0,
    "tile": 1
   },
@@ -974,7 +974,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_4096.ptx",
+   "file": "full_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -985,7 +985,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "94b297c886bdfc8fc2f274222323ad4a894dc465752d67cf64ce4cb2b916e11d",
+   "sha256": "2ffeb43bd135d74f41438e5a84e9582acd662ef44904af81c0471474cc5ffac1",
    "single_bin": 0,
    "tile": 1
   },
@@ -993,7 +993,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_65536_lds32.ptx",
+   "file": "full_65536_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1004,7 +1004,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "4ad0b4a6405c66c472941a2df510a159bf41fa29577cde5eadcb7e0d14d8da36",
+   "sha256": "5d3dc49407aec25f242f944988b84fe01925f9543dca72de4f16742ed5824e84",
    "single_bin": 0,
    "tile": 1
   },
@@ -1012,7 +1012,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelation",
-   "file": "full_8192_lds32.ptx",
+   "file": "full_8192_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1023,7 +1023,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "579332d51c20e235d7acf29b1d69b1b8139afda2bf435077108ac1f740c6ef66",
+   "sha256": "c6ebb02e27dbcf87e4a13a34a12ed8c5abecceeba3a0c68e80dedbddcd9bff0b",
    "single_bin": 0,
    "tile": 1
   },
@@ -1031,7 +1031,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_1024.ptx",
+   "file": "full_series_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1042,7 +1042,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "0b154cdca82fb138f84ebad68efbffa49939d5554de5811f80bdbb019ca63e51",
+   "sha256": "c6bc6594f616083a01f4ba9788ffbd7b65b09af9b87ef2ddf335784c5927e472",
    "single_bin": 0,
    "tile": 1
   },
@@ -1050,7 +1050,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_16384_lds32.ptx",
+   "file": "full_series_16384_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1061,7 +1061,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "9d45053318b38a6cf4bd4e55a9878d4a7bd962ea16098052790918b634174739",
+   "sha256": "6020327e7802a819165b7a92ec8716dd4c06620219af6682eeba563b6fe260d5",
    "single_bin": 0,
    "tile": 1
   },
@@ -1069,7 +1069,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_2048.ptx",
+   "file": "full_series_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -1080,7 +1080,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "19327ce12f96f476dfe5ff352553773669057f13e415fd4cdd7fa888c5af4e34",
+   "sha256": "272c639a099e739cfe0fdb3bcaf0991318bc2eb7781fd0103ca36bb02b227c74",
    "single_bin": 0,
    "tile": 1
   },
@@ -1088,7 +1088,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_32768_lds32.ptx",
+   "file": "full_series_32768_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1099,7 +1099,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "e6517b939965f48673060806e873a70a464160e2754eb08f75a7c9422eca68d1",
+   "sha256": "807f122ed9457b3d5f68f85dbff1920003b8ce09945f01a3a0bb04bb0caf67d5",
    "single_bin": 0,
    "tile": 1
   },
@@ -1107,7 +1107,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_4096.ptx",
+   "file": "full_series_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -1118,7 +1118,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "5346c2e019e02c107a30634af6f7e2a5b3c6fe90c2cffda4112a3f8f22b00402",
+   "sha256": "7513d49d2b7b162a377d614a303f9bc33b74926a12e75b0d7eb718a9d907f6b2",
    "single_bin": 0,
    "tile": 1
   },
@@ -1126,7 +1126,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_65536_lds32.ptx",
+   "file": "full_series_65536_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1137,7 +1137,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "eca5a39f58f883865d9582d11bcd34faa1b5517bd368d25ae74a827b7fcb61d4",
+   "sha256": "dffe3865dfa6813dd438e5e8c4e67147c01af88b54f3ecddcbcdeca5f1ae4f84",
    "single_bin": 0,
    "tile": 1
   },
@@ -1145,7 +1145,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fullCorrelationSeries",
-   "file": "full_series_8192_lds32.ptx",
+   "file": "full_series_8192_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1156,7 +1156,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "083ec7ab7aa4ce9cca689e18affe48190942ac02463e4b4d8e2ca66d419e34d7",
+   "sha256": "0e45a007414bf6c6bdc19f2b25ff239e4fb739e0c3b56fc52694aabbd323f787",
    "single_bin": 0,
    "tile": 1
   },
@@ -1164,7 +1164,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_1024.ptx",
+   "file": "items_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1175,7 +1175,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "2de291b288dfcebe9799c23267206f29ae3c49d35a2be6d1ec85eecd75d2ba4f",
+   "sha256": "be9324d15609463af20c593487b35cba234de1d67453471b258029f7b49f46ad",
    "single_bin": 0,
    "tile": 1
   },
@@ -1183,7 +1183,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_128.ptx",
+   "file": "items_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -1194,7 +1194,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d88b490c6ac211b2963765f13a240307b6648fb1437b0d634fc6526c2a3b53a1",
+   "sha256": "13e7a13f3f8614024881f9dc321553672c102ec6232570358623ee74da4d7477",
    "single_bin": 0,
    "tile": 1
   },
@@ -1202,7 +1202,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_16384_lds32.ptx",
+   "file": "items_16384_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1213,7 +1213,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "387195b8fc8a207445be381967df6ce8ecd47164bff3355f5bd3dd6c9e9d94fe",
+   "sha256": "9049bc41d769cef40412ebfc049752a2f1f591483852cd99a03061c0a25c2a67",
    "single_bin": 0,
    "tile": 1
   },
@@ -1221,7 +1221,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_2048.ptx",
+   "file": "items_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -1232,7 +1232,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "1ef3997e44ab43e7b3be98ed6250eef02d40fd001c934cef6507b6c3f53593f1",
+   "sha256": "2c0284f7dae9d68d660da4cf93b70745adcac8be2a5b0d74cdc195fb1426a18b",
    "single_bin": 0,
    "tile": 1
   },
@@ -1240,7 +1240,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_256.ptx",
+   "file": "items_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -1251,7 +1251,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "545b9c7e3af04144ebb4e0c259c33c74ed07a6c8a87214963959f80576ac4cf6",
+   "sha256": "2a4c1674bf78c16578df526e11b4ae9910e630d1fc8f2cde8d7a533039962015",
    "single_bin": 0,
    "tile": 1
   },
@@ -1259,7 +1259,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_32768_lds32.ptx",
+   "file": "items_32768_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1270,7 +1270,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "6a93a771945eb32d3dc38ef4c3629d82dcec8dee63c9d1502ce7ec8acb155f8b",
+   "sha256": "92eaa1911c6808e238a41099f89a0c6411c6cb1b56966646949fbcf39ee5ea8d",
    "single_bin": 0,
    "tile": 1
   },
@@ -1278,7 +1278,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_4096.ptx",
+   "file": "items_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -1289,7 +1289,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ec4665b8910ad132fe678396fd82246fef553ef698a5326194f22d943e0262a7",
+   "sha256": "e7702051f92e6eab558e0337eafe8b5af92f9026e4ee7f6ac2383ee73f1b6507",
    "single_bin": 0,
    "tile": 1
   },
@@ -1297,7 +1297,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_512.ptx",
+   "file": "items_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1308,7 +1308,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "a733f9d5bbd6c5e5a32bd4387722d8e1612536a7e125d12e1245445cee128c3f",
+   "sha256": "0beb2b95c2b1d43ce63ded899ddc4efbeb6fb0f30bdbf457dc15771527f9b258",
    "single_bin": 0,
    "tile": 1
   },
@@ -1316,7 +1316,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_64.ptx",
+   "file": "items_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -1327,7 +1327,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "8794645c6d2b682474300697feb69c8fc023e276b10b065fe8908f01f7b219bc",
+   "sha256": "8ea6969f91989b553083793f406028e662522f62525bba3803c0de9a384c3110",
    "single_bin": 0,
    "tile": 1
   },
@@ -1335,7 +1335,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_65536_lds32.ptx",
+   "file": "items_65536_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1346,7 +1346,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "d5e179e3bc8f5839812b21e79e930258803481912bdcbcad3af80372ef17b0b1",
+   "sha256": "99b9cbe2db02b701e3aed0118810ed94db0b655335c3e2eadf58ec945c83bcb5",
    "single_bin": 0,
    "tile": 1
   },
@@ -1354,7 +1354,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineItems",
-   "file": "items_8192_lds32.ptx",
+   "file": "items_8192_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1365,7 +1365,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "d4e9f6fd87a6076014894ca5d487b0a7aa025a421ba5802c333f774c169a793f",
+   "sha256": "9ca0ba563a1451c835f436843b99ac1143c5927b583117aabd7621883ccf6362",
    "single_bin": 0,
    "tile": 1
   },
@@ -1373,7 +1373,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "markBlocks",
-   "file": "markblocks.ptx",
+   "file": "markblocks.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 0,
    "local_size": [
@@ -1384,14 +1384,14 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d68dc5d378325cb8a2d2dc551af3e01e2ef09aecb1a35b325fc76913f3b33893",
+   "sha256": "8cdf894bcce1e85b42e59cf8eec2dc40212bd4cfe226450bef5ec131ca4e9af5",
    "single_bin": 0,
    "tile": 1
   },
   "pack_coarse": {
    "coarse16": 0,
    "entry": "packCoarse",
-   "file": "pack_coarse.ptx",
+   "file": "pack_coarse.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 0,
    "local_size": [
@@ -1402,7 +1402,7 @@
    "n": 0,
    "portable": 0,
    "ppg": 1,
-   "sha256": "59db6550e635f2e3c6d627a9751c16d4fa24b262cadb3ebd501a567a7cc0537b",
+   "sha256": "34acd7d35be9e985a4662e2762da55b8e4ce5e76fe8180e6a0376078c240d58a",
    "single_bin": 0,
    "tile": 1
   },
@@ -1410,7 +1410,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_1024.ptx",
+   "file": "refine_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1421,7 +1421,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "017b63fec5357027e0f8c81c0bf7cb788f82d62ca4bb4f9a015216ca5b1cb042",
+   "sha256": "94b02edd110203cf16f0727d6f2e4581c2a8b196dd8df8e0006293817fff1304",
    "single_bin": 0,
    "tile": 1
   },
@@ -1429,7 +1429,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_1024_onebin.ptx",
+   "file": "refine_1024_onebin.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1440,7 +1440,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "160259bb80ad3500998b5323866080d51a227764ed4b31a6f4a0912d59f1585e",
+   "sha256": "eff55799322a7337a2be4b6fa101ecf6b6716968ae732ac83312ace2a7603ed9",
    "single_bin": 1,
    "tile": 1
   },
@@ -1448,7 +1448,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_1024_onebin_gate.ptx",
+   "file": "refine_1024_onebin_gate.ptx.gz",
    "gate_only": 1,
    "lds_bytes": 4096,
    "local_size": [
@@ -1459,7 +1459,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "154fe106beeb5a43f915883c033a509ea3122cdf4f9112090cca9f7b0bb9a444",
+   "sha256": "2f47a2b09b1974fb3d24a47cbcba0a084dd6ea8a0b4b6e9d38a69e86e8e9bce2",
    "single_bin": 1,
    "tile": 1
   },
@@ -1467,7 +1467,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_128.ptx",
+   "file": "refine_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -1478,7 +1478,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "521743e08f0843acaa1f0fa1ce355912dce166bd19904677913b17f5dfe12566",
+   "sha256": "584876472f582b0cdd47218e9dabdd728e7c8d58894c89e07392e71575c4471a",
    "single_bin": 0,
    "tile": 1
   },
@@ -1486,7 +1486,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_16384_lds32.ptx",
+   "file": "refine_16384_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1497,7 +1497,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "d4120b865ca011bcf4785784dfb56c9c508006bba2693251f3808b338cf759ee",
+   "sha256": "465ca3f57f21aa41643ddb05e09547745baa7e8240cd9b892fd91ec3290608fc",
    "single_bin": 0,
    "tile": 1
   },
@@ -1505,7 +1505,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_16384_onebin_lds32.ptx",
+   "file": "refine_16384_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1516,7 +1516,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "b06f26abcae2690ea1fa5047479f2396ed3ef92a433bfc7aa23a3d6c1628d3ea",
+   "sha256": "3719709e23fe6117b540d45b784d1fa18ee15e165fbe74257a8a861ccf35c3d6",
    "single_bin": 1,
    "tile": 1
   },
@@ -1524,7 +1524,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_2048.ptx",
+   "file": "refine_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -1535,7 +1535,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "bf1401ee6ebc7ae97cfe59ba10fa386e9ca9b04a4c57037288a364e11648fd4e",
+   "sha256": "ca7561e1a9099eb79e513dcab14f9736c77a574a64d9473edadc502cbd527939",
    "single_bin": 0,
    "tile": 1
   },
@@ -1543,7 +1543,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_2048_onebin.ptx",
+   "file": "refine_2048_onebin.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -1554,7 +1554,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "4eca3188d8ac15463ca23d8d332698bc0c7f9c69bfce2985ea0376f375cfc94d",
+   "sha256": "33ed05c5189814738eaaed34ea6b20a89cbcf4d2589e7eeb9da0570e3d7a204e",
    "single_bin": 1,
    "tile": 1
   },
@@ -1562,7 +1562,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_256.ptx",
+   "file": "refine_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -1573,7 +1573,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "519d6c0394679c38a591b1ce7be85349267cdea8d2bae831421b5d8b7a7d68ca",
+   "sha256": "8341abde36fce0686e1706baed0d311ee70ed1ef7c0f138872868ac4737b153c",
    "single_bin": 0,
    "tile": 1
   },
@@ -1581,7 +1581,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_256_onebin.ptx",
+   "file": "refine_256_onebin.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -1592,7 +1592,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "80b92ab0604908151f97d8ee0d9a38d267321fa4c95adfc3ba7d06ab181301eb",
+   "sha256": "df78168e1633e6a29788d6ea721d2f633f38742f7f6d7cb24d6dd547c3b03b25",
    "single_bin": 1,
    "tile": 1
   },
@@ -1600,7 +1600,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_256_onebin_gate.ptx",
+   "file": "refine_256_onebin_gate.ptx.gz",
    "gate_only": 1,
    "lds_bytes": 2048,
    "local_size": [
@@ -1611,7 +1611,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c779458c6ed6d51ef6dff0fcf70164aa8cff185c28b1ad69e2de9380bf1d49c1",
+   "sha256": "660d126b814a16b6a37e01e4d54fe69a7540c70a5ec11d17ffd3a0157e41b145",
    "single_bin": 1,
    "tile": 1
   },
@@ -1619,7 +1619,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_32768_lds32.ptx",
+   "file": "refine_32768_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1630,7 +1630,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "923796e3b092f25a67cfd869872aa96b9b4d10cbf3ab1be6f81387e749d9e013",
+   "sha256": "ff4d855a8bc93e8ab944f1b18bd2b8f8a3cc12a79ff8559806b9e8917a8d6c63",
    "single_bin": 0,
    "tile": 1
   },
@@ -1638,7 +1638,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_32768_onebin_lds32.ptx",
+   "file": "refine_32768_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1649,7 +1649,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "066b3d34d5b44fa364e40fe6b944508748dfeb178745c04d542d3a4c0af30ef3",
+   "sha256": "0ae8917193fb0a9da62e2ee5650fd27fb3ff1060528a31d158b13b21f72792ba",
    "single_bin": 1,
    "tile": 1
   },
@@ -1657,7 +1657,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_4096.ptx",
+   "file": "refine_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -1668,7 +1668,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "97b94bef2fc1f4f8cf795cd9ff329ff352afb894c624edd5641888940f3335da",
+   "sha256": "20a1bd5acc70a2d3ccaad5d6393df465ba86b4ef696318f34f77746bdc1a2214",
    "single_bin": 0,
    "tile": 1
   },
@@ -1676,7 +1676,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_4096_onebin.ptx",
+   "file": "refine_4096_onebin.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -1687,7 +1687,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "76685cec6073d4ddbc57056edf5ea77f0c9061e1169e6f67c87da4777dc03c80",
+   "sha256": "26403760b8199aee6cd4f4fc01f03200cc2c3f41fc9de81e4bc8268e85344874",
    "single_bin": 1,
    "tile": 1
   },
@@ -1695,7 +1695,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_512.ptx",
+   "file": "refine_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1706,7 +1706,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "74477b3e5144df463bab54a9adfa7eb60d6fcb03f87b68bf1d0cbd76f04fea08",
+   "sha256": "a6b93388cfda92dbf6dbb0f819fd4f572157445351c5ac1076a28f0c24ea71da",
    "single_bin": 0,
    "tile": 1
   },
@@ -1714,7 +1714,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_512_onebin.ptx",
+   "file": "refine_512_onebin.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1725,7 +1725,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "bd0627d7b2718b45042a4f43b51fef73d4d9b759aa45f588a07b35063e2007a1",
+   "sha256": "0f85b2dcfcee9e8a1a56270f90f427f15da143b84d6a8ac87a91e0c8584353dc",
    "single_bin": 1,
    "tile": 1
   },
@@ -1733,7 +1733,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_512_onebin_gate.ptx",
+   "file": "refine_512_onebin_gate.ptx.gz",
    "gate_only": 1,
    "lds_bytes": 4096,
    "local_size": [
@@ -1744,7 +1744,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c482baa3d547083ae6802710bbf3d9c560025f2b3264bac72cc738924f3f7122",
+   "sha256": "0a91ed4204ec516064381c4515aa871244d43ac8aa4b22cd9493b368a89d05a5",
    "single_bin": 1,
    "tile": 1
   },
@@ -1752,7 +1752,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_64.ptx",
+   "file": "refine_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -1763,7 +1763,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "6616a2bfab6407e8ee2a6332443d01d9f9640cffdf8eebf0960ad944d2ca9ab2",
+   "sha256": "8ed8d18c09ed7eca4503c14526d94b324b3ddb7c5d6277785b913878f6579afa",
    "single_bin": 0,
    "tile": 1
   },
@@ -1771,7 +1771,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_65536_lds32.ptx",
+   "file": "refine_65536_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1782,7 +1782,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "ffb69455501b3d6ef05c7ce9165b3916da0ce43d52f1c3d70aee94ef58c87287",
+   "sha256": "ca8fe3015510c402caae6aea1c3a7a035465e4ba2cc0d2a0efa441c5f7e394a2",
    "single_bin": 0,
    "tile": 1
   },
@@ -1790,7 +1790,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_65536_onebin_lds32.ptx",
+   "file": "refine_65536_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1801,7 +1801,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "f326225f73351a22d647e8c1041a93f0da136b8362150396415e550542abf70a",
+   "sha256": "4978030d3d54de4f5250662edbe1be64d0d51b375a24b098a61fce3a98ba23d5",
    "single_bin": 1,
    "tile": 1
   },
@@ -1809,7 +1809,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_8192_lds32.ptx",
+   "file": "refine_8192_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1820,7 +1820,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "241d8af38faedfa943e0097738f170fbfa096d1f6b9ab87d24e60a525fec6aed",
+   "sha256": "99134927f4ae8262c890ad3bc88543c6beecf446fb58250c5759a24cf77a3c23",
    "single_bin": 0,
    "tile": 1
   },
@@ -1828,7 +1828,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "refineListedBounded",
-   "file": "refine_8192_onebin_lds32.ptx",
+   "file": "refine_8192_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -1839,7 +1839,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "695ce84b5aa53cbb68a9d920066c5322124007ae25ece40d22822b6439c0f040",
+   "sha256": "78b7b8638ce187a5f894f567b656a05553ef2a5261a7d067fa4f23131586b718",
    "single_bin": 1,
    "tile": 1
   },
@@ -1847,7 +1847,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcStage1",
-   "file": "tc_corr1_1048576.ptx",
+   "file": "tc_corr1_1048576.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1861,7 +1861,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr1",
-   "sha256": "d69d730c7d101877787ef566373c777c7cc642cc4bda1bbc4305caded20c46c6",
+   "sha256": "3b8038bef0c9d4526a9cb4967ea2bb394e940fc8b1a70307f394098f208c8797",
    "single_bin": 0,
    "tc_n": 1048576,
    "tile": 1
@@ -1870,7 +1870,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcStage1",
-   "file": "tc_corr1_131072.ptx",
+   "file": "tc_corr1_131072.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1884,7 +1884,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr1",
-   "sha256": "e81229143f28b1e2844cbd722c960bc25cb37fc197d28b09e1d3dac70f53297e",
+   "sha256": "a2f04592f187eb9c76918bb095cb86ec40aa1c35271a4dcf5c7b497a7c3eaf41",
    "single_bin": 0,
    "tc_n": 131072,
    "tile": 1
@@ -1893,7 +1893,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcStage1",
-   "file": "tc_corr1_2097152.ptx",
+   "file": "tc_corr1_2097152.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -1907,7 +1907,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr1",
-   "sha256": "76498c5b79bc42b7c96a851ea2803e1030b0301bd9b9b35f3d65695dfebdf388",
+   "sha256": "f8c83a4258175cbe58fc2db265484e844f35246cdafe50da85fa6e95a51dd30e",
    "single_bin": 0,
    "tc_n": 2097152,
    "tile": 1
@@ -1916,7 +1916,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcStage1",
-   "file": "tc_corr1_262144.ptx",
+   "file": "tc_corr1_262144.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1930,7 +1930,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr1",
-   "sha256": "1561b8eb8dbed9d7030f6fdc113e707d9efaace436d6dcac7945b7af41ebafa1",
+   "sha256": "c7d82bd3595c06b36ab28b58eea20ee497fc81ef7d49c120fabd00d31d35e2bf",
    "single_bin": 0,
    "tc_n": 262144,
    "tile": 1
@@ -1939,7 +1939,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcStage1",
-   "file": "tc_corr1_4194304.ptx",
+   "file": "tc_corr1_4194304.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -1953,7 +1953,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr1",
-   "sha256": "814defe0301a3e20c3d2c04f60feb4558d47172be00160907b3fee90a856dc87",
+   "sha256": "591a53a7bd802fefc932962ab0e826390aefd58bdced013014e3db7334d6abb6",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1
@@ -1962,7 +1962,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcStage1",
-   "file": "tc_corr1_524288.ptx",
+   "file": "tc_corr1_524288.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1976,7 +1976,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr1",
-   "sha256": "d88300f5bd86bca7b8d142d5121ce23b5168f0b6a66999cd3c86f8dffad4f2b4",
+   "sha256": "3f9ce8ca6dd3f4fc743cead900606c4db08b3a43d55c6b37c7b67c72071f7dc5",
    "single_bin": 0,
    "tc_n": 524288,
    "tile": 1
@@ -1985,7 +1985,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullStage3",
-   "file": "tc_corr2_1048576.ptx",
+   "file": "tc_corr2_1048576.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -1999,7 +1999,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr2",
-   "sha256": "97a782a83e540e811ae02f7466e4cf8463ba16716c2b68f7dd8595e318677367",
+   "sha256": "f830f47d42fcaf50ffca1557af0cca0a4fa270efdf7f26224cee7bc55ab4f916",
    "single_bin": 0,
    "tc_n": 1048576,
    "tile": 1
@@ -2008,7 +2008,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullStage3",
-   "file": "tc_corr2_131072.ptx",
+   "file": "tc_corr2_131072.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -2022,7 +2022,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr2",
-   "sha256": "4e1da7f4b7b7959f181754d32f4cae5b6bcecfd23e3bd494cbe687c3ba9b8cd8",
+   "sha256": "8ed9e6ee3b0dc262c42700b120f4dcfffe3bb7d73080902045a8770fcc17d9bb",
    "single_bin": 0,
    "tc_n": 131072,
    "tile": 1
@@ -2031,7 +2031,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullStage3",
-   "file": "tc_corr2_2097152.ptx",
+   "file": "tc_corr2_2097152.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2045,7 +2045,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr2",
-   "sha256": "76dc4672c90c1a9daf48c6a5d258496472bf6c71692b33dfeca736976775a6c1",
+   "sha256": "52ca9ef752819393c065819f9d33c21539f95fcb70c48b875a4a547d09c39cea",
    "single_bin": 0,
    "tc_n": 2097152,
    "tile": 1
@@ -2054,7 +2054,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullStage3",
-   "file": "tc_corr2_262144.ptx",
+   "file": "tc_corr2_262144.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2068,7 +2068,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr2",
-   "sha256": "923af7b3f124dbe9d697922c80224883bf3be35282437d4625a5640642dc2bfe",
+   "sha256": "3f8be69ae72d56993f6f1351a322854651340678e876e21aee26e07afdd627aa",
    "single_bin": 0,
    "tc_n": 262144,
    "tile": 1
@@ -2077,7 +2077,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcFullStage3",
-   "file": "tc_corr2_4194304.ptx",
+   "file": "tc_corr2_4194304.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -2091,7 +2091,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr2",
-   "sha256": "1297eec8d30586f3539ac3fab94d6709e0caf3a3b1f2abb0cb04289feb2e5268",
+   "sha256": "e55506e2076213f3ead8ee0ff687ccef713bf6a259ebaebbe78a403aeeecda59",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1
@@ -2100,7 +2100,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullStage3",
-   "file": "tc_corr2_524288.ptx",
+   "file": "tc_corr2_524288.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2114,7 +2114,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr2",
-   "sha256": "42a39afde1e2b6c468056e471ef6933d7f543544114a958f86ff1b60150c3490",
+   "sha256": "8cad131ebc97e2575cbd36702897f92fd2da88c857b6e0052a5b5a8d86836788",
    "single_bin": 0,
    "tc_n": 524288,
    "tile": 1
@@ -2123,7 +2123,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullSeriesStage3",
-   "file": "tc_corr_series2_1048576.ptx",
+   "file": "tc_corr_series2_1048576.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2137,7 +2137,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr_series2",
-   "sha256": "49c5177ee1867f9152d5e5b14035d733abd0689a9e3f2b08ca651f658dd644e7",
+   "sha256": "d49187f0071ab7e100e724ec059f8b48e3936c1fba0d9f7e800e8c862f2d5e8d",
    "single_bin": 0,
    "tc_n": 1048576,
    "tile": 1
@@ -2146,7 +2146,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullSeriesStage3",
-   "file": "tc_corr_series2_131072.ptx",
+   "file": "tc_corr_series2_131072.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -2160,7 +2160,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr_series2",
-   "sha256": "170274639d07dc901c20ec0cfe2cdb50468b97892e7dc743b72df4c53c7482bd",
+   "sha256": "6f10945fb03abc8f51a0a35b05030cc6dfe1be34e8f727e84d09c53da05716f3",
    "single_bin": 0,
    "tc_n": 131072,
    "tile": 1
@@ -2169,7 +2169,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullSeriesStage3",
-   "file": "tc_corr_series2_2097152.ptx",
+   "file": "tc_corr_series2_2097152.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2183,7 +2183,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr_series2",
-   "sha256": "261bd5273ec120866b7007fb21295af8dddbbf88d2154859bac5190ad27e99d2",
+   "sha256": "dd64145d71ef2f73edb29f5698be925a727cf3811d120898920067e3dc70e91c",
    "single_bin": 0,
    "tc_n": 2097152,
    "tile": 1
@@ -2192,7 +2192,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullSeriesStage3",
-   "file": "tc_corr_series2_262144.ptx",
+   "file": "tc_corr_series2_262144.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2206,7 +2206,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr_series2",
-   "sha256": "895f23a153ad6863c33bd5cdc1dbece07ce7b82e4b573cad86ea21e4581a017e",
+   "sha256": "b5bd524f4102a616808786f1b0ff01cb7206d1ec9fc0b4dac001279ad0b6b0a8",
    "single_bin": 0,
    "tc_n": 262144,
    "tile": 1
@@ -2215,7 +2215,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcFullSeriesStage3",
-   "file": "tc_corr_series2_4194304.ptx",
+   "file": "tc_corr_series2_4194304.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -2229,7 +2229,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr_series2",
-   "sha256": "30f58804a92ba69cc92e506aae6c7ec880634b8ddcbf5ba639ca3c9e9782dfd1",
+   "sha256": "6eab0fd0b70e2bc4ee85a427db325d6d7f1a1e0197b03dc68f9b6fa7d39c50dd",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1
@@ -2238,7 +2238,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcFullSeriesStage3",
-   "file": "tc_corr_series2_524288.ptx",
+   "file": "tc_corr_series2_524288.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2252,7 +2252,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "corr_series2",
-   "sha256": "8c0a80c47c7226c08e039059f4ada1b5697989e3252add7e38d199aecb5349fe",
+   "sha256": "6d2588e0d2fb7ec13a69065659a5a346acd7c25d0a837af7f317a59baf39edb2",
    "single_bin": 0,
    "tc_n": 524288,
    "tile": 1
@@ -2261,7 +2261,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage1",
-   "file": "tc_fwd1_1048576.ptx",
+   "file": "tc_fwd1_1048576.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2275,7 +2275,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd1",
-   "sha256": "2bbef9dd24457f06259ad8597a3bce16aa5ffb0ca25ac7cef95d4df751a01604",
+   "sha256": "10f921a405b9a44dd90253a992682c2ebe6c07f975c29adde7f188661cfdaa11",
    "single_bin": 0,
    "tc_n": 1048576,
    "tile": 1
@@ -2284,7 +2284,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage1",
-   "file": "tc_fwd1_131072.ptx",
+   "file": "tc_fwd1_131072.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2298,7 +2298,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd1",
-   "sha256": "80fede092985af830b43eef9a03686488cbb5db29f7c4851940e74f429154a03",
+   "sha256": "e3ffc374111b9adf954a58bb3c6d0a035fe80ea2e727e07c93fa0bf5e62d681a",
    "single_bin": 0,
    "tc_n": 131072,
    "tile": 1
@@ -2307,7 +2307,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcForwardStage1",
-   "file": "tc_fwd1_2097152.ptx",
+   "file": "tc_fwd1_2097152.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -2321,7 +2321,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd1",
-   "sha256": "d83a3a1b15507fbf7700b1a02a63bf375632173143fe5112cb9cf031dcdaf406",
+   "sha256": "03540505238ac0a8a3559e82206b49fbd0bd79f367ee0897a7cf6dae084d497f",
    "single_bin": 0,
    "tc_n": 2097152,
    "tile": 1
@@ -2330,7 +2330,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage1",
-   "file": "tc_fwd1_262144.ptx",
+   "file": "tc_fwd1_262144.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2344,7 +2344,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd1",
-   "sha256": "88257c020046e98be7b06ece1e7a176a53b987eca30c6037f3a42046f1bd5a0c",
+   "sha256": "83a8b76ac7d5fbf7998462fff5ea695a16d9d6aa93596d9d38dcb3135645923b",
    "single_bin": 0,
    "tc_n": 262144,
    "tile": 1
@@ -2353,7 +2353,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcForwardStage1",
-   "file": "tc_fwd1_4194304.ptx",
+   "file": "tc_fwd1_4194304.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -2367,7 +2367,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd1",
-   "sha256": "742b6d937834f031ef8f1f53af6497940eb11769b82ffc107f36ad414e5b27fe",
+   "sha256": "1ab7c93c143c11e630c8ed92dc2e8bfadedc13ab6ac5f3c331b41bd61b6a4ad0",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1
@@ -2376,7 +2376,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage1",
-   "file": "tc_fwd1_524288.ptx",
+   "file": "tc_fwd1_524288.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2390,7 +2390,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd1",
-   "sha256": "bb4b445d49e27181f946c9f38263448984e09f640baaf637b2258a2d76c1f2e6",
+   "sha256": "5d63eae314c6d0dd4bec72c87557c653199696cfab49bb38d83c07a9564b50a4",
    "single_bin": 0,
    "tc_n": 524288,
    "tile": 1
@@ -2399,7 +2399,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage3",
-   "file": "tc_fwd2_1048576.ptx",
+   "file": "tc_fwd2_1048576.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2413,7 +2413,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd2",
-   "sha256": "d49886606316debe44b075c3a6e8b3b507606b0dd5e43eb65e75c38edb38afca",
+   "sha256": "0fbee7ea53d5954d2e4de8679a9fcb4c48af41becacc691092c0ccc006eb922a",
    "single_bin": 0,
    "tc_n": 1048576,
    "tile": 1
@@ -2422,7 +2422,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage3",
-   "file": "tc_fwd2_131072.ptx",
+   "file": "tc_fwd2_131072.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -2436,7 +2436,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd2",
-   "sha256": "f18c6887ab9814f8cf4b6efb192632283687f133bcde4d0abf67d3489b882c67",
+   "sha256": "463b40cf1d609c04072200b1e73fa86a5c562f03a78eabfd7d6dcc2dbaf9a664",
    "single_bin": 0,
    "tc_n": 131072,
    "tile": 1
@@ -2445,7 +2445,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage3",
-   "file": "tc_fwd2_2097152.ptx",
+   "file": "tc_fwd2_2097152.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2459,7 +2459,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd2",
-   "sha256": "abff01442b4892a84263274a55f0aa71f5ebf76de78f30624ca31ea647ba87ab",
+   "sha256": "09bd5c9bb3ebe42c81472e3ecb676180ff3d21e98eadd5b414ff8894847fa9b2",
    "single_bin": 0,
    "tc_n": 2097152,
    "tile": 1
@@ -2468,7 +2468,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage3",
-   "file": "tc_fwd2_262144.ptx",
+   "file": "tc_fwd2_262144.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2482,7 +2482,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd2",
-   "sha256": "9e62900e65646f460c44e49d10fafbc610ee88dc15039bab73d5f592e1ca4a12",
+   "sha256": "887ddc1814856bb08dadb955ce87c8c5f2f3706d87b0f454522f58ac8aad682f",
    "single_bin": 0,
    "tc_n": 262144,
    "tile": 1
@@ -2491,7 +2491,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "tcForwardStage3",
-   "file": "tc_fwd2_4194304.ptx",
+   "file": "tc_fwd2_4194304.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -2505,7 +2505,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd2",
-   "sha256": "c4ae50a87e83c621404d127c1c6022cde2d9b318617f30537d52ff561783696e",
+   "sha256": "5375b9d9b8abb5a4fe582f74091aa269212b912ec8f9d087e24386612b3edaf0",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1
@@ -2514,7 +2514,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "tcForwardStage3",
-   "file": "tc_fwd2_524288.ptx",
+   "file": "tc_fwd2_524288.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2528,7 +2528,7 @@
    "portable": 0,
    "ppg": 1,
    "role": "fwd2",
-   "sha256": "9ef0bfb2e5c29c0f3258d21b9774575606c1e909d56f4f630ac4450e6181e837",
+   "sha256": "92feeb771760a789f6b988b591e6610cef3034757b2e4e62c2a1cdb1ff5a0384",
    "single_bin": 0,
    "tc_n": 524288,
    "tile": 1
@@ -2537,7 +2537,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_1024.ptx",
+   "file": "tierb_1024.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -2548,7 +2548,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ccf1c24fad687bfb7cee56adbb5bcb931687e5afc9461d51f6beab84f6eb1717",
+   "sha256": "f84036d3be40ca2700a5fda66ef98381da3260a7ccc87caccbb4058664f0c3ea",
    "single_bin": 0,
    "tile": 1
   },
@@ -2556,7 +2556,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16.ptx",
+   "file": "tierb_1024_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -2567,7 +2567,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "708e8786c368876d395c28564f15593d022b03d4fc2b6d8017c7a9a9e874677c",
+   "sha256": "15516dfb799fe13adcd5377e6c3c6aaed19d2d9ac25b745c2baf32d9aa5fdd5a",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -2576,7 +2576,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2.ptx",
+   "file": "tierb_1024_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2587,7 +2587,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "f8d5d3da93139285fac38cd5a2fc7b7b8d94e0c73410696c391a74a710301941",
+   "sha256": "5a8134e899096a72d7a557cae3c088c7fed93908ad7899f06421e901241eb3c1",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -2596,7 +2596,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2t2.ptx",
+   "file": "tierb_1024_c16p2t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2607,7 +2607,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "1e90e1e9ab4cdb68ba22e0f81d466eec4b23dd1c28c22913bc8b13bd7429d830",
+   "sha256": "ffecbb11e36905dfc7f8973eaa8ada3ba4dc6bdde03b17c4f0e4a2b2802f4578",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -2616,7 +2616,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2t2w.ptx",
+   "file": "tierb_1024_c16p2t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2627,7 +2627,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "25392190b3294407426675070969ef77e3cbec909253dd53b43605bf184d2df6",
+   "sha256": "665a1f656b91edc8a1b64efd0b17a44595307fdfd4dba4e78ca6fa21bb5753e3",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -2636,7 +2636,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2t4.ptx",
+   "file": "tierb_1024_c16p2t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2647,7 +2647,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "99f1ec5a324e589dd32a017fabe2f8d6d178af09c23e6270a86414ff77621fcc",
+   "sha256": "154bdf797919904fcd00b02767446b8aa426079e9e2bc6fe25172243c5ca309a",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -2656,7 +2656,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2t4w.ptx",
+   "file": "tierb_1024_c16p2t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2667,7 +2667,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "a51f525b02e96c2398d3ffc20669f2553ff7370c5a312a25976f7e6395c294d0",
+   "sha256": "38781a61b58885ad892471fcd059552bf07b6564c7076dafc32a9ed647758b7f",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -2676,7 +2676,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2t8.ptx",
+   "file": "tierb_1024_c16p2t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2687,7 +2687,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "e736d0e8d39c1b918aa785ea49e55fb5a19867f1f17832ba8b1989e0a9842394",
+   "sha256": "c0cc968ba4ba96b70ba790ffccced30bd62159ab091186e2761cc68b15805722",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -2696,7 +2696,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2t8w.ptx",
+   "file": "tierb_1024_c16p2t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2707,7 +2707,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "b99efd1df6c7c7fac37d8068f6043b0ac3830c59b68fcf197155ec0a6965aebc",
+   "sha256": "be91ce1a953e7ab4d65b3cbc6e5e1cda9c01265ca09d7559e735004e4c388e88",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -2716,7 +2716,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p2w.ptx",
+   "file": "tierb_1024_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -2727,7 +2727,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 2,
-   "sha256": "793e9e47bd05e1503c078da254c12b83b44ea24b1c727a69054948bf98fa515f",
+   "sha256": "0fe9db728447aa1eebe9a18cbdc2a3ad700bcc9c91669d7090aeb47a7bfe18c4",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -2736,7 +2736,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4.ptx",
+   "file": "tierb_1024_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2747,7 +2747,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "7de123e3ae72f147eb0e103d9c59f5ef1444397733385024684971d8d6e19f50",
+   "sha256": "d190c8de70865eb9a3bc759e83a5feccc3ba0c300cb75d3f8421cc6c5c63b4ed",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -2756,7 +2756,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4t2.ptx",
+   "file": "tierb_1024_c16p4t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2767,7 +2767,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "7c83f87de1fb811c608861060854648bf6974692d97fe6db45e209042775dea3",
+   "sha256": "ed27b708c4e0a6bd35d64e2f0012ad5c2cfe40b4afb61bc7c14466de264a62ae",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -2776,7 +2776,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4t2w.ptx",
+   "file": "tierb_1024_c16p4t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2787,7 +2787,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "c413e1408186c4e2871c199afa31e33872be9f4b889575c65e4821854368f6d2",
+   "sha256": "a7149991d45f32bb2c43394b91632474f3ed8eac54478797cc623e4b6e73f11b",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -2796,7 +2796,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4t4.ptx",
+   "file": "tierb_1024_c16p4t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2807,7 +2807,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "fc9a2a984e26e4ae9d1e0cf99e5dc9bd1a1137374fe3151a33a2340daae19a34",
+   "sha256": "219c5e5c61d663e98b579f4a71965f3d72a7480dfe22e6e3eecb14d05276d2b1",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -2816,7 +2816,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4t4w.ptx",
+   "file": "tierb_1024_c16p4t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2827,7 +2827,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "e27ffd450a270854c4613d599bcc6bbd702e0ef3324eba2ebd6708d1ef2e421a",
+   "sha256": "e3c9ab9856d46de999fe69705dc43c09870db2e808f90b3d422d5f2a62a82266",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -2836,7 +2836,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4t8.ptx",
+   "file": "tierb_1024_c16p4t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2847,7 +2847,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "aad909764708d0ceacaa11c78caaa9b0a8565ce9fbfd59748f682c24c9f608b8",
+   "sha256": "bf430fcf8bca7246a4ba81c22b50b55c6fc61545aab51ffb94b1ceb8445688dc",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -2856,7 +2856,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4t8w.ptx",
+   "file": "tierb_1024_c16p4t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2867,7 +2867,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "adedbc716ea61156f5c85694e372235346e85f5f98744ba2b58ca51138964562",
+   "sha256": "2675f40ae6f715cb79db56207727f08752c660f36b7d2fd32b44f7cff5fedf53",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -2876,7 +2876,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16p4w.ptx",
+   "file": "tierb_1024_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -2887,7 +2887,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 4,
-   "sha256": "8d6745f2607a68ad070f96463b0e979e91e745d9df7a0d6055b643b4ad19e310",
+   "sha256": "46dba8657b65dbe4df46509a49f79d104c7ac29c7914371e008e2e88e1afbcdf",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -2896,7 +2896,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16t2.ptx",
+   "file": "tierb_1024_c16t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -2907,7 +2907,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f90db3258d58d09d4ca896063642115beb107fc75bbac45462e129c74629149b",
+   "sha256": "aba2ea1bc85541d9e1f4d31b17ac3c30f2e483f2105178a65c9de6652c9f86f5",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -2916,7 +2916,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16t2w.ptx",
+   "file": "tierb_1024_c16t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -2927,7 +2927,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "166655728efa09448a32c07ce854d658a50020e933ac1114c3cf7e68e55ca5c3",
+   "sha256": "ae4d6cf940454f2306be14d54d69a33fbce30d7e7090caa55e8fab7055d4b4bb",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -2936,7 +2936,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16t4.ptx",
+   "file": "tierb_1024_c16t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -2947,7 +2947,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "e0d992cef8c1176009eb8abe1506753a31bbfc5fbe2a64dcd43c9d052b82dd9f",
+   "sha256": "5a09ccbc560bb2d42408012f6dce66094755bf3fe527cd59344142a0f02dc3a5",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -2956,7 +2956,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16t4w.ptx",
+   "file": "tierb_1024_c16t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -2967,7 +2967,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "666c20d13d5d776ad58c4caf6101a90878e3f234dd3992dd7fe1df8dc10d9810",
+   "sha256": "fbca66ca500fe0d2110331847104436a46d6fae51e1baa2b900db9e4d1bcaca9",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -2976,7 +2976,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16t8.ptx",
+   "file": "tierb_1024_c16t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -2987,7 +2987,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "1e3c5054deae4f8bf1d4962f0240d5dbfb275e0b3f14c5659d449a4d4c4b13ad",
+   "sha256": "95370c24f583490c30a794da6268c380b1b95011938df5f7dabf50926277ced4",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -2996,7 +2996,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16t8w.ptx",
+   "file": "tierb_1024_c16t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -3007,7 +3007,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "3870c6cd1583fc194c6ea40144874984d0fbb434fe51e51bdd5039c7aed3bb4b",
+   "sha256": "f999bc8501b13749b7a8b0781c03421c8b763456d53e226b2e8e928716230c6b",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -3016,7 +3016,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_1024_c16w.ptx",
+   "file": "tierb_1024_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -3027,7 +3027,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "10af1f8ff0425565e7ffcf1f7096b19ad44ead54a612d546317b2b27e193d288",
+   "sha256": "7f864af91dfe05278c460f2d680fa1dfefbbb9bc5f056d87605e641ab256cf16",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3036,7 +3036,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_128.ptx",
+   "file": "tierb_128.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1024,
    "local_size": [
@@ -3047,7 +3047,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "7746cc1acbb5fe057ee039103739163d8dcbf4efbfc7825a0c42163019b5d17d",
+   "sha256": "15f1d7a444f72df429a372aa127274a9eefda2ca22ce6f2e2a082d1940867cd0",
    "single_bin": 0,
    "tile": 1
   },
@@ -3055,7 +3055,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16.ptx",
+   "file": "tierb_128_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3066,7 +3066,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "2b2d1f470b7b0832858067e9dfb5270e532a489feb5303ef541738e48a682dec",
+   "sha256": "fafa309e356f249cf1ae48655f4f5748935c6b1980691b92555865230d58b264",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3075,7 +3075,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p16.ptx",
+   "file": "tierb_128_c16p16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 9728,
    "local_size": [
@@ -3086,7 +3086,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 16,
-   "sha256": "714aa90a8e980c0a2336eedac07171476af6b903d35242c1fd70bac673f0ffbc",
+   "sha256": "52e811c9cc0d9abb32f1de0ec0eb3946962e03b19fd36781097f051d807c9e13",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3095,7 +3095,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p16w.ptx",
+   "file": "tierb_128_c16p16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 9728,
    "local_size": [
@@ -3106,7 +3106,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 16,
-   "sha256": "8d9720ee1a462442aa6710ec9eee58b814de8044381b01c377717a52cac1e0be",
+   "sha256": "e2bf3fc71cb2cfb31599de350d358fff39210b504f437e2709ccdd54468544e9",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3115,7 +3115,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2.ptx",
+   "file": "tierb_128_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3126,7 +3126,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "3652e6137e5efd65d1e98aa4a8dff69ac5c2119f378cb2a1944196f1e1925b44",
+   "sha256": "7dade5bef334bf516007cb2d5d8e718bf6dfd85c695d3d45dd17e6a33a1810d7",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3135,7 +3135,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2t2.ptx",
+   "file": "tierb_128_c16p2t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3146,7 +3146,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "0789287c7345f10be611c13637d9260391ccc72aef5d5fc67ab2ea1e5a58b62f",
+   "sha256": "365311e31aa10fe8d2f05275078257168362dab759bd7a5b883b763db436f882",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -3155,7 +3155,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2t2w.ptx",
+   "file": "tierb_128_c16p2t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3166,7 +3166,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "d9c5fb61221e38e19a85cae7184a1687cf353a370904110f3c31f7e2bad0352c",
+   "sha256": "d0a131bf3c6420656bf5f57d0a7d8a27224154123123a974924c39880af99c55",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -3175,7 +3175,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2t4.ptx",
+   "file": "tierb_128_c16p2t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3186,7 +3186,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "3d518c8569dce3c3fe703366e7ef6985b1da285b52b0157d7e2f6ad7552bf03c",
+   "sha256": "b7ca0c528621602dda5db07445a662b50b32bff19d7381aa2ca2e94033b6b8e0",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -3195,7 +3195,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2t4w.ptx",
+   "file": "tierb_128_c16p2t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3206,7 +3206,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "3c33eb3ba0017f1ff8cd9f081ebb409c676cfb9cb909ca693047183d9bfb378c",
+   "sha256": "12011bc48c9ff9dfdfb52496a1f9c01a4102e407719725dac6ed228fd82cadb1",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -3215,7 +3215,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2t8.ptx",
+   "file": "tierb_128_c16p2t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3226,7 +3226,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "654009c1df0d4bd9ca8079d0a75b9c37074d20fc79257a6512156bdb9807a465",
+   "sha256": "d03f838c8ca2f726806dee00b495061231a4d8c652619168a5f14612c69b3d8c",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -3235,7 +3235,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2t8w.ptx",
+   "file": "tierb_128_c16p2t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3246,7 +3246,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "f4f419b49ef474ba329191b01814a0812789d113c54ac130ab761eb44aad0842",
+   "sha256": "86a5582e40f7de1099ac0720482ba274939b5a9589f71c9c1610115a25d0f743",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -3255,7 +3255,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p2w.ptx",
+   "file": "tierb_128_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1152,
    "local_size": [
@@ -3266,7 +3266,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 2,
-   "sha256": "689c7c86cf6b0a05ddb9e620e601183852cd91f6181e3b175653316c0998da23",
+   "sha256": "717fa3710b8527d795fe359bc66181a170f5e5c83af7fa49ebeb2b33e8ca36b7",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3275,7 +3275,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4.ptx",
+   "file": "tierb_128_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3286,7 +3286,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "c153f765a8c61e93a2ffe3c158dc4978ec5acffed1cf91dad9b4ca51f56a6d95",
+   "sha256": "29bd49417057779f15e87759b4f557d67f6c5cd5b0bfa910f6a9fcc601783218",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3295,7 +3295,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4t2.ptx",
+   "file": "tierb_128_c16p4t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3306,7 +3306,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "94350cb7672ba6c912252d9beca4499fab44c1482609342d54cd922c4fee90cb",
+   "sha256": "c0cad4fadbcefce4e3d12b299b0bafa8be7bf5d8182783720bd8804e87f29fc3",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -3315,7 +3315,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4t2w.ptx",
+   "file": "tierb_128_c16p4t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3326,7 +3326,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "45f340dd19696327bc5f176138cc2c9ee0c0749a90c1951b48f271a677ec6ba0",
+   "sha256": "744c742d9fafcbe8c7bbedd7ac761630e4f73885bb3a9f9007fa38f022dfa0ed",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -3335,7 +3335,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4t4.ptx",
+   "file": "tierb_128_c16p4t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3346,7 +3346,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "8be2476db5934d17587d62315f082b9ea07b1b1f2530ff48b39ecbb4b0ac3dae",
+   "sha256": "0b1ad345fe392c319d322c8b0d164e471785868a78fde22b3a3bf2229e7b4f5b",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -3355,7 +3355,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4t4w.ptx",
+   "file": "tierb_128_c16p4t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3366,7 +3366,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "1fef9dd1390751711c1cd770cdf76535ca7c97b7dc3edc14eef0c0c511675f9c",
+   "sha256": "37380e1eb5b9c700d54cb2a20aa0d1c954599448db5109b7e98f263b59ee14d1",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -3375,7 +3375,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4t8.ptx",
+   "file": "tierb_128_c16p4t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3386,7 +3386,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "0c83af555fe98da5708591c313be441a0e74ea81398854af0679728b9fee5adc",
+   "sha256": "bf053c1ccd258ef1715306557367ba8e96dc309955525bb7e9948540a413e500",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -3395,7 +3395,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4t8w.ptx",
+   "file": "tierb_128_c16p4t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3406,7 +3406,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "129a206de96764fa5446bcc375718e2a120072c5462e933ce2f33caa6c12e41a",
+   "sha256": "7a056bbce7914aa43221c3a11cc73f422673461ed966913e9bebab73f7410703",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -3415,7 +3415,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p4w.ptx",
+   "file": "tierb_128_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2432,
    "local_size": [
@@ -3426,7 +3426,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 4,
-   "sha256": "92cf9a62df5f585b9052b05fc3ce1b6f8addc40157c5994c069e24fa2d86d502",
+   "sha256": "83c4d56536a0a614f6bb11298081690982d7e83459f359d4a3a7633848351a15",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3435,7 +3435,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8.ptx",
+   "file": "tierb_128_c16p8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3446,7 +3446,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "f2f24a6dab2a3cff6880710783c473a046c77823a573d556028ead6a386f4756",
+   "sha256": "ca9c1d934726c0f5026070d89d6bf5f1c8e37feff706bef572d67ee9e81cc2dc",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3455,7 +3455,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8t2.ptx",
+   "file": "tierb_128_c16p8t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3466,7 +3466,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "b054e028273879dc8c93f7c7c4a747fdf3846b5bacd0fb363445fe7342af1ef0",
+   "sha256": "01730fa8d3594eaf9fd98f1af4c265e165db6ce4844ff23f96522d00e9300962",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -3475,7 +3475,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8t2w.ptx",
+   "file": "tierb_128_c16p8t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3486,7 +3486,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "af3462ad5ec5594a43d0a909cddc2eac3cca0e24beeb44b9310300e7b477ce3d",
+   "sha256": "35ea3d0f074ee1433514c5559554b2618ab680287b34bb358fbd2138937ae412",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -3495,7 +3495,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8t4.ptx",
+   "file": "tierb_128_c16p8t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3506,7 +3506,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "98d513bdba1ca9fb39039b937681bec385e10d72e19c3589845c4773a17b81fc",
+   "sha256": "5903c5e4e664cbd02818617e7c2d90231446859d01a8ff5e5dd190bb7ed0b1af",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -3515,7 +3515,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8t4w.ptx",
+   "file": "tierb_128_c16p8t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3526,7 +3526,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "ada8bd24d084449346fe818bc54fcb17f4803b281aa08310c8dca5843f44e677",
+   "sha256": "b92b6d98c93176b3ebe2812e3f57cc8b43ae72e12df85b808bf74002c14bb611",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -3535,7 +3535,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8t8.ptx",
+   "file": "tierb_128_c16p8t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3546,7 +3546,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "a480dd250b535813cb003cacd886009e6b4cec620ed5eb32c481c48e08f0b799",
+   "sha256": "9de96b0693e5254e1099546039ff95e0be8fdf2dabea477b9bcb977b5cd68c4e",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -3555,7 +3555,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8t8w.ptx",
+   "file": "tierb_128_c16p8t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3566,7 +3566,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "31df9872e03b321f7c7bc47fe5896c57f0ad5d1c3c6cd29fe608f088f7fcc223",
+   "sha256": "0de520b6596e2d29efa81a19d1fb839d3cecd7893078c43661a723f85688f597",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -3575,7 +3575,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16p8w.ptx",
+   "file": "tierb_128_c16p8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4864,
    "local_size": [
@@ -3586,7 +3586,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 8,
-   "sha256": "17c62bb6ce75c7a91f67672f20cb3364ecff79cbbe89e223d65002191d6daa51",
+   "sha256": "2a816a5eb8865691082ac0cfd604f5e3375fae3741c3b147268d33e718f64109",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3595,7 +3595,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16t2.ptx",
+   "file": "tierb_128_c16t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3606,7 +3606,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "2447bac63f9bb16f049ee91eec3cc312faf72e16cd6612117de24b0b8bde7cc2",
+   "sha256": "536e98b9270be1f864ca3f5f0d04aaf66f77dd0bff41a0003049bc940b3c8878",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -3615,7 +3615,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16t2w.ptx",
+   "file": "tierb_128_c16t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3626,7 +3626,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "839d5c80239e119e5b66dfa1e6a6c8f7fa8c6c3882f5c262647db3c68b98b127",
+   "sha256": "e3bfa9890240caf36d2adfb93c3b11707f458f464209c142df5e46125ceb7da1",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -3635,7 +3635,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16t4.ptx",
+   "file": "tierb_128_c16t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3646,7 +3646,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "f2acde31c20369a10b8749f4f5dea3dda1d8cb36671df6413d50ee8528a3c6aa",
+   "sha256": "e96dfc5fd7d24cfd6dcf1388c8a9c212728fc3254c5f1c434d9299aac6d78cb2",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -3655,7 +3655,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16t4w.ptx",
+   "file": "tierb_128_c16t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3666,7 +3666,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "7e600d045878f97c97c5cb91fc9580917a83463f18a87fcbc8656489b7fdbc7a",
+   "sha256": "6c7303cdad26810ef3ee632bb5d4281da97b58bcfc0b9a02e2d44f9556ed4fd2",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -3675,7 +3675,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16t8.ptx",
+   "file": "tierb_128_c16t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3686,7 +3686,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "b0c712b51458cfa58c5397affeb2edc2f8543a5b2c51649f973253ccbdf41c1e",
+   "sha256": "76a0d0a271da01581d939dc94b4125928667000ae3f58df1e3408f99f159cc60",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -3695,7 +3695,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16t8w.ptx",
+   "file": "tierb_128_c16t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3706,7 +3706,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "327e7147dc27cf02868eaeae3ede57bd14d2543087be17cc34594e946470dd36",
+   "sha256": "466e3786aa8bffd7a0b1c83674868e0f9c4b4a225d1b11ba423462daaa1fbef5",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -3715,7 +3715,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_128_c16w.ptx",
+   "file": "tierb_128_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 576,
    "local_size": [
@@ -3726,7 +3726,7 @@
    "n": 128,
    "portable": 0,
    "ppg": 1,
-   "sha256": "cc8488cb8e9f640a797d02db1b4c707e403364df3955bb6157139643995f8f4d",
+   "sha256": "1242ce12b6e143faa6f8bd9917d2b97910117b9083262a01a7353721f3cb0941",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3735,7 +3735,7 @@
    "cap": 8192,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_16384_c16.ptx",
+   "file": "tierb_16384_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32896,
    "local_size": [
@@ -3746,7 +3746,7 @@
    "n": 16384,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c27588218f79003241fb13692fac22713f4272ef4d83b4dca20a3cdf127d5cba",
+   "sha256": "0836e0aca31f034baa41b76a6ed609879918cfeb3ac9abe0ed7d8b5d483235d0",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3755,7 +3755,7 @@
    "cap": 8192,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_16384_c16w.ptx",
+   "file": "tierb_16384_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32896,
    "local_size": [
@@ -3766,7 +3766,7 @@
    "n": 16384,
    "portable": 0,
    "ppg": 1,
-   "sha256": "03377960250470966ba591a99f27686362de55fa628d74f293519b999ad81776",
+   "sha256": "af92bdfb08dcab0295ab02f879e1b7bc722e57a706fe0c75068ea492159d890d",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3775,7 +3775,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_16384_lds32.ptx",
+   "file": "tierb_16384_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -3786,7 +3786,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "6eb8272045c4a857f70a898d124dd1c6bc8617f53e10e906f3d29f3bffe961be",
+   "sha256": "c0146d65fcbd7e5e8f4c9c1cca6207358e3356903a840e6adbe45eb11beb0bb3",
    "single_bin": 0,
    "tile": 1
   },
@@ -3794,7 +3794,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_16384_onebin_lds32.ptx",
+   "file": "tierb_16384_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -3805,7 +3805,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "00927cafb4a1226ffa46861454cb8950f5bd59de678204a283ff2c706f811919",
+   "sha256": "41d6a15540ca7090810a87eb8ff8db32433ce3e5a9553e0282ba8ec33b5eb82a",
    "single_bin": 1,
    "tile": 1
   },
@@ -3813,7 +3813,7 @@
    "cap": 1024,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_2048.ptx",
+   "file": "tierb_2048.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8192,
    "local_size": [
@@ -3824,7 +3824,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "0138110557a16da8a787ec5cd67ef8aa2157059d41ae54f310030ef5bd75e381",
+   "sha256": "c4fbd0015f573758ad2b8ccdb45f4235d5569c54e0c5e30c8ed8ed0c8972e9bb",
    "single_bin": 0,
    "tile": 1
   },
@@ -3832,7 +3832,7 @@
    "cap": 1024,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_2048_c16.ptx",
+   "file": "tierb_2048_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4256,
    "local_size": [
@@ -3843,7 +3843,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "cadd04d96ba9e7b7ba9c482fcb87787641ec6a2aad9d1a2f82167947aaa7c424",
+   "sha256": "7ded44f04563e918ceb3d8330ac007d689b3a518f62914b9ebc516cdbd50f791",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3852,7 +3852,7 @@
    "cap": 1024,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_2048_c16p2.ptx",
+   "file": "tierb_2048_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8512,
    "local_size": [
@@ -3863,7 +3863,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 2,
-   "sha256": "8173dabb7a3a025f2c05c9f20e51a0c9c7804f975b00f849ebecf4898ea355ed",
+   "sha256": "d515d41670235e69dee8fa414e58175401ae877dabc28b3046babb089088d484",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3872,7 +3872,7 @@
    "cap": 1024,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_2048_c16p2w.ptx",
+   "file": "tierb_2048_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8512,
    "local_size": [
@@ -3883,7 +3883,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 2,
-   "sha256": "f5a16a7ea4de2a9910af5496a9d71f88d22f81eb822d6f12baceb3b474a846e5",
+   "sha256": "afa714f01d0b963ef7ef6b434a756a6d0d97e2778965e72dc74d873a0961321e",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3892,7 +3892,7 @@
    "cap": 1024,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_2048_c16p4.ptx",
+   "file": "tierb_2048_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 17024,
    "local_size": [
@@ -3903,7 +3903,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 4,
-   "sha256": "dfac979feaadd547725a413387a3f8a5c0e14d0df37d194b1d2a08913efbba60",
+   "sha256": "726dfe8e09dbff5db0bb6e91883622b69cbe2e438f706c8e0fe97f2e56de1ef8",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3912,7 +3912,7 @@
    "cap": 1024,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_2048_c16p4w.ptx",
+   "file": "tierb_2048_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 17024,
    "local_size": [
@@ -3923,7 +3923,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 4,
-   "sha256": "3965e8d5b180d50a35bd2a7de6055c39261acda7aac5c13080348655641ede7b",
+   "sha256": "00f876f1e5c59b821edf32ed26546a91e3b989badffc7bf7712335dd384dd584",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3932,7 +3932,7 @@
    "cap": 1024,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_2048_c16w.ptx",
+   "file": "tierb_2048_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4256,
    "local_size": [
@@ -3943,7 +3943,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "a8eab65a58efdd1c65d11fd9a359f1845c8ec29096e175580529fc7d296846f4",
+   "sha256": "b62dfad40dac1ecb70a59f5f58b457af350bf162107f494fffaf1168aa3af5b0",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -3952,7 +3952,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_256.ptx",
+   "file": "tierb_256.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2048,
    "local_size": [
@@ -3963,7 +3963,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9e0a456344ba66786d2bf7c13d983b83595510cad45936418084b910c33b3ec4",
+   "sha256": "9ccb74b037d1697a57175e23c26f12a9194f2664a260767bc94c11b6cb419604",
    "single_bin": 0,
    "tile": 1
   },
@@ -3971,7 +3971,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16.ptx",
+   "file": "tierb_256_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -3982,7 +3982,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c320dd68973b1a1684a49e274d237acb42da4b5be0943ecb395688a07e4ef645",
+   "sha256": "14a1c483814c77a506b8a7b053f397ed341177e58235a468f0c0615dca926082",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -3991,7 +3991,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p16.ptx",
+   "file": "tierb_256_c16p16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 17408,
    "local_size": [
@@ -4002,7 +4002,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 16,
-   "sha256": "138d0f78df7ff963ab938b7e158ba94351a8f136d6dd90fe7672f944bdc5d7ba",
+   "sha256": "c86e9e54e2a02733824ae9fd25561550bb6ee9951d79df63fe1ab31673ea514e",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4011,7 +4011,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p16w.ptx",
+   "file": "tierb_256_c16p16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 17408,
    "local_size": [
@@ -4022,7 +4022,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 16,
-   "sha256": "70d8bed806cffe6bc2d40cbc70094cefd1e8e6bae3b5d7a3dcedaa80b3f968d1",
+   "sha256": "c0f014265123a803f0a25f7eb39bd12faf13393c4a8df921e70ea31e8d516295",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4031,7 +4031,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2.ptx",
+   "file": "tierb_256_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4042,7 +4042,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "f23d0a36197b68d69d00c2cd73e933e296cc34bb1119cb78a93ecc9ea1dca1d2",
+   "sha256": "149b296498c24656721ee09dbf6b3d63b40fa30764eb9d285d601e84c7b1ed62",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4051,7 +4051,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2t2.ptx",
+   "file": "tierb_256_c16p2t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4062,7 +4062,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "040d4b83c2ea191b3638fa3a9af79ed3a05bea5088ed506db00f4a3993e5c2f4",
+   "sha256": "d12b505fb9e453aefd6ef66382d3500f9c8c89b3fb50e5733167d74e4106a974",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -4071,7 +4071,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2t2w.ptx",
+   "file": "tierb_256_c16p2t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4082,7 +4082,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "92de90b3d368f89c4e5f4457c75bf0e903d1202b376d3ffcca671ebded16a8f4",
+   "sha256": "6b8f8c5d8e13f563c1314f2147805117341a6ef936c57f41b4b8112300833284",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -4091,7 +4091,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2t4.ptx",
+   "file": "tierb_256_c16p2t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4102,7 +4102,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "074ebea7d84ce98ba76ee5d0f7aec51cfdbe7a3b7a5ee8dc6dea24c03b1f4725",
+   "sha256": "eae4004edf980a016e614bc3186ada589e4b9f1aeb44be218daed3c239d80df7",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -4111,7 +4111,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2t4w.ptx",
+   "file": "tierb_256_c16p2t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4122,7 +4122,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "dfc7796045e5baa2c20789bf815574856c9e82f5c38f4063569e8cdf6f901be4",
+   "sha256": "53f253d4687ef3782a95d0275119aeaf28b6a5f2587cf057b86f02c29acd643a",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -4131,7 +4131,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2t8.ptx",
+   "file": "tierb_256_c16p2t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4142,7 +4142,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "cf9afe9ff88a62b927b8136d5198effde04ab143047a5b024957c7438584f820",
+   "sha256": "5c6b156867877d97f6f7fac6d9ce11b3ab6bf26f03e0b9b42ce489a821ed6e37",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -4151,7 +4151,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2t8w.ptx",
+   "file": "tierb_256_c16p2t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4162,7 +4162,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "dc09e13f339d75aa54dc0f19acb9070773591a12a19f8ba7a413da0c52d91af6",
+   "sha256": "3e327f223ef635225844b3785e6851b62c20763c3ee1a2b978f63570f93d8926",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -4171,7 +4171,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p2w.ptx",
+   "file": "tierb_256_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4182,7 +4182,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 2,
-   "sha256": "cc9d04729cb4f981e6283513f435256dd5199a68f2080fb3941230f946812369",
+   "sha256": "562dcf47853a79a1ccfb773d6a64b7c9cdf28ef900017d43fdc45259bead21aa",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4191,7 +4191,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4.ptx",
+   "file": "tierb_256_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4202,7 +4202,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "02eaee1dc756c5edc912955665f433fb03e7685634c639a841182acd27bb642e",
+   "sha256": "408b5d8b417a58ba04037e234f1c50c501529b8cac6ed7491430e73100dfc201",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4211,7 +4211,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4t2.ptx",
+   "file": "tierb_256_c16p4t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4222,7 +4222,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "f9ac3ffa967b3100a8f6e2fff83d62243f89ab51e1f8f7b427ca0a333bce8f64",
+   "sha256": "7a66c1824932479a04eef4821419c2f856f4139ae71934bd30d2e4bd11f29346",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -4231,7 +4231,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4t2w.ptx",
+   "file": "tierb_256_c16p4t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4242,7 +4242,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "45809be1ebde1e8072afb26ce485981d1ea3df016ba9bbc6c8ef399f4644d690",
+   "sha256": "9bf98c288c33c5de6a321dd881b8df7d03aa1f7dd4a1368f40d0543a2533490d",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -4251,7 +4251,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4t4.ptx",
+   "file": "tierb_256_c16p4t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4262,7 +4262,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "f630a8d7714144bc948e2e5fafa98c82308bc1c1d6aacd6325fe799c5ae7d093",
+   "sha256": "a824355064b1791d49825d6ddc7183f08a933837870ede263fff60b0801a581a",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -4271,7 +4271,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4t4w.ptx",
+   "file": "tierb_256_c16p4t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4282,7 +4282,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "6dea63566cbfe0cb8cc80c5b42fa5b495ffb4299e16bc942d2f240b70c555732",
+   "sha256": "52cf97c71a2def5d3693eb2507dce5a5cf457a097529731599ecb1a4930a7628",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -4291,7 +4291,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4t8.ptx",
+   "file": "tierb_256_c16p4t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4302,7 +4302,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "73b120901ba539a0c7d7f503ef7085d73ff05834261056c017e1016018775d7d",
+   "sha256": "242e0685adab945bfc8132d095463b616bb5a0f3174b998a5e3a333e7af5037c",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -4311,7 +4311,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4t8w.ptx",
+   "file": "tierb_256_c16p4t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4322,7 +4322,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "40573a642d2bf2bcb9efd05bac436afe5a0de8580dc09843a10b9a61894c2fbd",
+   "sha256": "4f9a6d0ae4aa879812b5001b36d457932d9da9af6d8d2fee18f60f0a6bc0b263",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -4331,7 +4331,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p4w.ptx",
+   "file": "tierb_256_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4342,7 +4342,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 4,
-   "sha256": "0f4b242479916dc23e80033d01ea5227f10fffdc6f4c151899d7af95554f27f2",
+   "sha256": "f096bc332490d2d1bf366b1b1d896b2e4896ec8938d511d1fb2b5bed849a5c01",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4351,7 +4351,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8.ptx",
+   "file": "tierb_256_c16p8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4362,7 +4362,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "58fb54893f0dcc9a74885910eed589a402062396e749bbe4a2ab38cf59b5057d",
+   "sha256": "7ff5294fc1fde42e36ed655b44037416b244532c278e08024dc15dd1ed245001",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4371,7 +4371,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8t2.ptx",
+   "file": "tierb_256_c16p8t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4382,7 +4382,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "b0cbb35dd2b9488c7d2db17d403f691b6fe8fb7528c5e28b31747ada493ff77b",
+   "sha256": "66f905f3fe6ce79faad9956c6bf06f085d21f4447dbed3b59021a255ca075827",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -4391,7 +4391,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8t2w.ptx",
+   "file": "tierb_256_c16p8t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4402,7 +4402,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "40a15399cbdc00b285d1d9be4b640da32e5235a60cbc14a061601a581f0866f5",
+   "sha256": "6aefc29394d3a3326ecdb9dfb30d3e4fe2243cea6653a96152bd4f9d2fce3f1b",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -4411,7 +4411,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8t4.ptx",
+   "file": "tierb_256_c16p8t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4422,7 +4422,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "e020777b7b4759afc5cb0a2fb481ea5ac789990ad4568160ea51698bd92272cd",
+   "sha256": "a9a46b72f6fa663b3905870d18c22b45924f4df12cb66e5126f83a7328748982",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -4431,7 +4431,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8t4w.ptx",
+   "file": "tierb_256_c16p8t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4442,7 +4442,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "3e687ba8a4a0054e6d72e9324afe63f895fda3aef67f311ad94dc670e12697ce",
+   "sha256": "255b2bcf7a7a6cf7dc37cff103022618ec80f0217a6df47b0e7fc78235090e44",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -4451,7 +4451,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8t8.ptx",
+   "file": "tierb_256_c16p8t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4462,7 +4462,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "85570c9809ee9b7305af161cc4bfa04b1c45ba664bd5060444834bb6e70b2697",
+   "sha256": "409af354bc8bbcd8fe4dd3f465235e049aa17affd38c22a8d16d9d7444dead8c",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -4471,7 +4471,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8t8w.ptx",
+   "file": "tierb_256_c16p8t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4482,7 +4482,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "94a80faba3ef1b600178771d1d14d0019959138f88e4a4c13ac38f6050c5837a",
+   "sha256": "c9ff6b611cf544c40886165192caa2ecaba391a94706c5f26e5016afa1865e59",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -4491,7 +4491,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16p8w.ptx",
+   "file": "tierb_256_c16p8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -4502,7 +4502,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 8,
-   "sha256": "f3de62455de96ce832828c0b6d2b4a2217593985cc7fd48f37a4f2d497acf4f5",
+   "sha256": "d71f5fae8be9151f5acbc60ad297a5b0a6b3213d336c7410d63b88415f2f7aea",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4511,7 +4511,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16t2.ptx",
+   "file": "tierb_256_c16t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4522,7 +4522,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "a195580b70bb6b557ffe312f60d01bc59b02d23e5280d6d10c4d70440ab2f91e",
+   "sha256": "d133712460e4cc4f969bb04ce23dcaac24cb4118ab29d935506fa2759697a8f5",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -4531,7 +4531,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16t2w.ptx",
+   "file": "tierb_256_c16t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4542,7 +4542,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "931f5ca60058032e1e1900488edd17628885487af65a794f2deb5ea7dd8ddee8",
+   "sha256": "b3e9176e58797413a67245e38f07cd2d4d4f0f78c03365f733ef522a69a1eec1",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -4551,7 +4551,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16t4.ptx",
+   "file": "tierb_256_c16t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4562,7 +4562,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "26be98728113da49a65d25eb055b3e21b95cce94fae8f5097321b144f0bcc6fe",
+   "sha256": "ec35c198ef93bfd35b3aa720dbaf2e90f679010f82d4803ea7725c97ea747e8e",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -4571,7 +4571,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16t4w.ptx",
+   "file": "tierb_256_c16t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4582,7 +4582,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "ca4af6f1d43be17125ec0095acec1756e1da210603a60f7b607c68e1ca5e5f97",
+   "sha256": "0df92f10160e2b215a3df4975fd9bacbfafd5381235641c39409c2421f07ba96",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -4591,7 +4591,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16t8.ptx",
+   "file": "tierb_256_c16t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4602,7 +4602,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "02389fb1157e58f0e954f0ccb8a615f74e6418d7aa93305a83e0c04c78c0199e",
+   "sha256": "17550b99bf184838322eaf7b5c4fee7e6bcd5ce66d5fb5442e522033727bf025",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -4611,7 +4611,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16t8w.ptx",
+   "file": "tierb_256_c16t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4622,7 +4622,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "1471205e6b7d77d155dfc709669f6c4dc45efcf4ac1a7eb8bf3f5443ae7faad9",
+   "sha256": "3f59a63c8390abb027220cb48f26fad4cebbaf397c63e791cd84afe205be8502",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -4631,7 +4631,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_256_c16w.ptx",
+   "file": "tierb_256_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1088,
    "local_size": [
@@ -4642,7 +4642,7 @@
    "n": 256,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c17d2708215f0f324448b827e0a68e877ea79bf392844d144dc8edc30de74f5b",
+   "sha256": "7d47cb91c6e8b692b62d2d4d114494869c4519ab44c2c475ce051f6028190f9f",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4651,7 +4651,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_32768_lds32.ptx",
+   "file": "tierb_32768_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -4662,7 +4662,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "766c3edaa8db829ed47145eefc0a7c1d3f73737065893bb7f359d3cca85f4aff",
+   "sha256": "f14c205c8eb4650c56bca050e8a79b92143679ba2560e24252c160971516d186",
    "single_bin": 0,
    "tile": 1
   },
@@ -4670,7 +4670,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_32768_onebin_lds32.ptx",
+   "file": "tierb_32768_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -4681,7 +4681,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "71f18c840771bcbfea3c8964375c0221010dee47a3d95dfd68cd031e9fc49497",
+   "sha256": "1083d8c314caab4b61dfd72e78227f541db72836b8b8ae946d002f7e93b1d7f2",
    "single_bin": 1,
    "tile": 1
   },
@@ -4689,7 +4689,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_4096.ptx",
+   "file": "tierb_4096.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -4700,7 +4700,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c98f1e4bba9425f2e70d21808cf4e1d6062652ce91dd08de2cb8a0849cfaa620",
+   "sha256": "948d820c5b6a4c1e458791ad7778d936997d5a7b7a79c94d4c87e388cc931af4",
    "single_bin": 0,
    "tile": 1
   },
@@ -4708,7 +4708,7 @@
    "cap": 2048,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_4096_c16.ptx",
+   "file": "tierb_4096_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8224,
    "local_size": [
@@ -4719,7 +4719,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "79558e56d9593410b47482fa6a2c6d030923d05499ab99b59c95a6358926cf4f",
+   "sha256": "d6de7e52fe7ce5e6dfa824da8299a9517bfda15b543320ad1288ad0771f87a73",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4728,7 +4728,7 @@
    "cap": 2048,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_4096_c16p2.ptx",
+   "file": "tierb_4096_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16448,
    "local_size": [
@@ -4739,7 +4739,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 2,
-   "sha256": "58ddf67805a2f646a87d19f5dccf13eb6f3e8ef875656b5d434fa55707fbe114",
+   "sha256": "fee74b4bc64c03f7197cc581721ef7b80c6d1572f53b738c036b00710f586c66",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4748,7 +4748,7 @@
    "cap": 2048,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_4096_c16p2w.ptx",
+   "file": "tierb_4096_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16448,
    "local_size": [
@@ -4759,7 +4759,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 2,
-   "sha256": "fbf48751963772801942d42522d314e703007508b21d0d8c5c9a95ff48b749eb",
+   "sha256": "59b48fb0963e2084f418d2717d3c72df8d487d27ad3b99a1b868b7d5d2a4ce5a",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4768,7 +4768,7 @@
    "cap": 2048,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_4096_c16p4.ptx",
+   "file": "tierb_4096_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32896,
    "local_size": [
@@ -4779,7 +4779,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 4,
-   "sha256": "db34fb31b15d2a25da305da2ffbabe4a80cee78215e6e05d7b789ecf31b370a1",
+   "sha256": "f084c47859ffcc7fe416a2f9cfe4ae5d9c41801c8636bbd5671552e5b6c1d2d4",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4788,7 +4788,7 @@
    "cap": 2048,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_4096_c16p4w.ptx",
+   "file": "tierb_4096_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32896,
    "local_size": [
@@ -4799,7 +4799,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 4,
-   "sha256": "3f517d77799db9cdc44a382540d9cec543cda0df0e47572216da62289261fee8",
+   "sha256": "570693c3570fb824973f3af18153b313b118bc3d1294f0b7fad7fecb7225481b",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4808,7 +4808,7 @@
    "cap": 2048,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_4096_c16w.ptx",
+   "file": "tierb_4096_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8224,
    "local_size": [
@@ -4819,7 +4819,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "36f025348b4bd2b5ec8305a0b881619f4572df351e85406d5724f2b0c61506ef",
+   "sha256": "f863e7c0638bbb552fc26a2ad584f492027b1cecad0a329ffe6789b789cb5e0c",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -4828,7 +4828,7 @@
    "cap": 2048,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_4096_onebin.ptx",
+   "file": "tierb_4096_onebin.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 16384,
    "local_size": [
@@ -4839,7 +4839,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "91488dae65e8ab3d348d93fac6ed4b2638ae7b8e5fa5f890e7ab9844f06350ae",
+   "sha256": "5c5bbb6dd4f261d471628582f4419cd15830dad282c3e628c6fc292c6ede7add",
    "single_bin": 1,
    "tile": 1
   },
@@ -4847,7 +4847,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_512.ptx",
+   "file": "tierb_512.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4096,
    "local_size": [
@@ -4858,7 +4858,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "c9591c0a4bde3d77b03020f0a4d08d5710d985bdf9c8757e2699b0f2096e4ff3",
+   "sha256": "458163a5feaebca1e9c99f5680f00a4940cd261c55531982628a33320b0b4fe0",
    "single_bin": 0,
    "tile": 1
   },
@@ -4866,7 +4866,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16.ptx",
+   "file": "tierb_512_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -4877,7 +4877,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "758c4a8e2fc1b3791fa72da10e66dc05bba1297f7d3b90d2f78016ac1f4c879e",
+   "sha256": "7329e62d6cf1369f5ad684b90fb2f092c261be68d3ce7775ac6fa52fcbdac4dd",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4886,7 +4886,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2.ptx",
+   "file": "tierb_512_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4897,7 +4897,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "a81ff2f9b4fbad41a7504b3ed956d2db24f333569e2eede021bc5f710b405c98",
+   "sha256": "0a7cc9dffa7b75ae9ba11efa1786f5686d5217dbbea5a3a5e1c4f2cd42b4e9ad",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -4906,7 +4906,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2t2.ptx",
+   "file": "tierb_512_c16p2t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4917,7 +4917,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "7d9647853416e83bdc53b4fa3b032bee9e10c68f3aa3500a6b40c8e158fa4762",
+   "sha256": "4d711756c1ec1e0b2bc74d243a2e818d5311728a6e39fbd94aa9805d11ab9f74",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -4926,7 +4926,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2t2w.ptx",
+   "file": "tierb_512_c16p2t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4937,7 +4937,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "99a2d2f9737a9e4b22ee3eb44ecb7d7f03fddc1ec331e29b0d34f0cce0118fbc",
+   "sha256": "ceb8f964daf1a99bb8a99d8524abfeed5a0af10640f8a4368a7b66f9f07cfa66",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -4946,7 +4946,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2t4.ptx",
+   "file": "tierb_512_c16p2t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4957,7 +4957,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "d9911e6dc9d2f8f5e468ef562eb4ffaaf6aa3188e4572507b446d113cae92603",
+   "sha256": "4daceca08d5fad494f12cf9d5513cad6594bf43b6c1c1de0c85e262770cc6c2d",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -4966,7 +4966,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2t4w.ptx",
+   "file": "tierb_512_c16p2t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4977,7 +4977,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "4d5863b098550cec5c59069a867a25c10dd707bad72c1dea30875d45fb6db086",
+   "sha256": "81030bdfe2338126c5276d7bf4364dd53e19072aee9986470a1a0a94e32b0085",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -4986,7 +4986,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2t8.ptx",
+   "file": "tierb_512_c16p2t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -4997,7 +4997,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "80b9efb422fceb8be23fa33fdf48718d5c9f07f4d6a55a35ade3f65fc916142a",
+   "sha256": "f9d599cd89b336f9823ca1dd2332d4a53aeedad04efc66687cc0e5d7632fd1e8",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -5006,7 +5006,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2t8w.ptx",
+   "file": "tierb_512_c16p2t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -5017,7 +5017,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "126ba660a25a69932d932e7094097f2ad0fbf6c5b2f1b9f047b9ecc32779ccca",
+   "sha256": "a3b0d4fa33b38783584e3c3c7b151a89f70df36f3db1ab988527c7eef19a9f07",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -5026,7 +5026,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p2w.ptx",
+   "file": "tierb_512_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 4352,
    "local_size": [
@@ -5037,7 +5037,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 2,
-   "sha256": "ad211cf972c38e7c6504c03c390072ee2a93a9815f2be9503055022fdcb83821",
+   "sha256": "539ecde5a41176ae5c12e043858dc8efe642b45d065e7d39d704a75c1589c5f3",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5046,7 +5046,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4.ptx",
+   "file": "tierb_512_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5057,7 +5057,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "b2acc2b73b5668f6a5f378ccfb5dc4953c7a2bf0490973b7d1bc803dd5e7c4b1",
+   "sha256": "3b6f69f212ed80bbb83485aebda3518d1ee28b61f1d98540c4e2c53e399661f3",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -5066,7 +5066,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4t2.ptx",
+   "file": "tierb_512_c16p4t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5077,7 +5077,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "1942d1656a6ad8be0bcdc6d4e7055fcac324aea30841728702e729c99aab2e94",
+   "sha256": "12cd501ffa2ab8473c5a299472d064935457e257c0a02af635b52cecfacb17b8",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -5086,7 +5086,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4t2w.ptx",
+   "file": "tierb_512_c16p4t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5097,7 +5097,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "11e9bb5c0c2325410a60ebd6787059e2542df7a44e776c873b1120a8ae37d9cc",
+   "sha256": "85ee4b8db079d1618a6fb8feb09910098fdf30494b3143d36d41e9ee0f984368",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -5106,7 +5106,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4t4.ptx",
+   "file": "tierb_512_c16p4t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5117,7 +5117,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "fb026d3526890321654102dab609877636bd3e1551c81ffa21b915c45045f1b8",
+   "sha256": "6d226b2da39a59e75a1d68e0c6b771d79468b32fc35ca8a6f1f196a57aa9169c",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -5126,7 +5126,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4t4w.ptx",
+   "file": "tierb_512_c16p4t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5137,7 +5137,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "1c131b42ecb0e81c81a48be9bdd4d0d91a35d9996125b023912074cc6633f32d",
+   "sha256": "6cca55cc8cc37152f7d0f5a96cd8253a02df5b25f9cbc9b614daba06b468dd89",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -5146,7 +5146,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4t8.ptx",
+   "file": "tierb_512_c16p4t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5157,7 +5157,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "49c3b1469aebc3276e3bc9286ed115c6136c2a0168937dff6dd045b6e51af46a",
+   "sha256": "502de8fa892d503906199df9a7b8725fac75c68eeb4ae7e931760a85130a07a7",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -5166,7 +5166,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4t8w.ptx",
+   "file": "tierb_512_c16p4t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5177,7 +5177,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "bf5df5ccc080f48e909fa123ca4f0e413e83c1418d725f7b447ac76c1307b821",
+   "sha256": "ff9b0b7426a6b99a8c772dbdd11c40f16349316aedf1bff45f3361c29c1ebc60",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -5186,7 +5186,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16p4w.ptx",
+   "file": "tierb_512_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 8704,
    "local_size": [
@@ -5197,7 +5197,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 4,
-   "sha256": "58aeb4475a4888ee1577da3b7222b43dec3baddff06574c6dfce9631bfe62b06",
+   "sha256": "83cbe675efb9c33308771f7257410c416badc1129c5fbcdc8be7b18011127615",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5206,7 +5206,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16t2.ptx",
+   "file": "tierb_512_c16t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5217,7 +5217,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "06e4b395f1c54a2baaa754468933e84bd71d4fb313ec20c8cfe1f09a093d0300",
+   "sha256": "fa3d78792ef601358e44796ea06004cb12f1af916b2827d919573535462d1c12",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -5226,7 +5226,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16t2w.ptx",
+   "file": "tierb_512_c16t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5237,7 +5237,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "14d278e7d87b3f0dc7cbf09a148086cf7fc943de1fbcebc6518ad6c335004d82",
+   "sha256": "9b7feb1a4bdc58c185199c222635b74df540be81f7309785a462fd7b95220f53",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -5246,7 +5246,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16t4.ptx",
+   "file": "tierb_512_c16t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5257,7 +5257,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "5f40d2539e5b3543947c2e9b1ef0f497edb11f6e7d64f1df9184986334f7f50b",
+   "sha256": "2ee7dba418580305b2e5fb66a649414673f4979a645ff263c902d789b1a603e5",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -5266,7 +5266,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16t4w.ptx",
+   "file": "tierb_512_c16t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5277,7 +5277,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "b56f0b66b36fc33651a74155755b2e89ef86b9e2006ea926c1671c9ff172d50e",
+   "sha256": "7f7ecea7092896b26701b36cec77dfff21e237eb7ba346445f9c12f2e5759bfd",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -5286,7 +5286,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16t8.ptx",
+   "file": "tierb_512_c16t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5297,7 +5297,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9943e043fee15e0521a130f862ef23a5fa2e1fe773a8a761392e2fa89bf64345",
+   "sha256": "dbd5cf64d667920f8ce74a83f03fa10814629c2bcdf926695b6e2f4c649cd99b",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -5306,7 +5306,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16t8w.ptx",
+   "file": "tierb_512_c16t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5317,7 +5317,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "dfab305ee718b3239e4250aa5bd9ad045486fd4e9d8a1d66a70f5cd1598f850d",
+   "sha256": "46a219f3e1d9bab60bf6f275d4c1fc72064e5b82dd4298fbdbbe8cb68f2f31a7",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -5326,7 +5326,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_512_c16w.ptx",
+   "file": "tierb_512_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 2176,
    "local_size": [
@@ -5337,7 +5337,7 @@
    "n": 512,
    "portable": 0,
    "ppg": 1,
-   "sha256": "1c669a3cf3aab5e0c5a869794db4e38cf7a5527c3e376fe88d23814bea13478c",
+   "sha256": "bea86cc0117f60a29270cf0faa1b73cb679c323b3eeb5bdc8a7d4a4990bf4f01",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5346,7 +5346,7 @@
    "cap": 512,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_64.ptx",
+   "file": "tierb_64.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 512,
    "local_size": [
@@ -5357,7 +5357,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "d2e88fdbc617c0b273e97f30363b95deaef1b2b57ff84ad843eab6fef6031579",
+   "sha256": "fed7d6947a4e57dde3d886f1b68c064775826d5a577bc01e45da25680812d1a9",
    "single_bin": 0,
    "tile": 1
   },
@@ -5365,7 +5365,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16.ptx",
+   "file": "tierb_64_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -5376,7 +5376,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "04e3128c22f72841cfd435750a7c0189b6dcc440b4aa9b1fb679623496c2d008",
+   "sha256": "4b4f3102e52360ab8363ef6d61b6081d2ec08be915d83b3e3c83b03698f1f8d7",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -5385,7 +5385,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p16.ptx",
+   "file": "tierb_64_c16p16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 6336,
    "local_size": [
@@ -5396,7 +5396,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 16,
-   "sha256": "b9bdd1c44b4547c15d80c5eebbd625da6dc23cb2f201f0b0cfcdb7b5af887e42",
+   "sha256": "8648bca6da4f7778035efb4df994ffacada049b98b20efb3ebb82472d9085c8d",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -5405,7 +5405,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p16w.ptx",
+   "file": "tierb_64_c16p16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 6336,
    "local_size": [
@@ -5416,7 +5416,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 16,
-   "sha256": "5a31c1bb1bdefadaefc33528247f65bfb89180f34180b69a925fd32e328f0f1e",
+   "sha256": "25b0a946891172aadd01bbdc806ed043989b23785c25796eb5a7498403cdff99",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5425,7 +5425,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2.ptx",
+   "file": "tierb_64_c16p2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5436,7 +5436,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "522c0b594dcc197914a35aaddd36c96f059f44db1352a4990d8074a913f68fcb",
+   "sha256": "0f216068dd240c4d85543d873012b91ece37d5d8acf5b0916a3a9c12a5822885",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -5445,7 +5445,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2t2.ptx",
+   "file": "tierb_64_c16p2t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5456,7 +5456,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "18138bd41360440681ff458de1eb78d064a8fb9b4055c675c1ef230c89f20e5c",
+   "sha256": "bebf56576f4cf8476c8128c53fa10cb762cf443d0b4f963a436dd024041b2184",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -5465,7 +5465,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2t2w.ptx",
+   "file": "tierb_64_c16p2t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5476,7 +5476,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "acbffcfbfbba6f1aa8670273e70c54e203db6b89e1a071361f69ef24a71ee323",
+   "sha256": "e2340ee6cf7ff78a295bf3a156075b65f57a047dcaf76203857efcbcb9dea94e",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -5485,7 +5485,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2t4.ptx",
+   "file": "tierb_64_c16p2t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5496,7 +5496,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "566ed6dd6d76d671c62656c9214a79f5b5974d2ad83d0d8ea9df6b91899539f3",
+   "sha256": "1bdfe4932d98c64e5f257cd684afa8822936615d8109957fa4de56f86bca5f45",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -5505,7 +5505,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2t4w.ptx",
+   "file": "tierb_64_c16p2t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5516,7 +5516,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "06a5e3b91c68f9143a64cf79443f2c467d31d64faa609d022ce2b81a093c5ceb",
+   "sha256": "644acf677263c9a45f384179aa02233bda113e3819f372c63526006cf427f397",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -5525,7 +5525,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2t8.ptx",
+   "file": "tierb_64_c16p2t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5536,7 +5536,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "69266857700f8131194b348619feddf516628739728ce513eaac052b3a5f1217",
+   "sha256": "7e5ca61bcc1dd17102dbbfb456e0005becb15dc984d97b6843c38fb8f492e91a",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -5545,7 +5545,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2t8w.ptx",
+   "file": "tierb_64_c16p2t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5556,7 +5556,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "1b05b4224748f7359414b1bd06a5ae59fe0a76f5ca1b277245317707ccf1429c",
+   "sha256": "91e44a174590d7d3c0044dd2dc2caf70007a81e9e1b00e4c80b8d1416ac285ce",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -5565,7 +5565,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p2w.ptx",
+   "file": "tierb_64_c16p2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 640,
    "local_size": [
@@ -5576,7 +5576,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 2,
-   "sha256": "e8234f968e318aa26442ec2079b1faa72283d3e1a0cc89303f93f55575ef8818",
+   "sha256": "6811e3d8815f5736e0f97f2cad1651645e4d70b6726c73d8cc47ac3efe8de60d",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5585,7 +5585,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4.ptx",
+   "file": "tierb_64_c16p4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5596,7 +5596,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "309a34158abcecf6df137b0fa7b8644ab612fabfe3be1b1eb1187086ddf82694",
+   "sha256": "0583ed3d292671adcb6c300f90f9c6b87d4baf1dd22b672e6772ece2a6c9cd44",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -5605,7 +5605,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4t2.ptx",
+   "file": "tierb_64_c16p4t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5616,7 +5616,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "bf0725b02fd7e3396fa5e8d784d71a83fd69bc007437ca52938b834e00658c3d",
+   "sha256": "4c085f946f3c8ce823ad22b900f38d632e69ee245b1fa2bde503d46f51f92dc7",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -5625,7 +5625,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4t2w.ptx",
+   "file": "tierb_64_c16p4t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5636,7 +5636,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "63b11b18f9bbb4bc8cea19282e01da9bb3405576038d4f114a348d772f1dfe0a",
+   "sha256": "a4b3cb9121a5cdaa6e54c7f7af3d6e57f4b092d9a4b733d5cd8f08e96ee63caa",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -5645,7 +5645,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4t4.ptx",
+   "file": "tierb_64_c16p4t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5656,7 +5656,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "86a71ef28d38cd7f7893fdfb5d7f14554dc03178a6ac44e9218d531221c03d88",
+   "sha256": "ef77a37e33408a10674469acbe477d95cdba3963ac595c2662990327f9806513",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -5665,7 +5665,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4t4w.ptx",
+   "file": "tierb_64_c16p4t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5676,7 +5676,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "ee7678ea81ad9b23414cc504e0dfd2829267aeeaf394794d787f7c1a8bcd49a3",
+   "sha256": "6fcf94c1bc064a36e694cd8ab5ddc4a378015138c30181f39a499deaab36b864",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -5685,7 +5685,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4t8.ptx",
+   "file": "tierb_64_c16p4t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5696,7 +5696,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "a1a590bde620dade0ea4eb6f5846b013d1fbf338dff81a434300476e335e47d3",
+   "sha256": "b58d865aedfca9de76983d41a10fefe404825c9aed3dd7f41a7c988bc2a66a18",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -5705,7 +5705,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4t8w.ptx",
+   "file": "tierb_64_c16p4t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5716,7 +5716,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "f70e89fbe2591ff1910af2a1d23780edbd8e7e77a5805a8dbe236a2ebac0a9d0",
+   "sha256": "85cc4a52cf9768d2a20ea2c485dd915ce99104ef39249fe1a5fd2a1fcdb055a6",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -5725,7 +5725,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p4w.ptx",
+   "file": "tierb_64_c16p4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 1328,
    "local_size": [
@@ -5736,7 +5736,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 4,
-   "sha256": "7b58aa9adb13a159925d3993e9ebf81f5117dbb74c7911c8ec350aec75f2238a",
+   "sha256": "34d68c505c486db112aa3b717c2709caef99e4f36320edc1bafe94ede26d9d32",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5745,7 +5745,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8.ptx",
+   "file": "tierb_64_c16p8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5756,7 +5756,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "7a98bcf1edb77d64c031be636a0d52f6f833b2e0b20b7fdab3a20b1bd9712e7b",
+   "sha256": "89fa768f00a979e608fdd870a732ff5dad95df6377e29f742a077c03b525acf4",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -5765,7 +5765,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8t2.ptx",
+   "file": "tierb_64_c16p8t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5776,7 +5776,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "3d2cc81637e6b81f5627d444a8ade9e6113befdda19ab1ca3e62c313ac29399a",
+   "sha256": "6e064ed49e52c9ac12b61d52c8f388d65b5166e14fa93e3890520ec8fe882ec3",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -5785,7 +5785,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8t2w.ptx",
+   "file": "tierb_64_c16p8t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5796,7 +5796,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "d4c4c988636ef92c4d1929afe9e96d344a01b4fc6c2d47b1cef79175c11f9f40",
+   "sha256": "a7cf2bdc855514f6562f571b3d4224d717fb0afe8a17b29942887c601ce87993",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -5805,7 +5805,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8t4.ptx",
+   "file": "tierb_64_c16p8t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5816,7 +5816,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "ba55e4642c4f2ac492d7c523e8434566459a90c7c7e80cabb437c9511623631b",
+   "sha256": "7dd9ded75af5a679764a3f0a9dc6be733da8aa6c0531bc6e5195c8394a819897",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -5825,7 +5825,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8t4w.ptx",
+   "file": "tierb_64_c16p8t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5836,7 +5836,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "90d3fe2dcfa05e8b4ebce3cc4cefe8b258204492a4c8d4fd2de7d161fa6e79c0",
+   "sha256": "a24d9a1945c703e4580566c0d1da8f76ff85d65deb29901cf34bba7a72561266",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -5845,7 +5845,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8t8.ptx",
+   "file": "tierb_64_c16p8t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5856,7 +5856,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "15bf000b6e28a4ffc561309cb2cbd88f35bb2f22534e744499276adacf1bf7f8",
+   "sha256": "17ba189efb9fd67d6d6f931df6046f6cf278c328b7ebb77a763ad25b16d0c45f",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -5865,7 +5865,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8t8w.ptx",
+   "file": "tierb_64_c16p8t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5876,7 +5876,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "03c3e9f0d7694601efee7d1e15754cb78199b3e529693d8c73755a4eba7b20d0",
+   "sha256": "9cea72d5f6c01431280261a6831b4d6fc7b08bcd44f2a2339c31a5ad53e31e67",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -5885,7 +5885,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16p8w.ptx",
+   "file": "tierb_64_c16p8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 3168,
    "local_size": [
@@ -5896,7 +5896,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 8,
-   "sha256": "032fffbf6e5a37bd954d9ac274a2f487e24602dcffe47548dbc33b04e8a748a3",
+   "sha256": "636671d996dd22eb0434ebb1f6e9817b7c495a915c4f74effd449299b8450add",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -5905,7 +5905,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16t2.ptx",
+   "file": "tierb_64_c16t2.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -5916,7 +5916,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "cbbd5357c4c23839f14e77db700563f6a3b9d36a08b923f13921841fc9033c46",
+   "sha256": "8f0ff161407c5f240ca6db4bc51b3862bfc79eb5c13455658dcc4a14d717b586",
    "single_bin": 0,
    "tile": 2,
    "twt": 0
@@ -5925,7 +5925,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16t2w.ptx",
+   "file": "tierb_64_c16t2w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -5936,7 +5936,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "603756f397cd160156f985c73bfbb85d50222ecea4375424c45900ae6b8f1557",
+   "sha256": "e297a06841ad939fab7d9128642706b3379cec77b6b1c225493e085cb6ec37c5",
    "single_bin": 0,
    "tile": 2,
    "twt": 1
@@ -5945,7 +5945,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16t4.ptx",
+   "file": "tierb_64_c16t4.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -5956,7 +5956,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "0410d4abea2b3650d59ac414c998492c87f85b998c9816aa8edceeb739f29d5c",
+   "sha256": "efbad4f1dd68a58265923cefe3bd9e2eef6a257a8715097a24f01128b781cdb7",
    "single_bin": 0,
    "tile": 4,
    "twt": 0
@@ -5965,7 +5965,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16t4w.ptx",
+   "file": "tierb_64_c16t4w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -5976,7 +5976,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "624a0665a2c628ac7d131e6c7c212483d30e60468222a7da8920cc700f79223b",
+   "sha256": "47126ab6345f50cf53c95511384c75bc0120d587eac4f6f6edc33ecd92e3dd61",
    "single_bin": 0,
    "tile": 4,
    "twt": 1
@@ -5985,7 +5985,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16t8.ptx",
+   "file": "tierb_64_c16t8.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -5996,7 +5996,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "377c3ea205d1e14ff52d0df872f05e71bbf75afcbe1e65e5f934a8c31e0fe30a",
+   "sha256": "81a409e67461c32d33c2dbc4daa8708bb10da760dbcdce694668c57e160666a9",
    "single_bin": 0,
    "tile": 8,
    "twt": 0
@@ -6005,7 +6005,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16t8w.ptx",
+   "file": "tierb_64_c16t8w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -6016,7 +6016,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "1d4be33cdb56ecb6ce07878b97869d4e8ece621f2626fefe6f8aaef874c70749",
+   "sha256": "8aa174f5deac0d0e99caaf27fd8319f053a538bf628a61410a7a7ef82f1167e0",
    "single_bin": 0,
    "tile": 8,
    "twt": 1
@@ -6025,7 +6025,7 @@
    "cap": 512,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_64_c16w.ptx",
+   "file": "tierb_64_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 320,
    "local_size": [
@@ -6036,7 +6036,7 @@
    "n": 64,
    "portable": 0,
    "ppg": 1,
-   "sha256": "119776c3309dac4053b5067c029a6bf77245790460fd145db0aa6b93cc0b28f6",
+   "sha256": "b648e891c768523eb19749e5ee2712a03dbdc44e38ad3deaef22affb88ff10ab",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -6045,7 +6045,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_65536_lds32.ptx",
+   "file": "tierb_65536_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -6056,7 +6056,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "15835f82968fb3c4fc6dc12680ebd7b1f0f9ea97b289cc1247b34bac329829fa",
+   "sha256": "e530167b5ed3f9b2e76604d6f9b575f2557bfa406d398bdef9a07f0aa5584302",
    "single_bin": 0,
    "tile": 1
   },
@@ -6064,7 +6064,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_65536_onebin_lds32.ptx",
+   "file": "tierb_65536_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -6075,7 +6075,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "04c1142daa683c225f949b9428c8c9536f17291c96f635c46710a3db784958f9",
+   "sha256": "5957e4cd8cd35e65f50f17a432191165fbc920413a33d7a2d69cc0ba383a5364",
    "single_bin": 1,
    "tile": 1
   },
@@ -6083,7 +6083,7 @@
    "cap": 8192,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_8192_c16.ptx",
+   "file": "tierb_8192_c16.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32896,
    "local_size": [
@@ -6094,7 +6094,7 @@
    "n": 8192,
    "portable": 0,
    "ppg": 1,
-   "sha256": "e9c92455d0d982fcd058fbf0920c501f1ade5d49cfed6cc2295f67230c0ac13c",
+   "sha256": "db418d54e1a426fcd06225fbe07c3deac0a7517511782bd20243a04f3c61704c",
    "single_bin": 0,
    "tile": 1,
    "twt": 0
@@ -6103,7 +6103,7 @@
    "cap": 8192,
    "coarse16": 1,
    "entry": "fusedTierB",
-   "file": "tierb_8192_c16w.ptx",
+   "file": "tierb_8192_c16w.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32896,
    "local_size": [
@@ -6114,7 +6114,7 @@
    "n": 8192,
    "portable": 0,
    "ppg": 1,
-   "sha256": "5b6ea4216dd7e85256d143682b8020a66617b44a7d59f35c9fcde32e54383d95",
+   "sha256": "432369b169dec813a729eb2a85c02a3d389d98d0bb86a1bafc3a2b09dc0eb997",
    "single_bin": 0,
    "tile": 1,
    "twt": 1
@@ -6123,7 +6123,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_8192_lds32.ptx",
+   "file": "tierb_8192_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -6134,7 +6134,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "a758bf6240aab48555895fcce8cd5d371426729b68979f7ed9173e1bcee2b5f4",
+   "sha256": "a9256a82fd74ff3bd8a50ba6c58358fdfff254013e57efd544888a14026cf6c6",
    "single_bin": 0,
    "tile": 1
   },
@@ -6142,7 +6142,7 @@
    "cap": 4096,
    "coarse16": 0,
    "entry": "fusedTierB",
-   "file": "tierb_8192_onebin_lds32.ptx",
+   "file": "tierb_8192_onebin_lds32.ptx.gz",
    "gate_only": 0,
    "lds_bytes": 32768,
    "local_size": [
@@ -6153,7 +6153,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "36f7b5be3c4c0be5f6030a132cc5db609adac09eb44e031425dfc93326a1f75c",
+   "sha256": "51d47d208bde88a5001443d9bbd2c365a835933ca92d6f751192c4a6d2a6f36e",
    "single_bin": 1,
    "tile": 1
   }
@@ -6168,7 +6168,7 @@
   "refine_bounded.slang": "9081e2f8f41a823b0293c3cec7df7eae289c1b16e1a94d8e815902ee8d2d3bdc",
   "series_bands.slang": "26862d5296af0f3d0a73f2d5b47337dcceb5d0843e40b141179c99bb984f0e99",
   "series_forward.slang": "ed54d158b885a0d6c26009e4d636f8733df90fb7909f5d3fe9708aac05d5f4b6",
-  "tierb.slang": "a7e3d621c3f6992d670426adf0617fd52ba6366acd257be3dec4f2e0223216ec",
+  "tierb.slang": "54ba6505c3c1b713d46bbddc38342d493c35c45a6e2205172c279ef4be2df44c",
   "twiddle.slang": "643b23842b7e9954902ee4c9dae211536500a34ae631e0604773ce17e84fc537"
  },
  "two_stage": {

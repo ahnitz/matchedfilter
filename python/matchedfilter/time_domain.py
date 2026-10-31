@@ -267,8 +267,9 @@ def _joint_round(jobs):
         banks[0]._prepare_arms()                    # the trial's arms come from its plans
         tr = _trial.trial(key, banks[0]._joint_arms)
         if len(tr.live()) < 2:
+            ch = tr.choice
             with _AUTOTUNE_LOCK:
-                tr.choice.lock(_trial.DEFAULT)
+                ch.lock(_trial.DEFAULT)
         if tr.winner is not None:
             for b in banks:
                 b._lock_arm(tr.winner)

@@ -540,3 +540,32 @@ def test_a_gpu_batch_settles_to_a_steady_time_not_only_to_no_builds():
     from matchedfilter import time_domain
     assert _settle_run([10.0, 5.0, 10.0, 5.0, 10.0, 5.0], [0] * 6) == time_domain._SETTLE_REPLAYS
     assert time_domain._SETTLE_TOL == pytest.approx(0.025)
+
+
+def test_get_autotune_state_does_not_deadlock_on_single_arm_trial():
+    mf.clear_autotune_cache()
+    _trial.trial("t|single_arm", lambda: [_trial.DEFAULT])
+    state = mf.get_autotune_state()
+    assert state["trials"]["t|single_arm"]["winner"] == _trial.DEFAULT
+
+
+def test_held_playing_flag_is_thread_local():
+    import threading
+    other_saw = []
+    ready = threading.Event()
+    proceed = threading.Event()
+
+    def worker():
+        ready.wait(timeout=5.0)
+        other_saw.append(_choice.playing())
+        proceed.set()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    with _choice.held():
+        assert _choice.playing() is True
+        ready.set()
+        proceed.wait(timeout=5.0)
+    t.join(timeout=5.0)
+    assert other_saw == [False]
+    assert _choice.playing() is False

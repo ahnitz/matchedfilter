@@ -687,36 +687,36 @@ void innermost_0(array<float2, int(16)> thread* r_3)
 }
 
 
-#line 827
+#line 830
 void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 827
+#line 830
     uint _S22;
 
-#line 827
+#line 830
     uint k2_1;
 
-#line 827
+#line 830
     float cr_0;
 
-#line 827
+#line 830
     float ci_0;
 
-#line 827
+#line 830
     uint _S23;
 
-#line 827
+#line 830
     uint _S24;
 
-#line 827
+#line 830
     uint _S25;
 
-#line 827
+#line 830
     for(;;)
     {
 
-#line 827
+#line 830
         for(;;)
         {
 
@@ -984,7 +984,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 56
     innermost_0(r_4);
 
-#line 830 "mm_8192_refineListed_onebin.slang"
+#line 833 "mm_8192_refineListed_onebin.slang"
     return;
 }
 
@@ -1044,42 +1044,42 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 844
+#line 847
 void filterPairOut_0(uint pair_0, uint opair_0, uint tid_1, packed_float2 device* data_0, packed_float2 device* tmpl_0, int device* peakIdx_0, packed_float2 device* peakVal_0, uint ntmpl_1, uint winStart_2, uint winEnd_2, uint binsize_1, int binShift_1, uint nbins_1, uint thrBits_1, KernelContext_0 thread* kernelContext_3)
 {
 
 
     uint threadBestBits_0;
 
-#line 871
+#line 874
     kernelContext_3->_tid_0 = tid_1;
     uint _S39 = pair_0 / ntmpl_1;
 
-#line 872
+#line 875
     uint _S40 = pair_0 % ntmpl_1;
 
-#line 877
+#line 880
     thread array<float2, int(16)> r_5;
 
-#line 877
+#line 880
     uint n2_0 = 0U;
 
-#line 888
+#line 891
     for(;;)
     {
 
-#line 888
+#line 891
         if(n2_0 < 16U)
         {
         }
         else
         {
 
-#line 888
+#line 891
             break;
         }
 
-#line 889
+#line 892
         uint idx_0 = tid_1 + 512U * n2_0;
 
 #line 63 "twiddle.slang"
@@ -1106,103 +1106,103 @@ void filterPairOut_0(uint pair_0, uint opair_0, uint tid_1, packed_float2 device
 #line 177
         }
 
-#line 890
+#line 893
         r_5[n2_0] = cmulConj_0(cload_0(data_0, _S39 * threadBestBits_0 + idx_0), cload_0(tmpl_0, _S40 * 8192U + idx_0));
 
-#line 888
+#line 891
         n2_0 = n2_0 + 1U;
 
-#line 888
+#line 891
     }
 
-#line 888
+#line 891
     transform_0(&r_5, tid_1, kernelContext_3);
 
-#line 907
+#line 910
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 950
+#line 953
     bool _S43 = tid_1 == 0U;
 
-#line 950
+#line 953
     if(_S43)
     {
 
-#line 950
+#line 953
         (*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0] = thrBits_1;
 
-#line 950
+#line 953
         (*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0 + 1U] = 4294967295U;
 
-#line 950
+#line 953
     }
 
 
 
     float2 _S44 = float2(0.0f, 0.0f);
 
-#line 954
+#line 957
     bool live_0;
 
     if(winStart_2 == 0U)
     {
 
-#line 956
+#line 959
         live_0 = winEnd_2 >= 8192U;
 
-#line 956
+#line 959
     }
     else
     {
 
-#line 956
+#line 959
         live_0 = false;
 
-#line 956
+#line 959
     }
 
-#line 956
+#line 959
     uint threadBestSlot_0;
 
-#line 956
+#line 959
     uint winner_0;
 
-#line 956
+#line 959
     float2 threadBestVal_0;
 
-#line 956
+#line 959
     if(live_0)
     {
 
-#line 956
+#line 959
         threadBestBits_0 = thrBits_1;
 
-#line 956
+#line 959
         threadBestSlot_0 = 4294967295U;
 
-#line 956
+#line 959
         threadBestVal_0 = _S44;
 
-#line 956
+#line 959
         winner_0 = 0U;
         for(;;)
         {
 
-#line 957
+#line 960
             if(winner_0 < 16U)
             {
             }
             else
             {
 
-#line 957
+#line 960
                 break;
             }
 
-#line 958
+#line 961
             float _rx_0 = r_5[winner_0].x;
 
-#line 958
+#line 961
             float _ry_0 = r_5[winner_0].y;
             uint magBits_0 = (as_type<uint>((_rx_0 * _rx_0 + _ry_0 * _ry_0)));
             if(magBits_0 > threadBestBits_0)
@@ -1210,159 +1210,159 @@ void filterPairOut_0(uint pair_0, uint opair_0, uint tid_1, packed_float2 device
                 uint _S45 = tid_1 * 16U + winner_0;
                 float2 _S46 = float2(_rx_0, _ry_0);
 
-#line 963
+#line 966
                 threadBestBits_0 = magBits_0;
 
-#line 963
+#line 966
                 threadBestSlot_0 = _S45;
 
-#line 963
+#line 966
                 threadBestVal_0 = _S46;
 
-#line 960
+#line 963
             }
 
-#line 957
+#line 960
             winner_0 = winner_0 + 1U;
 
-#line 957
+#line 960
         }
 
-#line 956
+#line 959
     }
     else
     {
 
-#line 956
+#line 959
         threadBestBits_0 = thrBits_1;
 
-#line 956
+#line 959
         threadBestSlot_0 = 4294967295U;
 
-#line 956
+#line 959
         threadBestVal_0 = _S44;
 
-#line 956
+#line 959
         winner_0 = 0U;
 
-#line 967
+#line 970
         for(;;)
         {
 
-#line 967
+#line 970
             if(winner_0 < 16U)
             {
             }
             else
             {
 
-#line 967
+#line 970
                 break;
             }
 
-#line 968
+#line 971
             uint _S47 = tid_1 * 16U + winner_0;
 
-#line 968
+#line 971
             uint idx_1 = slotToIndex_0(_S47);
             if(idx_1 >= winStart_2)
             {
 
-#line 969
+#line 972
                 live_0 = idx_1 < winEnd_2;
 
-#line 969
+#line 972
             }
             else
             {
 
-#line 969
+#line 972
                 live_0 = false;
 
-#line 969
+#line 972
             }
             float _rx_1 = r_5[winner_0].x;
 
-#line 970
+#line 973
             float _ry_1 = r_5[winner_0].y;
 
-#line 970
+#line 973
             uint magBits_1;
             if(live_0)
             {
 
-#line 971
+#line 974
                 magBits_1 = (as_type<uint>((_rx_1 * _rx_1 + _ry_1 * _ry_1)));
 
-#line 971
+#line 974
             }
             else
             {
 
-#line 971
+#line 974
                 magBits_1 = 0U;
 
-#line 971
+#line 974
             }
             if(magBits_1 > threadBestBits_0)
             {
 
                 float2 _S48 = float2(_rx_1, _ry_1);
 
-#line 975
+#line 978
                 threadBestBits_0 = magBits_1;
 
-#line 975
+#line 978
                 threadBestSlot_0 = _S47;
 
-#line 975
+#line 978
                 threadBestVal_0 = _S48;
 
-#line 972
+#line 975
             }
 
-#line 967
+#line 970
             winner_0 = winner_0 + 1U;
 
-#line 967
+#line 970
         }
 
-#line 956
+#line 959
     }
 
-#line 980
+#line 983
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
 
     uint wm_0 = simd_max(threadBestBits_0);
     bool _S49 = simd_is_first();
 
-#line 984
+#line 987
     if(_S49)
     {
 
-#line 984
+#line 987
         live_0 = wm_0 > thrBits_1;
 
-#line 984
+#line 987
     }
     else
     {
 
-#line 984
+#line 987
         live_0 = false;
 
-#line 984
+#line 987
     }
 
-#line 984
+#line 987
     if(live_0)
     {
 
-#line 984
+#line 987
         uint _S50 = atomic_fetch_max_explicit(((atomic_uint threadgroup*)(&(*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0])), wm_0, memory_order_relaxed);
 
-#line 984
+#line 987
     }
 
 
@@ -1373,36 +1373,36 @@ void filterPairOut_0(uint pair_0, uint opair_0, uint tid_1, packed_float2 device
     if(threadBestBits_0 > thrBits_1)
     {
 
-#line 991
+#line 994
         live_0 = threadBestBits_0 == (*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0];
 
-#line 991
+#line 994
     }
     else
     {
 
-#line 991
+#line 994
         live_0 = false;
 
-#line 991
+#line 994
     }
 
-#line 991
+#line 994
     if(live_0)
     {
 
-#line 991
+#line 994
         winner_0 = threadBestSlot_0;
 
-#line 991
+#line 994
     }
     else
     {
 
-#line 991
+#line 994
         winner_0 = 4294967295U;
 
-#line 991
+#line 994
     }
 
 
@@ -1410,65 +1410,65 @@ void filterPairOut_0(uint pair_0, uint opair_0, uint tid_1, packed_float2 device
     uint waveWinner_0 = simd_min(winner_0);
     bool _S51 = simd_is_first();
 
-#line 996
+#line 999
     if(_S51)
     {
 
-#line 996
+#line 999
         live_0 = waveWinner_0 != 4294967295U;
 
-#line 996
+#line 999
     }
     else
     {
 
-#line 996
+#line 999
         live_0 = false;
 
-#line 996
+#line 999
     }
 
-#line 996
+#line 999
     if(live_0)
     {
 
-#line 997
+#line 1000
         uint _S52 = atomic_fetch_min_explicit(((atomic_uint threadgroup*)(&(*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0 + 1U])), waveWinner_0, memory_order_relaxed);
 
-#line 996
+#line 999
     }
 
-#line 1001
+#line 1004
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if(threadBestSlot_0 == (*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0 + 1U])
     {
 
-#line 1003
+#line 1006
         live_0 = threadBestSlot_0 != 4294967295U;
 
-#line 1003
+#line 1006
     }
     else
     {
 
-#line 1003
+#line 1006
         live_0 = false;
 
-#line 1003
+#line 1006
     }
 
-#line 1003
+#line 1006
     if(live_0)
     {
 
-#line 1004
+#line 1007
         *(peakIdx_0+opair_0) = int(slotToIndex_0(threadBestSlot_0));
 
-#line 1004
+#line 1007
         *(peakVal_0+opair_0) = packed_float2(threadBestVal_0) ;
 
-#line 1003
+#line 1006
     }
 
 
@@ -1476,34 +1476,34 @@ void filterPairOut_0(uint pair_0, uint opair_0, uint tid_1, packed_float2 device
     if(_S43)
     {
 
-#line 1007
+#line 1010
         live_0 = ((*kernelContext_3->stg_0)[kernelContext_3->_stgBase_0 + 1U]) == 4294967295U;
 
-#line 1007
+#line 1010
     }
     else
     {
 
-#line 1007
+#line 1010
         live_0 = false;
 
-#line 1007
+#line 1010
     }
 
-#line 1007
+#line 1010
     if(live_0)
     {
 
-#line 1008
+#line 1011
         *(peakIdx_0+opair_0) = int(-1);
 
-#line 1008
+#line 1011
         *(peakVal_0+opair_0) = packed_float2(_S44) ;
 
-#line 1007
+#line 1010
     }
 
-#line 1217
+#line 1233
     return;
 }
 
@@ -1519,91 +1519,91 @@ void filterPair_0(uint pair_1, uint tid_2, packed_float2 device* data_1, packed_
 }
 
 
-#line 2091
+#line 2118
 [[kernel]] void refineListedBounded(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], int device* entryPointParams_peakIdx_1 [[buffer(3)]], packed_float2 device* entryPointParams_peakVal_1 [[buffer(4)]], uint device* entryPointParams_survivors_1 [[buffer(5)]], uint device* entryPointParams_count_1 [[buffer(6)]], uint device* entryPointParams_rowWin_1 [[buffer(7)]])
 {
 
-#line 2091
+#line 2118
     thread KernelContext_0 kernelContext_5;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_0 = entryPointParams_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_peakIdx_0 = entryPointParams_peakIdx_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_peakVal_0 = entryPointParams_peakVal_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_count_0 = entryPointParams_count_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->entryPointParams_rowWin_0 = entryPointParams_rowWin_1;
 
-#line 2091
+#line 2118
     threadgroup array<uint, int(8192)> stg_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->stg_0 = &stg_1;
 
-#line 2091
+#line 2118
     (&kernelContext_5)->_binPhase_0 = 0U;
 
-#line 2101
+#line 2128
     uint _S53 = entryPointParams_count_1[int(0)];
 
-#line 2101
+#line 2128
     uint i_2 = gid_0.x;
     for(;;)
     {
 
-#line 2102
+#line 2129
         if(i_2 < _S53)
         {
         }
         else
         {
 
-#line 2102
+#line 2129
             break;
         }
 
-#line 2103
+#line 2130
         (&kernelContext_5)->_stgBase_0 = 0U;
         uint pair_2 = (&kernelContext_5)->entryPointParams_survivors_0[i_2];
 
-#line 2104
+#line 2131
         thread uint ws_0 = (&kernelContext_5)->entryPointParams_0->winStart_0;
 
-#line 2104
+#line 2131
         thread uint we_0 = (&kernelContext_5)->entryPointParams_0->winEnd_0;
         uint _S54 = pair_2 / (&kernelContext_5)->entryPointParams_0->ntmpl_0;
 
-#line 2105
+#line 2132
         rowWindow_0(_S54, &ws_0, &we_0, (&kernelContext_5)->entryPointParams_rowWin_0, &kernelContext_5);
 
-#line 2105
+#line 2132
         filterPair_0(pair_2, lid_0.x, (&kernelContext_5)->entryPointParams_data_0, (&kernelContext_5)->entryPointParams_tmpl_0, (&kernelContext_5)->entryPointParams_peakIdx_0, (&kernelContext_5)->entryPointParams_peakVal_0, (&kernelContext_5)->entryPointParams_0->ntmpl_0, ws_0, we_0, (&kernelContext_5)->entryPointParams_0->binsize_0, (&kernelContext_5)->entryPointParams_0->binShift_0, (&kernelContext_5)->entryPointParams_0->nbins_0, (&kernelContext_5)->entryPointParams_0->thrBits_0, &kernelContext_5);
 
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2102
+#line 2129
         i_2 = i_2 + (&kernelContext_5)->entryPointParams_0->gridSize_0;
 
-#line 2102
+#line 2129
     }
 
-#line 2110
+#line 2137
     return;
 }

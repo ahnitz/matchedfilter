@@ -63,26 +63,26 @@ def rounds() -> Tuple[int, int]:
 
 
 _AUTOTUNE_LOCK = threading.Lock()
-#: Whether a paired play (Choice.play) is running its candidates: choices met meanwhile take
-#: their preference untimed.
-_PLAYING = [False]
+#: Whether a paired play (Choice.play) is running its candidates on this thread: choices met
+#: meanwhile take their preference untimed.
+_LOCAL = threading.local()
 
 
 def playing() -> bool:
     """Whether a trial is running its candidates (Choice.play, a joint round's replays):
     every choice met meanwhile takes its preference untimed, and no trial nests in it."""
-    return _PLAYING[0]
+    return getattr(_LOCAL, "playing", False)
 
 
 @contextmanager
 def held():
     """A trial runs its candidates (playing() is True inside)."""
-    was = _PLAYING[0]
-    _PLAYING[0] = True
+    was = getattr(_LOCAL, "playing", False)
+    _LOCAL.playing = True
     try:
         yield
     finally:
-        _PLAYING[0] = was
+        _LOCAL.playing = was
 
 
 def _log_autotune(msg, *args):
@@ -392,7 +392,7 @@ class Choice:
         last in the order before it reverses (so first after): settled and timed like every
         candidate, its result dropped, its timing logged with the round's (and `work`, the
         round's size in the caller's units) and never a sample."""
-        if self.winner is not None or _PLAYING[0]:
+        if self.winner is not None or playing():
             return run(self.winner if self.winner is not None else self.preference)
         ran = set() if ran is None else ran
         config = config or (lambda c: c)

@@ -158,11 +158,18 @@ def get_autotune_state():
     winner and its rounds by arm."""
     from . import _trial
     with _AUTOTUNE_LOCK:
-        return {"choices": dict(_chains._CHAIN_CHOICE),
-                "trials": {k: {"winner": v.winner, "arms": list(v.arms),
-                               "samples": {c: list(s) for c, s in v.choice.samples.items()},
-                               "dropped": sorted(v.choice.dropped)}
-                           for k, v in _trial._TRIALS.items()}}
+        choices = dict(_chains._CHAIN_CHOICE)
+        trials = list(_trial._TRIALS.items())
+    out = {}
+    for k, v in trials:
+        ch = v.choice
+        winner, arms = v.winner, list(v.arms)
+        with _AUTOTUNE_LOCK:
+            samples = {c: list(s) for c, s in ch.samples.items()}
+            dropped = sorted(ch.dropped)
+        out[k] = {"winner": winner, "arms": arms,
+                  "samples": samples, "dropped": dropped}
+    return {"choices": choices, "trials": out}
 
 
 def clear_autotune_cache():

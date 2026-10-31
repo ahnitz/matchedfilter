@@ -226,7 +226,11 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
     if (q < -7) q = -7;
   }
   const hn::RebindToSigned<decltype(AP_D)> d16;
+  const hn::RebindToUnsigned<decltype(AP_D)> du;
   using V16 = hn::Vec<decltype(d16)>;
+  using VU = hn::Vec<decltype(du)>;
+  const VU emask = hn::Set(du, (uint16_t)0x7C00u), estep = hn::Set(du, (uint16_t)0x0400u);
+  VU ov = hn::Zero(du);
   const vf av = hn::Set(AP_D, hwy::F16FromF32(ldexpf(1.f, q)));
   /* two interleaved chains (even and odd lags), merged at the end: the compare-select
      latency, not its rate, bounds one chain */
@@ -240,6 +244,8 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
     const vf s = hn::Mul(R[f], av), j = hn::Mul(I[f], av);
     const vf p = hn::MulAdd(r, r, hn::Mul(i, i));
     const vf q2 = hn::MulAdd(s, s, hn::Mul(j, j));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, p), emask), estep));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, q2), emask), estep));
     const auto gt = hn::Gt(p, bm);
     const auto gu = hn::Gt(q2, cm);
     bm = hn::IfThenElse(gt, p, bm);
@@ -251,6 +257,7 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
     const int e = eidx(&g->ea, (int)k);
     const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
     const vf p = hn::MulAdd(r, r, hn::Mul(i, i));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, p), emask), estep));
     const auto gu = hn::Gt(p, cm);
     cm = hn::IfThenElse(gu, p, cm);
     cx = hn::IfThenElse(hn::RebindMask(d16, gu), hn::Set(d16, (int16_t)k), cx);
@@ -260,9 +267,16 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
     bx = hn::IfThenElse(hn::RebindMask(d16, gu), cx, bx);
   }
   alignas(16) int16_t kx[AP_W];
+  alignas(16) uint16_t ovx[AP_W];
   alignas(16) h16 lr[AP_W], li[AP_W];
   hn::StoreU(bx, d16, kx);
+  hn::StoreU(ov, du, ovx);
   for (int l = 0; l < AP_W; l++) {
+    if (ws < we && (ovx[l] & 0x8000u)) {
+      idx_out[l] = kx[l] >= 0 ? kx[l] : (int)ws;
+      re_out[l] = 3.402823e38f; im_out[l] = 0.f; m2_out[l] = INFINITY;
+      continue;
+    }
     if (kx[l] < 0) { idx_out[l] = -1; m2_out[l] = re_out[l] = im_out[l] = 0.f; continue; }
     const int e = eidx(&g->ea, (int)kx[l]);
     hn::StoreU(R[e], AP_D, lr);
@@ -284,12 +298,16 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
    product, one FMA) is within (1 +- u)^2 of the FP16 transform's, so |y16|max <=
    sqrt(Pmax)/a / (1 - u) < sqrt(Pmax)/a (1 + 2u) -- the guarantee pair_group's
    |y(chosen)| (1 + 3u) gives. */
-static void live_list(Gate *g, size_t ws, size_t we) {
-  if (g->live && g->live_ws == ws && g->live_we == we) return;
-  if (!g->live) g->live = (int *)malloc(g->m * sizeof(int));
+static int live_list(Gate *g, size_t ws, size_t we) {
+  if (g->live && g->live_ws == ws && g->live_we == we) return 0;
+  if (!g->live) {
+    g->live = (int *)malloc(g->m * sizeof(int));
+    if (!g->live) return -1;
+  }
   size_t n = 0;
   for (size_t k = ws; k < we; k++) g->live[n++] = eidx(&g->ea, (int)k);
   g->live_n = n; g->live_ws = ws; g->live_we = we;
+  return 0;
 }
 
 static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
@@ -348,6 +366,10 @@ static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, con
     if (q > 7) q = 7;
     if (q < -7) q = -7;
   }
+  const hn::RebindToUnsigned<decltype(AP_D)> du;
+  using VU = hn::Vec<decltype(du)>;
+  const VU emask = hn::Set(du, (uint16_t)0x7C00u), estep = hn::Set(du, (uint16_t)0x0400u);
+  VU ov = hn::Zero(du);
   const vf av = hn::Set(AP_D, hwy::F16FromF32(ldexpf(1.f, q)));
   vf bm = hn::Zero(AP_D), cm = bm;
   const vf *R = g->bR, *I = g->bI;
@@ -357,19 +379,28 @@ static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, con
     const int e = L[j], f = L[j + 1];
     const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
     const vf s = hn::Mul(R[f], av), t = hn::Mul(I[f], av);
-    bm = hn::Max(bm, hn::MulAdd(r, r, hn::Mul(i, i)));
-    cm = hn::Max(cm, hn::MulAdd(s, s, hn::Mul(t, t)));
+    const vf p = hn::MulAdd(r, r, hn::Mul(i, i));
+    const vf q2 = hn::MulAdd(s, s, hn::Mul(t, t));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, p), emask), estep));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, q2), emask), estep));
+    bm = hn::Max(bm, p);
+    cm = hn::Max(cm, q2);
   }
   if (j < g->live_n) {
     const int e = L[j];
     const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
-    cm = hn::Max(cm, hn::MulAdd(r, r, hn::Mul(i, i)));
+    const vf p = hn::MulAdd(r, r, hn::Mul(i, i));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, p), emask), estep));
+    cm = hn::Max(cm, p);
   }
   bm = hn::Max(bm, cm);
   alignas(16) h16 mx[AP_W];
+  alignas(16) uint16_t ovx[AP_W];
   hn::StoreU(bm, AP_D, mx);
+  hn::StoreU(ov, du, ovx);
   const float ia2 = ldexpf(1.f, -2 * q);
-  for (int l = 0; l < AP_W; l++) m2_out[l] = hwy::F32FromF16(mx[l]) * ia2;
+  for (int l = 0; l < AP_W; l++)
+    m2_out[l] = (ovx[l] & 0x8000u) ? INFINITY : hwy::F32FromF16(mx[l]) * ia2;
 }
 
 /* The gate over listed pairs (d0 + dsel[i], tsel[i]), in order: runs of up to 8 pairs that
@@ -379,7 +410,7 @@ static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *ts
                          int nt_row, size_t ws, size_t we, ap_peak *out) {
   if (we > g->m) we = g->m;
   const size_t m = g->m;
-  live_list(g, ws, we);
+  if (live_list(g, ws, we)) return -1;
   if (!g->gtre) {
     g->gtre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
     g->gtim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
@@ -408,13 +439,13 @@ static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *ts
       const int t = tsel[i + l];
       ap_peak *o = out + (size_t)d * nt_row + t;
       const float sc = dinv * g->tinv[t0 + t];
-      if (g->live_n == 0 || !(m2[l] > 0.f)) {
+      if (g->live_n == 0 || m2[l] == 0.f) {
         o->index = -1; o->re = o->im = o->magnitude = 0.f;
         continue;
       }
       o->index = 0;
       o->re = o->im = 0.f;
-      o->magnitude = sqrtf(m2[l]) * sc;
+      o->magnitude = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc;
     }
     i += k;
   }
@@ -428,7 +459,7 @@ static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we
      pair's all-lag rms, as MF_GATE16_DEBUG does for the electing scan. */
   static const int debug = ap_env_flag("MF_GATE16_DEBUG_MAX", 0);
   const size_t m = g->m;
-  live_list(g, ws, we);
+  if (live_list(g, ws, we)) return -1;
   alignas(16) float m2[AP_W], pw[AP_W];
   const int g0 = t0 / AP_W, g1 = (t0 + nt - 1) / AP_W;
   for (int grp = g0; grp <= g1; grp++) {
@@ -440,13 +471,13 @@ static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we
         if (t < t0 || t >= t0 + nt) continue;
         ap_peak *o = out + (size_t)d * nt + (t - t0);
         const float sc = dinv * g->tinv[t];
-        if (g->live_n == 0 || !(m2[l] > 0.f)) {      /* empty window, nothing, or NaN */
+        if (g->live_n == 0 || m2[l] == 0.f) {      /* empty window or zero; NaN/Inf fail open */
           o->index = -1; o->re = o->im = o->magnitude = 0.f;
           continue;
         }
         o->index = 0;                               /* fires; the lag has no reader */
         o->re = o->im = 0.f;
-        o->magnitude = sqrtf(m2[l]) * sc;           /* the pair's own statistic */
+        o->magnitude = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc;
         if (debug) o->im = sqrtf(pw[l] / (float)m) * sc;
       }
     }
@@ -477,14 +508,18 @@ static int run(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap
         if (t < t0 || t >= t0 + nt) continue;
         ap_peak *o = out + (size_t)d * nt + (t - t0);
         const float sc = dinv * g->tinv[t];
-        if (ix[l] < 0 || !(m2[l] >= 0.f)) {
+        if (ix[l] < 0) {
           o->index = -1; o->re = o->im = o->magnitude = 0.f;
           continue;
         }
         o->index = ix[l];
-        o->re = re[l] * sc;
-        o->im = -im[l] * sc;                     /* AP_BACKWARD, as the FP32 scan reports */
-        o->magnitude = sqrtf(m2[l]) * sc;
+        if (!isfinite(m2[l])) {
+          o->re = 3.402823e38f; o->im = 0.f; o->magnitude = 3.402823e38f;
+        } else {
+          o->re = re[l] * sc;
+          o->im = -im[l] * sc;                     /* AP_BACKWARD, as the FP32 scan reports */
+          o->magnitude = sqrtf(m2[l]) * sc;
+        }
         if (debug) o->im = sqrtf(pw[l] / (float)m) * sc;
       }
     }
