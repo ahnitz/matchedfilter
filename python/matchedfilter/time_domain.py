@@ -1053,6 +1053,9 @@ class TimeDomainFilterBank:
                         plan._one_bin_frac = min(
                             1.0, max(0.0, (max_bins * self.binsize - n_valid + 1) / float(self.binsize))
                         )
+                        plan._unsplit_bin_frac = min(
+                            1.0, max(0.0, (self.binsize - n_valid + 1) / float(self.binsize))
+                        )
                     plan.set_taps(group_taps, group_counts)
             else:
                 factory = (lambda n_=chosen_N, T_=T, dev=self.device:

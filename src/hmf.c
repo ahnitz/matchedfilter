@@ -775,7 +775,12 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   const float inv=1.0f/(float)n;
   const size_t st=p->real_stride ? p->real_stride : 1;
   float * restrict Z=p->fwd+n;               /* the h-point transform */
-  ap_fft_forward_scaled(p->half_fft,have ? x+s0*st : x,have,st,inv,Z);
+  if(st==1){
+    ap_fft_forward_scaled(p->half_fft,have ? x+s0 : x,have,1,inv,Z);
+  } else {
+    ap_scale_load_on(p->half_fft,p->fwd,have ? x+s0*st : x,have,n,st,inv);
+    ap_fft(p->half_fft,p->fwd,Z,AP_FORWARD);
+  }
   ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
@@ -1164,7 +1169,7 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
   const float thr2=sthr>0.f ? sthr*sthr : 0.f;
   unsigned long long q1=ap_ticks();
 
-  /* Batch coarse sub-window peaks across multi-bin direct survivors on pair-batched plans. */
+  /* Batch coarse sub-window peaks across multi-bin direct survivors in one call. */
   int ns=0, have_sub=0;
   for(int j=0;j<nfire;j++){
     const int d=fire_d[j], t=fire_t[j];
@@ -1387,10 +1392,10 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       if(tr->q15){
         const int ql = ap_mf_q15_lanes(tr->mf);
         const long nslabs = ql>0 ? ((long)nd+ql-1)/ql : 1;
-        /* Listed Q15 groups by (data slab, template); below ~2 survivors per group,
-           FP32 pair-batched IFFTs pack arbitrary (d, t) pairs across all SIMD lanes
-           without per-block int16 quantization and finish in fewer transforms. */
-        use_q15 = nfire >= 2L*nslabs*(long)nt;
+        /* Intermediate tiers gate in listed Q15 down to ~0.25 survivors per (slab, template);
+           the final tier also elects coarse lags and only switches to Q15 above ~2 per group. */
+        const long min_q15 = (i+1<p->ntiers) ? ((nslabs*(long)nt)>>2) : (2L*nslabs*(long)nt);
+        use_q15 = nfire >= min_q15;
       }
       qlag = (use_q15 && i==p->ntiers-1 && p->direct && p->taps) ? p->qidx : NULL;
       if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end,use_q15,qlag)<0) return -1;

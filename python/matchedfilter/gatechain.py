@@ -138,15 +138,20 @@ def band_offset(power, n, b):
     w = pos[:n // 2] / tot
     if float(w.sum()) <= 0.0:
         return 0
-    k = np.arange(n // 2, dtype=np.float64)
     cf = np.concatenate(([0.0], np.cumsum(w)))
-    cz = np.concatenate(([0.0j], np.cumsum(w * np.exp(1j * np.pi * k / b))))
     k0s = np.arange(0, n // 2 - b + 1, 8, dtype=np.int64)
+    # Only skip leading dead-zone bins (<= 1e-5 of total power) when they span at least half
+    # of the DC-anchored band [0, b), keeping k0 anchored to the low-frequency cutoff.
+    k0s = k0s[cf[k0s] <= 1e-5]
+    if k0s.size <= 1 or int(k0s[-1]) < b // 2:
+        return 0
+    k = np.arange(n // 2, dtype=np.float64)
+    cz = np.concatenate(([0.0j], np.cumsum(w * np.exp(1j * np.pi * k / b))))
     f = cf[k0s + b] - cf[k0s]
     z = np.abs(cz[k0s + b] - cz[k0s])
     rho = np.where(f > 1e-12, z / np.sqrt(np.maximum(f, 1e-30)), 0.0)
     best = int(np.argmax(rho))
-    if rho[best] > rho[0] + 0.01:
+    if int(k0s[best]) >= b // 2 and rho[best] > rho[0] + 0.01:
         return int(k0s[best])
     return 0
 
@@ -857,6 +862,8 @@ class CostModel:
                                      for b, v in sorted(self.screen.items())),
                                getattr(self, "direct_lag", None), getattr(self, "direct_single", True),
                                getattr(self, "direct_frac", 1.0),
+                               getattr(self, "direct_base", 0.0),
+                               getattr(self, "direct_multi_frac", 0.0),
                                None if self.feed is None else (tuple(sorted(self.feed["band"].items())),
                                                                self.feed["full"]))
         return sig
@@ -916,13 +923,13 @@ class CostModel:
             per = self.feed["full"]
         return per / float(ntemplates)
 
-    def with_direct(self, lag_price, single_tier=True, fraction=1.0):
+    def with_direct(self, lag_price, single_tier=True, fraction=1.0, base=0.0, multi_frac=0.0):
         """A copy that also prices a direct refine at lag_price ticks per lag of its window
         (HierarchicalFilter._direct_price): a chain whose last tier reports its coarse lag
         then refines a pair, with a window of half-width h coarse samples, at the cheaper of
-        the measured whole-block refine and 2 h n / b + 1 lags, b its last band (refine_for;
-        the window scales with n / b, so it favours chains ending in a wider band), weighted by
-        the fraction of blocks whose window falls within a single output bin."""
+        the measured whole-block refine and base + (2 h n / b + 1) * lag_price, b its last band
+        (refine_for; the window scales with n / b, so it favours chains ending in a wider band),
+        weighted by the fraction of blocks eligible for direct refine."""
         import copy
         cm = copy.copy(self)
         cm.direct_lag = float(lag_price)
@@ -930,6 +937,8 @@ class CostModel:
         # no lag, so its survivors refine by transform (hmf.c hmf_tier.lagged).
         cm.direct_single = bool(single_tier)
         cm.direct_frac = float(fraction)
+        cm.direct_base = float(base)
+        cm.direct_multi_frac = float(multi_frac)
         cm._sig = None
         return cm
 
@@ -953,7 +962,13 @@ class CostModel:
         window half-width hw (None: the whole-block refine)."""
         r = self.refine(f)
         if hw is not None and self.prices_direct(chain):
-            d = min(r, self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1))
+            d = getattr(self, "direct_base", 0.0) + self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1)
+            mfrac = getattr(self, "direct_multi_frac", 0.0)
+            if mfrac > 0.0:
+                b_last = int(chain[-1])
+                if b_last in self._sparse:
+                    d += mfrac * self.sparse(b_last, f)
+            d = min(r, d)
             frac = getattr(self, "direct_frac", 1.0)
             r = (1.0 - frac) * r + frac * d
         return r
@@ -1219,7 +1234,8 @@ def _halfwidths(dist, allow, cost, chain, n, all_hws=None):
         return (None,)
     R = n // int(chain[-1])
     top = max(v for _, v in cost._refine)
-    hmax = int((top / cost.direct_lag - 1.0) // (2 * R))      # 2 h R + 1 lags priced below top
+    dbase = getattr(cost, "direct_base", 0.0)
+    hmax = int(((top - dbase) / cost.direct_lag - 1.0) // (2 * R))      # 2 h R + 1 lags priced below top
     if all_hws is None:
         all_hws = _all_halfwidths(dist, allow)
     if len(all_hws) < 2 or hmax < all_hws[1]:
@@ -1389,8 +1405,12 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         later = chain[1:]
         prices_dir = cost.prices_direct(chain)
         dlag = getattr(cost, "direct_lag", 0.0) if prices_dir else 0.0
+        dbase = getattr(cost, "direct_base", 0.0) if prices_dir else 0.0
+        dmfrac = getattr(cost, "direct_multi_frac", 0.0) if prices_dir else 0.0
         dfrac = getattr(cost, "direct_frac", 1.0) if prices_dir else 1.0
-        R = n // int(chain[-1]) if prices_dir else 0
+        b_last = int(chain[-1]) if prices_dir else 0
+        has_last_sparse = bool(prices_dir and dmfrac > 0.0 and b_last in cost._sparse)
+        R = n // b_last if prices_dir else 0
         for pth, preach, lasts in cands:
             c_prefix, _ = cost.first_tier(b0, preach[1])
             for idx_t, bt in enumerate(later, 1):
@@ -1402,7 +1422,10 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
                 f = last[1]
                 r_cost = cost.refine(f)
                 if hw is not None and prices_dir:
-                    d_cost = min(r_cost, dlag * (2 * int(hw) * R + 1))
+                    d_cost = dbase + dlag * (2 * int(hw) * R + 1)
+                    if has_last_sparse and f >= 0.05:
+                        d_cost += dmfrac * cost.sparse(b_last, f)
+                    d_cost = min(r_cost, d_cost)
                     r_cost = (1.0 - dfrac) * r_cost + dfrac * d_cost
                 c = c_prefix + f * r_cost
                 if best is None or c < best[0]:
