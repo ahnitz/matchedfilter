@@ -76,6 +76,14 @@ void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
 void ap_td_corr_on(const ap_plan *p,const float *x,const float *taps,int L,int nlag,float *out){
   be_of(p)->td_corr(x,taps,L,nlag,out);
 }
+void ap_td_corr_ex(const float *x,int x_real,const float *tr,const float *ti,int L,int nlag,
+                   float *out){
+  pick()->td_corr_ex(x,x_real,tr,ti,L,nlag,out);
+}
+void ap_td_corr_ex_on(const ap_plan *p,const float *x,int x_real,const float *tr,const float *ti,
+                      int L,int nlag,float *out){
+  be_of(p)->td_corr_ex(x,x_real,tr,ti,L,nlag,out);
+}
 
 void ap_split_store_on(const ap_plan *p,const float *x,float *re,float *im,size_t n,int conj,
                        int n1,int n2,int w){
@@ -91,6 +99,12 @@ void ap_lanes_transpose_on(const ap_plan *p,float *dst,const float *const *src,i
 }
 void ap_real_split_on(const ap_plan *p,const float *Z,const float *tw,size_t n,float *X){
   be_of(p)->real_split(Z,tw,n,X);
+}
+void ap_real_split_pos_on(const ap_plan *p,const float *Z,const float *tw,size_t n,float *X){
+  be_of(p)->real_split_pos(Z,tw,n,X);
+}
+void ap_real_split_mirror_on(const ap_plan *p,float *X,size_t n){
+  be_of(p)->real_split_mirror(X,n);
 }
 
 void ap_root_merge_on(const ap_plan *p,const float *D,const float *T,size_t k0,size_t k1,

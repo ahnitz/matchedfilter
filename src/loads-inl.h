@@ -25,7 +25,9 @@ static void scale_load(float *HWY_RESTRICT dst, const float *HWY_RESTRICT src, s
   if (stride == 1) {
     for (; k + AP_W <= have; k += AP_W) V_STOREU(dst + k, V_MUL(V_LOADU(src + k), s));
   } else if (stride == 2) {
-    for (; k + AP_W <= have; k += AP_W) {
+    /* Stop one element short so v_deint never reads one float past a view's last sample
+       (e.g. row.imag of a complex64 array, whose final real sample sits at the buffer end). */
+    for (; k + AP_W < have; k += AP_W) {
       vf a, b;
       v_deint(src + 2 * k, &a, &b);
       V_STOREU(dst + k, V_MUL(a, s));

@@ -50,11 +50,16 @@ int      ap_plan_split(const ap_plan *p, int *n1, int *n2);
 /* Full transform, AP_FORWARD or AP_BACKWARD.  Neither direction scales by 1/N. */
 void ap_fft(ap_plan *p, const float *in, float *out, int sign);
 
-/* Direct correlation of an interleaved complex series with real taps over nlag consecutive
-   lags: out[i] = sum_{k<L} taps[k] x[i+k] (td-inl.h). x holds nlag + L - 1 samples. */
+/* Direct correlation over nlag consecutive lags: out[i] = sum_{k<L} (tr[k] + j ti[k]) x[i+k]
+   (td-inl.h). x holds nlag + L - 1 samples (real when x_real != 0, else interleaved complex);
+   ti is NULL for real taps. */
 void ap_td_corr(const float *x, const float *taps, int L, int nlag, float *out);
 void ap_td_corr_on(const ap_plan *p, const float *x, const float *taps, int L, int nlag,
                    float *out);
+void ap_td_corr_ex(const float *x, int x_real, const float *tr, const float *ti, int L, int nlag,
+                   float *out);
+void ap_td_corr_ex_on(const ap_plan *p, const float *x, int x_real, const float *tr,
+                      const float *ti, int L, int nlag, float *out);
 
 /* A real block's full n-point spectrum X from Z, the n/2-point transform of its samples read
    as n/2 complex ones; tw: cos, sin of 2 pi k/n for k = 0 .. n/2 (rsplit-inl.h). */
@@ -71,6 +76,8 @@ void ap_scale_load_on(const ap_plan *p, float *dst, const float *src, size_t hav
 void ap_lanes_transpose_on(const ap_plan *p, float *dst, const float *const *src, int cnt,
                            size_t n, int w);
 void ap_real_split_on(const ap_plan *p, const float *Z, const float *tw, size_t n, float *X);
+void ap_real_split_pos_on(const ap_plan *p, const float *Z, const float *tw, size_t n, float *X);
+void ap_real_split_mirror_on(const ap_plan *p, float *X, size_t n);
 
 /* The root stage's product scale * conj(T) D over bins [k0, k1) of two one-sided spectra of
    n/2 + 1 bins, merged into the n/2-point spectrum Z whose backward transform is the real

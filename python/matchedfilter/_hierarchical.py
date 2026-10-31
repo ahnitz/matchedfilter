@@ -214,7 +214,7 @@ class HierarchicalFilter(MatchedFilter):
         self._pfft = _prices._cpu_forward_platform(self.n) and plan.set_platform_fft(True)
         taps = getattr(self, "_taps", None)
         if taps is not None:
-            plan.set_taps(taps[0], taps[0].shape[1], taps[1])   # direct: with the thresholds
+            plan.set_taps(taps[0], taps[0].shape[1], taps[1], bool(taps[2]))
         return plan
 
     # ---- joint-trial arms (_trial) ----------------------------------------------
@@ -355,21 +355,37 @@ class HierarchicalFilter(MatchedFilter):
         self._restore_into(self._mf, templates)
         return self._mf
 
+    def _sync_direct_prices(self, plan, real_series):
+        """Update plan's direct-refine prices for real_series (True or False)."""
+        taps = getattr(self, "_taps", None)
+        r = self.__dict__.get("_resolved")
+        if taps is not None and r is not None and r.direct_hw is not None:
+            prices = _prices._direct_pair_prices(self.n, plan, real_series=bool(real_series),
+                                                 complex_taps=bool(taps[2]))
+            if prices is not None:
+                plan.set_direct_prices(*prices)
+        self._applied_real = bool(real_series)
+
     def _execution_plan(self):
         """The CPU plan, with the resolved plan (_resolve) applied to it: once per plan and
         resolution (a new plan, or a changed input, applies it again)."""
         plan = self._ensure()
         r = self._resolve()
         d = self.__dict__
+        want_real = bool(d.get("_want_real", False))
         if d.get("_applied_plan") is not plan or d.get("_applied_res") is not r:
             plan.set_thresholds(list(r.thresholds))
-            if getattr(self, "_taps", None) is not None:
+            taps = getattr(self, "_taps", None)
+            if taps is not None:
                 if r.direct_hw is not None:
-                    prices = _prices._direct_pair_prices(self.n, plan)
+                    if want_real:
+                        plan.set_real_series(True)
+                    prices = _prices._direct_pair_prices(self.n, plan, real_series=want_real,
+                                                         complex_taps=bool(taps[2]))
                     if prices is not None:
                         plan.set_direct_prices(*prices)
                 plan.set_direct(r.direct_hw is not None, r.direct_hw or 1)
-            self._applied_plan, self._applied_res = plan, r
+            self._applied_plan, self._applied_res, self._applied_real = plan, r, want_real
         return plan
 
     def _resolve(self):
@@ -408,7 +424,10 @@ class HierarchicalFilter(MatchedFilter):
         taps = getattr(self, "_taps", None)
         if taps is None or not _direct_refine_enabled() or self._pending_ref is None:
             return None
-        lagtap = _prices._direct_lagtap()
+        cplx = bool(taps[2])
+        want_real = self.__dict__.get("_want_real")
+        rs = bool(cplx) if want_real is None else bool(want_real)
+        lagtap = _prices._direct_lagtap(real_series=rs, complex_taps=cplx)
         if not lagtap > 0:
             return None
         L = 32.0 * max(1, int(round(float(np.mean(taps[1])) / 32.0)))   # as the chain key rounds it
@@ -553,7 +572,8 @@ class HierarchicalFilter(MatchedFilter):
         taps = getattr(self, "_taps", None)
         if taps is None or not _direct_refine_enabled() or self.device.kind != "cpu":
             return None
-        return int(round(float(np.mean(taps[1])) / 32.0))
+        rl = int(round(float(np.mean(taps[1])) / 32.0))
+        return (rl, True) if taps[2] else rl
 
     def _choose_chain(self):
         """The chain this plan runs: the model's choice, which prices every chain for this
@@ -673,28 +693,30 @@ class HierarchicalFilter(MatchedFilter):
         self._mark_ready("template", None)
 
     def set_taps(self, taps, counts=None):
-        """Each template's real FIR taps, for the direct refine on the CPU.
+        """Each template's real or complex FIR taps, for the direct refine on the CPU.
 
-        taps (ntemplates, m) float32, row t's first counts[t] taps valid (all m when counts
-        is None), the centre tap counts[t] // 2 at lag 0 -- the filter whose spectrum
-        set_templates holds, at the data's sample rate (time_domain.template_spectra with
-        tap and data rates equal). run_series then refines a survivor by direct correlation
+        taps (ntemplates, m) float32 or complex64, row t's first counts[t] taps valid (all m
+        when counts is None), the centre tap counts[t] // 2 at lag 0 -- the filter whose
+        spectrum set_templates holds, at the data's sample rate (time_domain.template_spectra
+        with tap and data rates equal). run_series then refines a survivor by direct correlation
         at the lags around its last tier's firing coarse lags wherever that is priced
         cheaper than a whole-block transform; MF_DIRECT_REFINE=0 turns it off."""
-        taps = np.ascontiguousarray(taps, dtype=np.float32)
+        arr = np.asarray(taps)
+        cplx = np.iscomplexobj(arr)
+        taps = np.ascontiguousarray(arr, dtype=np.complex64 if cplx else np.float32)
         if taps.ndim != 2 or taps.shape[0] != self.ntemplates:
             raise ValueError("taps must be (ntemplates, m) = (%d, m)" % self.ntemplates)
         counts = (np.full(self.ntemplates, taps.shape[1], np.int64) if counts is None
                   else np.ascontiguousarray(counts, dtype=np.int64))
         if counts.shape != (self.ntemplates,) or counts.min() < 1 or counts.max() > min(taps.shape[1], self.n):
             raise ValueError("counts must be (ntemplates,) in [1, min(m, n)]")
-        self._taps = (taps, counts)
+        self._taps = (taps, counts, cplx)
         if self._pinned is None and self._chain is not None and self.device.kind == "cpu":
             # The model priced the chain without the direct refine: choose again (the plan is
             # rebuilt on next use and replays reference, templates and data).
             self._chain, self._mf, self._resolved = None, None, None
         elif self._mf is not None:
-            self._mf.set_taps(taps, taps.shape[1], counts)
+            self._mf.set_taps(taps, taps.shape[1], counts, cplx)
             self._resolved = None               # the direct window is part of the resolved plan
 
     def direct_stats(self):

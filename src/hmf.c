@@ -67,7 +67,7 @@ struct ap_hmf_plan {
   const float **dspec;
   float *dcopy;               /* [nd][2n]: ap_hmf_set_data's own copy of each data spectrum */
   int sparse;                 /* ap_hmf_set_sparse: rows that do not fire write counts only */
-  char *dready,*tready;
+  char *dready,*tready,*dmirrored;
   int ref_on;
   long pairs,trig;
   unsigned long long c_ref,c_fill;
@@ -87,8 +87,9 @@ struct ap_hmf_plan {
   /* Direct refine (ap_hmf_set_taps, ap_hmf_set_direct): a survivor is refined only at the
      lags around its last tier's firing coarse lags, by direct correlation with its real
      taps, where that is priced cheaper than the whole-block transform. */
-  float **taps;                   /* [nt] 64-byte aligned taps, or NULL */
+  float **taps;                   /* [nt] 64-byte aligned taps (split tr, ti if tap_cplx) */
   int *tap_len;                   /* [nt] */
+  int tap_cplx;                   /* 1 = complex conjugated taps, 0 = real taps */
   int direct, dir_hw;             /* on; half-width of a window, in last-tier coarse samples */
   const float **dtime;            /* [nd] the block's complex samples (run_series only) */
   size_t *dhave;                  /* [nd] samples present (the rest are zero) */
@@ -187,8 +188,9 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   p->dtime=calloc((size_t)p->nd,sizeof(*p->dtime));
   p->dhave=calloc((size_t)p->nd,sizeof(*p->dhave));
   p->dready=calloc((size_t)p->nd,1);
+  p->dmirrored=calloc((size_t)p->nd,1);
   p->tready=calloc((size_t)ntmpl,1);
-  if(!p->full||!p->full_fft||!p->fwd||!p->spec||!p->dspec||!p->dready||!p->tready
+  if(!p->full||!p->full_fft||!p->fwd||!p->spec||!p->dspec||!p->dready||!p->dmirrored||!p->tready
      ||!p->dtime||!p->dhave){
     ap_hmf_destroy(p); return NULL;
   }
@@ -213,7 +215,8 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->half_fft) ap_destroy(p->half_fft);
   free(p->rtw);
   ap_accel_destroy(p->accel);
-  free(p->fwd); free(p->spec); free(p->dspec); free(p->dcopy); free(p->dready); free(p->tready);
+  free(p->fwd); free(p->spec); free(p->dspec); free(p->dcopy);
+  free(p->dready); free(p->dmirrored); free(p->tready);
   if(p->twiddles) free(p->twiddles);
   if(p->tw_scratch) free(p->tw_scratch);
   if(p->tmpls_half) free(p->tmpls_half);
@@ -225,10 +228,12 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   free(p);
 }
 
-/* Each template's real FIR taps: row t holds counts[t] valid taps (stride floats per row),
-   centre tap counts[t]/2 at lag 0 -- the filter whose spectrum ap_hmf_set_template holds
-   (time_domain._tap_spectra, rate ratio 1). */
-int ap_hmf_set_taps(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t *counts){
+static inline size_t tap_imag_offset(int L){
+  return ((size_t)L + 15u) & ~(size_t)15u;
+}
+
+static int set_taps_impl(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t *counts,
+                         int cplx){
   if(!p||!taps||!counts) return -1;
   for(int t=0;t<p->nt;t++) if(counts[t]<1||(size_t)counts[t]>stride||(size_t)counts[t]>p->n) return -1;
   if(!p->taps){
@@ -241,12 +246,23 @@ int ap_hmf_set_taps(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t
     if(!p->taps||!p->tap_len||!p->dx||!p->dout||!p->dfd||!p->dft) goto fail;
   }
   for(int t=0;t<p->nt;t++){
+    const int L=(int)counts[t];
+    const size_t ioff=tap_imag_offset(L);
+    const size_t nfl=cplx ? ioff+(size_t)L : (size_t)L;
     free(p->taps[t]);
-    p->taps[t]=ap_alloc64((size_t)counts[t]*sizeof(float));
+    p->taps[t]=ap_alloc64(nfl*sizeof(float));
     if(!p->taps[t]) goto fail;
-    memcpy(p->taps[t],taps+(size_t)t*stride,(size_t)counts[t]*sizeof(float));
-    p->tap_len[t]=(int)counts[t];
+    if(cplx){
+      const float *src=taps+2*(size_t)t*stride;
+      float *tr=p->taps[t], *ti=tr+ioff;
+      for(int k=0;k<L;k++){ tr[k]=src[2*k]; ti[k]=-src[2*k+1]; }
+    } else {
+      memcpy(p->taps[t],taps+(size_t)t*stride,(size_t)L*sizeof(float));
+    }
+    p->tap_len[t]=L;
   }
+  p->tap_cplx=cplx?1:0;
+  p->dir_lagtap=0;
   return 0;
 fail:
   if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); p->taps=NULL; }
@@ -255,30 +271,51 @@ fail:
   free(p->dout); p->dout=NULL;
   free(p->dfd); p->dfd=NULL;
   free(p->dft); p->dft=NULL;
+  p->tap_cplx=0;
   return -1;
+}
+
+/* Each template's real FIR taps: row t holds counts[t] valid taps (stride floats per row),
+   centre tap counts[t]/2 at lag 0 -- the filter whose spectrum ap_hmf_set_template holds
+   (time_domain._tap_spectra, rate ratio 1). */
+int ap_hmf_set_taps(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t *counts){
+  return set_taps_impl(p,taps,stride,counts,0);
+}
+
+/* Complex FIR taps: stride complex64 elements per row; conjugated at ingest so conj(taps[k])
+   is stored as (tr[k], ti[k]). */
+int ap_hmf_set_taps_complex(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t *counts){
+  return set_taps_impl(p,taps,stride,counts,1);
 }
 
 /* Ticks per lag x tap of the direct correlation on this core (best of a few reps): what
    the cost model charges a direct refine (gatechain.CostModel.with_direct). */
-double ap_hmf_price_direct(void){
+double ap_hmf_price_direct_mode(int x_real,int tap_cplx){
   const int L=256, nl=32;
-  float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float)), *tp=ap_alloc64((size_t)L*sizeof(float));
+  float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float));
+  float *tr=ap_alloc64((size_t)L*sizeof(float));
+  float *ti=tap_cplx ? ap_alloc64((size_t)L*sizeof(float)) : NULL;
   float *out=ap_alloc64(2*(size_t)nl*sizeof(float));
   double best=-1;
-  if(x&&tp&&out){
+  if(x&&tr&&(!tap_cplx||ti)&&out){
     for(int i=0;i<2*(nl+L);i++) x[i]=(float)((i*7919)%1000)/1000.f-0.5f;
-    for(int i=0;i<L;i++) tp[i]=(float)((i*104729)%1000)/1000.f-0.5f;
+    for(int i=0;i<L;i++) tr[i]=(float)((i*104729)%1000)/1000.f-0.5f;
+    if(ti) for(int i=0;i<L;i++) ti[i]=(float)((i*65537)%1000)/1000.f-0.5f;
     best=1e30;
     for(int r=0;r<7;r++){
       unsigned long long a=ap_ticks();
-      ap_td_corr(x,tp,L,nl,out);
+      ap_td_corr_ex(x,x_real?1:0,tr,ti,L,nl,out);
       unsigned long long b=ap_ticks();
       if((double)(b-a)<best) best=(double)(b-a);
     }
     best/=(double)nl*L;
   }
-  free(x); free(tp); free(out);
+  free(x); free(tr); free(ti); free(out);
   return best;
+}
+
+double ap_hmf_price_direct(void){
+  return ap_hmf_price_direct_mode(0,0);
 }
 
 /* Price the direct correlation (ticks per lag x tap) and the whole-block refine (ticks per
@@ -286,17 +323,20 @@ double ap_hmf_price_direct(void){
 static void price_direct(ap_hmf_plan *p){
   const size_t n=p->n;
   const int L=256, nl=32;
-  float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float)), *tp=ap_alloc64((size_t)L*sizeof(float));
+  float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float));
+  float *tr=ap_alloc64((size_t)L*sizeof(float));
+  float *ti=p->tap_cplx ? ap_alloc64((size_t)L*sizeof(float)) : NULL;
   float *spec=ap_alloc64(2*n*sizeof(float));
   ap_peak pk[4];
-  if(!x||!tp||!spec){ free(x); free(tp); free(spec); return; }
+  if(!x||!tr||(p->tap_cplx&&!ti)||!spec){ free(x); free(tr); free(ti); free(spec); return; }
   for(int i=0;i<2*(nl+L);i++) x[i]=(float)((i*7919)%1000)/1000.f-0.5f;
-  for(int i=0;i<L;i++) tp[i]=(float)((i*104729)%1000)/1000.f-0.5f;
+  for(int i=0;i<L;i++) tr[i]=(float)((i*104729)%1000)/1000.f-0.5f;
+  if(ti) for(int i=0;i<L;i++) ti[i]=(float)((i*65537)%1000)/1000.f-0.5f;
   for(size_t i=0;i<2*n;i++) spec[i]=(float)((i*31337)%1000)/1000.f-0.5f;
   double best_d=1e30,best_f=1e30;
   for(int r=0;r<5;r++){
     unsigned long long a=ap_ticks();
-    ap_td_corr_on(p->full_fft,x,tp,L,nl,p->dout);
+    ap_td_corr_ex_on(p->full_fft,x,p->real_series,tr,ti,L,nl,p->dout);
     unsigned long long b=ap_ticks();
     int c=0;
     ap_binmax(p->full_fft,spec,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n,NULL);
@@ -306,7 +346,7 @@ static void price_direct(ap_hmf_plan *p){
   }
   p->dir_lagtap=best_d/((double)nl*L);
   p->dir_fftpair=best_f;
-  free(x); free(tp); free(spec);
+  free(x); free(tr); free(ti); free(spec);
 }
 
 int ap_hmf_price_direct_pair(ap_hmf_plan *p,double *lagtap,double *fftpair){
@@ -527,6 +567,7 @@ int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
   }
   float *own=p->dcopy+(size_t)d*row;
   memcpy(own,spec,row*sizeof(float));
+  p->dmirrored[d]=1;
   /* Preserve the public setter's eager coarse copies. Only series calls defer
      them, because their source spectra live in the plan's own storage. */
   return set_data_tiers(p,d,own,p->ntiers);
@@ -595,9 +636,9 @@ int ap_hmf_set_real_stride(ap_hmf_plan *p,size_t stride){
 }
 
 /* The real block at x[s0 .. s0+have) zero-padded to n and scaled by 1/n, transformed into
-   its full n-point spectrum sp: the n reals read as n/2 complex z, Z = FFT_{n/2}(z), then
-   X[k] = E[k] + W^k O[k] with E = (Z[k] + conj Z[h-k]) / 2, O = (Z[k] - conj Z[h-k]) / 2i,
-   W = e^{-2 pi i / n}, for k = 0 .. h, and X[n-k] = conj X[k]. */
+   non-negative bins 0 .. n/2 of sp: the n reals read as n/2 complex z, Z = FFT_{n/2}(z), then
+   X[k] = E[k] + W^k O[k] for k = 0 .. n/2. Negative bins are mirrored lazily on blocks that
+   take the transform refine (hmf_refine_fft). */
 static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have,float *sp){
   const size_t n=p->n;
   const float inv=1.0f/(float)n;
@@ -606,7 +647,7 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   { const size_t st=p->real_stride ? p->real_stride : 1;
     ap_scale_load_on(p->half_fft,z,x+s0*st,have,n,st,inv); }
   ap_fft(p->half_fft,z,Z,AP_FORWARD);
-  ap_real_split_on(p->half_fft,Z,p->rtw,n,sp);
+  ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
 int ap_hmf_run_series(ap_hmf_plan *p,
@@ -633,12 +674,14 @@ int ap_hmf_run_series(ap_hmf_plan *p,
       size_t have = s0<nseries ? nseries-s0 : 0;
       if(have>n) have=n;
       if(p->real_series){
-        /* A real series: the half-size transform, and no complex samples for the direct
-           refine (its NULL dtime sends refines to the transform). */
+        /* A real series: the half-size transform (half-spectrum; negative bins mirrored lazily
+           on transform refine), with real block samples kept for direct refine. */
+        const size_t st=p->real_stride ? p->real_stride : 1;
         float *sp=p->spec+(size_t)j*2*n;
         hmf_forward_real(p,series,s0,have,sp);
+        p->dmirrored[j]=0;
         if(set_data_tiers(p,j,sp,1)) return -1;
-        p->dtime[j]=NULL; p->dhave[j]=0;
+        p->dtime[j]=have ? series+s0*st : NULL; p->dhave[j]=have;
         continue;
       }
       /* pycbc's inverse is unnormalised and so is matchedfilter's, so the
@@ -657,6 +700,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
                        1.0f/(float)n);
       ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);
       }
+      p->dmirrored[j]=1;
       if(set_data_tiers(p,j,sp,1)) return -1;
       p->dtime[j]=have ? series+2*s0 : NULL; p->dhave[j]=have;
       /* The full spectrum is NOT ingested here.  Only the coarse band is read
@@ -699,6 +743,17 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       size_t binsize, float threshold,
                       ap_peak *peaks, int *counts, size_t start, size_t end){
   if(nfire <= 0) return 0;
+  /* Complete negative-frequency bins on any real-series block whose survivor reaches FFT refine. */
+  if(p->real_series){
+    for(int j = 0; j < nfire; j++){
+      const int idx = d0 + fire_d[j];
+      if(!p->dmirrored[idx]){
+        if(!p->dspec[idx]) return -1;
+        ap_real_split_mirror_on(p->full_fft, (float *)p->dspec[idx], p->n);
+        p->dmirrored[idx] = 1;
+      }
+    }
+  }
 
   if(p->is_dif && p->hermitian){
     const size_t nb = hmf_nbins_phased(p, binsize, start, end, hmf_row_phase(p, d0 + fire_d[0]));
@@ -833,16 +888,31 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
   const size_t have=p->dhave[d];
   for(int w=0;w<nw;w++)
     if(lo[w]-c<0 || hi[w]-1-c+L>(long)n) return -2;     /* would wrap: the transform's answer */
-  if(have<n){
-    memcpy(p->dx,x,2*have*sizeof(float));
-    memset(p->dx+2*have,0,2*(n-have)*sizeof(float));
-    x=p->dx;
+  if(nw>0){
+    const size_t s_min=(size_t)(lo[0]-c), s_max=(size_t)(hi[nw-1]-1-c+L);
+    if(p->real_series){
+      const size_t st=p->real_stride ? p->real_stride : 1;
+      if(st!=1 || s_max>have){
+        const size_t avail=have>s_min ? (have-s_min<s_max-s_min ? have-s_min : s_max-s_min) : 0;
+        ap_scale_load_on(p->full_fft,p->dx+s_min,avail ? x+s_min*st : p->dx,avail,s_max-s_min,st,
+                         1.0f);
+        x=p->dx;
+      }
+    } else if(s_max>have){
+      const size_t avail=have>s_min ? have-s_min : 0;
+      if(avail) memcpy(p->dx+2*s_min,x+2*s_min,2*avail*sizeof(float));
+      memset(p->dx+2*(s_min+avail),0,2*(s_max-s_min-avail)*sizeof(float));
+      x=p->dx;
+    }
   }
+  const float *tr=p->taps[t];
+  const float *ti=p->tap_cplx ? tr+tap_imag_offset(L) : NULL;
   const float t2=threshold>0.f ? threshold*threshold : 0.f;
   for(size_t b=0;b<nb;b++) out[b]=(ap_peak){-1,0.f,0.f,t2};
   for(int w=0;w<nw;w++){
     const int m=(int)(hi[w]-lo[w]);
-    ap_td_corr_on(p->full_fft,x+2*(lo[w]-c),p->taps[t],L,m,p->dout);
+    const float *xw=p->real_series ? x+(lo[w]-c) : x+2*(lo[w]-c);
+    ap_td_corr_ex_on(p->full_fft,xw,p->real_series,tr,ti,L,m,p->dout);
     for(int i=0;i<m;i++){
       const float re=p->dout[2*i], im=p->dout[2*i+1], m2=re*re+im*im;
       const long k=lo[w]+i;

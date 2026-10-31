@@ -117,6 +117,9 @@ static HWY_ATTR HWY_INLINE void v_deint(const float *p, vf *re, vf *im) {
 static HWY_ATTR HWY_INLINE void v_inter(float *p, vf re, vf im) {
   hn::StoreInterleaved2(re, im, AP_D, p);
 }
+static HWY_ATTR HWY_INLINE vf v_reverse(vf v) {
+  return hn::Reverse(AP_D, v);
+}
 
 /* W x W transpose: one network, every width.
  *
