@@ -57,13 +57,16 @@ struct Gate {
   size_t m;
   int nd, nt, ntpad;
   int M1, M2;
+  int debug;
   emap ea;
   h16 *tre, *tim;          /* [group][element][lane], conjugated, scaled by 2^-et[t] */
   float *tinv;             /* per template: 2^et, undoes its scale */
+  float *tsum2;            /* per template: sum_k |T_k|^2 of stored FP16 values */
   h16 *dre, *dim;          /* [slot][element], scaled */
   float *dinv;             /* per data slot: undoes its scale */
-  float *t2;               /* [group][element][lane] |T|^2 of the stored (rounded) templates */
-  float *d2;               /* [slot][element] |D|^2 of the stored data */
+  float *dsum2;            /* per data slot: sum_k |D_k|^2 of stored FP16 values */
+  float *t2;               /* [group][element][lane] |T|^2 (allocated only when debug != 0) */
+  float *d2;               /* [slot][element] |D|^2 (allocated only when debug != 0) */
   h16 *w1r, *w1i;          /* element split twiddles */
   int *live;               /* storage slots of the window's lags (run_max), cached per window */
   h16 *gtre, *gtim;        /* one gathered template group (run_pairs_max) */
@@ -84,7 +87,8 @@ static float pow2_scale(const float *spec, size_t m, float *inv) {
 
 static void destroy(Gate *g) {
   if (!g) return;
-  free(g->tre); free(g->tim); free(g->tinv); free(g->dre); free(g->dim); free(g->dinv);
+  free(g->tre); free(g->tim); free(g->tinv); free(g->tsum2);
+  free(g->dre); free(g->dim); free(g->dinv); free(g->dsum2);
   free(g->w1r); free(g->w1i); free(g->bR); free(g->bI); free(g->sR); free(g->sI);
   free(g->live); free(g->gtre); free(g->gtim); free(g->gt2);
   free(g->t2); free(g->d2);
@@ -97,24 +101,30 @@ static Gate *create(size_t m, int nd, int nt) {
   if (!g) return nullptr;
   g->m = m; g->nd = nd; g->nt = nt;
   g->ntpad = (nt + AP_W - 1) / AP_W * AP_W;
+  g->debug = ap_env_flag("MF_GATE16_DEBUG", 0) || ap_env_flag("MF_GATE16_DEBUG_MAX", 0);
   efactor((int)m, &g->M1, &g->M2);
   g->ea = emake(g->M1, g->M2);
   const size_t se = (g->M2 == 1) ? m : (size_t)ESTRIDE(g->M1) * g->M2;
   g->tre = (h16 *)ap_alloc64((size_t)g->ntpad * m * sizeof(h16));
   g->tim = (h16 *)ap_alloc64((size_t)g->ntpad * m * sizeof(h16));
   g->tinv = (float *)calloc((size_t)g->ntpad, sizeof(float));
+  g->tsum2 = (float *)calloc((size_t)g->ntpad, sizeof(float));
   g->dre = (h16 *)ap_alloc64((size_t)nd * m * sizeof(h16));
   g->dim = (h16 *)ap_alloc64((size_t)nd * m * sizeof(h16));
   g->dinv = (float *)calloc((size_t)nd, sizeof(float));
-  g->t2 = (float *)ap_alloc64((size_t)g->ntpad * m * sizeof(float));
-  g->d2 = (float *)ap_alloc64((size_t)nd * m * sizeof(float));
+  g->dsum2 = (float *)calloc((size_t)nd, sizeof(float));
+  if (g->debug) {
+    g->t2 = (float *)ap_alloc64((size_t)g->ntpad * m * sizeof(float));
+    g->d2 = (float *)ap_alloc64((size_t)nd * m * sizeof(float));
+  }
   g->w1r = (h16 *)ap_alloc64(m * sizeof(h16));
   g->w1i = (h16 *)ap_alloc64(m * sizeof(h16));
   g->bR = (vf *)ap_alloc64(se * sizeof(vf)); g->bI = (vf *)ap_alloc64(se * sizeof(vf));
   g->sR = (vf *)ap_alloc64(se * sizeof(vf)); g->sI = (vf *)ap_alloc64(se * sizeof(vf));
-  if (!g->tre || !g->tim || !g->tinv || !g->dre || !g->dim || !g->dinv || !g->w1r || !g->w1i
-      || !g->bR || !g->bI || !g->sR || !g->sI || !g->t2 || !g->d2) { destroy(g); return nullptr; }
-  memset(g->t2, 0, (size_t)g->ntpad * m * sizeof(float));
+  if (!g->tre || !g->tim || !g->tinv || !g->tsum2 || !g->dre || !g->dim || !g->dinv || !g->dsum2
+      || !g->w1r || !g->w1i || !g->bR || !g->bI || !g->sR || !g->sI
+      || (g->debug && (!g->t2 || !g->d2))) { destroy(g); return nullptr; }
+  if (g->t2) memset(g->t2, 0, (size_t)g->ntpad * m * sizeof(float));
   /* padding lanes must be finite: zero templates */
   memset(g->tre, 0, (size_t)g->ntpad * m * sizeof(h16));
   memset(g->tim, 0, (size_t)g->ntpad * m * sizeof(h16));
@@ -138,13 +148,17 @@ static int set_template(Gate *g, int t, const float *spec) {
   const float s = pow2_scale(spec, m, &inv);
   g->tinv[t] = inv;
   const size_t base = (size_t)(t / AP_W) * m * AP_W + (size_t)(t % AP_W);
+  double sum2 = 0.0;
   for (size_t k = 0; k < m; k++) {
     const h16 r = hwy::F16FromF32(spec[2 * k] * s), i = hwy::F16FromF32(-spec[2 * k + 1] * s);
     g->tre[base + k * AP_W] = r;
     g->tim[base + k * AP_W] = i;
     const float fr = hwy::F32FromF16(r), fi = hwy::F32FromF16(i);
-    g->t2[base + k * AP_W] = fr * fr + fi * fi;
+    const float pk = fr * fr + fi * fi;
+    sum2 += pk;
+    if (g->t2) g->t2[base + k * AP_W] = pk;
   }
+  g->tsum2[t] = (float)sum2;
   return 0;
 }
 
@@ -155,19 +169,56 @@ static int set_data(Gate *g, int d, const float *spec) {
   const float s = pow2_scale(spec, m, &inv);
   g->dinv[d] = inv;
   h16 *re = g->dre + (size_t)d * m, *im = g->dim + (size_t)d * m;
-  float *p2 = g->d2 + (size_t)d * m;
+  float *p2 = g->d2 ? g->d2 + (size_t)d * m : nullptr;
+  double sum2 = 0.0;
   for (size_t k = 0; k < m; k++) {
     re[k] = hwy::F16FromF32(spec[2 * k] * s);
     im[k] = hwy::F16FromF32(spec[2 * k + 1] * s);
     const float fr = hwy::F32FromF16(re[k]), fi = hwy::F32FromF16(im[k]);
-    p2[k] = fr * fr + fi * fi;
+    const float pk = fr * fr + fi * fi;
+    sum2 += pk;
+    if (p2) p2[k] = pk;
   }
+  g->dsum2[d] = (float)sum2;
   return 0;
+}
+
+static void parseval_group(const float *d2, const float *t2, size_t m, float *pow_out) {
+  const hn::ScalableTag<float> df;           /* 4 lanes: each FP16 lane group is two of these */
+  using VF = hn::Vec<decltype(df)>;
+  VF pw0 = hn::Zero(df), pw1 = hn::Zero(df);
+  /* four elements per step into independent sums: the FMA latency, not its rate,
+     bounds a single accumulator chain */
+  VF a0 = pw0, a1 = pw0, b0 = pw0, b1 = pw0, c0 = pw0, c1 = pw0;
+  size_t k = 0;
+  for (; k + 4 <= m; k += 4) {
+    const float *t = t2 + k * AP_W;
+    const VF d0 = hn::Set(df, d2[k]), d1 = hn::Set(df, d2[k + 1]);
+    const VF e0 = hn::Set(df, d2[k + 2]), e1 = hn::Set(df, d2[k + 3]);
+    pw0 = hn::MulAdd(d0, hn::LoadU(df, t), pw0);
+    pw1 = hn::MulAdd(d0, hn::LoadU(df, t + 4), pw1);
+    a0 = hn::MulAdd(d1, hn::LoadU(df, t + 8), a0);
+    a1 = hn::MulAdd(d1, hn::LoadU(df, t + 12), a1);
+    b0 = hn::MulAdd(e0, hn::LoadU(df, t + 16), b0);
+    b1 = hn::MulAdd(e0, hn::LoadU(df, t + 20), b1);
+    c0 = hn::MulAdd(e1, hn::LoadU(df, t + 24), c0);
+    c1 = hn::MulAdd(e1, hn::LoadU(df, t + 28), c1);
+  }
+  for (; k < m; k++) {
+    const VF dk = hn::Set(df, d2[k]);
+    pw0 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W), pw0);
+    pw1 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W + 4), pw1);
+  }
+  pw0 = hn::Add(hn::Add(pw0, a0), hn::Add(b0, c0));
+  pw1 = hn::Add(hn::Add(pw1, a1), hn::Add(b1, c1));
+  const VF mm = hn::Set(df, (float)m);
+  hn::StoreU(hn::Mul(pw0, mm), df, pow_out);
+  hn::StoreU(hn::Mul(pw1, mm), df, pow_out + 4);
 }
 
 /* One data slot against one 8-template group: transform, then the windowed maximum and
    the all-lag power, in FP32. Results per lane: max |y|^2 in [ws, we), its lag, the value,
-   and sum |y|^2 over all m lags. */
+   and (when g->debug != 0) sum |y|^2 over all m lags. */
 static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
                        float *m2_out, int *idx_out, float *re_out, float *im_out,
                        float *pow_out) {
@@ -175,43 +226,17 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
   efft_prod_broadcast((int)m, g->dre + (size_t)d * m, g->dim + (size_t)d * m,
                       g->tre + (size_t)grp * m * AP_W, g->tim + (size_t)grp * m * AP_W,
                       g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
-  /* All-lag power by Parseval, sum_k |y_k|^2 = m sum_j |x_j|^2 with |x_j|^2 = |D_j|^2 |T_j|^2,
-     in FP32 from the stored values: m FMAs instead of a pass over every output lag. */
-  const hn::ScalableTag<float> df;           /* 4 lanes: each FP16 lane group is two of these */
-  using VF = hn::Vec<decltype(df)>;
-  VF pw0 = hn::Zero(df), pw1 = hn::Zero(df);
-  {
-    const float *d2 = g->d2 + (size_t)d * m, *t2 = g->t2 + (size_t)grp * m * AP_W;
-    /* four elements per step into independent sums: the FMA latency, not its rate,
-       bounds a single accumulator chain */
-    VF a0 = pw0, a1 = pw0, b0 = pw0, b1 = pw0, c0 = pw0, c1 = pw0;
-    size_t k = 0;
-    for (; k + 4 <= m; k += 4) {
-      const float *t = t2 + k * AP_W;
-      const VF d0 = hn::Set(df, d2[k]), d1 = hn::Set(df, d2[k + 1]);
-      const VF e0 = hn::Set(df, d2[k + 2]), e1 = hn::Set(df, d2[k + 3]);
-      pw0 = hn::MulAdd(d0, hn::LoadU(df, t), pw0);
-      pw1 = hn::MulAdd(d0, hn::LoadU(df, t + 4), pw1);
-      a0 = hn::MulAdd(d1, hn::LoadU(df, t + 8), a0);
-      a1 = hn::MulAdd(d1, hn::LoadU(df, t + 12), a1);
-      b0 = hn::MulAdd(e0, hn::LoadU(df, t + 16), b0);
-      b1 = hn::MulAdd(e0, hn::LoadU(df, t + 20), b1);
-      c0 = hn::MulAdd(e1, hn::LoadU(df, t + 24), c0);
-      c1 = hn::MulAdd(e1, hn::LoadU(df, t + 28), c1);
-    }
-    for (; k < m; k++) {
-      const VF dk = hn::Set(df, d2[k]);
-      pw0 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W), pw0);
-      pw1 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W + 4), pw1);
-    }
-    pw0 = hn::Add(hn::Add(pw0, a0), hn::Add(b0, c0));
-    pw1 = hn::Add(hn::Add(pw1, a1), hn::Add(b1, c1));
-    const VF mm = hn::Set(df, (float)m);
-    hn::StoreU(hn::Mul(pw0, mm), df, pow_out);
-    hn::StoreU(hn::Mul(pw1, mm), df, pow_out + 4);
-  }
   float pmax = 0.f;
-  for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
+  if (g->debug) {
+    /* All-lag power by Parseval, sum_k |y_k|^2 = m sum_j |D_j|^2 |T_j|^2, for debug rms. */
+    parseval_group(g->d2 + (size_t)d * m, g->t2 + (size_t)grp * m * AP_W, m, pow_out);
+    for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
+  } else {
+    /* O(1) Cauchy-Schwarz bound: |y_k|^2 <= (sum_j |D_j|^2)(sum_j |T_j|^2) for every lag k. */
+    float tmax = 0.f;
+    for (int l = 0; l < AP_W; l++) tmax = fmaxf(tmax, g->tsum2[grp * AP_W + l]);
+    pmax = g->dsum2[d] * tmax;
+  }
   /* The window maximum of |a y|^2 in FP16, a = 2^q chosen so the largest lane's whole
      output power maps to <= 2^14: every |a y|^2 then fits FP16 (coarse lengths keep lags in
      int16). The lanes share one data block and unit-norm templates, so no lane's power sits
@@ -311,53 +336,29 @@ static int live_list(Gate *g, size_t ws, size_t we) {
 }
 
 static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
-                             float *m2_out, float *pow_out);
+                             float tsum2_max, float *m2_out, float *pow_out);
 static void pair_group_max(Gate *g, int d, int grp, float *m2_out, float *pow_out) {
   const size_t m = g->m;
+  float tmax = 0.f;
+  for (int l = 0; l < AP_W; l++) tmax = fmaxf(tmax, g->tsum2[grp * AP_W + l]);
   pair_group_max_t(g, d, g->tre + (size_t)grp * m * AP_W, g->tim + (size_t)grp * m * AP_W,
-                   g->t2 + (size_t)grp * m * AP_W, m2_out, pow_out);
+                   g->t2 ? g->t2 + (size_t)grp * m * AP_W : nullptr, tmax, m2_out, pow_out);
 }
 
 /* pair_group_max for one data slot against 8 templates given as one [element][lane] group
    (a stored group, or one gathered from scattered templates: run_pairs_max). */
 static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
-                             float *m2_out, float *pow_out) {
+                             float tsum2_max, float *m2_out, float *pow_out) {
   const size_t m = g->m;
   efft_prod_broadcast((int)m, g->dre + (size_t)d * m, g->dim + (size_t)d * m,
                       tre, tim, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
-  const hn::ScalableTag<float> df;
-  using VF = hn::Vec<decltype(df)>;
-  VF pw0 = hn::Zero(df), pw1 = hn::Zero(df);
-  {
-    const float *d2 = g->d2 + (size_t)d * m, *t2 = t2g;
-    VF a0 = pw0, a1 = pw0, b0 = pw0, b1 = pw0, c0 = pw0, c1 = pw0;
-    size_t k = 0;
-    for (; k + 4 <= m; k += 4) {
-      const float *t = t2 + k * AP_W;
-      const VF d0 = hn::Set(df, d2[k]), d1 = hn::Set(df, d2[k + 1]);
-      const VF e0 = hn::Set(df, d2[k + 2]), e1 = hn::Set(df, d2[k + 3]);
-      pw0 = hn::MulAdd(d0, hn::LoadU(df, t), pw0);
-      pw1 = hn::MulAdd(d0, hn::LoadU(df, t + 4), pw1);
-      a0 = hn::MulAdd(d1, hn::LoadU(df, t + 8), a0);
-      a1 = hn::MulAdd(d1, hn::LoadU(df, t + 12), a1);
-      b0 = hn::MulAdd(e0, hn::LoadU(df, t + 16), b0);
-      b1 = hn::MulAdd(e0, hn::LoadU(df, t + 20), b1);
-      c0 = hn::MulAdd(e1, hn::LoadU(df, t + 24), c0);
-      c1 = hn::MulAdd(e1, hn::LoadU(df, t + 28), c1);
-    }
-    for (; k < m; k++) {
-      const VF dk = hn::Set(df, d2[k]);
-      pw0 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W), pw0);
-      pw1 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W + 4), pw1);
-    }
-    pw0 = hn::Add(hn::Add(pw0, a0), hn::Add(b0, c0));
-    pw1 = hn::Add(hn::Add(pw1, a1), hn::Add(b1, c1));
-    const VF mm = hn::Set(df, (float)m);
-    hn::StoreU(hn::Mul(pw0, mm), df, pow_out);
-    hn::StoreU(hn::Mul(pw1, mm), df, pow_out + 4);
-  }
   float pmax = 0.f;
-  for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
+  if (g->debug) {
+    parseval_group(g->d2 + (size_t)d * m, t2g, m, pow_out);
+    for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
+  } else {
+    pmax = g->dsum2[d] * tsum2_max;
+  }
   int q = 0;
   if (pmax > 0.f) {
     int e2;
@@ -414,26 +415,35 @@ static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *ts
   if (!g->gtre) {
     g->gtre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
     g->gtim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
-    g->gt2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
-    if (!g->gtre || !g->gtim || !g->gt2) return -1;
+    if (g->debug) g->gt2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
+    if (!g->gtre || !g->gtim || (g->debug && !g->gt2)) return -1;
   }
   alignas(16) float m2[AP_W], pw[AP_W];
   for (int i = 0; i < n;) {
     const int d = dsel[i];
     int k = 1;
     while (k < AP_W && i + k < n && dsel[i + k] == d) k++;
+    float tmax = 0.f;
     for (int l = 0; l < AP_W; l++) {          /* lanes past k repeat the last template */
       const int t = t0 + tsel[i + (l < k ? l : k - 1)];
+      tmax = fmaxf(tmax, g->tsum2[t]);
       const size_t base = (size_t)(t / AP_W) * m * AP_W + (size_t)(t % AP_W);
       const h16 *sr = g->tre + base, *si = g->tim + base;
-      const float *s2 = g->t2 + base;
-      for (size_t e = 0; e < m; e++) {
-        g->gtre[e * AP_W + l] = sr[e * AP_W];
-        g->gtim[e * AP_W + l] = si[e * AP_W];
-        g->gt2[e * AP_W + l] = s2[e * AP_W];
+      if (g->debug) {
+        const float *s2 = g->t2 + base;
+        for (size_t e = 0; e < m; e++) {
+          g->gtre[e * AP_W + l] = sr[e * AP_W];
+          g->gtim[e * AP_W + l] = si[e * AP_W];
+          g->gt2[e * AP_W + l] = s2[e * AP_W];
+        }
+      } else {
+        for (size_t e = 0; e < m; e++) {
+          g->gtre[e * AP_W + l] = sr[e * AP_W];
+          g->gtim[e * AP_W + l] = si[e * AP_W];
+        }
       }
     }
-    pair_group_max_t(g, d0 + d, g->gtre, g->gtim, g->gt2, m2, pw);
+    pair_group_max_t(g, d0 + d, g->gtre, g->gtim, g->gt2, tmax, m2, pw);
     const float dinv = g->dinv[d0 + d];
     for (int l = 0; l < k; l++) {
       const int t = tsel[i + l];
@@ -457,7 +467,7 @@ static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we
   if (we > g->m) we = g->m;
   /* MF_GATE16_DEBUG_MAX (measurement only, tools/gate16_error.py --scan max): im carries the
      pair's all-lag rms, as MF_GATE16_DEBUG does for the electing scan. */
-  static const int debug = ap_env_flag("MF_GATE16_DEBUG_MAX", 0);
+  const int debug = g->debug && ap_env_flag("MF_GATE16_DEBUG_MAX", 0);
   const size_t m = g->m;
   if (live_list(g, ws, we)) return -1;
   alignas(16) float m2[AP_W], pw[AP_W];
@@ -493,7 +503,7 @@ static int run(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap
   if (we > g->m) we = g->m;
   /* MF_GATE16_DEBUG (measurement only, tools/gate16_error.py): im carries the pair's
      all-lag rms instead of a value. */
-  static const int debug = ap_env_flag("MF_GATE16_DEBUG", 0);
+  const int debug = g->debug && ap_env_flag("MF_GATE16_DEBUG", 0);
   const size_t m = g->m;
   alignas(16) float m2[AP_W], re[AP_W], im[AP_W], pw[AP_W];
   alignas(16) int ix[AP_W];
@@ -589,7 +599,7 @@ int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we,
   if (!g) return -1;
   /* The elected lag and value only for the error tools (MF_GATE16_DEBUG);
      the gate itself needs only the bound (run_max). */
-  static const int elect = ap_env_flag("MF_GATE16_DEBUG", 0);
+  const int elect = ((ap16::Gate *)g)->debug && ap_env_flag("MF_GATE16_DEBUG", 0);
   return elect ? ap16::run((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out)
                : ap16::run_max((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out);
 #else
