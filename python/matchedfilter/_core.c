@@ -1018,30 +1018,8 @@ static PyObject *M_gauss_fill_rows(PyObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 /* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex: simulate's
-   statistics. One pass the compiler vectorises; on x86-64 ELF builds also for AVX2 and
-   AVX-512, picked when loaded (the module is built for the baseline ISA). */
-#if defined(__x86_64__) && defined(__ELF__) && defined(__GNUC__)
-__attribute__((target_clones("avx512f","avx2","default")))
-#endif
-static float sr_power(const float *restrict y, const float *restrict d, float g, long long m, float *restrict A){
-  /* the largest A, as a maximum of bit patterns: for non-negative floats they order as the
-     values do, and an integer maximum vectorises where a float one (NaN rules) does not */
-  uint32_t mx=0;
-  if(d){
-    for(long long e=0;e<m;e++){
-      const float re=g*y[2*e]+d[2*e], im=g*y[2*e+1]+d[2*e+1];
-      const float v=re*re+im*im; uint32_t u; memcpy(&u,&v,4);
-      A[e]=v; mx = u>mx ? u : mx;
-    }
-  } else {
-    for(long long e=0;e<m;e++){
-      const float re=g*y[2*e], im=g*y[2*e+1];
-      const float v=re*re+im*im; uint32_t u; memcpy(&u,&v,4);
-      A[e]=v; mx = u>mx ? u : mx;
-    }
-  }
-  float r; memcpy(&r,&mx,4); return r;
-}
+   statistics, under Highway's dispatch (src/records.cc). Returns the largest A. */
+float ap_sim_power(const float *y, const float *d, float g, long long m, float *A);
 /* One statistic's running-maximum records outward from the signal (simulate): of the
    values a[e0], a[e0 + dir], ... (L of them), each exceeding all before it (the first always)
    as (distance i + d0 for the i-th, sqrt value), appended at pos[*k], val[*k] and *k advanced
@@ -1188,7 +1166,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
         if(has_noise && s>0){
           /* the noise alone, lags 0 .. m-1 */
           const int q=(int)(s-1); long long *off=(long long*)nob[q].buf; off[r]=kn[q];
-          sr_power(Y,NULL,g,m,A);
+          ap_sim_power(Y,NULL,g,m,A);
           if(ap_sim_records(A,0,1,m,0,(int32_t*)npb[q].buf,(float*)nvb[q].buf,&kn[q],nvb[q].len/4)<0){ full=1; break; }
         }
         if(!has_sig) continue;
@@ -1200,7 +1178,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
            per phase rho = t - js R, its values in that order (tab[f, s, rho m + e]) */
         const long long R = n/m, t=tv[r], js = t/R;
         const float *D = tab+(size_t)2*fi[r]*(1+nb)*n + (size_t)2*s*n + (size_t)2*(t - js*R)*m;
-        const float m1=sr_power(Y+2*js,D,g,m-js,A), m2=sr_power(Y,D+2*(m-js),g,js,A+(m-js));
+        const float m1=ap_sim_power(Y+2*js,D,g,m-js,A), m2=ap_sim_power(Y,D+2*(m-js),g,js,A+(m-js));
         if(s==0 && keep2>0.f){
           const float mx = m1>m2 ? m1 : m2;
           if(mx<keep2){

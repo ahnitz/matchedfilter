@@ -512,7 +512,7 @@ Some suites pin contracts the rest of the code relies on:
 | Test | What it pins |
 |---|---|
 | `test_search_contracts.py` | Search-level behaviour per engine: noise and injections, lazy template loading, the gate chain's thresholds, autotuning. |
-| `test_fdr_calibration.py`, `test_gate_model.py`, `test_gate_chain.py`, `test_gate_draws.py` | The gate model's dismissal and the simulation's draws. |
+| `test_fdr_calibration.py`, `test_fdr_engine.py`, `test_fdr_plans.py`, `test_gate_model.py`, `test_gate_chain.py`, `test_gate_draws.py` | The gate model's dismissal and the simulation's draws. |
 | `test_tier_conformance.py`, `test_coarse_conformance.py` | Every CPU tier kind and every GPU coarse layout refines exactly the pairs above thresholds placed in gaps of the exact maxima. |
 | `test_choice.py`, `test_paired_cpu_trials.py`, `test_joint_trials.py` | The measured-choice rule and the joint trial. |
 | `test_reproducible_choices.py` | Two processes sharing a cost file choose alike. |

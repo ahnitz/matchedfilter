@@ -26,6 +26,8 @@ except Exception:
 
 
 # --- a size this device cannot run is not a failure ------------------------
+import json                                            # noqa: E402
+import os                                              # noqa: E402
 import pytest                                          # noqa: E402
 
 
@@ -352,12 +354,42 @@ def pytest_addoption(parser):
     parser.addoption('--performance-record', help='Save timings after a successful performance run')
 
 
-def shard_modules(modules, k, n):
-    """The modules of the k-th (1-based) of n shards: sorted by name and dealt in turn, so
-    each module is in exactly one shard and the shards differ by at most one module."""
+#: Each test module's seconds in one run of the suite (dev2, unsanitized, GPU hidden;
+#: tools/test_durations.py writes it), by which --shard balances its parts. A hint only: a
+#: module missing from it weighs the median, and a stale table moves the balance, never which
+#: tests run. Dealt by name, the shards held what the names put together: one module is a
+#: quarter of the suite, and its shard ran out of time under the arm64 sanitizer (2026-10-30).
+DURATIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'durations.json')
+
+
+def module_weights(path=DURATIONS):
+    """{module name: seconds} from the durations table, or {} without one."""
+    try:
+        with open(path) as f:
+            return {str(k): float(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+def shard_modules(modules, k, n, weights=None):
+    """The modules of the k-th (1-based) of n shards: each module in exactly one shard, the
+    heaviest first (weights: seconds by module name; a module without a weight weighs the
+    median of those with one, and all weigh alike without any), each into the shard lightest
+    so far, ties by name and by shard. With equal weights the modules are dealt in turn by
+    name, so the shards differ by at most one module."""
     if not (n >= 1 and 1 <= k <= n):
         raise pytest.UsageError('--shard K/N needs 1 <= K <= N')
-    return set(sorted(set(modules))[k - 1::n])
+    names = sorted(set(modules))
+    weights = weights or {}
+    known = sorted(weights[m] for m in names if m in weights)
+    default = known[len(known) // 2] if known else 1.0
+    weigh = lambda m: weights.get(m, default)
+    load, parts = [0.0] * n, [set() for _ in range(n)]
+    for m in sorted(names, key=lambda m: (-weigh(m), m)):
+        i = min(range(n), key=lambda j: (load[j], j))
+        load[i] += weigh(m)
+        parts[i].add(m)
+    return parts[k - 1]
 
 
 def pytest_collection_modifyitems(config, items):
@@ -367,7 +399,7 @@ def pytest_collection_modifyitems(config, items):
             k, n = (int(x) for x in shard.split('/'))
         except ValueError:
             raise pytest.UsageError('--shard takes K/N, e.g. 2/4: %r' % shard)
-        keep = shard_modules((item.module.__name__ for item in items), k, n)
+        keep = shard_modules((item.module.__name__ for item in items), k, n, module_weights())
         dropped = [item for item in items if item.module.__name__ not in keep]
         items[:] = [item for item in items if item.module.__name__ in keep]
         config.hook.pytest_deselected(items=dropped)
