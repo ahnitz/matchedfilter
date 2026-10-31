@@ -30,7 +30,7 @@ int ap_gate16_run_pairs(void *g,int d0,int t0,const int *dsel,const int *tsel,in
 /* One coarse tier of the gate chain. Tier i runs on the survivors of tier i-1
    (tier 0 on every pair); the survivors of the last tier get the full refine. */
 typedef struct {
-  size_t m;                       /* band: coarse transform length */
+  size_t m,k0;                    /* band: coarse transform length and starting fine bin */
   ap_mf_plan *mf;
   float *scratch,*fpow;           /* staging, per-template band fraction */
   float ref_f,thr;                /* reference band fraction; threshold (<0: unconfigured) */
@@ -541,6 +541,65 @@ int ap_hmf_chain(const ap_hmf_plan *p,size_t *bands){
   if(bands) for(int i=0;i<p->ntiers;i++) bands[i]=p->tier[i].m;
   return p->ntiers;
 }
+static inline size_t tier_khi(const ap_hmf_plan *p,const hmf_tier *tr){
+  if(!tr->k0) return tr->m < p->k ? tr->m : p->k;
+  const size_t lim = p->n/2 < p->k ? p->n/2 : p->k;
+  const size_t hi = tr->k0 + tr->m;
+  return hi < lim ? hi : lim;
+}
+/* Copy data row d's active band [k0, khi) into tier tr, wrapping bin k into cyclic slot
+   k & (m - 1) when k0 > 0 so the m-point backward IFFT needs no twiddles. */
+static int ingest_tier_data(const ap_hmf_plan *p,hmf_tier *tr,int d,const float *spec,
+                            int to_mf,int to_g16){
+  const float *src = spec;
+  if(tr->k0 > 0){
+    const size_t khi = tier_khi(p,tr);
+    const size_t len = khi > tr->k0 ? khi - tr->k0 : 0;
+    if(len < tr->m) memset(tr->scratch,0,2*tr->m*sizeof(float));
+    const size_t u0 = tr->k0 & (tr->m - 1);
+    const size_t first = len < tr->m - u0 ? len : tr->m - u0;
+    if(first) memcpy(tr->scratch + 2*u0, spec + 2*tr->k0, 2*first*sizeof(float));
+    if(len > first) memcpy(tr->scratch, spec + 2*(tr->k0 + first), 2*(len - first)*sizeof(float));
+    src = tr->scratch;
+  }
+  if(to_mf && ap_mf_set_data(tr->mf,d,src)) return -1;
+  if(to_g16 && tr->g16 && ap_gate16_set_data(tr->g16,d,src)) return -1;
+  return 0;
+}
+int ap_hmf_band_offsets(const ap_hmf_plan *p,size_t *k0s){
+  if(!p) return 0;
+  if(k0s) for(int i=0;i<p->ntiers;i++) k0s[i]=p->tier[i].k0;
+  return p->ntiers;
+}
+int ap_hmf_set_band_offsets(ap_hmf_plan *p,const size_t *k0s,int ntiers){
+  if(!p || !k0s || ntiers!=p->ntiers) return -1;
+  const size_t lim = p->n/2 < p->k ? p->n/2 : p->k;
+  int same = 1;
+  for(int i=0;i<ntiers;i++){
+    if(k0s[i]>0 && k0s[i]>=lim) return -1;
+    if(p->tier[i].k0 != k0s[i]) same = 0;
+  }
+  if(same) return 0;
+  for(int i=0;i<ntiers;i++) p->tier[i].k0 = k0s[i];
+  for(int t=0;t<p->nt;t++) if(p->tready[t]==1) p->tready[t]=2;
+  if(p->dcopy){
+    const size_t row = 2*p->n;
+    for(int d=0;d<p->nd;d++)
+      if(p->dmirrored[d] && p->dspec[d]==p->dcopy+(size_t)d*row){
+        for(int i=0;i<p->ntiers;i++){
+          hmf_tier *tr=&p->tier[i];
+          if(i==0 && tr->g16 && !p->q15){
+            if(ingest_tier_data(p,tr,d,p->dcopy+(size_t)d*row,0,1)) return -1;
+            if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+          } else {
+            if(ingest_tier_data(p,tr,d,p->dcopy+(size_t)d*row,1,1)) return -1;
+            if(tr->pending[d]){ tr->pending[d]=0; tr->npending--; }
+          }
+        }
+      }
+  }
+  return 0;
+}
 int ap_hmf_thresholds(const ap_hmf_plan *p,float *thr){
   if(!p) return 0;
   if(thr) for(int i=0;i<p->ntiers;i++) thr[i]=p->tier[i].thr;
@@ -552,18 +611,30 @@ int ap_hmf_set_thresholds(ap_hmf_plan *p,const float *thr,int ntiers){
   for(int i=0;i<ntiers;i++) p->tier[i].thr=thr[i];   /* negative marks unconfigured */
   return 0;
 }
-/* Each tier's template t: the in-band part of spec (its first m bins; for a Hermitian-packed
-   spectrum the Nyquist value in DC's imaginary part is dropped), scaled to unit expected
-   power in the band -- by the reference's band fraction, or the template's own without one.
-   Nothing unscaled is kept: a later reference change marks the template stale, and the
-   caller loads it again (ap_hmf_set_reference). */
+/* Each tier's template t: the in-band part of spec ([k0, khi), wrapped to cyclic slots
+   k & (m - 1) when k0 > 0; for a Hermitian-packed spectrum with k0 == 0 the Nyquist value in
+   DC's imaginary part is dropped), scaled to unit expected power in the band -- by the
+   reference's band fraction, or the template's own without one. Nothing unscaled is kept: a
+   later reference or offset change marks the template stale, and the caller loads it again. */
 static int load_tiers(ap_hmf_plan *p,int t,const float *spec){
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     double f=p->ref_on ? tr->ref_f : tr->fpow[t];
     double scale=f>0 ? 1/sqrt(f) : 0;
-    for(size_t k=0;k<2*tr->m;k++) tr->scratch[k]=(float)(spec[k]*scale);
-    if(p->is_dif && p->hermitian) tr->scratch[1]=0.0f;
+    if(tr->k0 == 0){
+      for(size_t k=0;k<2*tr->m;k++) tr->scratch[k]=(float)(spec[k]*scale);
+      if(p->is_dif && p->hermitian) tr->scratch[1]=0.0f;
+    } else {
+      const size_t khi = tier_khi(p,tr);
+      const size_t len = khi > tr->k0 ? khi - tr->k0 : 0;
+      if(len < tr->m) memset(tr->scratch,0,2*tr->m*sizeof(float));
+      const size_t u0 = tr->k0 & (tr->m - 1);
+      const size_t first = len < tr->m - u0 ? len : tr->m - u0;
+      for(size_t k=0;k<2*first;k++)
+        tr->scratch[2*u0 + k] = (float)(spec[2*tr->k0 + k]*scale);
+      for(size_t k=0;k<2*(len - first);k++)
+        tr->scratch[k] = (float)(spec[2*(tr->k0 + first) + k]*scale);
+    }
     if(ap_mf_set_template(tr->mf,t,tr->scratch)) return -1;
     if(tr->g16 && ap_gate16_set_template(tr->g16,t,tr->scratch)) return -1;
   }
@@ -576,7 +647,8 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
     for(size_t k=0;k<p->k;k++){
       if(!isfinite(power[k]) || power[k]<0) return -1;
       total+=power[k];
-      for(int i=0;i<p->ntiers;i++) if(k<p->tier[i].m) low[i]+=power[k];
+      for(int i=0;i<p->ntiers;i++)
+        if(k>=p->tier[i].k0 && k<tier_khi(p,&p->tier[i])) low[i]+=power[k];
     }
     if(total<=0) return -1;
     for(int i=0;i<p->ntiers;i++) p->tier[i].ref_f=(float)(low[i]/total);
@@ -601,12 +673,11 @@ static int set_data_tiers(ap_hmf_plan *p,int d,const float *spec,int eager){
       continue;
     }
     if(i==0 && tr->g16 && !p->q15){
-      if(ap_gate16_set_data(tr->g16,d,spec)) return -1;
+      if(ingest_tier_data(p,tr,d,spec,0,1)) return -1;
       if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
       continue;
     }
-    if(ap_mf_set_data(tr->mf,d,spec)) return -1;
-    if(tr->g16 && ap_gate16_set_data(tr->g16,d,spec)) return -1;
+    if(ingest_tier_data(p,tr,d,spec,1,1)) return -1;
     if(tr->pending[d]){ tr->pending[d]=0; tr->npending--; }
   }
   return 0;
@@ -646,15 +717,17 @@ int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
       double re=spec[2*k],im=spec[2*k+1];
       double pwr=re*re+im*im;
       pos_pow+=pwr;
-      for(int i=0;i<p->ntiers;i++) if(k<p->tier[i].m) low[i]+=pwr;
+      for(int i=0;i<p->ntiers;i++)
+        if(k>=p->tier[i].k0 && k<tier_khi(p,&p->tier[i])) low[i]+=pwr;
     }
     total=dc_pow+nyq_pow+2.0*pos_pow;
-    for(int i=0;i<p->ntiers;i++) low[i]+=dc_pow;
+    for(int i=0;i<p->ntiers;i++) if(p->tier[i].k0==0) low[i]+=dc_pow;
   } else {
     for(size_t k=0;k<p->k;k++){
       double re=spec[2*k],im=spec[2*k+1],power=re*re+im*im;
       total+=power;
-      for(int i=0;i<p->ntiers;i++) if(k<p->tier[i].m) low[i]+=power;
+      for(int i=0;i<p->ntiers;i++)
+        if(k>=p->tier[i].k0 && k<tier_khi(p,&p->tier[i])) low[i]+=power;
     }
   }
   for(int i=0;i<p->ntiers;i++){
@@ -1225,7 +1298,7 @@ static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
   for(int j=0;tr->npending && j<count;j++){
     const int d=d0+ds[j];
     if(tr->pending[d]){
-      if(ap_mf_set_data(tr->mf,d,p->dspec[d])) return -1;
+      if(ingest_tier_data(p,tr,d,p->dspec[d],1,0)) return -1;
       tr->pending[d]=0; tr->npending--;
     }
   }
@@ -1271,7 +1344,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(i==0 && (p->q15 || !tr->g16) && tr->npending){
       for(int d=d0;d<d0+nd;d++)
         if(tr->pending[d]){
-          if(ap_mf_set_data(tr->mf,d,p->dspec[d])) return -1;
+          if(ingest_tier_data(p,tr,d,p->dspec[d],1,0)) return -1;
           tr->pending[d]=0; tr->npending--;
         }
     }

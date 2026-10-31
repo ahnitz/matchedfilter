@@ -206,6 +206,11 @@ int ap_hmf_set_thresholds(ap_hmf_plan *p, const float *thr, int ntiers);
 int ap_hmf_thresholds(const ap_hmf_plan *p, float *thr);
 /* The chain's bands (bands may be NULL); returns the number of tiers. */
 int ap_hmf_chain(const ap_hmf_plan *p, size_t *bands);
+/* Starting fine bin k0 per tier (0 selects [0, m); k0 > 0 wraps [k0, min(k0+m, n/2))
+   into cyclic slots k & (m-1) with zero twiddles). Changing offsets marks loaded
+   templates stale; re-call ap_hmf_set_reference afterwards when a reference is active. */
+int ap_hmf_set_band_offsets(ap_hmf_plan *p, const size_t *k0s, int ntiers);
+int ap_hmf_band_offsets(const ap_hmf_plan *p, size_t *k0s);
 /* Pairs that passed tier `tier` and the ticks spent in it; tier == ntiers is
    the refine (refined pairs, refine ticks). Always counted. */
 int ap_hmf_tier_stats(const ap_hmf_plan *p, int tier, long *passed, unsigned long long *ticks);

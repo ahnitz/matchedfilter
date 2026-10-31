@@ -63,6 +63,7 @@ def engine_misses(power, n, chain, fd, inj, window=None, seed=11):
     full = mf.MatchedFilter(n, 1, 1)
     full.set_templates(np.conj(h)[None, :])
     hm = _core.HMF(n, 1, 1, list(chain), 8)
+    hm.set_band_offsets(list(plan["offsets"]))
     hm.set_reference(power.astype(np.float32))
     hm.set_thresholds(thr)
     hm.set_template(0, np.conj(h))

@@ -35,14 +35,15 @@ def _uncovered_message(n, snr, fd):
     )
 
 
-def _band_features(power, m):
-    """(in-band fraction, effective bandwidth in bins) at band m."""
+def _band_features(power, m, k0=0):
+    """(in-band fraction, effective bandwidth in bins) at band m starting at k0."""
     p = np.asarray(power, dtype=np.float64)
     p = np.where(p > 0, p, 0.0)
     tot = p.sum()
     if tot <= 0:
         return 0.0, 1.0
-    inb = p[:m]
+    k0, khi = _gatechain._band_slice(len(p), m, k0)
+    inb = p[k0:khi]
     s = inb.sum()
     if s <= 0:
         return 0.0, 1.0
@@ -62,7 +63,10 @@ def _uncovered_reference(power, n):
     refine, so the hierarchical method does not apply. See `_BEFF_MIN`.
     """
     bands = _gatechain.candidate_bands(n)
-    return bool(bands) and all(_band_features(power, b)[1] < _BEFF_MIN for b in bands)
+    return bool(bands) and all(
+        _band_features(power, b, _gatechain.band_offset(power, n, b))[1] < _BEFF_MIN
+        for b in bands
+    )
 
 
 def _normalize_chain(chain, n):
@@ -115,6 +119,7 @@ class _Resolved(NamedTuple):
     reach: Optional[float]           # the model's per-pair refine probability, or None
     fractions: Optional[tuple]       # each tier's share of the reference's power, or None
     direct_hw: Optional[int]         # the CPU direct refine's window half-width, or None
+    offsets: tuple = ()              # per-tier starting fine bin k0
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -326,8 +331,17 @@ class HierarchicalFilter(MatchedFilter):
                 if x is not None:
                     plan.set_template(i, x)
 
+    def _desired_offsets(self, chain):
+        """Per-tier starting fine bins k0: model-selected offsets when calibrating from a
+        reference profile, or zeros when explicit thresholds bypass the model."""
+        if self._pending_ref is not None and self._cal_thr is None:
+            return tuple(int(_gatechain.band_offset(self._pending_ref, self.n, b)) for b in chain)
+        return (0,) * len(chain)
+
     def _restore_into(self, plan, templates=None):
         """Replay reference, templates and data into a freshly built plan."""
+        if hasattr(plan, "set_band_offsets"):
+            plan.set_band_offsets(list(self._desired_offsets(self._chain)))
         if self._pending_ref is not None:
             plan.set_reference(self._pending_ref)
         if templates is None:
@@ -374,6 +388,11 @@ class HierarchicalFilter(MatchedFilter):
         d = self.__dict__
         want_real = bool(d.get("_want_real", False))
         if d.get("_applied_plan") is not plan or d.get("_applied_res") is not r:
+            if hasattr(plan, "band_offsets") and plan.band_offsets() != r.offsets:
+                plan.set_band_offsets(list(r.offsets))
+                if self._pending_ref is not None:
+                    plan.set_reference(self._pending_ref)
+                self._reload_templates()
             plan.set_thresholds(list(r.thresholds))
             taps = getattr(self, "_taps", None)
             if taps is not None:
@@ -402,18 +421,20 @@ class HierarchicalFilter(MatchedFilter):
             self._chain = self._choose_chain(); self._q15 = self._arm_q15(self._chain)
         chain = tuple(self._chain)
         thr = tuple(self._thresholds(required=True))
+        offsets = self._desired_offsets(chain)
         f = hw = None
         if self._pending_ref is not None:
             ref = np.asarray(self._pending_ref, dtype=np.float64)
             tot = ref.sum()
-            f = tuple(float(ref[:b].sum() / tot) if tot > 0 else 0.0 for b in chain)
+            f = tuple(float(ref[slice(*_gatechain._band_slice(self.n, b, k0))].sum() / tot)
+                      if tot > 0 else 0.0 for b, k0 in zip(chain, offsets))
         if (self.device.kind == 'cpu' and getattr(self, "_taps", None) is not None
                 and _direct_refine_enabled() and self._cal_thr is None):
             # the model's plan: its thresholds and half-width share the budget. Explicit
             # thresholds carry their own guarantee, which a window would add to: transform.
             hw = getattr(self, "_plan_halfwidth", None)
         r = self._resolved = _Resolved(chain, thr, getattr(self, "_refine_reach", None), f,
-                                       hw)
+                                       hw, offsets)
         return r
 
     def _direct_price(self):
@@ -539,11 +560,15 @@ class HierarchicalFilter(MatchedFilter):
         if power is None:
             self._pending_ref = None
             if self._mf is not None:
+                if hasattr(self._mf, "set_band_offsets"):
+                    self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
                 self._mf.set_reference(None)
                 self._reload_templates()
             return
         self._pending_ref = p.copy()
         if self._mf is not None:
+            if hasattr(self._mf, "set_band_offsets"):
+                self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
             self._mf.set_reference(p)
             self._reload_templates()
 
@@ -759,37 +784,57 @@ class HierarchicalFilter(MatchedFilter):
         r = self._resolve()
         return r.chain, r.fractions, r.thresholds
 
-    def _coarse_templates(self, H, bands, f):
-        """Coarse templates per tier: the first b bins scaled by 1/sqrt(band fraction)."""
+    def _coarse_templates(self, H, bands, f, offsets=None):
+        """Coarse templates per tier: active band [k0, khi) wrapped to cyclic slots and scaled
+        by 1/sqrt(band fraction)."""
+        offsets = (0,) * len(bands) if offsets is None else offsets
         out = []
-        for i, b in enumerate(bands):
+        power = total = None
+        for i, (b, k0) in enumerate(zip(bands, offsets)):
+            k0, khi = _gatechain._band_slice(self.n, b, k0)
             if f is None:
-                power = H.real * H.real + H.imag * H.imag
-                total = power.sum(axis=1, dtype=np.float64)
-                frac = np.divide(power[:, :b].sum(axis=1, dtype=np.float64), total,
+                if power is None:
+                    power = H.real * H.real + H.imag * H.imag
+                    total = power.sum(axis=1, dtype=np.float64)
+                frac = np.divide(power[:, k0:khi].sum(axis=1, dtype=np.float64), total,
                                  out=np.zeros_like(total), where=total > 0)
                 sc = np.divide(1.0, np.sqrt(frac), out=np.zeros_like(frac), where=frac > 0)[:, None].astype(np.float32)
             else:
                 sc = np.float32(1.0 / np.sqrt(f[i])) if f[i] > 0 else np.float32(0.0)
-            out.append(H[:, :b] * sc)
+            if k0 == 0:
+                out.append(H[:, :b] * sc)
+            else:
+                ct = np.zeros((H.shape[0], b), dtype=np.complex64)
+                length = max(khi - k0, 0)
+                u0 = k0 & (b - 1)
+                first = min(length, b - u0)
+                if first > 0:
+                    ct[:, u0:u0 + first] = H[:, k0:k0 + first] * sc
+                if length > first:
+                    ct[:, :length - first] = H[:, k0 + first:khi] * sc
+                out.append(ct)
         return out
 
     def _gate_args(self, H, threshold):
         """What a dispatch of templates H passes the backend's gate chain: (chain, coarse
-        templates per tier, per-tier thresholds, and the keywords of a second tier, empty for a
-        one-tier chain). The coarse templates are cut again only when H, the chain or its band
-        fractions change, or the templates were set again."""
-        chain, f, thr = self._gpu_calibration(threshold)
+        templates per tier, per-tier thresholds, and the keywords of a second tier and active
+        band offsets). The coarse templates are cut again only when H, the chain, its offsets
+        or its band fractions change, or the templates were set again."""
+        r = self._resolve()
+        chain, f, thr, offsets = r.chain, r.fractions, r.thresholds, r.offsets
         if len(chain) > 2:
             # The kernels take a first (cascade) band and a last band; every chain a GPU plan
             # is given is bounded by _MAX_TIERS["gpu"].
             raise RuntimeError("a GPU chain has at most two tiers; got %s" % (chain,))
-        ck = (chain, f, H.ctypes.data, H.shape)
+        ck = (chain, offsets, f, H.ctypes.data, H.shape)
         if getattr(self, "_ckey", None) != ck or self._tdirty:
-            self._ct = self._coarse_templates(H, chain, f)
+            self._ct = self._coarse_templates(H, chain, f, offsets)
             self._ckey = ck
+            self._tdirty = True
         ct = self._ct
         extra = {} if len(chain) == 1 else dict(cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1])
+        if any(offsets):
+            extra["band_offsets"] = offsets
         return chain, ct, thr, extra
 
     def _grouped_dispatch(self, n, spec, H, groups, binsize, threshold, **kw):
@@ -828,6 +873,11 @@ class HierarchicalFilter(MatchedFilter):
             else:
                 self._ensure()
         return tuple(self._chain)
+
+    @property
+    def band_offsets(self):
+        """Per-tier starting fine bin `k0` of the active coarse bands."""
+        return tuple(self._resolve().offsets)
 
     @property
     def stats(self):

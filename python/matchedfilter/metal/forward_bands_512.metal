@@ -291,6 +291,7 @@ struct EntryPointParams_0
 {
     uint seriesLength_0;
     uint B_0;
+    uint k0_0;
     uint seriesLayout_0;
 };
 
@@ -811,6 +812,12 @@ uint slotToIndex_0(uint slot_0)
 {
 
 #line 2164
+    bool _S28;
+
+#line 2164
+    float2 x_1;
+
+#line 2164
     thread KernelContext_0 kernelContext_4;
 
 #line 2164
@@ -835,10 +842,10 @@ uint slotToIndex_0(uint slot_0)
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
-    uint _S28 = gid_0.x;
+    uint _S29 = gid_0.x;
 
 #line 2173
-    uint _S29 = entryPointParams_starts_1[_S28];
+    uint _S30 = entryPointParams_starts_1[_S29];
     thread array<float2, int(16)> r_5;
 
 #line 2174
@@ -859,15 +866,12 @@ uint slotToIndex_0(uint slot_0)
 
 #line 2176
         uint offset_0 = tid_1 + 32U * k_0;
-        float2 _S30 = float2(0.0f, 0.0f);
-
-#line 2177
-        bool _S31;
-        if(_S29 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
+        float2 _S31 = float2(0.0f, 0.0f);
+        if(_S30 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
 #line 2178
-            _S31 = offset_0 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S29);
+            _S28 = offset_0 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S30);
 
 #line 2178
         }
@@ -875,20 +879,17 @@ uint slotToIndex_0(uint slot_0)
         {
 
 #line 2178
-            _S31 = false;
+            _S28 = false;
 
 #line 2178
         }
 
 #line 2178
-        float2 x_1;
-
-#line 2178
-        if(_S31)
+        if(_S28)
         {
 
 #line 2178
-            x_1 = seriesSample_0((&kernelContext_4)->entryPointParams_series_0, _S29 + offset_0, (&kernelContext_4)->entryPointParams_0->seriesLayout_0);
+            x_1 = seriesSample_0((&kernelContext_4)->entryPointParams_series_0, _S30 + offset_0, (&kernelContext_4)->entryPointParams_0->seriesLayout_0);
 
 #line 2178
         }
@@ -896,7 +897,7 @@ uint slotToIndex_0(uint slot_0)
         {
 
 #line 2178
-            x_1 = _S30;
+            x_1 = _S31;
 
 #line 2178
         }
@@ -932,11 +933,69 @@ uint slotToIndex_0(uint slot_0)
 
 #line 2184
         uint index_0 = slotToIndex_0(tid_1 * 16U + k_0);
-        if(index_0 < ((&kernelContext_4)->entryPointParams_0->B_0))
+        if(((&kernelContext_4)->entryPointParams_0->k0_0) == 0U)
         {
 
+#line 2186
+            if(index_0 < ((&kernelContext_4)->entryPointParams_0->B_0))
+            {
+
+#line 2186
+                *((&kernelContext_4)->entryPointParams_bands_0+(_S29 * (&kernelContext_4)->entryPointParams_0->B_0 + index_0)) = packed_float2(float2(r_5[k_0].x, - r_5[k_0].y)) ;
+
+#line 2186
+            }
+
 #line 2185
-            *((&kernelContext_4)->entryPointParams_bands_0+(_S28 * (&kernelContext_4)->entryPointParams_0->B_0 + index_0)) = packed_float2(float2(r_5[k_0].x, - r_5[k_0].y)) ;
+        }
+        else
+        {
+            if(index_0 >= ((&kernelContext_4)->entryPointParams_0->k0_0))
+            {
+
+#line 2188
+                _S28 = index_0 < ((&kernelContext_4)->entryPointParams_0->k0_0 + (&kernelContext_4)->entryPointParams_0->B_0);
+
+#line 2188
+            }
+            else
+            {
+
+#line 2188
+                _S28 = false;
+
+#line 2188
+            }
+
+#line 2188
+            if(_S28)
+            {
+
+#line 2188
+                packed_float2 device* _S32 = (&kernelContext_4)->entryPointParams_bands_0+(_S29 * (&kernelContext_4)->entryPointParams_0->B_0 + (index_0 & ((&kernelContext_4)->entryPointParams_0->B_0 - 1U)));
+
+                if(index_0 < 256U)
+                {
+
+#line 2190
+                    x_1 = float2(r_5[k_0].x, - r_5[k_0].y);
+
+#line 2190
+                }
+                else
+                {
+
+#line 2190
+                    x_1 = float2(0.0f, 0.0f);
+
+#line 2190
+                }
+
+#line 2190
+                *_S32 = packed_float2(x_1) ;
+
+#line 2188
+            }
 
 #line 2185
         }
@@ -947,6 +1006,6 @@ uint slotToIndex_0(uint slot_0)
 #line 2183
     }
 
-#line 2188
+#line 2193
     return;
 }

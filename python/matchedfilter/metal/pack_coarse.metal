@@ -31,6 +31,7 @@ struct EntryPointParams_0
     uint count_0;
     uint packed_0;
     uint scaleBits_0;
+    uint k0_0;
 };
 
 
@@ -59,40 +60,75 @@ struct KernelContext_0
 #line 7
     (&kernelContext_0)->entryPointParams_coarse_0 = entryPointParams_coarse_1;
 
-#line 13
+#line 14
     uint i_0 = tid_0.x;
     if(i_0 >= (entryPointParams_1->count_0))
     {
 
-#line 14
+#line 15
         return;
     }
 
-#line 14
-    float2 _S2 = float2(*((&kernelContext_0)->entryPointParams_data_0+((i_0 >> (firstbithigh_0((&kernelContext_0)->entryPointParams_0->band_0))) * (&kernelContext_0)->entryPointParams_0->n_0 + (i_0 & ((&kernelContext_0)->entryPointParams_0->band_0 - 1U))))) ;
+    uint slot_0 = i_0 & ((&kernelContext_0)->entryPointParams_0->band_0 - 1U);
+    uint row_0 = i_0 >> (firstbithigh_0((&kernelContext_0)->entryPointParams_0->band_0));
+    float2 _S2 = float2(0.0f, 0.0f);
 
+#line 20
+    float2 x_0;
+    if(((&kernelContext_0)->entryPointParams_0->k0_0) == 0U)
+    {
 
+#line 21
+        x_0 = float2(*((&kernelContext_0)->entryPointParams_data_0+(row_0 * (&kernelContext_0)->entryPointParams_0->n_0 + slot_0))) ;
+
+#line 21
+    }
+    else
+    {
+
+        uint k_0 = (&kernelContext_0)->entryPointParams_0->k0_0 + ((slot_0 - (((&kernelContext_0)->entryPointParams_0->k0_0) & ((&kernelContext_0)->entryPointParams_0->band_0 - 1U))) & ((&kernelContext_0)->entryPointParams_0->band_0 - 1U));
+        if(k_0 < (((&kernelContext_0)->entryPointParams_0->n_0) >> 1U))
+        {
+
+#line 26
+            x_0 = float2(*((&kernelContext_0)->entryPointParams_data_0+(row_0 * (&kernelContext_0)->entryPointParams_0->n_0 + k_0))) ;
+
+#line 26
+        }
+        else
+        {
+
+#line 26
+            x_0 = _S2;
+
+#line 26
+        }
+
+#line 21
+    }
+
+#line 29
     if(((&kernelContext_0)->entryPointParams_0->packed_0) != 0U)
     {
 
-#line 18
+#line 30
         float s_0 = (as_type<float>(((&kernelContext_0)->entryPointParams_0->scaleBits_0)));
-        *((&kernelContext_0)->entryPointParams_coarse_0+i_0) = (as_type<ushort>((half)((_S2.x * s_0)))) | ((as_type<ushort>((half)((_S2.y * s_0)))) << 16U);
+        *((&kernelContext_0)->entryPointParams_coarse_0+i_0) = (as_type<ushort>((half)((x_0.x * s_0)))) | ((as_type<ushort>((half)((x_0.y * s_0)))) << 16U);
 
-#line 17
+#line 29
     }
     else
     {
 
         uint _S3 = 2U * i_0;
 
-#line 21
-        *((&kernelContext_0)->entryPointParams_coarse_0+_S3) = (as_type<uint>((_S2.x)));
-        *((&kernelContext_0)->entryPointParams_coarse_0+(_S3 + 1U)) = (as_type<uint>((_S2.y)));
+#line 33
+        *((&kernelContext_0)->entryPointParams_coarse_0+_S3) = (as_type<uint>((x_0.x)));
+        *((&kernelContext_0)->entryPointParams_coarse_0+(_S3 + 1U)) = (as_type<uint>((x_0.y)));
 
-#line 17
+#line 29
     }
 
-#line 24
+#line 36
     return;
 }

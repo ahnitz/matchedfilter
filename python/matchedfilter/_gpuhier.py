@@ -351,7 +351,7 @@ class HierOps:
     def _hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None, threshold=0.0,
                    window=None, upload_data=True, upload_tmpl=True, cascade_band=None, ct1=None,
                    raw_thr1=None, slot=None, async_submit=False, sparse=False, row_windows=None,
-                   handle_out=None, refine_reach=None, nbins=None):
+                   handle_out=None, refine_reach=None, nbins=None, band_offsets=None):
         """Hierarchical peaks: (idx, val) shaped (data rows, templates, bins) as peaks returns,
         or a _SparsePeaks when sparse, from one recording that gates every pair at a narrow
         band (one tier, or a cascade of two) and refines only the survivors at n.
@@ -376,7 +376,8 @@ class HierOps:
                 lambda w, ud, ut: self.hier_peaks(
                     n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
                     window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
-                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, refine_reach=refine_reach),
+                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, refine_reach=refine_reach,
+                    band_offsets=band_offsets),
                 lo, hi, binsize, MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
         if cascade_band is not None:
             tiers = ((int(cascade_band), ct0, float(raw_thr)), (int(band), ct1, float(raw_thr1)))
@@ -389,6 +390,13 @@ class HierOps:
             if ct.shape != (nt, b):
                 raise ValueError("tier-%d coarse templates must be (%d, %d), got %s"
                                  % (i, nt, b, ct.shape))
+        if band_offsets is None:
+            k0s = (0,) * len(tiers)
+        else:
+            k0s = tuple(int(x) for x in band_offsets)
+            if len(k0s) != len(tiers) or any(x < 0 or (x > 0 and x >= n // 2) for x in k0s):
+                raise ValueError("band_offsets must have one valid offset (< n // 2) per tier")
+        shifted = any(k0s)
         bands = tuple(b for b, _, _ in tiers)
         half = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
         layout0 = self._coarse_layout(bands[0]) if half else None
@@ -398,23 +406,18 @@ class HierOps:
 
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
         # The feed: claim the deferred forward of these spectra when its bands move fewer
-        # bytes than the full spectra (band_forward_wanted). It is a function of the call,
-        # never of earlier ones: the feeds round differently (different FFT routes before
-        # the fp16 step), so a fraction measured on an earlier call made a batch and the same
-        # calls made one by one disagree on pairs within an fp16 step of a gate's threshold.
-        # The call's refine-block fraction lies between refine_reach (a pair's modelled
-        # probability of reaching the refine; a block refines at least as often as any of its
-        # pairs) and 1 - (1 - reach)^templates (independent pairs). The lower bound prices
-        # it, so the full forward is taken only when it moves fewer bytes for certain: the
-        # upper bound took it on the production profile, where bank neighbours trigger
-        # together, and lost 3.8% on the 8060S ladder.
-        feed = "inplace" if self.inplace_feed else "pack"
+        # bytes than the full spectra (band_forward_wanted). With shifted active bands (k0 > 0),
+        # in-place reads at row start cannot wrap [k0, k0+b) into cyclic slots, so un-claimed
+        # calls pack via packCoarse and claimed forwards use forwardTier0 (or seriesForwardBands
+        # for a single tier).
+        feed = "inplace" if (self.inplace_feed and not shifted) else "pack"
         claim = None
         banded = band_forward_wanted(
             n, top, None if refine_reach is None else min(max(float(refine_reach), 0.0), 1.0),
             forced=self.__dict__.get("feed_forced"))
         tier0_ok = half and self._shipped("fwd_tier0", n)
-        if dv is not None and (tier0_ok or self.inplace_feed) and banded:
+        bands_ok = self.inplace_feed and (not shifted or len(tiers) == 1)
+        if dv is not None and (tier0_ok or bands_ok) and banded:
             claim = self._exec_claim(slot, data, nd)
             if claim is not None:
                 CLAIMS[0] += 1
@@ -422,9 +425,10 @@ class HierOps:
         # Each tier's input and its stride: the spectra rows (n), the band rows, or packed.
         ed = 0
         et = 0
+        k0_extra = (k0s,) if shifted else ()
         storage_key = ("hierstore", n, bands, nd, nt, nbins, rw_key is not None,
                        dv is not None and data.ctypes.data, tv is not None and tmpl.ctypes.data,
-                       slot if async_submit else None)
+                       slot if async_submit else None, *k0_extra)
         uploads = self._input_uploads(storage_key, data, tmpl, upload_data, upload_tmpl)
         if half:
             held = self.__dict__.setdefault("_c16_template_exp", {})
@@ -440,13 +444,13 @@ class HierOps:
         def run(way, layout=layout0):
             gate = self._gate_use(bands[1]) if len(bands) > 1 else None
             key = ("hier", n, bands, nd, nt, nbins, layout, gate, feed, way, rw_key is not None,
-                   ed, storage_key)
+                   ed, storage_key, *k0_extra)
             table = self._exec_table()
             rec = table.get(key)
             fresh = rec is None
             if fresh:
                 rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
-                                        ed, dv, tv, data, tmpl, claim)
+                                        ed, dv, tv, data, tmpl, claim, k0s)
                 table[key] = rec
             self._cache_touch(key)
             self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
@@ -465,7 +469,7 @@ class HierOps:
                 self._x_upload(rec.buffers["rws"], packed, slot)
 
             binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
-                                     et, rw is not None, layout, claim, data)
+                                     et, rw is not None, layout, claim, data, k0s)
             shape = (nd, nt, nbins)
             if handle_out is not None:
                 slots = self._call_slots(bands, half, sparse)
@@ -503,10 +507,11 @@ class HierOps:
             self._uploaded["tmpl"][storage_key] = uploads[3]
 
     def _hier_record(self, key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw, ed, dv,
-                     tv, data, tmpl, claim):
+                     tv, data, tmpl, claim, k0s=None):
         """Buffers and the recording of one call shape (see the module docstring)."""
         from ._coarse import coarse_launch
         from ._gpuexec import Arg, Record
+        k0s = (0,) * len(tiers) if k0s is None else k0s
         bands = tuple(b for b, _, _ in tiers)
         last = len(tiers) - 1
         pairs = nd * nt
@@ -566,12 +571,12 @@ class HierOps:
         if feed == "tier0":
             lst.dispatch(self._x_kernel("fwd_tier0", n), nd,
                          [Arg("series"), Arg("starts"), B["band0"], B["band1"]],
-                         (Arg("tier0", 5),))
+                         (Arg("tier0", 7),))
             lst.barrier()
             lst.stamp("forward")
         elif feed == "bands":
             lst.dispatch(self._x_kernel("fwd_bands", n), nd,
-                         [Arg("series"), Arg("starts"), B["bands"]], (Arg("bands", 3),))
+                         [Arg("series"), Arg("starts"), B["bands"]], (Arg("bands", 4),))
             lst.barrier()
             lst.stamp("forward")
         # Counts to zero (an indirect dispatch's [count, 1, 1]), in one update; dense outputs
@@ -594,7 +599,7 @@ class HierOps:
                 h = int(i == 0 and half)
                 lst.dispatch(self._x_kernel("pack", n), (nd * b + 255) // 256,
                              [bd, B["band%d" % i]],
-                             (n, b, nd * b, h, _bits(2.0 ** ed if h else 1.0)))
+                             (n, b, nd * b, h, _bits(2.0 ** ed if h else 1.0), k0s[i]))
             lst.barrier()
             lst.stamp("pack")
         # Tier inputs: (buffer, row stride in elements (0: the tier's own band), data scale
@@ -677,9 +682,10 @@ class HierOps:
         return rec
 
     def _hier_binds(self, n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed, et,
-                    rowwin, layout, claim, data):
+                    rowwin, layout, claim, data, k0s=None):
         """The per-run words and bindings of a hier_peaks call."""
         from ._coarse import coarse_launch
+        k0s = (0,) * len(tiers) if k0s is None else k0s
         pairs = nd * nt
         binds = {}
         start = (lambda first: ROWWIN_ON) if rowwin else (lambda first: first)
@@ -696,7 +702,6 @@ class HierOps:
         if len(tiers) > 1:
             b1, _, thr1 = tiers[1]
             cs1, ce1, csp1, csh1 = coarse_span(n, b1, lo, hi)
-            # nbins 0 asks a one-bin build for the gate's decision alone (tierb.slang gateOnly).
             # nbins 0 asks a one-bin build for the gate's decision alone, where it is faster.
             gate = self._gate_use(b1)
             binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF, 0 if gate else 1, 0)
@@ -708,8 +713,9 @@ class HierOps:
             binds["series"], binds["starts"] = series, starts
             binds["listed"] = (nser, code)
             b1 = tiers[1][0] if len(tiers) > 1 else 0
-            binds["tier0"] = (nser, b0, b1, _bits(2.0 ** ed if half else 1.0), code)
-            binds["bands"] = (nser, max(b for b, _, _ in tiers), code)
+            k0_1 = k0s[1] if len(k0s) > 1 else 0
+            binds["tier0"] = (nser, b0, b1, _bits(2.0 ** ed if half else 1.0), k0s[0], k0_1, code)
+            binds["bands"] = (nser, max(b for b, _, _ in tiers), k0s[0], code)
         return binds
 
     def _sparse_way(self):

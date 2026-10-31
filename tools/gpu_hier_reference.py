@@ -19,10 +19,22 @@ that, and it should be closed before the odd half is relied on.
 import numpy as np
 
 
-def band_fraction(reference, band):
+def _wrap_band(arr, band, k0):
+    arr = np.asarray(arr)
+    if k0 <= 0:
+        return arr[:band]
+    n = arr.shape[0]
+    khi = min(k0 + band, n // 2)
+    out = np.zeros(band, dtype=arr.dtype)
+    idx = np.arange(k0, khi)
+    out[idx & (band - 1)] = arr[k0:khi]
+    return out
+
+
+def band_fraction(reference, band, k0=0):
     """The SIGNAL's band fraction, which is what the scaling must use.
 
-    The coarse noise variance is s^2 * sum_{k<m} |H|^2 W against the full
+    The coarse noise variance is s^2 * sum_{k in band} |H|^2 W against the full
     sum_k |H|^2 W, so s^2 = 1/f with the same W the reference describes.
     Using the TEMPLATE's own fraction instead mis-scales the coarse output
     and moves the coarse threshold off its calibration -- which is silent,
@@ -30,10 +42,13 @@ def band_fraction(reference, band):
     """
     reference = np.asarray(reference, dtype=np.float64)
     total = reference.sum()
-    return float(reference[:band].sum() / total) if total > 0 else 0.0
+    if total <= 0:
+        return 0.0
+    khi = min(k0 + band, reference.shape[0] // 2) if k0 > 0 else band
+    return float(reference[k0:khi].sum() / total)
 
 
-def coarse_templates(template, band, f):
+def coarse_templates(template, band, f, k0=0):
     """(even, odd) coarse templates for one template spectrum.
 
     Scaled by 1/sqrt(f) so the coarse output carries the same noise level as
@@ -43,16 +58,16 @@ def coarse_templates(template, band, f):
     length.
     """
     s = 1.0 / np.sqrt(f) if f > 0 else 0.0
-    even = (np.asarray(template)[:band] * s).astype(np.complex64)
+    even = (_wrap_band(template, band, int(k0)) * s).astype(np.complex64)
     k = np.arange(band)
     odd = (even * np.exp(1j * np.pi * k / band)).astype(np.complex64)
     return even, odd
 
 
-def coarse_peak(data, template, band, f):
+def coarse_peak(data, template, band, f, k0=0):
     """(even_max, odd_max) for one pair -- the flat filter at length `band`."""
-    even_t, odd_t = coarse_templates(template, band, f)
-    d = np.asarray(data)[:band].astype(np.complex128)
+    even_t, odd_t = coarse_templates(template, band, f, k0=k0)
+    d = _wrap_band(data, band, int(k0)).astype(np.complex128)
     out = []
     for t in (even_t, odd_t):
         z = np.fft.ifft(d * np.conj(t.astype(np.complex128))) * band

@@ -167,6 +167,7 @@ def run_case(job):
 
     def engine(q15):
         e = _core.HMF(n, _B, 1, list(chain), 8)
+        e.set_band_offsets(list(plan["offsets"]))
         e.set_reference(power.astype(np.float32))
         e.set_thresholds(thr)
         e.set_template(0, hc)
@@ -184,10 +185,11 @@ def run_case(job):
         # The device's own hierarchical filter at the same chain and thresholds: on a GPU its
         # first tier is the fp16 coarse gate (its bound, or the raw maximum with
         # MF_COARSE_RAW=1), so its misses are that gate's dismissal against the flat filter.
-        gpu = mf.HierarchicalFilter(n, _B, 1, chain=tuple(chain), device=a["device"])
+        gpu = mf.HierarchicalFilter(n, _B, 1, snr=a["snr"], fd=a["fd"], chain=tuple(chain),
+                                    device=a["device"])
         gpu.set_reference(power.astype(np.float32))
         gpu.set_templates(hc[None, :])
-        gpu.set_coarse_threshold(tuple(thr))
+        gpu._thresholds = lambda required=True, _t=tuple(thr): _t
         engines["device"] = gpu
     peaks = {k: np.empty((_B, 1), mf.PEAK_DTYPE) for k in engines}
     cnt = np.empty(_B, np.int32)

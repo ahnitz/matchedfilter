@@ -36,11 +36,12 @@ from fdr_support import ALPHA, PROFILES, SNR, modelled, profile
 def _true_coarse(power, n, band, draws, seed):
     """For signals at uniformly random arrival times that the fine search detects: the band's
     coarse statistic maximised over every coarse lag of the block, as the engine computes it
-    (its band of the product over sqrt of the band's power)."""
+    (its active band of the product over sqrt of the band's power)."""
     rng = np.random.default_rng(seed)
     h = np.sqrt(power)
     k = np.arange(n)
-    R, fb = n // band, power[:band].sum()
+    k0, khi = gc._band_slice(n, band, gc.band_offset(power, n, band))
+    R, fb = n // band, power[k0:khi].sum()
     out = []
     for start in range(0, draws, 2000):
         m = min(2000, draws - start)
@@ -51,7 +52,7 @@ def _true_coarse(power, n, band, draws, seed):
         at = fine.argmax(1)
         ok = (fine[np.arange(m), at] >= SNR) & (np.abs(((at - t0 + n / 2) % n) - n / 2) <= 64)
         q = np.zeros((m, n), complex)
-        q[:, :band] = d[:, :band] * h[:band]
+        q[:, k0:khi] = d[:, k0:khi] * h[k0:khi]
         coarse = np.abs(np.fft.ifft(q, axis=1) * n)[:, ::R].max(1) / np.sqrt(fb)
         out.append(coarse[ok])
     return np.concatenate(out)
@@ -146,8 +147,15 @@ def test_signal_draws_match_a_direct_simulation(name, window):
     ps = {"fine": _ks_p(F[:, 0], fine[some])}
     for i, b in enumerate(bands):
         R = n // b
+        k0, khi = gc._band_slice(n, b, gc.band_offset(p, n, b))
         c0, c1 = (w0 // R - 1 if w0 else 0), min(-(-w1 // R) + 1, b)
-        z = np.abs(np.fft.ifft(x[:, :b], axis=1) * b)[:, c0:c1].max(1) / np.sqrt(p[:b].sum())
+        if k0 == 0:
+            cb = np.abs(np.fft.ifft(x[:, :b], axis=1) * b)
+        else:
+            q = np.zeros((M, n), complex)
+            q[:, k0:khi] = x[:, k0:khi]
+            cb = np.abs(np.fft.ifft(q, axis=1) * n)[:, ::R]
+        z = cb[:, c0:c1].max(1) / np.sqrt(p[k0:khi].sum())
         ps[b] = _ks_p(C[:, i], z[some])
         ps[(b, "kept")] = _ks_p(C[F[:, 0] >= SNR, i], z[fine >= SNR])
     _all_alike(ps, (name, window))
