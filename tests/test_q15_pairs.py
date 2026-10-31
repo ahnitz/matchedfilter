@@ -21,7 +21,8 @@ def lib():
             ("ap_mf_set_template", [P, I, P], I), ("ap_mf_q15_lanes", [P], I),
             ("ap_mf_set_q15_margin", [P, I], I),
             ("ap_mf_q15_screen", [P, I, I, I, I, F, Z, Z, P, P], I),
-            ("ap_mf_q15_pairs", [P, I, P, P, I, I, F, Z, Z, P, P], I)):
+            ("ap_mf_q15_pairs", [P, I, P, P, I, I, F, Z, Z, P, P], I),
+            ("ap_mf_q15_pairs_lag", [P, I, P, P, I, I, F, Z, Z, P, P, P], I)):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = args, res
     return lib
@@ -91,5 +92,58 @@ def test_listed_screen_rejects_out_of_range_pairs(lib):
         out = np.zeros(2, np.uint8)
         assert lib.ap_mf_q15_pairs(p, 0, ds.ctypes.data, ts.ctypes.data, 2, 0,
                                    C.c_float(1.0), 0, 256, out.ctypes.data, None) == -1
+    finally:
+        lib.ap_mf_destroy(p)
+
+
+@pytest.mark.parametrize("m", [64, 128, 256, 512, 1024])
+def test_listed_screen_lag_election_and_zero_nan_scales(lib, target, m):
+    nd, nt = 6, 20
+    rng = np.random.default_rng(1000 + m)
+    p = lib.ap_mf_create_pairbatch(m, nd, nt)
+    assert p
+    try:
+        if lib.ap_mf_q15_lanes(p) <= 0:
+            pytest.skip("no Q15 screen on this target")
+        lib.ap_mf_set_q15_margin(p, 0)
+        D = _rows(rng, nd, m)
+        T = _rows(rng, nt, m)
+        # Inject clear peaks at known lags on blocks 0..2
+        k = np.arange(m, dtype=np.float64)
+        lags_true = [m // 4 + 3, m // 2 - 5, 3 * m // 4 + 1]
+        for b, lag in enumerate(lags_true):
+            tc = T[b, :, 0] + 1j * T[b, :, 1]
+            sig = 12.0 * tc * np.exp(-2j * np.pi * k * lag / m)
+            D[b, :, 0] += sig.real.astype(np.float32)
+            D[b, :, 1] += sig.imag.astype(np.float32)
+        D[3] = 0.0                  # exact zero data block
+        D[4, 0, 0] = np.nan         # non-finite data block (must fail open)
+        T[nt - 1] = 0.0             # exact zero template
+        for d in range(nd):
+            assert lib.ap_mf_set_data(p, d, D[d].ctypes.data) == 0
+        for t in range(nt):
+            assert lib.ap_mf_set_template(p, t, T[t].ctypes.data) == 0
+        ds = np.array([0, 1, 2, 3, 4, 0], np.int32)
+        ts = np.array([0, 1, 2, 0, 0, nt - 1], np.int32)
+        lp = np.zeros(len(ds), np.uint8)
+        ls = np.zeros(len(ds), np.float32)
+        li = np.full(len(ds), -99, np.int16)
+        lo, hi = m // 8, m - m // 8
+        got = lib.ap_mf_q15_pairs_lag(p, 0, ds.ctypes.data, ts.ctypes.data, len(ds), 0,
+                                      C.c_float(2.0), lo, hi,
+                                      lp.ctypes.data, ls.ctypes.data, li.ctypes.data)
+        assert got == int(lp.sum())
+        assert list(lp[:3]) == [1, 1, 1]
+        assert list(li[:3]) == lags_true
+        # Exact-zero data (pair 3) and exact-zero template (pair 5) reject at threshold > 0
+        assert lp[3] == 0 and ls[3] == 0.0 and li[3] == -1
+        assert lp[5] == 0 and ls[5] == 0.0 and li[5] == -1
+        # Non-finite data (pair 4) fails open with stat == -1.0 and lag_idx == -1
+        assert lp[4] == 1 and ls[4] == -1.0 and li[4] == -1
+        # At threshold == 0.0, exact-zero rows pass
+        got0 = lib.ap_mf_q15_pairs_lag(p, 0, ds.ctypes.data, ts.ctypes.data, len(ds), 0,
+                                       C.c_float(0.0), lo, hi,
+                                       lp.ctypes.data, ls.ctypes.data, li.ctypes.data)
+        assert got0 == len(ds) and np.all(lp == 1)
     finally:
         lib.ap_mf_destroy(p)

@@ -264,6 +264,13 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
         _SIGNAL_CACHE.move_to_end(key)
         return hit[0] if not lags_too else hit
     sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed))
+    skey = ("sim", id(sim), n, tuple(bands), float(snr), ndet, int(seed), lags, _NF)
+    shit = _SIGNAL_CACHE.get(skey)
+    if shit is not None and shit[0] is sim:
+        _SIGNAL_CACHE.move_to_end(skey)
+        hit = shit[1]
+        _cache_put(_SIGNAL_CACHE, key, hit)
+        return hit[0] if not lags_too else hit
     while True:
         C, F, at = _signal_window(sim, n, bands, lags)
         det = np.flatnonzero(F >= snr)
@@ -277,6 +284,7 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     end = int(det[ndet - 1]) + 1 if ndet > 0 else 0
     C, F, at = C[:end], F[:end], (at[0][:end], at[1][:end])
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
+    _cache_put(_SIGNAL_CACHE, skey, (sim, hit))
     _cache_put(_SIGNAL_CACHE, key, hit)
     return hit[0] if not lags_too else hit
 
@@ -1007,9 +1015,44 @@ def _distances(sig, lags, bands, chain, snr, n):
     tier's coarse maximum, in that tier's coarse samples: the direct refine's window of
     half-width h around the coarse maximum holds the fine peak iff this is at most h
     (hmf.c refine_direct_pair)."""
+    F = sig[1]
     fat, cat = lags
-    keep = sig[1][:, 0] >= snr
-    return np.abs(fat[keep] - cat[keep, bands.index(chain[-1])]) / (n // int(chain[-1]))
+    b = int(chain[-1])
+    col = bands.index(b)
+    key = ("dist", id(F), id(fat), id(cat), col, b, float(snr), int(n))
+    hit = _KEPT.get(key)
+    if hit is not None and hit[0] is F and hit[1] is fat and hit[2] is cat:
+        _KEPT.move_to_end(key)
+        return hit[3]
+    keep = F[:, 0] >= snr
+    out = np.abs(fat[keep] - cat[keep, col]) / (n // b)
+    out.setflags(write=False)
+    _KEPT[key] = (F, fat, cat, out)
+    while len(_KEPT) > 512:
+        _KEPT.popitem(last=False)
+    return out
+
+
+def _all_halfwidths(dist, allow):
+    """Cost-independent candidate half-widths (None, hmin, ...) for search half `dist`."""
+    if dist is None or allow < 0:
+        return (None,)
+    key = ("hws", id(dist), int(allow))
+    hit = _KEPT.get(key)
+    if hit is not None and hit[0] is dist:
+        _KEPT.move_to_end(key)
+        return hit[1]
+    if dist.size > allow:
+        kth = dist.size - 1 - allow
+        hmin = max(1, int(math.ceil(np.partition(dist, kth)[kth])))
+    else:
+        hmin = 1
+    up = np.ceil(dist[dist > hmin]).astype(np.int64)
+    out = (None,) + tuple(sorted({hmin} | {int(h) for h in up}))
+    _KEPT[key] = (dist, out)
+    while len(_KEPT) > 512:
+        _KEPT.popitem(last=False)
+    return out
 
 
 def _halfwidths(dist, allow, cost, chain, n):
@@ -1026,12 +1069,10 @@ def _halfwidths(dist, allow, cost, chain, n):
     R = n // int(chain[-1])
     top = max(v for _, v in cost._refine)
     hmax = int((top / cost.direct_lag - 1.0) // (2 * R))      # 2 h R + 1 lags priced below top
-    srt = np.sort(dist)[::-1]
-    hmin = max(1, int(math.ceil(srt[allow]))) if srt.size > allow else 1
-    if hmax < hmin:
+    all_hws = _all_halfwidths(dist, allow)
+    if len(all_hws) < 2 or hmax < all_hws[1]:
         return (None,)
-    up = np.ceil(dist[dist > hmin]).astype(np.int64)
-    return (None,) + tuple(sorted({hmin} | {int(h) for h in up[up <= hmax]}))
+    return (None,) + tuple(h for h in all_hws[1:] if h <= hmax)
 
 
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
@@ -1076,22 +1117,29 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     K = int(round(float(fd) * (A.shape[0] + 1))) - 1      # the search half's budget, as the fit's
     if K < 0 or B.shape[0] < 1:
         return None
-    dA = dB = None
-    if lags is not None and cost is not None and cost.prices_direct(chain):
-        dA, dB = _halves(_distances(sig, lags, bands, chain, snr, n))
-    hws = _halfwidths(dA, _gm.window_allowance(float(fd), A.shape[0], B.shape[0]) if dA is not None
-                      else -1, cost, chain, n)
-    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune), hws)
-    cands = _CAND_CACHE.get(key) if key is not None else None
-    if cands is None:
-        dead = tuple(np.empty(0, np.int64) if h is None else np.flatnonzero(dA > h) for h in hws)
+    dA = dB = dA_all = None
+    allow = -1
+    if lags is not None:
+        dA_all, dB_all = _halves(_distances(sig, lags, bands, chain, snr, n))
+        allow = _gm.window_allowance(float(fd), A.shape[0], B.shape[0])
+        if cost is not None and cost.prices_direct(chain):
+            dA, dB = dA_all, dB_all
+    all_hws = _all_halfwidths(dA_all, allow)
+    hws = _halfwidths(dA, allow, cost, chain, n)
+    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune), all_hws)
+    hit = _CAND_CACHE.get(key) if key is not None else None
+    if hit is not None and hit[0] is sig[0] and hit[1] is noise:
+        _CAND_CACHE.move_to_end(key)
+        cands = hit[2]
+    else:
+        cand_hws = all_hws if key is not None else hws
+        dead = tuple(np.empty(0, np.int64) if h is None else np.flatnonzero(dA_all > h)
+                     for h in cand_hws)
         cands = _chain_candidates(A, noise, cols, K, prune, dead)
         if key is not None:
-            _CAND_CACHE[key] = cands
+            _CAND_CACHE[key] = (sig[0], noise, cands)
             while len(_CAND_CACHE) > _CAND_CACHE_MAX:
                 _CAND_CACHE.popitem(last=False)
-    else:
-        _CAND_CACHE.move_to_end(key)
     best = None
     for pth, preach, lasts in cands:
         for hw, last in zip(hws, lasts):
@@ -1338,7 +1386,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
         return None, []
     sig, lags = drawn
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
-    memo = ("choose", _gm._profile_sig(power), n, float(snr), float(fd), tuple(bands), window,
+    memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), window,
             int(nsim), int(nsamp))
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):

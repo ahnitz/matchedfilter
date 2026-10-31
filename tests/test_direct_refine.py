@@ -477,3 +477,33 @@ def test_straddling_window_bins_refine_per_survivor_and_price_one_bin_fraction(m
     np.testing.assert_allclose(r_dir.snr, r_fft.snr, rtol=2e-5, atol=2e-4)
 
 
+def test_multitier_q15_last_tier_supplies_coarse_lag_to_direct_refine(monkeypatch):
+    """A multi-tier plan with Q15 enabled gates its last coarse tier in Q15 at high survivor
+    density while electing each survivor's coarse argmax lag for direct time-domain refinement."""
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_GATE16", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    data = _bank(nblocks=60)
+    n, taps, counts, spec, series, layout, ref, window = data
+    if mf._core.MF(256, 1, 1).q15_lanes() == 0:
+        pytest.skip("no Q15 screen on this target")
+    hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
+                               search_window=window)
+    hf.set_reference(ref); hf.set_templates(spec); hf.set_taps(taps, counts)
+    hf.lock_arm(mf._settings.arm("q15", True))
+    thr = (1.5, hf._resolve().thresholds[1])
+    hf._execution_plan().set_thresholds(list(thr))
+    idx_q, val_q = hf.run_series(series, *layout, binsize=n, threshold=6.0, raw=True)
+    st_q = hf.direct_stats()
+    assert hf._mf.q15_stats()[1] > 0
+    assert st_q["pairs"] > 0, st_q
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+    hf_ref = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
+                                   search_window=window)
+    hf_ref.set_reference(ref); hf_ref.set_templates(spec); hf_ref.set_coarse_threshold(thr)
+    hf_ref.lock_arm(mf._settings.arm("q15", True))
+    idx_f, val_f = hf_ref.run_series(series, *layout, binsize=n, threshold=6.0, raw=True)
+    assert (idx_f >= 0).sum() > 15
+    np.testing.assert_array_equal(idx_q, idx_f)
+    m = idx_f >= 0
+    np.testing.assert_allclose(val_q[m], val_f[m], rtol=2e-5, atol=1e-4)

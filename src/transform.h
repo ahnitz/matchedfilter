@@ -189,7 +189,10 @@ int ap_q15_slab8(const ap_plan *p, const float *const *rr, const float *const *r
 int ap_q15_screen_perm(const ap_plan *p, const int16_t *dr, const int16_t *di,
                        const int16_t *tr, const int16_t *ti, long tw, const int16_t *dsel,
                        const int16_t *tsel, size_t start, size_t end, const int16_t *lanethr,
-                       uint64_t *bits, int16_t *lanemax, void *scratch);
+                       uint64_t *bits, int16_t *lanemax, int16_t *laneidx, void *scratch);
+int ap_mf_q15_pairs_lag(ap_mf_plan *p, int d0, const int *dsel, const int *tsel, int npairs,
+                        int t0, float threshold, size_t start, size_t end, unsigned char *pass,
+                        float *stat, int16_t *lag_idx);
 /* A partial lane group's tile, at any N ap_q15_screen takes (ap_q15_has_tile). dq has QW/T
    consecutive [N][3] blocks; tr/ti retain stride QW and contain at least T lanes from the
    selected offset. Output lane b*T+l is data block b, template l. */

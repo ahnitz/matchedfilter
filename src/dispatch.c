@@ -275,11 +275,12 @@ int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const 
 int ap_q15_screen_perm(const ap_plan *p, const int16_t *dr, const int16_t *di,
                        const int16_t *tr, const int16_t *ti, long tw, const int16_t *dsel,
                        const int16_t *tsel, size_t start, size_t end, const int16_t *lanethr,
-                       uint64_t *bits, int16_t *lanemax, void *scratch){
+                       uint64_t *bits, int16_t *lanemax, int16_t *laneidx, void *scratch){
   const ap_backend *b=p ? p->be : NULL;
   if(!b || !b->q15_screen_perm || !dr || !di || !tr || !ti || !dsel || !tsel || !lanethr ||
      !bits || !scratch) return -1;
-  return b->q15_screen_perm(p->n,dr,di,tr,ti,tw,dsel,tsel,start,end,lanethr,bits,lanemax,scratch);
+  return b->q15_screen_perm(p->n,dr,di,tr,ti,tw,dsel,tsel,start,end,lanethr,bits,lanemax,laneidx,
+                            scratch);
 }
 
 int ap_q15_slab8(const ap_plan *p, const float *const *rr, const float *const *ri,

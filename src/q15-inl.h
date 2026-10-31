@@ -44,12 +44,6 @@ using ap_qtag = hn::CappedTag<int16_t, 2 * AP_W>;
 constexpr ap_qtag AP_DQ{};
 constexpr int AP_QW = (int)HWY_MAX_LANES_D(ap_qtag);
 typedef hn::Vec<ap_qtag> vq;
-/* Listed pairs (q15_screen_perm): each lane's operands are looked up in a vector of one element
-   across QW data blocks (dix) and across two groups of QW templates (tix, the second group TW
-   further on). Names in scope inside the *_prod_perm codelets. */
-typedef hn::IndicesFromD<ap_qtag> qidx;
-#define Q_DLOAD(p) hn::TableLookupLanes(Q_LOADU(p), dix)
-#define Q_TLOAD(p) hn::TwoTablesLookupLanes(AP_DQ, Q_LOADU(p), Q_LOADU((p) + TW), tix)
 
 #define Q_ZERO()       hn::Zero(AP_DQ)
 #define Q_SET1(x)      hn::Set(AP_DQ, (int16_t)(x))
@@ -57,6 +51,70 @@ typedef hn::IndicesFromD<ap_qtag> qidx;
 #define Q_ADD(a, b)    hn::Add((a), (b))
 #define Q_SUB(a, b)    hn::Sub((a), (b))
 #define Q_MUL(a, b)    hn::MulFixedPoint15((a), (b))
+
+/* Listed pairs (q15_screen_perm): each lane's operands are looked up in a vector of one element
+   across QW data blocks (dix) and across two groups of QW templates (tix, the second group TW
+   further on). On AVX2, precomputed vpshufb byte masks replace Highway's multi-instruction
+   cross-lane int16 table lookup inside every codelet load. */
+#undef Q_DLOAD
+#undef Q_TLOAD
+#if HWY_TARGET == HWY_AVX2
+struct ap_qidx_avx2 { __m256i s0, s1, s2, s3; };
+typedef const ap_qidx_avx2 *qidx;
+static HWY_INLINE void q15_make_dix_avx2(ap_qidx_avx2 *out, const int16_t *dsel){
+  alignas(32) uint8_t b0[32], b1[32];
+  for(int l = 0; l < 16; l++){
+    const int h = l >> 3, idx = dsel[l] & 15, sh = idx >> 3;
+    const uint8_t lo = (uint8_t)(2 * (idx & 7)), hi = (uint8_t)(lo + 1);
+    if(sh == h){ b0[2 * l] = lo; b0[2 * l + 1] = hi; b1[2 * l] = 0x80; b1[2 * l + 1] = 0x80; }
+    else       { b0[2 * l] = 0x80; b0[2 * l + 1] = 0x80; b1[2 * l] = lo; b1[2 * l + 1] = hi; }
+  }
+  out->s0 = _mm256_load_si256((const __m256i *)b0);
+  out->s1 = _mm256_load_si256((const __m256i *)b1);
+}
+static HWY_INLINE void q15_make_tix_avx2(ap_qidx_avx2 *out, const int16_t *tsel, long TW){
+  alignas(32) uint8_t b0[32], b1[32], b2[32], b3[32];
+  memset(b0, 0x80, 32); memset(b1, 0x80, 32);
+  memset(b2, 0x80, 32); memset(b3, 0x80, 32);
+  for(int l = 0; l < 16; l++){
+    const int h = l >> 3, raw = tsel[l] & 31;
+    const int idx = TW ? raw : (raw & 15);
+    const int g = idx >> 4, sh = (idx >> 3) & 1;
+    const uint8_t lo = (uint8_t)(2 * (idx & 7)), hi = (uint8_t)(lo + 1);
+    if(g == 0){
+      if(sh == h){ b0[2 * l] = lo; b0[2 * l + 1] = hi; }
+      else       { b1[2 * l] = lo; b1[2 * l + 1] = hi; }
+    } else {
+      if(sh == h){ b2[2 * l] = lo; b2[2 * l + 1] = hi; }
+      else       { b3[2 * l] = lo; b3[2 * l + 1] = hi; }
+    }
+  }
+  out->s0 = _mm256_load_si256((const __m256i *)b0);
+  out->s1 = _mm256_load_si256((const __m256i *)b1);
+  out->s2 = _mm256_load_si256((const __m256i *)b2);
+  out->s3 = _mm256_load_si256((const __m256i *)b3);
+}
+static HWY_INLINE vq q15_dload_avx2(const int16_t *p, const ap_qidx_avx2 *ix){
+  const __m256i v = _mm256_loadu_si256((const __m256i *)p);
+  const __m256i vs = _mm256_permute4x64_epi64(v, 0x4E);
+  return vq{_mm256_or_si256(_mm256_shuffle_epi8(v, ix->s0), _mm256_shuffle_epi8(vs, ix->s1))};
+}
+static HWY_INLINE vq q15_tload_avx2(const int16_t *p, long TW, const ap_qidx_avx2 *ix){
+  const __m256i v0 = _mm256_loadu_si256((const __m256i *)p);
+  const __m256i v0s = _mm256_permute4x64_epi64(v0, 0x4E);
+  const __m256i v1 = _mm256_loadu_si256((const __m256i *)(p + TW));
+  const __m256i v1s = _mm256_permute4x64_epi64(v1, 0x4E);
+  const __m256i a = _mm256_or_si256(_mm256_shuffle_epi8(v0, ix->s0), _mm256_shuffle_epi8(v0s, ix->s1));
+  const __m256i b = _mm256_or_si256(_mm256_shuffle_epi8(v1, ix->s2), _mm256_shuffle_epi8(v1s, ix->s3));
+  return vq{_mm256_or_si256(a, b)};
+}
+#define Q_DLOAD(p) q15_dload_avx2((p), dix)
+#define Q_TLOAD(p) q15_tload_avx2((p), TW, tix)
+#else
+typedef hn::IndicesFromD<ap_qtag> qidx;
+#define Q_DLOAD(p) hn::TableLookupLanes(Q_LOADU(p), dix)
+#define Q_TLOAD(p) hn::TwoTablesLookupLanes(AP_DQ, Q_LOADU(p), Q_LOADU((p) + TW), tix)
+#endif
 /* acc +- round(a*b / 2^15): AArch64 SQRDMLAH/SQRDMLSH (FEAT_RDM, every Apple core) in one
    instruction. acc is an integer, so rounding the sum rounds the product: Q_MLAH equals
    Q_ADD(acc, Q_MUL(a, b)) except where Q_MUL alone saturates (a = b = -32768, outside the
@@ -180,7 +238,7 @@ static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *re
 static HWY_INLINE int q15_finish(size_t N, int M1, int M2,
                                  const ap_q15_twiddles *tw, vq *X, vq *Xi,
                                  size_t ws, size_t we, const int16_t *lanethr,
-                                 uint64_t *bits, int16_t *lanemax){
+                                 uint64_t *bits, int16_t *lanemax, int16_t *laneidx){
   const int st = M1 + 1;
   if(we > N) we = N;
 #if AP_Q15_VREGS32
@@ -197,7 +255,7 @@ static HWY_INLINE int q15_finish(size_t N, int M1, int M2,
      L1D from the OS (ap_l1d_bytes); unknown, the 512-bit width stands in. */
   const size_t l1d = ap_l1d_bytes();
   const int fuse = l1d ? ap_q15_batch_bytes(N, AP_QW) > l1d : HWY_MAX_BYTES >= 64;
-  if(fuse){
+  if(fuse && !laneidx){
   vq mm[2] = {Q_ZERO(), Q_ZERO()};
   if(M1 == 16 && M2 == 16 && ws <= 32 && we >= 224){
     /* Every row includes k1 = 2..13. Reduce those outputs without tests,
@@ -233,6 +291,46 @@ static HWY_INLINE int q15_finish(size_t N, int M1, int M2,
     for(int k2 = 0; k2 < M2; k2++)
       qcodelet_tw(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
                   tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1);
+  }
+  if(laneidx){
+    /* Elect each lane's argmax lag k = k2 + M2*k1 over [ws, we), breaking ties to earliest lag. */
+    vq m0 = Q_SET1(-1), m1 = Q_SET1(-1), ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
+    for(int k2 = 0; k2 < M2; k2++){
+      const long lo = (long)ws > k2 ? ((long)ws - k2 + M2 - 1) / M2 : 0;
+      const long hi = (long)we > k2 ? ((long)we - k2 + M2 - 1) / M2 : 0;
+      const vq *xr = X + (size_t)k2 * st, *xi = Xi + (size_t)k2 * st;
+      long k1 = lo;
+      for(; k1 + 1 < hi; k1 += 2){
+        const vq a = xr[k1], b = xi[k1], c = xr[k1 + 1], d = xi[k1 + 1];
+        const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
+        const vq s1 = hn::SaturatedAdd(Q_MUL(c, c), Q_MUL(d, d));
+        const vq j0 = Q_SET1(k2 + M2 * (int)k1), j1 = Q_SET1(k2 + M2 * (int)(k1 + 1));
+        const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
+        const auto u1 = hn::Or(hn::Gt(s1, m1), hn::And(hn::Eq(s1, m1), hn::Lt(j1, ix1)));
+        m0 = hn::Max(m0, s0);
+        m1 = hn::Max(m1, s1);
+        ix0 = hn::IfThenElse(u0, j0, ix0);
+        ix1 = hn::IfThenElse(u1, j1, ix1);
+      }
+      if(k1 < hi){
+        const vq a = xr[k1], b = xi[k1];
+        const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
+        const vq j0 = Q_SET1(k2 + M2 * (int)k1);
+        const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
+        m0 = hn::Max(m0, s0);
+        ix0 = hn::IfThenElse(u0, j0, ix0);
+      }
+    }
+    const auto u1 = hn::Or(hn::Gt(m1, m0), hn::And(hn::Eq(m1, m0), hn::Lt(ix1, ix0)));
+    const vq mx_raw = hn::Max(m0, m1);
+    const vq ix = hn::IfThenElse(hn::Ge(mx_raw, Q_ZERO()), hn::IfThenElse(u1, ix1, ix0), Q_SET1(-1));
+    hn::StoreU(ix, AP_DQ, laneidx);
+    const vq mx = hn::Max(mx_raw, Q_ZERO());
+    if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
+    uint64_t b = 0;
+    hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&b);
+    *bits = b;
+    return 0;
   }
   /* Output k = k2 + M2*k1 sits at X[k2*st + k1]; the maximum does not care
      about order, so walk memory and clip each row to the window. */
@@ -293,7 +391,7 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
     case 1024: q15_prod_n<32, 32>(dq, tr, ti, X, Xi); break;
     default: return -1;
   }
-  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax);
+  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax,nullptr);
 }
 
 /* QW listed pairs: as q15_screen, but lane l's data element is lane dsel[l] of dr/di (QW data
@@ -314,12 +412,19 @@ static HWY_INLINE void q15_prod_perm_n(const int16_t *dr, const int16_t *di, con
 static int q15_screen_perm(size_t N, const int16_t *dr, const int16_t *di, const int16_t *tr,
                            const int16_t *ti, long TW, const int16_t *dsel, const int16_t *tsel,
                            size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
-                           int16_t *lanemax, void *scratch){
+                           int16_t *lanemax, int16_t *laneidx, void *scratch){
   int M1, M2;
   if(ap_q15_factor(N, &M1, &M2)) return -1;
   const ap_q15_twiddles *tw = ap_q15_twiddle_table(N);
   if(!tw) return -1;
+#if HWY_TARGET == HWY_AVX2
+  ap_qidx_avx2 dix_s, tix_s;
+  q15_make_dix_avx2(&dix_s, dsel);
+  q15_make_tix_avx2(&tix_s, tsel, TW);
+  const qidx dix = &dix_s, tix = &tix_s;
+#else
   const qidx dix = hn::SetTableIndices(AP_DQ, dsel), tix = hn::SetTableIndices(AP_DQ, tsel);
+#endif
   vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
   switch(N){
     case   64: q15_prod_perm_n< 8,  8>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
@@ -329,7 +434,7 @@ static int q15_screen_perm(size_t N, const int16_t *dr, const int16_t *di, const
     case 1024: q15_prod_perm_n<32, 32>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
     default: return -1;
   }
-  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax);
+  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax,laneidx);
 }
 
 #if AP_Q15_TAIL
@@ -347,7 +452,7 @@ static int q15_screen_tile_n(const int16_t *dq, const int16_t *tr, const int16_t
     else if(M2 == 16) qsr16_prod_tile<T, 3 * N>(d, r, i, X + e1, Xi + e1, M1 + 1, 3L * M1, (long)M1 * AP_QW);
     else qsr32_prod_tile<T, 3 * N>(d, r, i, X + e1, Xi + e1, M1 + 1, 3L * M1, (long)M1 * AP_QW);
   }
-  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax);
+  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax,nullptr);
 }
 template<int T>
 static int q15_screen_tile_t(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
