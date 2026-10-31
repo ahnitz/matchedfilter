@@ -420,10 +420,10 @@ def test_time_domain_bank_complex_taps_uses_direct_refine(monkeypatch):
 
 
 def test_straddling_window_bins_refine_per_survivor_and_price_one_bin_fraction(monkeypatch):
-    """With window-aligned binsize=2048 at block size n=2048, blocks whose valid span lies inside
-    one window bin take direct refine per survivor while straddling blocks fall back to the
-    transform without disabling direct refine for the whole group; CostModel weights r_direct by
-    the one-bin fraction (binsize - n_valid + 1) / binsize."""
+    """Blocks touching up to HMF_MAX_DIRECT_BINS (4) window bins refine directly per survivor
+    (fraction 1.0 at binsize=2048, n=2048 where straddling blocks touch 2 bins), while at
+    binsize=512 (n_valid=1726) 4-bin blocks take direct refine and 5-bin straddling blocks fall
+    back to the whole-block transform weighted by (4 * binsize - n_valid + 1) / binsize."""
     from matchedfilter.benchmark import _inspiral_power
     rng = np.random.default_rng(43)
     n, T = 2048, 20
@@ -446,35 +446,43 @@ def test_straddling_window_bins_refine_per_survivor_and_price_one_bin_fraction(m
     x = np.fft.irfft(S, n=total)
     x = (x / np.std(x)).astype(np.float64)
     pulse = np.real(np.fft.ifft(p1) * total) * 2.0
-    # Inject signals across many phases so both 1-bin and 2-bin straddling blocks fire
+    # Inject signals across many phases so 1..5-bin straddling blocks fire
     for tau in range(4200, 60000, 2350):
         x += 9.0 * np.roll(pulse, tau)
     x = x.astype(np.float32)
 
     monkeypatch.setenv("MF_AUTOTUNE", "0")
-    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
-    b_dir = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
-                                    threshold=6.0, false_dismissal=1e-2, binsize=2048,
-                                    fft_lengths=(n,))
-    b_dir.set_reference(ref)
-    for g in b_dir._groups:
-        if g.is_hier:
-            frac = getattr(g.plan, "_one_bin_frac", None)
-            assert frac is not None and 0.0 < frac < 0.25, frac
-    r_dir = b_dir.filter_series(x, windows=slice(4096, 61440))
-    st = [g.plan.direct_stats() for g in b_dir._groups if g.is_hier][0]
-    assert st["pairs"] > 0 and st["fft"] > 0, st
+    for binsize, expect_full_direct in ((2048, True), (512, False)):
+        monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+        b_dir = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+                                        threshold=6.0, false_dismissal=1e-2, binsize=binsize,
+                                        fft_lengths=(n,))
+        b_dir.set_reference(ref)
+        for g in b_dir._groups:
+            if g.is_hier:
+                frac = getattr(g.plan, "_one_bin_frac", None)
+                if expect_full_direct:
+                    assert frac == 1.0, frac
+                else:
+                    assert frac is not None and 0.5 < frac < 0.7, frac
+        r_dir = b_dir.filter_series(x, windows=slice(4096, 61440))
+        st = [g.plan.direct_stats() for g in b_dir._groups if g.is_hier][0]
+        assert st["pairs"] > 0, st
+        if expect_full_direct:
+            assert st["fft"] == 0, st
+        else:
+            assert st["fft"] > 0, st
 
-    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
-    b_fft = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
-                                    threshold=6.0, false_dismissal=1e-2, binsize=2048,
-                                    fft_lengths=(n,))
-    b_fft.set_reference(ref)
-    r_fft = b_fft.filter_series(x, windows=slice(4096, 61440))
-    assert len(r_dir.sample_indices) > 20
-    np.testing.assert_array_equal(r_dir.template_indices, r_fft.template_indices)
-    np.testing.assert_array_equal(r_dir.sample_indices, r_fft.sample_indices)
-    np.testing.assert_allclose(r_dir.snr, r_fft.snr, rtol=2e-5, atol=2e-4)
+        monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+        b_fft = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+                                        threshold=6.0, false_dismissal=1e-2, binsize=binsize,
+                                        fft_lengths=(n,))
+        b_fft.set_reference(ref)
+        r_fft = b_fft.filter_series(x, windows=slice(4096, 61440))
+        assert len(r_dir.sample_indices) > 20
+        np.testing.assert_array_equal(r_dir.template_indices, r_fft.template_indices)
+        np.testing.assert_array_equal(r_dir.sample_indices, r_fft.sample_indices)
+        np.testing.assert_allclose(r_dir.snr, r_fft.snr, rtol=2e-5, atol=2e-4)
 
 
 def test_multitier_q15_last_tier_supplies_coarse_lag_to_direct_refine(monkeypatch):
@@ -507,3 +515,117 @@ def test_multitier_q15_last_tier_supplies_coarse_lag_to_direct_refine(monkeypatc
     np.testing.assert_array_equal(idx_q, idx_f)
     m = idx_f >= 0
     np.testing.assert_allclose(val_q[m], val_f[m], rtol=2e-5, atol=1e-4)
+
+
+@pytest.mark.parametrize("n,binsize,phase_mode", [
+    (2048, 900, "zero"),        # ntouch = 2
+    (2048, 650, "sub"),         # ntouch = 3 with 0 < ph < binsize
+    (2048, 560, "padded"),      # ntouch = 4 with ph >= binsize (leading empty bin)
+    (4096, 2048, "continuous"), # 1s binning on n=4096 (ntouch = 2..3)
+])
+@pytest.mark.parametrize("chain", [(512,), (256, 512), (256, 512, 1024)])
+def test_multibin_direct_refine_phases_and_chains(n, binsize, phase_mode, chain, monkeypatch):
+    """Multi-bin direct refine (2 <= ntouch <= 4) matches the whole-block transform across
+    zero, sub-bin, and padded bin phases and across 1-tier, pair-batched, and balanced final tiers."""
+    data = _bank(n=n, T=32, nblocks=48, nsig=28, seed=11)
+    _, taps, counts, spec, series, layout, ref, window = data
+    starts, w0, w1 = layout
+    nblk = len(starts)
+    if phase_mode == "zero":
+        bph = None
+    elif phase_mode == "sub":
+        bph = np.full(nblk, binsize // 3, dtype=np.uint32)
+    elif phase_mode == "padded":
+        bph = np.full(nblk, binsize + binsize // 4, dtype=np.uint32)
+    else:
+        raw = ((starts + w0) % binsize).astype(np.uint32)
+        nbe = (w1 - w0 + raw + binsize - 1) // binsize
+        bph = (raw + (int(nbe.max()) - nbe) * binsize).astype(np.uint32)
+
+    kw = {} if bph is None else {"bin_phase": bph}
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    hf1 = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=chain,
+                                search_window=window)
+    hf1.set_reference(ref); hf1.set_templates(spec); hf1.set_taps(taps, counts)
+    i1, v1 = hf1.run_series(series, starts, w0, w1, binsize=binsize, threshold=6.0, raw=True, **kw)
+    i1, v1, st = i1.copy(), v1.copy(), hf1.direct_stats()
+    thr = hf1._resolve().thresholds
+
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+    hf0 = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=chain,
+                                search_window=window)
+    hf0.set_reference(ref); hf0.set_templates(spec); hf0.set_coarse_threshold(thr)
+    i0, v0 = hf0.run_series(series, starts, w0, w1, binsize=binsize, threshold=6.0, raw=True, **kw)
+
+    assert (i0 >= 0).sum() > 15
+    if len(chain) > 1 or gatechain.cpu_gate_kind() != "f16":
+        assert st["pairs"] > 0, st
+    np.testing.assert_array_equal(i1, i0)
+    m = i0 >= 0
+    np.testing.assert_allclose(v1[m], v0[m], rtol=2e-5, atol=1e-4)
+
+
+@pytest.mark.parametrize("use_q15_last", [False, True])
+def test_multibin_per_bin_coarse_election_with_loud_neighbor_excursion(use_q15_last, monkeypatch):
+    """When two or more output bins in the same block each contain an above-threshold signal
+    (e.g. a loud SNR ~ 14 excursion in one bin and an SNR ~ 8 signal near a bin boundary in
+    another), per-bin coarse election refines both bins and matches the whole-block transform."""
+    from matchedfilter.benchmark import _inspiral_power
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_GATE16", "0")
+    if use_q15_last and mf._core.MF(256, 1, 1).q15_lanes() == 0:
+        pytest.skip("no Q15 screen on this target")
+
+    data = _bank(n=2048, T=32, nblocks=24, nsig=0, seed=21)
+    n, taps, counts, spec, series, layout, ref, window = data
+    starts, w0, w1 = layout
+    total = len(series)
+    p = _inspiral_power(total); p /= p.sum()
+    pulse = np.fft.ifft(p) * total
+
+    binsize = 560  # n_valid ~ 1660 -> 3..4 bins
+    bph = np.full(len(starts), 180, dtype=np.uint32)
+    s = series.astype(np.complex128)
+    # Block 3: loud SNR 14 excursion in bin 2 AND SNR 8.2 signal right near bin 0/1 boundary
+    s0 = int(starts[3]); lo = int(w0[3])
+    boundary = lo + (binsize - 180)
+    s += 14.5 * np.exp(0.7j) * np.roll(pulse, s0 + boundary + binsize + 120)
+    s += 8.2 * np.exp(-1.1j) * np.roll(pulse, s0 + boundary - 3)
+    # Block 7: signals in three separate bins
+    s7 = int(starts[7]); lo7 = int(w0[7]); b7 = lo7 + (binsize - 180)
+    s += 13.0 * np.roll(pulse, s7 + lo7 + 90)
+    s += 8.5 * np.exp(1.3j) * np.roll(pulse, s7 + b7 + 200)
+    s += 9.1 * np.exp(-0.5j) * np.roll(pulse, s7 + b7 + binsize + 150)
+    series = s.astype(np.complex64)
+
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    hf1 = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
+                                search_window=window)
+    hf1.set_reference(ref); hf1.set_templates(spec); hf1.set_taps(taps, counts)
+    if use_q15_last:
+        hf1.lock_arm(mf._settings.arm("q15", True))
+        thr = (1.5, hf1._resolve().thresholds[1])
+        hf1._execution_plan().set_thresholds(list(thr))
+    else:
+        thr = hf1._resolve().thresholds
+    i1, v1 = hf1.run_series(series, starts, w0, w1, binsize=binsize, threshold=6.0, raw=True,
+                            bin_phase=bph)
+    i1, v1, st = i1.copy(), v1.copy(), hf1.direct_stats()
+
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+    hf0 = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
+                                search_window=window)
+    hf0.set_reference(ref); hf0.set_templates(spec); hf0.set_coarse_threshold(thr)
+    if use_q15_last:
+        hf0.lock_arm(mf._settings.arm("q15", True))
+    i0, v0 = hf0.run_series(series, starts, w0, w1, binsize=binsize, threshold=6.0, raw=True,
+                            bin_phase=bph)
+
+    assert st["pairs"] > 0, st
+    assert (i0[3] >= 0).sum() >= 2 * spec.shape[0]
+    assert (i0[7] >= 0).sum() >= 3 * spec.shape[0]
+    np.testing.assert_array_equal(i1, i0)
+    m = i0 >= 0
+    np.testing.assert_allclose(v1[m], v0[m], rtol=2e-5, atol=1e-4)
+

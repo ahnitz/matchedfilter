@@ -168,6 +168,10 @@ void ap_mf_set_bin_phase(ap_mf_plan *p, const unsigned *bph);
 int ap_mf_run_dif(ap_mf_plan *p, int d0, int t0, int nt,
                   size_t binsize, float threshold, ap_peak *peaks, int *counts,
                   size_t start, size_t end, unsigned ph);
+int ap_mf_run_pairs_packed(ap_mf_plan *p, int d0,
+                           const int *dsel, const int *tsel, int npairs,
+                           int t0, size_t binsize, float threshold,
+                           ap_peak *peaks, size_t start, size_t end);
 
 /* Q15 coarse screen (q15-inl.h).  ap_q15_lanes: int16 lanes per screen call
    on the plan's back end, 0 if it has none.  ap_q15_screen: for that many
@@ -199,5 +203,10 @@ int ap_mf_q15_pairs_lag(ap_mf_plan *p, int d0, const int *dsel, const int *tsel,
 int ap_q15_screen_tile(const ap_plan *p, int T, const int16_t *dq,
                        const int16_t *tr, const int16_t *ti, size_t start, size_t end,
                        const int16_t *lanethr, uint64_t *bits, int16_t *lanemax, void *scratch);
+int ap_q15_sumsq(const ap_plan *p, const float *re, const float *im, double *ss_out);
+int ap_q15_data(const ap_plan *p, const float *re, const float *im, int n1, int n2, int w,
+                int16_t *qd, float *scale_out);
+int ap_q15_lanethr(const ap_plan *p, float threshold, const float *qds, int qds_stride,
+                   const float *qts, float margin, int nomargin, int16_t *out);
 
 #endif

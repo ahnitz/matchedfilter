@@ -99,6 +99,7 @@ struct ap_mf_plan {
      first use and invalidated by the setters. */
   int qw;                     /* int16 lanes per screen call; 0 until first use */
   int qtail;                  /* retained backend has tail tiles at this n */
+  int qfull;                  /* tile full template groups across 2 blocks to fit L1D */
   int qnomargin;              /* decide on the int16 maximum itself (ap_mf_set_q15_margin) */
   int16_t *qtr,*qti;          /* [group][n][qw] quantised templates, conjugated */
   float *qts;                 /* [nt] template scale: t_q = t * qts */
@@ -1453,6 +1454,62 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
   return total;
 }
 
+int ap_mf_run_pairs_packed(ap_mf_plan *p, int d0,
+                           const int *dsel, const int *tsel, int npairs,
+                           int t0, size_t binsize, float threshold,
+                           ap_peak *peaks, size_t start, size_t end){
+  if(!p || npairs < 1 || !binsize) return 0;
+  if(!(p->pb && p->dsr && p->tsr)) return 0;
+  if(d0 < 0 || d0 >= p->nd) return -1;
+  for(int j = 0; j < npairs; j++){
+    if(dsel[j] < 0 || d0 + dsel[j] >= p->nd) return -1;
+    if(tsel[j] < 0 || t0 + tsel[j] < 0 || t0 + tsel[j] >= p->nt) return -1;
+  }
+  if(end > p->n) end = p->n;
+  if(start >= end) return 0;
+  const size_t n = p->n, nb = ap_bin_count(binsize, start, end, 0u);
+  const int W = p->pb;
+  if(p->pkcap < (size_t)W * nb){
+    free(p->pkbuf);
+    p->pkbuf = ap_alloc64((size_t)W * nb * sizeof(ap_peak));
+    if(!p->pkbuf){ p->pkcap = 0; return -1; }
+    p->pkcap = (size_t)W * nb;
+  }
+  for(int tt = 0; tt < npairs; tt += W){
+    const int cnt = (npairs - tt < W) ? npairs - tt : W;
+    int same_data = !p->ebr;
+    const int base = t0 + tsel[tt];
+    int packed_templates = base % W == 0;
+    for(int l = 1; l < cnt; l++){
+      same_data &= dsel[tt + l] == dsel[tt];
+      packed_templates &= tsel[tt + l] == tsel[tt] + l;
+    }
+    const float *Tr, *Ti;
+    if(packed_templates){
+      Tr = p->tre + (size_t)(base / W) * n * W;
+      Ti = p->tim + (size_t)(base / W) * n * W;
+    } else {
+      gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+      Tr = p->tsr; Ti = p->tsi;
+    }
+    if(same_data){
+      const size_t off = (size_t)(d0 + dsel[tt]) * n;
+      if(ap_binmax_prod_batch_peaks(p->fft, p->dre + off, p->dim + off, Tr, Ti, cnt,
+                                    binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
+                                    NULL) < 0)
+        return -1;
+    } else {
+      gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
+      if(ap_binmax_prod_batch_lanes_peaks(p->fft, p->dsr, p->dsi, Tr, Ti, cnt,
+                                          binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
+                                          NULL) < 0)
+        return -1;
+    }
+    memcpy(peaks + (size_t)tt * nb, p->pkbuf, (size_t)cnt * nb * sizeof(ap_peak));
+  }
+  return 1;
+}
+
 /* ---- Q15 coarse screen ---------------------------------------------------
  *
  * The coarse tier's question is only "can this pair's maximum reach the
@@ -1503,6 +1560,10 @@ static int q15_prepare(ap_mf_plan *p){
   memset(p->qti,0,ng*n*qw*sizeof(int16_t));
   p->qw=qw;
   p->qtail=ap_q15_has_tile(p->fft);
+  {
+    const size_t l1d=ap_l1d_bytes();
+    p->qfull=p->qtail && qw>=32 && n>=512 && (!l1d || ap_q15_batch_bytes(n,qw)>2*l1d);
+  }
   return 0;
 }
 
@@ -1548,14 +1609,23 @@ static void q15_template(ap_mf_plan *p,int t){
    pair (the sqrt(n) is the rounding's worst growth of the norm). */
 /* Keep preparation in its consumer's loop even with the separate tail caller;
    outlining it changed the cost of ordinary series calls on narrow targets. */
+static inline int q15_popcnt64(uint64_t v){
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_popcountll(v);
+#else
+  int c=0;
+  while(v){ v&=v-1; c++; }
+  return c;
+#endif
+}
+
 /* Block d's quantisation scale: |d_q|_2 = D (below), from the plan's float copy. */
 static inline __attribute__((always_inline)) double q15_data_scale(const ap_mf_plan *p,int d){
   const size_t n=p->n;
   const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
   double ss=0;
-  if(p->gmajor){
-    for(size_t k=0;k<n;k++){ const size_t j=q15_nat(p,k); ss+=(double)re[j]*re[j]+(double)im[j]*im[j]; }
-  } else {
+  if(ap_q15_sumsq(p->fft,re,im,&ss)){
+    /* Sum of squares is invariant to group-major element permutation. */
     float s4[4]={0,0,0,0};
     size_t k=0;
     for(;k+4<=n;k+=4) for(int u=0;u<4;u++) s4[u]+=re[k+u]*re[k+u]+im[k+u]*im[k+u];
@@ -1572,14 +1642,18 @@ static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
   const size_t n=p->n;
   const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
   int16_t *q=p->qd+(size_t)d*n*3;
+  if(!ap_q15_data(p->fft,re,im,p->gmajor?p->n1:0,p->n2,p->w,q,&p->qds[d])){
+    p->qdok[d]=1;
+    return;
+  }
   const double sc=q15_data_scale(p,d);
   const float scf=(float)sc;
   if(!(sc>0)){ memset(q,0,n*3*sizeof(int16_t)); }
   else if(p->gmajor){
     for(size_t k=0;k<n;k++){
       const size_t j=q15_nat(p,k);
-      const int16_t r=q15_q(re[j],sc), i=q15_q(im[j],sc);
-      q[3*k]=r; q[3*k+1]=i; q[3*k+2]=(int16_t)-i;
+      const int r=(int)lrintf(re[j]*scf), i=(int)lrintf(im[j]*scf);
+      q[3*k]=(int16_t)r; q[3*k+1]=(int16_t)i; q[3*k+2]=(int16_t)-i;
     }
   } else {
     /* |x*scf| <= |d_q|_2 < 32767 by construction, so no clamp is needed */
@@ -1617,35 +1691,55 @@ static inline float q15_stat_val(float qds,float qts,int16_t lanemax){
 /* Keep tail scheduling separate so it does not expand the ordinary screen's
    register allocation or data-quantization call sites on other backends. */
 static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int first,
-                      int t0, int nt, int g, int l1, float threshold,
+                      int t0, int nt, int g, int l1, int max_width, float threshold,
                       size_t start, size_t end, const float *bl,
                       const int16_t *tr, const int16_t *ti,
                       unsigned char *pass, float *stat){
   const size_t n=p->n;
   const int qw=p->qw;                      /* 32 on AVX-512, 16 on AVX2 */
   const float margin=(float)ap_q15_margin(n);
+  float qds_lane[64], qts_lane[64];
   int16_t lanethr[64], lanemax[64];
   int total=0;
   for(int d=d0;d<first;d++) if(!p->qdok[d]) q15_data(p,d);
   for(int off=0;off<l1;){
     /* tiles of qw/4 or qw/2 templates, repeated for 4 or 2 blocks */
-    const int width=l1-off<=qw/4 ? qw/4 : qw/2;
+    const int width=(l1-off<=qw/4 || max_width<=qw/4) ? qw/4 : qw/2;
     const int blocks=qw/width, active=l1-off<width ? l1-off : width;
+    for(int l=0;l<width;l++){
+      const float ts=bl[off+l];
+      for(int b=0;b<blocks;b++) qts_lane[b*width+l]=ts;
+    }
+    const uint64_t act_mask=((uint64_t)1<<active)-1u;
     for(int d=d0;d<first;d+=blocks){
       for(int b=0;b<blocks;b++){
-        for(int l=0;l<width;l++)
-          lanethr[b*width+l]=q15_lanethr(threshold,p->qds[d+b],bl[off+l],margin,p->qnomargin);
+        const float ds=p->qds[d+b];
+        for(int l=0;l<width;l++) qds_lane[b*width+l]=ds;
+      }
+      if(ap_q15_lanethr(p->fft,threshold,qds_lane,1,qts_lane,margin,p->qnomargin,lanethr)){
+        for(int l=0;l<qw;l++)
+          lanethr[l]=q15_lanethr(threshold,qds_lane[l],qts_lane[l],margin,p->qnomargin);
       }
       uint64_t bits=0;
       if(ap_q15_screen_tile(p->fft,width,p->qd+(size_t)d*n*3,tr+off,ti+off,
                             start,end,lanethr,&bits,stat?lanemax:NULL,p->qscr)) return -1;
+      if(!bits && !stat){
+        for(int b=0;b<blocks;b++)
+          memset(pass+(size_t)(d+b-d0)*nt+(size_t)(g*qw+off-t0),0,(size_t)active);
+        continue;
+      }
       for(int b=0;b<blocks;b++){
         const size_t row=(size_t)(d+b-d0)*nt+(size_t)(g*qw+off-t0);
-        for(int l=0;l<active;l++){
-          const int lane=b*width+l, ok=(int)((bits>>lane)&1u);
-          pass[row+l]=(unsigned char)ok;
-          total+=ok;
-          if(stat) stat[row+l]=q15_stat_val(p->qds[d+b],bl[off+l],lanemax[lane]);
+        const uint64_t mbits=(bits>>(b*width))&act_mask;
+        if(!mbits){
+          memset(pass+row,0,(size_t)active);
+        } else {
+          for(int l=0;l<active;l++) pass[row+l]=(unsigned char)((mbits>>l)&1u);
+          total+=q15_popcnt64(mbits);
+        }
+        if(stat){
+          for(int l=0;l<active;l++)
+            stat[row+l]=q15_stat_val(p->qds[d+b],bl[off+l],lanemax[b*width+l]);
         }
       }
     }
@@ -1678,16 +1772,23 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
     }
     const int16_t *tr=p->qtr+(size_t)g*n*qw, *ti=p->qti+(size_t)g*n*qw;
     int first=d0;
-    /* An aligned tail of at most 3/4 of the lanes runs as tiles that
-       repeat its templates for several blocks (q15_tail_group). A tile's blocks all
-       share this call's window. Complete groups and leftover blocks retain the
-       original broadcast path. */
-    if(p->qtail && l0==0 && l1<=3*qw/4 && nd>=4){
+    /* Tile full template groups across pairs of blocks when a full batch spills well
+       past L1D on 512-bit targets (b >= 512); aligned partial tails up to 3/4 of a
+       group tile across 4 blocks at any size. */
+    if(p->qfull && l0==0 && l1==qw && nd>=2){
+      first=d0+(nd/2)*2;
+      const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,qw/2,threshold,
+                                 start,end,bl,tr,ti,pass,stat);
+      if(r<0) return -1;
+      total+=r;
+    } else if(p->qtail && l0==0 && l1<=3*qw/4 && nd>=4){
       first=d0+(nd/4)*4;
-      const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,threshold,start,end,bl,tr,ti,pass,stat);
+      const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,qw/2,threshold,start,end,bl,tr,ti,pass,stat);
       if(r<0) return -1;
       total+=r;
     }
+    const int nlanes=l1-l0;
+    const uint64_t act_mask=((uint64_t)1<<nlanes)-1u;
     for(int d=first;d<d0+nd;d++){
       if(!p->qdok[d]) q15_data(p,d);
       /* Lane l's int16 maximum m satisfies m >= |z_q|^2/2^15 - 1, and
@@ -1696,17 +1797,26 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
          q = threshold*sd*st/2^15 - EQ.  A lane with q <= 0, or with a
          non-finite scale, always passes.  The 1e-4 covers the float
          tier's own rounding (~1e-6 relative). */
-      for(int l=0;l<qw;l++)
-        lanethr[l] = q15_lanethr(threshold,p->qds[d],bl[l],margin,p->qnomargin);
+      if(ap_q15_lanethr(p->fft,threshold,&p->qds[d],0,bl,margin,p->qnomargin,lanethr)){
+        for(int l=0;l<qw;l++)
+          lanethr[l] = q15_lanethr(threshold,p->qds[d],bl[l],margin,p->qnomargin);
+      }
       uint64_t bits=0;
       if(ap_q15_screen(p->fft,p->qd+(size_t)d*n*3,tr,ti,start,end,lanethr,&bits,
                        stat?lanemax:NULL,p->qscr)) return -1;
       /* lanes l0..l1 are templates g*qw+l0-t0 .. in the caller's rows */
       unsigned char *row=pass+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);
-      for(int l=l0;l<l1;l++){
-        const int ok=(int)((bits>>l)&1u);
-        row[l-l0]=(unsigned char)ok;
-        total+=ok;
+      if(!bits){
+        memset(row,0,(size_t)nlanes);
+        if(!stat) continue;
+      } else {
+        const uint64_t mbits=(bits>>l0)&act_mask;
+        if(!mbits){
+          memset(row,0,(size_t)nlanes);
+        } else {
+          for(int l=0;l<nlanes;l++) row[l]=(unsigned char)((mbits>>l)&1u);
+          total+=q15_popcnt64(mbits);
+        }
       }
       if(stat){
         float *srow=stat+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);
@@ -1745,10 +1855,15 @@ static int q15_slab_lanes(ap_mf_plan *p,int d){
   if(p->gmajor){
     const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
     const double sc=q15_data_scale(p,d);
-    for(size_t k=0;k<n;k++){
-      const size_t j=q15_nat(p,k);
-      xr[k*qw+d%qw]=sc>0?q15_q(re[j],sc):0;
-      xi[k*qw+d%qw]=sc>0?q15_q(im[j],sc):0;
+    const float scf=(float)sc;
+    if(!(sc>0)){
+      for(size_t k=0;k<n;k++){ xr[k*qw+d%qw]=0; xi[k*qw+d%qw]=0; }
+    } else {
+      for(size_t k=0;k<n;k++){
+        const size_t j=q15_nat(p,k);
+        xr[k*qw+d%qw]=(int16_t)lrintf(re[j]*scf);
+        xi[k*qw+d%qw]=(int16_t)lrintf(im[j]*scf);
+      }
     }
     p->qds[d]=(float)sc;
     p->qdxok[d]=1;
@@ -1810,6 +1925,7 @@ int ap_mf_q15_pairs_lag(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int
   for(int j=0;j<npairs;j++) order[cnt[key[j]]++]=j;
   if(cnt!=cstack) free(cnt);
   const float margin=(float)ap_q15_margin(n);
+  float qds_lane[64], qts_lane[64];
   int16_t lanethr[64], lanemax[64], laneidx[64], ld[64], lt[64];
   int jj[64];
   int total=0;
@@ -1824,8 +1940,11 @@ int ap_mf_q15_pairs_lag(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int
       if(!p->qdxok[d] && q15_slab_lanes(p,d)) return -1;
       if(!p->qtok[t]) q15_template(p,t);
       jj[l]=j; ld[l]=(int16_t)(d%qw); lt[l]=(int16_t)(t-gp*2*qw);
-      /* as ap_mf_q15_screen */
-      lanethr[l]=q15_lanethr(threshold,p->qds[d],p->qts[t],margin,p->qnomargin);
+      qds_lane[l]=p->qds[d]; qts_lane[l]=p->qts[t];
+    }
+    if(ap_q15_lanethr(p->fft,threshold,qds_lane,1,qts_lane,margin,p->qnomargin,lanethr)){
+      for(int l=0;l<qw;l++)
+        lanethr[l]=q15_lanethr(threshold,qds_lane[l],qts_lane[l],margin,p->qnomargin);
     }
     const int16_t *dr=p->qdx+(size_t)slab*2*n*qw, *di=dr+n*qw;
     const size_t g0=(size_t)gp*2;

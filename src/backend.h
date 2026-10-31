@@ -118,6 +118,12 @@ typedef struct {
   /* Inverse product correlation writing only window [blo, end) directly to dst. */
   int (*corr_prod_window)(void *, const float *dr, const float *di, const float *tr,
                           const float *ti, size_t blo, size_t end, float *dst);
+  /* Vectorised Q15 data quantisation (norm + interleaved int16 pack) and lane thresholds. */
+  double (*q15_sumsq)(size_t N, const float *re, const float *im);
+  void (*q15_data)(size_t N, const float *re, const float *im, int n1, int n2, int w,
+                   int16_t *qd, float *scale_out);
+  void (*q15_lanethr)(float threshold, const float *qds, int qds_stride, const float *qts,
+                      float margin, int nomargin, int16_t *out);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
