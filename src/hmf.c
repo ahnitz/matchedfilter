@@ -555,6 +555,11 @@ static int set_data_tiers(ap_hmf_plan *p,int d,const float *spec,int eager){
       if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
       continue;
     }
+    if(i==0 && tr->g16 && !p->q15){
+      if(ap_gate16_set_data(tr->g16,d,spec)) return -1;
+      if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+      continue;
+    }
     if(ap_mf_set_data(tr->mf,d,spec)) return -1;
     if(tr->g16 && ap_gate16_set_data(tr->g16,d,spec)) return -1;
     if(tr->pending[d]){ tr->pending[d]=0; tr->npending--; }
@@ -1111,6 +1116,13 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     tr->lagged = !(tr->g16 && i==0 && !p->q15);
     const int *checked_d=fire_d,*checked_t=fire_t;
     int nchecked=i==0 ? nd*nt : nfire;
+    if(i==0 && (p->q15 || !tr->g16) && tr->npending){
+      for(int d=d0;d<d0+nd;d++)
+        if(tr->pending[d]){
+          if(ap_mf_set_data(tr->mf,d,p->dspec[d])) return -1;
+          tr->pending[d]=0; tr->npending--;
+        }
+    }
     unsigned long long t_0=ap_ticks();
     float *qstat=NULL;               /* set: the screen decided, and this is its maximum */
     if(i==0 && p->q15){
