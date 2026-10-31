@@ -418,3 +418,62 @@ def test_time_domain_bank_complex_taps_uses_direct_refine(monkeypatch):
     np.testing.assert_array_equal(r_dir.sample_indices, r_fft.sample_indices)
     np.testing.assert_allclose(r_dir.snr, r_fft.snr, rtol=2e-5, atol=1e-4)
 
+
+def test_straddling_window_bins_refine_per_survivor_and_price_one_bin_fraction(monkeypatch):
+    """With window-aligned binsize=2048 at block size n=2048, blocks whose valid span lies inside
+    one window bin take direct refine per survivor while straddling blocks fall back to the
+    transform without disabling direct refine for the whole group; CostModel weights r_direct by
+    the one-bin fraction (binsize - n_valid + 1) / binsize."""
+    from matchedfilter.benchmark import _inspiral_power
+    rng = np.random.default_rng(43)
+    n, T = 2048, 20
+    counts = np.full(T, 323, np.int64)
+    taps = np.zeros((T, 323), np.complex64)
+    for t in range(T):
+        w = np.zeros(323, np.complex128)
+        w[161] = np.exp(1j * 0.15 * t)
+        w += 0.12 * np.hanning(323) * np.exp(1j * np.linspace(0, 2.8, 323)) / np.sqrt(323)
+        taps[t] = w.astype(np.complex64)
+    ref = _inspiral_power(n).copy()
+    ref[n // 2:] = 0.0
+    total = 65536
+    p1 = _inspiral_power(total).copy()
+    p1[total // 2:] = 0.0
+    p1 /= p1.sum()
+    W = np.fft.rfft(rng.standard_normal(total))
+    S = np.zeros_like(W)
+    S[:total // 2] = W[:total // 2] * np.sqrt(p1[:total // 2] * total)
+    x = np.fft.irfft(S, n=total)
+    x = (x / np.std(x)).astype(np.float64)
+    pulse = np.real(np.fft.ifft(p1) * total) * 2.0
+    # Inject signals across many phases so both 1-bin and 2-bin straddling blocks fire
+    for tau in range(4200, 60000, 2350):
+        x += 9.0 * np.roll(pulse, tau)
+    x = x.astype(np.float32)
+
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    b_dir = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+                                    threshold=6.0, false_dismissal=1e-2, binsize=2048,
+                                    fft_lengths=(n,))
+    b_dir.set_reference(ref)
+    for g in b_dir._groups:
+        if g.is_hier:
+            frac = getattr(g.plan, "_one_bin_frac", None)
+            assert frac is not None and 0.0 < frac < 0.25, frac
+    r_dir = b_dir.filter_series(x, windows=slice(4096, 61440))
+    st = [g.plan.direct_stats() for g in b_dir._groups if g.is_hier][0]
+    assert st["pairs"] > 0 and st["fft"] > 0, st
+
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+    b_fft = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+                                    threshold=6.0, false_dismissal=1e-2, binsize=2048,
+                                    fft_lengths=(n,))
+    b_fft.set_reference(ref)
+    r_fft = b_fft.filter_series(x, windows=slice(4096, 61440))
+    assert len(r_dir.sample_indices) > 20
+    np.testing.assert_array_equal(r_dir.template_indices, r_fft.template_indices)
+    np.testing.assert_array_equal(r_dir.sample_indices, r_fft.sample_indices)
+    np.testing.assert_allclose(r_dir.snr, r_fft.snr, rtol=2e-5, atol=2e-4)
+
+

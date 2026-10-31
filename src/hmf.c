@@ -104,6 +104,8 @@ struct ap_hmf_plan {
   int real_series;
   size_t real_stride;             /* floats between samples: 1, or 2 for a lane of a complex series */
   ap_plan *half_fft;              /* n/2-point transform */
+  ap_plan *fwd_cplx_batch;        /* lane-batched n-point forward (n <= 2048), or NULL */
+  ap_plan *fwd_real_batch;        /* lane-batched n/2-point real forward (n <= 4096), or NULL */
   float *rtw;                     /* [2(n/2+1)] cos, sin of 2 pi k/n */
 };
 
@@ -181,6 +183,8 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     }
   }
   p->full_fft=ap_create(n);
+  if(p->full_fft && n>=64 && n<=128)
+    p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
   p->accel=ap_accel_create(n);           /* NULL where the platform has none */
   p->spec=ap_alloc64((size_t)grp*2*n*sizeof(float));
@@ -213,6 +217,8 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   }
   ap_destroy(p->full_fft);
   if(p->half_fft) ap_destroy(p->half_fft);
+  if(p->fwd_cplx_batch) ap_destroy(p->fwd_cplx_batch);
+  if(p->fwd_real_batch) ap_destroy(p->fwd_real_batch);
   free(p->rtw);
   ap_accel_destroy(p->accel);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dcopy);
@@ -624,6 +630,8 @@ int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
       const double a=2.0*3.14159265358979323846*(double)k/(double)p->n;
       p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
     }
+    if(h>=64 && h<=128)
+      p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,h);
   }
   p->real_series=on?1:0;
   if(!p->real_stride) p->real_stride=1;
@@ -642,11 +650,9 @@ int ap_hmf_set_real_stride(ap_hmf_plan *p,size_t stride){
 static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have,float *sp){
   const size_t n=p->n;
   const float inv=1.0f/(float)n;
-  float * restrict z=p->fwd;                 /* n reals = h complex */
+  const size_t st=p->real_stride ? p->real_stride : 1;
   float * restrict Z=p->fwd+n;               /* the h-point transform */
-  { const size_t st=p->real_stride ? p->real_stride : 1;
-    ap_scale_load_on(p->half_fft,z,x+s0*st,have,n,st,inv); }
-  ap_fft(p->half_fft,z,Z,AP_FORWARD);
+  ap_fft_forward_scaled(p->half_fft,have ? x+s0*st : x,have,st,inv,Z);
   ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
@@ -669,7 +675,54 @@ int ap_hmf_run_series(ap_hmf_plan *p,
     int g=1;
     while(g<p->dgroup && b0+g<nblocks
           && win_start[b0+g]==win_start[b0] && win_end[b0+g]==win_end[b0]) g++;
-    for(int j=0;j<g;j++){
+    if(p->real_series && p->fwd_real_batch){
+      const int W = ap_plan_lanes(p->fwd_real_batch);
+      const size_t st = p->real_stride ? p->real_stride : 1;
+      const float inv = 1.0f/(float)n;
+      for(int j=0; j<g; j+=W){
+        const int cnt = g-j<W ? g-j : W;
+        const float *srcs[AP_MAX_LANES];
+        size_t haves[AP_MAX_LANES];
+        float *outs[AP_MAX_LANES];
+        for(int l=0; l<cnt; l++){
+          const size_t s0=start[b0+j+l];
+          size_t have = s0<nseries ? nseries-s0 : 0;
+          if(have>n) have=n;
+          srcs[l]=have ? series+s0*st : series;
+          haves[l]=have;
+          outs[l]=p->spec+(size_t)(j+l)*2*n;
+        }
+        if(ap_fft_real_batch(p->fwd_real_batch,srcs,haves,st,cnt,inv,p->rtw,0,outs)<0) return -1;
+        for(int l=0; l<cnt; l++){
+          p->dmirrored[j+l]=0;
+          if(set_data_tiers(p,j+l,outs[l],1)) return -1;
+          p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
+        }
+      }
+    } else if(!p->real_series && !p->use_accel && p->fwd_cplx_batch){
+      const int W = ap_plan_lanes(p->fwd_cplx_batch);
+      const float inv = 1.0f/(float)n;
+      for(int j=0; j<g; j+=W){
+        const int cnt = g-j<W ? g-j : W;
+        const float *srcs[AP_MAX_LANES];
+        size_t haves[AP_MAX_LANES];
+        float *outs[AP_MAX_LANES];
+        for(int l=0; l<cnt; l++){
+          const size_t s0=start[b0+j+l];
+          size_t have = s0<nseries ? nseries-s0 : 0;
+          if(have>n) have=n;
+          srcs[l]=have ? series+2*s0 : series;
+          haves[l]=have;
+          outs[l]=p->spec+(size_t)(j+l)*2*n;
+        }
+        if(ap_fft_forward_batch(p->fwd_cplx_batch,srcs,haves,cnt,inv,outs)<0) return -1;
+        for(int l=0; l<cnt; l++){
+          p->dmirrored[j+l]=1;
+          if(set_data_tiers(p,j+l,outs[l],1)) return -1;
+          p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
+        }
+      }
+    } else for(int j=0;j<g;j++){
       const size_t s0=start[b0+j];
       size_t have = s0<nseries ? nseries-s0 : 0;
       if(have>n) have=n;
@@ -696,9 +749,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
       if(p->use_accel){
         ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
       } else {
-      ap_scale_load_on(p->full_fft,p->fwd,have ? series+2*s0 : series,2*have,2*n,1,
-                       1.0f/(float)n);
-      ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);
+        ap_fft_forward_scaled(p->full_fft,have ? series+2*s0 : series,2*have,1,1.0f/(float)n,sp);
       }
       p->dmirrored[j]=1;
       if(set_data_tiers(p,j,sp,1)) return -1;
@@ -954,13 +1005,9 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
      row whose window lies in one bin is still a one-bin pair -- refined as its unpadded
      call would refine it, not by transform. */
   const size_t hi=end>p->n ? p->n : end;
-  int ok=p->direct && p->taps && start<hi && p->tier[p->ntiers-1].lagged;
-  for(int j=0;ok && j<nfire;j++){
-    const size_t ph=hmf_row_phase(p,d0+fire_d[j]);
-    if(!p->dtime[d0+fire_d[j]] || ph/binsize!=(hi-1-start+ph)/binsize) ok=0;
-  }
-  if(!ok) return hmf_refine_fft(p,fire_d,fire_t,d0,t0,nt,nfire,binsize,threshold,
-                                peaks,counts,start,end);
+  if(!(p->direct && p->taps && start<hi && hi-1-start<binsize && p->tier[p->ntiers-1].lagged))
+    return hmf_refine_fft(p,fire_d,fire_t,d0,t0,nt,nfire,binsize,threshold,
+                          peaks,counts,start,end);
   hmf_tier *tr=&p->tier[p->ntiers-1];
   const size_t R=p->n/tr->m;
   unsigned long long q1=ap_ticks();
@@ -968,11 +1015,14 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
   for(int j=0;j<nfire;j++){
     const int d=fire_d[j], t=fire_t[j];
     const size_t row=(size_t)d*nt+t;
-    const ap_peak ce=tr->cebuf[row];
-    const size_t jb=hmf_row_phase(p,d0+d)/binsize;      /* the row's one touched bin */
+    const size_t ph=hmf_row_phase(p,d0+d);
+    const size_t jb=ph/binsize;                 /* the row's one touched bin when unsplit */
     int c=-2;
-    if(ce.index>=0)
-      c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,threshold,peaks+row*nb+jb,1,start,end);
+    if(p->dtime[d0+d] && jb==(hi-1-start+ph)/binsize){
+      const ap_peak ce=tr->cebuf[row];
+      if(ce.index>=0)
+        c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,threshold,peaks+row*nb+jb,1,start,end);
+    }
     if(c==-2){ p->dfd[nf]=d; p->dft[nf]=t; nf++; continue; }
     for(size_t b=0;b<nb;b++) if(b!=jb) peaks[row*nb+b]=(ap_peak){-1,0.f,0.f,0.f};
     if(counts) counts[row]=c;

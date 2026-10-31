@@ -114,6 +114,10 @@ static HWY_ATTR HWY_INLINE float v_reduce_max(vf v) {
 static HWY_ATTR HWY_INLINE void v_deint(const float *p, vf *re, vf *im) {
   hn::LoadInterleaved2(AP_D, p, *re, *im);
 }
+static HWY_ATTR HWY_INLINE void v_deint_vec(vf lo, vf hi, vf *re, vf *im) {
+  *re = hn::ConcatEven(AP_D, hi, lo);
+  *im = hn::ConcatOdd(AP_D, hi, lo);
+}
 static HWY_ATTR HWY_INLINE void v_inter(float *p, vf re, vf im) {
   hn::StoreInterleaved2(re, im, AP_D, p);
 }

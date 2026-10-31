@@ -728,6 +728,7 @@ class CostModel:
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                                      for b, v in sorted(self.screen.items())),
                                getattr(self, "direct_lag", None), getattr(self, "direct_single", True),
+                               getattr(self, "direct_frac", 1.0),
                                None if self.feed is None else (tuple(sorted(self.feed["band"].items())),
                                                                self.feed["full"]))
         return sig
@@ -786,18 +787,20 @@ class CostModel:
             per = self.feed["full"]
         return per / float(ntemplates)
 
-    def with_direct(self, lag_price, single_tier=True):
+    def with_direct(self, lag_price, single_tier=True, fraction=1.0):
         """A copy that also prices a direct refine at lag_price ticks per lag of its window
         (HierarchicalFilter._direct_price): a chain whose last tier reports its coarse lag
         then refines a pair, with a window of half-width h coarse samples, at the cheaper of
         the measured whole-block refine and 2 h n / b + 1 lags, b its last band (refine_for;
-        the window scales with n / b, so it favours chains ending in a wider band)."""
+        the window scales with n / b, so it favours chains ending in a wider band), weighted by
+        the fraction of blocks whose window falls within a single output bin."""
         import copy
         cm = copy.copy(self)
         cm.direct_lag = float(lag_price)
         # single_tier False: a one-tier chain's tier runs on the CPU's FP16 gate, which reports
         # no lag, so its survivors refine by transform (hmf.c hmf_tier.lagged).
         cm.direct_single = bool(single_tier)
+        cm.direct_frac = float(fraction)
         cm._sig = None
         return cm
 
@@ -813,6 +816,7 @@ class CostModel:
     def prices_direct(self, chain):
         """Whether this model prices a direct refine for chain (with_direct)."""
         return (getattr(self, "direct_lag", None) is not None
+                and getattr(self, "direct_frac", 1.0) > 0.0
                 and (len(chain) > 1 or getattr(self, "direct_single", True)))
 
     def refine_for(self, chain, f, hw=None):
@@ -820,7 +824,9 @@ class CostModel:
         window half-width hw (None: the whole-block refine)."""
         r = self.refine(f)
         if hw is not None and self.prices_direct(chain):
-            r = min(r, self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1))
+            d = min(r, self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1))
+            frac = getattr(self, "direct_frac", 1.0)
+            r = (1.0 - frac) * r + frac * d
         return r
 
     def chain_cost(self, chain, reach, hw=None):

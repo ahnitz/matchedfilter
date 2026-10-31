@@ -99,11 +99,13 @@ static inline float v_reduce_max(vf v) {
 }
 
 /* Eight complex samples in, re and im out (and back): lane-crossing only through vperm2f128. */
-static inline void v_deint(const float *p, vf *re, vf *im) {
-  const vf lo = _mm256_loadu_ps(p), hi = _mm256_loadu_ps(p + 8);
+static inline void v_deint_vec(vf lo, vf hi, vf *re, vf *im) {
   const vf a = _mm256_permute2f128_ps(lo, hi, 0x20), b = _mm256_permute2f128_ps(lo, hi, 0x31);
   *re = _mm256_shuffle_ps(a, b, 0x88);
   *im = _mm256_shuffle_ps(a, b, 0xdd);
+}
+static inline void v_deint(const float *p, vf *re, vf *im) {
+  v_deint_vec(_mm256_loadu_ps(p), _mm256_loadu_ps(p + 8), re, im);
 }
 static inline void v_inter(float *p, vf re, vf im) {
   const vf a = _mm256_unpacklo_ps(re, im), b = _mm256_unpackhi_ps(re, im);

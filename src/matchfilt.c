@@ -60,6 +60,8 @@ struct ap_mf_plan {
      at half size and split into their full spectrum (ap_real_split_on). */
   int real_series;
   ap_plan *half_fft;
+  ap_plan *fwd_cplx_batch, *fwd_real_batch;
+  float *bspec;               /* [w][2n] batched forward spectra */
   float *rtw;                 /* [2(n/2+1)] cos, sin of 2 pi k/n */
   /* Pair-batched small-N path.  Below AP_W^2 the transform has no balanced
      split, so the back end puts AP_W independent PAIRS in a vector instead of
@@ -232,6 +234,9 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->pr);free(p->pi);free(p->scratch);
   free(p->sfwd);free(p->sspec);
   if(p->half_fft) ap_destroy(p->half_fft);
+  if(p->fwd_cplx_batch) ap_destroy(p->fwd_cplx_batch);
+  if(p->fwd_real_batch) ap_destroy(p->fwd_real_batch);
+  free(p->bspec);
   free(p->rtw);
   free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->dsr);free(p->dsi);free(p->pkbuf);
   free(p->tmre);free(p->tmim);
@@ -813,9 +818,55 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
   return 0;
 }
 
+static ap_plan *ensure_fwd_batch(ap_mf_plan *p,int real){
+  const size_t m=real?p->n/2:p->n;
+  if(m<64||m>128) return NULL;
+  ap_plan **slot=real?&p->fwd_real_batch:&p->fwd_cplx_batch;
+  if(!*slot) *slot=ap_create_pairbatch_like(p->fft,m);
+  if(!*slot) return NULL;
+  const int W=ap_plan_lanes(*slot);
+  if(W<=0) return NULL;
+  if(!p->bspec){
+    p->bspec=ap_alloc64((size_t)W*2*p->n*sizeof(float));
+    if(!p->bspec) return NULL;
+  }
+  return *slot;
+}
+
+static int forward_series_batch(ap_mf_plan *p,ap_plan *fb,const float *series,
+                                size_t nseries,const size_t *starts,int cnt){
+  const size_t n=p->n;
+  const float inv=1.0f/(float)n;
+  const float *srcs[AP_MAX_LANES];
+  size_t haves[AP_MAX_LANES];
+  float *outs[AP_MAX_LANES];
+  for(int l=0;l<cnt;l++){
+    const size_t s0=starts[l];
+    size_t have=s0<nseries?nseries-s0:0;
+    if(have>n) have=n;
+    srcs[l]=have?series+(p->real_series?s0:2*s0):series;
+    haves[l]=have;
+    outs[l]=p->bspec+(size_t)l*2*n;
+  }
+  if(p->real_series)
+    return ap_fft_real_batch(fb,srcs,haves,1,cnt,inv,p->rtw,1,outs);
+  return ap_fft_forward_batch(fb,srcs,haves,cnt,inv,outs);
+}
+
 static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
                           const size_t *starts,int count){
   const size_t n=p->n;
+  ap_plan *fb=ensure_fwd_batch(p,p->real_series);
+  if(fb){
+    const int W=ap_plan_lanes(fb);
+    for(int j=0;j<count;j+=W){
+      const int cnt=count-j<W?count-j:W;
+      if(forward_series_batch(p,fb,series,nseries,starts+j,cnt)<0) return -1;
+      for(int l=0;l<cnt;l++)
+        if(ap_mf_set_data(p,j+l,p->bspec+(size_t)l*2*n)) return -1;
+    }
+    return 0;
+  }
   if(alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float))) return -1;
   const float inv=1.0f/(float)n;
   if(p->real_series){
@@ -823,9 +874,7 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
       size_t start=starts[j];
       size_t have=start<nseries?nseries-start:0;
       if(have>n) have=n;
-      float * restrict z=p->sfwd;           /* n reals = n/2 complex */
-      ap_scale_load_on(p->fft,z,series+start,have,n,1,inv);
-      ap_fft(p->half_fft,z,p->sfwd+n,AP_FORWARD);
+      ap_fft_forward_scaled(p->half_fft,have ? series+start : series,have,1,inv,p->sfwd+n);
       ap_real_split_on(p->fft,p->sfwd+n,p->rtw,n,p->sspec);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
     }
@@ -835,8 +884,7 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     size_t start=starts[j];
     size_t have=start<nseries?nseries-start:0;
     if(have>n) have=n;
-    ap_scale_load_on(p->fft,p->sfwd,have ? series+2*start : series,2*have,2*n,1,inv);
-    ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
+    ap_fft_forward_scaled(p->fft,have ? series+2*start : series,2*have,1,inv,p->sspec);
     if(ap_mf_set_data(p,j,p->sspec)) return -1;
   }
   return 0;
@@ -954,16 +1002,26 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     }
     return 0;
   }
+  ap_plan *fb=ensure_fwd_batch(p,p->real_series);
+  const int W_fb=fb?ap_plan_lanes(fb):0;
+  const int use_fb=fb && W_fb>p->nd;
   for(int b0=0;b0<nblocks;){
-    const int g=nblocks-b0<p->nd?nblocks-b0:p->nd;
-    if(series_spectra(p,series,nseries,starts+b0,g)) return -1;
+    const int g=use_fb ? (nblocks-b0<W_fb?nblocks-b0:W_fb)
+                       : (nblocks-b0<p->nd?nblocks-b0:p->nd);
+    if(use_fb){
+      if(forward_series_batch(p,fb,series,nseries,starts+b0,g)<0) return -1;
+    }else{
+      if(series_spectra(p,series,nseries,starts+b0,g)) return -1;
+    }
     for(int d=0;d<g;d++){
       const size_t start=starts[b0+d];
       const size_t blo=bounds?bounds[2*(b0+d)]:lo, bhi=bounds?bounds[2*(b0+d)+1]:hi;
       if(start>=nseries||blo>=nseries-start) continue;
+      if(use_fb && ap_mf_set_data(p,0,p->bspec+(size_t)d*2*n)) return -1;
+      const int slot=use_fb?0:d;
       const size_t end=bhi<nseries-start?bhi:nseries-start;
       const size_t bytes=2*(end-blo)*sizeof(float);
-      const float *Dr=p->dre+(size_t)d*n, *Di=p->dim+(size_t)d*n;
+      const float *Dr=p->dre+(size_t)slot*n, *Di=p->dim+(size_t)slot*n;
       if(W){
         if(p->ebr){
           for(size_t k=0;k<n;k++){
@@ -992,13 +1050,18 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
         for(int t=0;t<nt;t++){
           const float *tr=p->tre+(size_t)(t0+t)*n;
           const float *ti=p->tim+(size_t)(t0+t)*n;
-          if(p->gmajor){
-            if(ap_corr_prod(p->fft,Dr,Di,tr,ti,p->scratch)) return -1;
+          if(p->gmajor && !stream){
+            if(ap_corr_prod_window(p->fft,Dr,Di,tr,ti,blo,end,
+                                   out+2*((size_t)t*nseries+start+blo))) return -1;
           }else{
-            mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
-            if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
+            if(p->gmajor){
+              if(ap_corr_prod(p->fft,Dr,Di,tr,ti,p->scratch)) return -1;
+            }else{
+              mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
+              if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
+            }
+            out_copy(out+2*((size_t)t*nseries+start+blo),p->scratch+2*blo,bytes,stream);
           }
-          out_copy(out+2*((size_t)t*nseries+start+blo),p->scratch+2*blo,bytes,stream);
         }
       }
     }
@@ -1073,18 +1136,7 @@ int ap_mf_run_series(ap_mf_plan *p,
     int g=1;
     while(g<p->nd && b0+g<nblocks
           && win_start[b0+g]==win_start[b0] && win_end[b0+g]==win_end[b0]) g++;
-    for(int j=0;j<g;j++){
-      const size_t s0=start[b0+j];
-      size_t have = s0<nseries ? nseries-s0 : 0;
-      if(have>n) have=n;
-      /* The caller's convention of pre-dividing the block spectrum by n is
-         kept, and applied on the way IN so it folds into a copy that has to
-         happen anyway. n is a power of two, so 1/n is exact and the transform
-         is linear: scaling before is bit-for-bit scaling after. */
-      ap_scale_load_on(p->fft,p->sfwd,have ? series+2*s0 : series,2*have,2*n,1,1.0f/(float)n);
-      ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
-      if(ap_mf_set_data(p,j,p->sspec)) return -1;
-    }
+    if(series_spectra(p,series,nseries,start+b0,g)) return -1;
     /* peaks is addressed at a single stride, so every window must produce the
        same bin count. A shorter one at a segment's edge does not: it writes
        where the next block's row begins and runs off the end of the caller's
@@ -1256,22 +1308,19 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
     const float * restrict d0_ptr;
 
     if(decimated){
-
       size_t have = s0 < nseries ? nseries - s0 : 0;
       if(have > n) have = n;
       const float inv = 1.0f / (float)n;
-      ap_scale_load_on(p->fft, p->sfwd_n, have ? series + 2 * s0 : series, 2 * have, 2 * n, 1, inv);
-
-      ap_fft(p->fft_fwd_n, p->sfwd_n, p->sspec_n, AP_FORWARD);
+      ap_fft_forward_scaled(p->fft_fwd_n, have ? series + 2 * s0 : series, 2 * have, 1, inv,
+                            p->sspec_n);
       d0_ptr = p->sspec_n;
     } else {
       const size_t N = 2 * n;
       size_t have = s0 < nseries ? nseries - s0 : 0;
       if(have > N) have = N;
       const float inv = 1.0f / (float)N;
-      ap_scale_load_on(p->fft, p->sfwd_2n, have ? series + 2 * s0 : series, 2 * have, 2 * N, 1, inv);
-
-      ap_fft(p->fft_fwd, p->sfwd_2n, p->sspec_2n, AP_FORWARD);
+      ap_fft_forward_scaled(p->fft_fwd, have ? series + 2 * s0 : series, 2 * have, 1, inv,
+                            p->sspec_2n);
       d0_ptr = p->sspec_2n;
     }
 

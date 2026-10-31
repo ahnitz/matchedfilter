@@ -107,6 +107,17 @@ typedef struct {
                      float scale);
   /* dst[k*w + l] = src[l][k] (zero past cnt) for k < n (loads-inl.h lanes_transpose). */
   void (*lanes_transpose)(float *dst, const float *const *src, int cnt, size_t n, int w);
+  /* Multi-block forward transforms across SIMD lanes on a small (pairbatch) plan. */
+  int (*fft_forward_batch)(void *, const float *const *srcs, const size_t *haves, int cnt,
+                           float scale, float *const *outs);
+  int (*fft_real_batch)(void *, const float *const *srcs, const size_t *haves, size_t stride,
+                        int cnt, float scale, const float *rtw, int mirror, float *const *outs);
+  /* Forward transform with 1/N scaling and zero-padding fused into stage A's load. */
+  void (*fft_forward_scaled)(void *, const float *in, size_t have_floats, size_t stride,
+                             float scale, float *out);
+  /* Inverse product correlation writing only window [blo, end) directly to dst. */
+  int (*corr_prod_window)(void *, const float *dr, const float *di, const float *tr,
+                          const float *ti, size_t blo, size_t end, float *dst);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
