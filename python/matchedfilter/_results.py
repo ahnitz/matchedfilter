@@ -55,12 +55,16 @@ class _SparsePeaks:
         per_block = nt * nb
         flats, idxs, vals = [], [], []
         for b0, sp in parts:
-            flats.append(sp.flat + b0 * per_block)
-            idxs.append(sp.idx)
-            vals.append(sp.val)
-        flat = np.concatenate(flats) if flats else np.empty(0, np.int64)
-        idx = np.concatenate(idxs) if idxs else np.empty(0, np.int64)
-        val = np.concatenate(vals) if vals else np.empty(0, np.complex64)
+            if sp.flat.size:
+                flats.append(sp.flat + b0 * per_block)
+                idxs.append(sp.idx)
+                vals.append(sp.val)
+        if not flats:
+            return _SparsePeaks(shape, np.empty(0, np.int64), np.empty(0, np.int64),
+                                np.empty(0, np.complex64))
+        flat = np.concatenate(flats)
+        idx = np.concatenate(idxs)
+        val = np.concatenate(vals)
         if order is not None and flat.size:
             rows, rest = np.divmod(flat, per_block)
             flat = np.asarray(order, np.int64)[rows] * per_block + rest

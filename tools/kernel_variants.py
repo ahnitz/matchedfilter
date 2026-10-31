@@ -223,7 +223,7 @@ TIER_C_ENTRIES = (("corr1", "tcStage1"), ("corr2", "tcFullStage3"),
 #: Every production shader source, fingerprinted in each manifest (test_kernels_ship).
 SOURCES = ("tierb.slang", "fft_transform.slang", "series_forward.slang", "series_bands.slang",
            "forward_tier0.slang", "pack_coarse.slang", "twiddle.slang", "refine_bounded.slang",
-           "compact_peaks.slang")
+           "compact_peaks.slang", "refine_td.slang")
 
 
 def radix(n):
@@ -656,15 +656,19 @@ def _tierc_family(backend, n, add):
                                gate_only=0, portable=0, role=role, n1=n1, n2=n2)))
 
 
-def _standalone(backend, stem, entry):
-    """pack_coarse.slang / compact_peaks.slang: compiled where they are on Vulkan and Metal,
-    from a copy with the structured-buffer define on CUDA."""
+def _standalone(backend, stem, entry, include=False):
+    """pack_coarse.slang / compact_peaks.slang / refine_td.slang: compiled where they are on
+    Vulkan (and Metal when no target define is needed), else from a copy with target defines."""
     facts = dict(n=0, ppg=1, tile=1, coarse16=0, single_bin=0, gate_only=0, portable=0)
     if backend == "cuda":
-        return Variant(backend, stem, entry, src=stem + ".temp.slang", facts=facts,
+        return Variant(backend, stem, entry, src=stem + ".temp.slang", include=include,
+                       facts=facts,
                        text=lambda: ("#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
                                      + source(stem + ".slang")))
-    return Variant(backend, stem, entry, repo_file=GPU_SRC / (stem + ".slang"), include=False,
+    if backend == "metal" and include:
+        return Variant(backend, stem, entry, src=stem + ".slang", include=True, facts=facts,
+                       text=lambda: "#define MF_METAL 1\n" + source(stem + ".slang"))
+    return Variant(backend, stem, entry, repo_file=GPU_SRC / (stem + ".slang"), include=include,
                    facts=facts)
 
 
@@ -682,12 +686,14 @@ def variants(backend):
     if backend != "cuda":
         add(_standalone(backend, "pack_coarse", "packCoarse"))
         add(_standalone(backend, "compact_peaks", "compactPeaks"))
+        add(_standalone(backend, "refine_td", "refineDirect", include=True))
         for n in TIER_B:
             _forward_family(backend, n, add)
     for n in FULL_TIER_C:
         _tierc_family(backend, n, add)
     if backend == "cuda":
         add(_standalone(backend, "compact_peaks", "compactPeaks"))
+        add(_standalone(backend, "refine_td", "refineDirect", include=True))
         # No module past what CUDA can launch (STATIC_SHARED_MAX, MAX_INVOCATIONS).
         out = [v for v in out if not v.facts.get("n") or (
             local_size(v)[0] <= MAX_INVOCATIONS and _staging(v) <= STATIC_SHARED_MAX)]
@@ -724,6 +730,11 @@ def local_size(v):
 def _staging(v):
     """staging_bytes of a tierb.slang-family variant, from its build facts."""
     f = v.facts
+    # Tiled COARSE16 at WG <= mfSubgroupSize (32 build-time on Metal and CUDA) transposes and
+    # elects in registers via subgroup shuffles without touching stg, so Slang emits 0 bytes.
+    if (v.backend in ("metal", "cuda") and f.get("coarse16")
+            and f.get("tile", 1) % 2 == 0 and f["n"] // radix(f["n"]) <= 32):
+        return 0
     if f.get("coarse16") and v.backend != "metal":
         xs, slot = exchange_layout(f["n"], f["ppg"], f["cap"])
         return staging_bytes(f["n"], f["cap"], f["ppg"], 1, xstride=xs, xslot=slot)

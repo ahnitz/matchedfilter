@@ -101,3 +101,28 @@ def _direct_pair_prices(n, plan, real_series=False, complex_taps=False):
             return (float(r["lagtap"]), float(r["fftpair"]))
         return None
     return price_once(_DIRECT_PAIR, key, "choice|" + key, measure, read)
+
+
+#: (n, device, kernel_id, mode) key -> device time of one direct (lag x tap) divided by one
+#: length-n FFT refine pair (_gpu_direct_ratio).
+_GPU_DIRECT_RATIO = {}
+
+
+def _gpu_direct_ratio(n, ctx, real_series=False, complex_taps=False):
+    """Device time of one GPU direct-refine (lag x tap) divided by one length-n FFT refine
+    pair on `ctx`, timed once per (n, device, kernel family, mode) and kept in MF_COST_FILE."""
+    from . import gatechain
+    rs, ct = bool(real_series), bool(complex_taps)
+    mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
+    dev_fn = getattr(ctx, "_dev_name", None)
+    dev = ((dev_fn() if dev_fn is not None else "")
+           or getattr(ctx, "device_name", "") or getattr(ctx, "name", "") or "gpu").strip()
+    kid = gatechain.gpu_kernel_id(getattr(ctx, "kernel_family", None))
+    key = "gpu-direct-ratio|%d|%s|%s%s" % (int(n), dev, kid, mode)
+
+    def measure():
+        v = float(ctx.time_direct_ratio(int(n), real_series=rs, complex_taps=ct))
+        return v, ({"value": v} if v > 0 else None)
+    return price_once(_GPU_DIRECT_RATIO, key, "choice|" + key, measure,
+                      lambda r: float(r["value"]) if isinstance(r, dict)
+                      and isinstance(r.get("value"), (int, float)) and r["value"] > 0 else None)

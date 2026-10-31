@@ -135,24 +135,29 @@ class _SeriesOutput:
         self.idx = self.val = self.peaks = None
         if c.single:
             return
-        if c.defer:
-            # A deferred call's tables outlive this call: its own.
-            if c.raw:
-                self.idx = np.empty(shape, dtype=np.int64)
-                self.val = np.empty(shape, dtype=np.complex64)
-            else:
+        if not c.raw:
+            if c.defer:
                 self.peaks = np.empty(shape, dtype=PEAK_DTYPE)
-        elif c.raw:
-            sb = getattr(plan, "_sbuf", None)
-            if sb is None or sb[0] != shape:
-                sb = plan._sbuf = (shape, np.empty(shape, dtype=np.int64),
-                                   np.empty(shape, dtype=np.complex64))
-            _, self.idx, self.val = sb
+            else:
+                spbuf = getattr(plan, "_spbuf", None)
+                if spbuf is None or spbuf[0] != shape:
+                    spbuf = plan._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                _, self.peaks = spbuf
+        elif not c.skw:
+            self._ensure_dense()
+
+    def _ensure_dense(self):
+        if self.idx is not None:
+            return
+        if self.c.defer:
+            self.idx = np.empty(self.shape, dtype=np.int64)
+            self.val = np.empty(self.shape, dtype=np.complex64)
         else:
-            spbuf = getattr(plan, "_spbuf", None)
-            if spbuf is None or spbuf[0] != shape:
-                spbuf = plan._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-            _, self.peaks = spbuf
+            sb = getattr(self.plan, "_sbuf", None)
+            if sb is None or sb[0] != self.shape:
+                sb = self.plan._sbuf = (self.shape, np.empty(self.shape, dtype=np.int64),
+                                        np.empty(self.shape, dtype=np.complex64))
+            _, self.idx, self.val = sb
 
     def take(self, b_start, b_end, r):
         """Store one batch's result (a grouped call: always several batches' tables); sparse
@@ -161,7 +166,9 @@ class _SeriesOutput:
             self.sparse_parts.append((b_start, r))
             return
         gi, gv = r
+        self.dense_seen = True
         if self.c.raw:
+            self._ensure_dense()
             self.idx[b_start:b_end], self.val[b_start:b_end] = gi, gv
         else:
             _core.pack_peaks(self.peaks[b_start:b_end], gi, gv)
@@ -190,6 +197,7 @@ class _SeriesOutput:
                 out = spbuf[1]
             return _format_result(gi, gv, raw=False, out=out)
         if c.raw:
+            self._ensure_dense()
             self.idx[b_start:b_end], self.val[b_start:b_end] = gi, gv
         else:
             _core.pack_peaks(self.peaks[b_start:b_end], gi, gv)
@@ -205,9 +213,15 @@ class _SeriesOutput:
             if not self.dense_seen:
                 return sp
             # Mixed (a tiled fallback came back dense): densify the sparse pieces.
+            self._ensure_dense()
             for b0, part in self.sparse_parts:
                 pi, pv = part.dense()
                 self.idx[b0:b0 + part.shape[0]], self.val[b0:b0 + part.shape[0]] = pi, pv
+        elif c.skw and not self.dense_seen:
+            return _SparsePeaks(self.shape, np.empty(0, np.int64), np.empty(0, np.int64),
+                                np.empty(0, np.complex64))
+        else:
+            self._ensure_dense()
         return _format_result(self.idx, self.val, raw=True, order=c.layout.order)
 
 
@@ -405,6 +419,8 @@ class MatchedFilter:
         self._gpairs = 0
         self._gtrig = 0
         self._gt1 = 0          # GPU: pairs tier 0 passed (cascade chains), for _roofline
+        self._gdirect = 0
+        self._gfft = 0
         self._ddirty = True
         self._tdirty = True
 
@@ -702,6 +718,8 @@ class MatchedFilter:
         self._gpairs += shp[0] * shp[1]
         self._gtrig += self._gpu.last_refinements
         self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
+        self._gdirect += getattr(self._gpu, "last_direct_refinements", 0) or 0
+        self._gfft += getattr(self._gpu, "last_fft_refinements", 0) or 0
         return r
 
     # ---- run ----------------------------------------------------------------
@@ -1245,14 +1263,14 @@ class MatchedFilter:
         # before a later run(), consistently on both devices.
         self._dataset = False
         self._data_ready = set()
+        real = ser.dtype == np.float32
+        self._want_real = real
         if self._gpu is not None:
             return self._run_series_gpu(ser, layout, binsize, threshold, t0, nt, raw)
         nb = layout.nbins
         ph = layout.phase
         shape = (nblk, nt, nb)
-        real = ser.dtype == np.float32
         stride = 2 if real and ser.strides == (8,) else 1
-        self._want_real = real
         ep = self._execution_plan()
         held = self.__dict__.get("_ep_real")
         if real or (held is not None and held[0] is ep and held[1]):
@@ -1434,7 +1452,8 @@ class MatchedFilter:
         ws = self.__dict__.get("_series_workspace")
         objs = (layout, self._gpu, self._gtmpl, self.__dict__.get("_resolved"),
                 self.__dict__.get("_ct"), self.__dict__.get("_ckey"),
-                None if ws is None else ws[2], None if ws is None else ws[3])
+                None if ws is None else ws[2], None if ws is None else ws[3],
+                self.__dict__.get("_taps"))
         from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
                 _config.get("MF_GPU_QUEUE_AHEAD"),
@@ -1475,7 +1494,7 @@ class MatchedFilter:
         if (objs[0] is not layout or objs[1] is not self._gpu or objs[2] is not self._gtmpl
                 or objs[3] is not d.get("_resolved") or objs[4] is not d.get("_ct")
                 or objs[5] is not d.get("_ckey") or ws is None or objs[6] is not ws[2]
-                or objs[7] is not ws[3]):
+                or objs[7] is not ws[3] or objs[8] is not d.get("_taps")):
             return None
         lo_addr, hi_addr = entry["span"]
         extent = (ser.size - 1) * ser.strides[0] + ser.itemsize if ser.size else 0
@@ -1518,21 +1537,30 @@ class MatchedFilter:
             if res is None:
                 raise RuntimeError("a validated call plan part was refused")
             in_flight.append((begin, end, res))
-        idx = np.empty(shape, dtype=np.int64)
-        val = np.empty(shape, dtype=np.complex64)
         sparse_parts = []
 
         def finish_grouped():
             # As the full path's finish_grouped/take_dense/finish_raw for a grouped call.
+            idx = val = None
+            refined = 0
             for b_start, b_end, item in in_flight:
                 r = self._account(item())
+                refined += getattr(gpu, "last_refinements", 1)
                 if isinstance(r, _SparsePeaks):
                     sparse_parts.append((b_start, r))
                 else:
+                    if idx is None:
+                        idx = np.empty(shape, dtype=np.int64)
+                        val = np.empty(shape, dtype=np.complex64)
                     idx[b_start:b_end], val[b_start:b_end] = r
             in_flight.clear()
+            if refined == 0:
+                deferred.empty = True
             if sparse_parts:
                 return _SparsePeaks.combine(sparse_parts, shape, layout.order)
+            if idx is None:
+                idx = np.full(shape, -1, dtype=np.int64)
+                val = np.zeros(shape, dtype=np.complex64)
             return _format_result(idx, val, raw=True, order=layout.order)
         self._defer_slot = slot_idx
         deferred = _Deferred(finish_grouped)
@@ -1668,10 +1696,7 @@ class MatchedFilter:
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
         # GPU works on this call while the host prepares the next bank's. (A joint trial's
         # round replays whole batches in the mode the search runs: deferred too.)
-        # A grouped flat call defers too when it is one batch (a follow-up's window: one
-        # submission for every bin count).
-        c.defer = defer = (self._defer_series and can_pipeline
-                           and (not grouped_flat or nblk <= batch))
+        c.defer = defer = bool(self._defer_series and can_pipeline)
         c.pipelined = can_pipeline and (not single or defer)
         queue_ahead = _config.get("MF_GPU_QUEUE_AHEAD")
         c.K = K = max(1, queue_ahead) if c.pipelined else 1
@@ -1826,6 +1851,7 @@ class MatchedFilter:
         """Every batch as one grouped dispatch over all its window groups."""
         layout, nblk, batch, ser, base = c.layout, c.nblk, c.batch, c.ser, c.base
         in_flight = []
+        collected_early = [False]
         slot_idx = c.slot0 if c.defer else 0
         # The batches' groups and rebased starts, per (layout, batch, series size, base):
         # the same every segment of a search.
@@ -1875,13 +1901,19 @@ class MatchedFilter:
                     record = False              # e.g. a split window: not one record
             in_flight.append((begin, end, res))
             if len(in_flight) >= c.K:
+                collected_early[0] = True
                 b_start, b_end, item = in_flight.pop(0)
                 out.take(b_start, b_end, item() if callable(item) else item)
+
+        refined = [0]
 
         def finish_grouped():
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
-                out.take(b_start, b_end, item() if callable(item) else item)
+                r = item() if callable(item) else item
+                if c.is_hier:
+                    refined[0] += getattr(self._gpu, "last_refinements", 1)
+                out.take(b_start, b_end, r)
             return out.finish()
         if not c.defer:
             return finish_grouped()
@@ -1889,7 +1921,14 @@ class MatchedFilter:
             self._record_call_plan(ser, layout, c.binsize, c.threshold, c.t0, c.nt, c.K, batch,
                                    c.slot0, c.contained[0] if c.contained is not None else ser,
                                    recorded, c.starts_pool)
-        return self._series_deferred(c, slot_idx, finish_grouped)
+
+        def finish_marking():
+            value = finish_grouped()
+            if c.is_hier and refined[0] == 0 and not collected_early[0]:
+                deferred.empty = True
+            return value
+        deferred = self._series_deferred(c, slot_idx, finish_marking)
+        return deferred
 
     def _series_by_group(self, c, out):
         """Every window group's batches as their own dispatches (one group, or a backend or
