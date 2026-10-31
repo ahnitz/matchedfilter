@@ -53,6 +53,10 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.split_store = k::split_store;     /* its vector path needs w == the plan's 8 lanes */
     be.scale_load = k::scale_load;
     be.lanes_transpose = k::lanes_transpose;
+    be.fft_forward_batch = k::fft_forward_batch;
+    be.fft_real_batch = k::fft_real_batch;
+    be.fft_forward_scaled = k::fft_forward_scaled;
+    be.corr_prod_window = k::corr_prod_window;
     be.td_corr = k::td_corr;
     be.td_corr_ex = k::td_corr_ex;
     be.real_split = k::real_split;

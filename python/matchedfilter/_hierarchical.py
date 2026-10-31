@@ -422,7 +422,8 @@ class HierarchicalFilter(MatchedFilter):
         the direct refine does not apply: off (MF_DIRECT_REFINE=0), no taps, or no reference
         to model it on."""
         taps = getattr(self, "_taps", None)
-        if taps is None or not _direct_refine_enabled() or self._pending_ref is None:
+        if (taps is None or not _direct_refine_enabled() or self._pending_ref is None
+                or getattr(self, "_one_bin_frac", 1.0) <= 0.0):
             return None
         cplx = bool(taps[2])
         want_real = self.__dict__.get("_want_real")
@@ -562,7 +563,8 @@ class HierarchicalFilter(MatchedFilter):
         cm = _calibration.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
         price = self._direct_price()
-        return (cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16")
+        return (cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
+                               fraction=getattr(self, "_one_bin_frac", 1.0))
                 if price is not None else cm)
 
     def _direct_key(self):
@@ -572,7 +574,12 @@ class HierarchicalFilter(MatchedFilter):
         taps = getattr(self, "_taps", None)
         if taps is None or not _direct_refine_enabled() or self.device.kind != "cpu":
             return None
+        frac = round(float(getattr(self, "_one_bin_frac", 1.0)), 2)
+        if frac <= 0.0:
+            return None
         rl = int(round(float(np.mean(taps[1])) / 32.0))
+        if frac < 1.0:
+            return (rl, bool(taps[2]), frac)
         return (rl, True) if taps[2] else rl
 
     def _choose_chain(self):

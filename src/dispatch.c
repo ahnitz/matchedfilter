@@ -69,6 +69,20 @@ void ap_destroy(ap_plan *p){
 void ap_fft(ap_plan *p,const float *in,float *out,int sign){
   p->be->fft(p->h,in,out,sign==AP_BACKWARD);
 }
+void ap_fft_forward_scaled(ap_plan *p,const float *in,size_t have_floats,size_t stride,
+                           float scale,float *out){
+  p->be->fft_forward_scaled(p->h,in,have_floats,stride,scale,out);
+}
+int ap_fft_forward_batch(ap_plan *p,const float *const *srcs,const size_t *haves,int cnt,
+                         float scale,float *const *outs){
+  if(!p || !p->be->fft_forward_batch) return -1;
+  return p->be->fft_forward_batch(p->h,srcs,haves,cnt,scale,outs);
+}
+int ap_fft_real_batch(ap_plan *p,const float *const *srcs,const size_t *haves,size_t stride,
+                      int cnt,float scale,const float *rtw,int mirror,float *const *outs){
+  if(!p || !p->be->fft_real_batch) return -1;
+  return p->be->fft_real_batch(p->h,srcs,haves,stride,cnt,scale,rtw,mirror,outs);
+}
 
 void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
   pick()->td_corr(x,taps,L,nlag,out);
@@ -187,6 +201,11 @@ int ap_corr_prod(ap_plan *p,const float *dr,const float *di,
                  const float *tr,const float *ti,float *out){
   if(!p||!p->be->corr_prod) return -1;
   return p->be->corr_prod(p->h,dr,di,tr,ti,out);
+}
+int ap_corr_prod_window(ap_plan *p,const float *dr,const float *di,
+                        const float *tr,const float *ti,size_t blo,size_t end,float *dst){
+  if(!p||!p->be->corr_prod_window) return -1;
+  return p->be->corr_prod_window(p->h,dr,di,tr,ti,blo,end,dst);
 }
 int ap_corr_split(ap_plan *p,const float *re,const float *im,float *out){
   if(!p||!p->be->corr_split) return -1;

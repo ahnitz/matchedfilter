@@ -49,6 +49,12 @@ int      ap_plan_split(const ap_plan *p, int *n1, int *n2);
 
 /* Full transform, AP_FORWARD or AP_BACKWARD.  Neither direction scales by 1/N. */
 void ap_fft(ap_plan *p, const float *in, float *out, int sign);
+void ap_fft_forward_scaled(ap_plan *p, const float *in, size_t have_floats, size_t stride,
+                           float scale, float *out);
+int  ap_fft_forward_batch(ap_plan *p, const float *const *srcs, const size_t *haves, int cnt,
+                          float scale, float *const *outs);
+int  ap_fft_real_batch(ap_plan *p, const float *const *srcs, const size_t *haves, size_t stride,
+                       int cnt, float scale, const float *rtw, int mirror, float *const *outs);
 
 /* Direct correlation over nlag consecutive lags: out[i] = sum_{k<L} (tr[k] + j ti[k]) x[i+k]
    (td-inl.h). x holds nlag + L - 1 samples (real when x_real != 0, else interleaved complex);
@@ -147,6 +153,8 @@ typedef struct {
 ap_prod_kernel ap_plan_prod_kernel(const ap_plan *,float threshold);
 int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
                  const float *tr, const float *ti, float *out);
+int ap_corr_prod_window(ap_plan *p, const float *dr, const float *di,
+                        const float *tr, const float *ti, size_t blo, size_t end, float *dst);
 int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);
 int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
                        const float *tr, const float *ti, int nlane, float *out);
