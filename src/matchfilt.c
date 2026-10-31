@@ -1528,8 +1528,8 @@ static void q15_template(ap_mf_plan *p,int t){
     if(fabs(r)>amax) amax=fabs(r);
     if(fabs(i)>amax) amax=fabs(i);
   }
-  double sc=0;
-  if(isfinite(ss) && ss>0){
+  double sc = !isfinite(ss) ? -1.0 : 0.0;
+  if(sc==0.0 && ss>0){
     sc=AP_Q15_TNORM(n)/sqrt(ss);
     if(sc*amax>32767.0) sc=32767.0/amax;
   }
@@ -1565,7 +1565,7 @@ static inline __attribute__((always_inline)) double q15_data_scale(const ap_mf_p
   const double D=(AP_Q15_L1-1.5*(double)n)*32768.0/AP_Q15_TNORM(n)-sqrt((double)n);
   /* float rounding of the sum can overstate or understate it by ~1e-7
      relative; the 0.999 keeps the bound on the side that matters. */
-  return (isfinite(ss) && ss>0) ? 0.999*D/sqrt(ss) : 0.0;
+  return !isfinite(ss) ? -1.0 : ss>0 ? 0.999*D/sqrt(ss) : 0.0;
 }
 
 static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
@@ -1596,13 +1596,22 @@ static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
    (p->qnomargin) the screen gates on its own statistic when quantisation rounding is small
    against one SNR unit; when an out-of-window glitch crushes qds*qts/2^15 below 2*margin,
    the deterministic bound margin is restored so an in-window signal cannot be rounded below
-   threshold. */
+   threshold.  Non-finite inputs (scale < 0) fail open; exact-zero inputs (scale == 0) have
+   exact correlation 0 and pass only when threshold <= 0. */
 static inline int16_t q15_lanethr(float threshold,float qds,float qts,float margin,int nomargin){
+  if(qds<0.f || qts<0.f) return (int16_t)-32768;
+  if(qds==0.f || qts==0.f) return !(threshold>0.f) ? (int16_t)-32768 : (int16_t)32767;
   const float ds=qds*(float)(1.0/32768.0);
   const float eq=(!nomargin || ds*qts<2.0f*margin) ? margin : 0.0f;
   const float q=threshold*ds*(1.0f-1e-4f)*qts-eq;
   const float T=q*q*(float)(1.0/32768.0)-1.0f;
   return !(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
+}
+
+static inline float q15_stat_val(float qds,float qts,int16_t lanemax){
+  if(qds<0.f || qts<0.f) return -1.0f;
+  const double sdt=(double)qds*qts/32768.0;
+  return sdt>0 ? (float)(sqrt((double)lanemax*32768.0)/sdt) : 0.0f;
 }
 
 /* Keep tail scheduling separate so it does not expand the ordinary screen's
@@ -1636,10 +1645,7 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
           const int lane=b*width+l, ok=(int)((bits>>lane)&1u);
           pass[row+l]=(unsigned char)ok;
           total+=ok;
-          if(stat){
-            const double sdt=(double)p->qds[d+b]*bl[off+l]/32768.0;
-            stat[row+l]=sdt>0 ? (float)(sqrt((double)lanemax[lane]*32768.0)/sdt) : -1.0f;
-          }
+          if(stat) stat[row+l]=q15_stat_val(p->qds[d+b],bl[off+l],lanemax[lane]);
         }
       }
     }
@@ -1687,8 +1693,8 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
       /* Lane l's int16 maximum m satisfies m >= |z_q|^2/2^15 - 1, and
          z_q = z * sd*st/2^15 to within EQ (ap_q15_margin).  So the float
          maximum can reach `threshold` only if m >= q^2/2^15 - 1 with
-         q = threshold*sd*st/2^15 - EQ.  A lane with q <= 0, or with a zero
-         or non-finite scale, always passes.  The 1e-4 covers the float
+         q = threshold*sd*st/2^15 - EQ.  A lane with q <= 0, or with a
+         non-finite scale, always passes.  The 1e-4 covers the float
          tier's own rounding (~1e-6 relative). */
       for(int l=0;l<qw;l++)
         lanethr[l] = q15_lanethr(threshold,p->qds[d],bl[l],margin,p->qnomargin);
@@ -1704,10 +1710,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
       }
       if(stat){
         float *srow=stat+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);
-        for(int l=l0;l<l1;l++){
-          const double sdt=(double)p->qds[d]*bl[l]/32768.0;
-          srow[l-l0] = sdt>0 ? (float)(sqrt((double)lanemax[l]*32768.0)/sdt) : -1.0f;
-        }
+        for(int l=l0;l<l1;l++) srow[l-l0]=q15_stat_val(p->qds[d],bl[l],lanemax[l]);
       }
     }
   }
@@ -1760,8 +1763,9 @@ static int q15_slab_lanes(ap_mf_plan *p,int d){
     const int e=slab*qw+g*8+b;
     if(e<p->nd){
       const double s=q15_data_scale(p,e);
-      rr[b]=p->dre+(size_t)e*n; ri[b]=p->dim+(size_t)e*n;
-      sc[b]=(float)s; p->qds[e]=(float)s;
+      p->qds[e]=(float)s;
+      if(s>0){ rr[b]=p->dre+(size_t)e*n; ri[b]=p->dim+(size_t)e*n; sc[b]=(float)s; }
+      else { rr[b]=ri[b]=p->qzero; sc[b]=0.f; }
     } else { rr[b]=ri[b]=p->qzero; sc[b]=0.f; }
   }
   if(ap_q15_slab8(p->fft,rr,ri,sc,xr+g*8,xi+g*8)) return -1;
@@ -1769,8 +1773,9 @@ static int q15_slab_lanes(ap_mf_plan *p,int d){
   return 0;
 }
 
-int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npairs,int t0,
-                    float threshold,size_t start,size_t end,unsigned char *pass,float *stat){
+int ap_mf_q15_pairs_lag(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npairs,int t0,
+                        float threshold,size_t start,size_t end,unsigned char *pass,float *stat,
+                        int16_t *lag_idx){
   if(!p||npairs<1) return 0;
   if(!pass) return -1;
   if(end>p->n) end=p->n;
@@ -1805,7 +1810,7 @@ int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npa
   for(int j=0;j<npairs;j++) order[cnt[key[j]]++]=j;
   if(cnt!=cstack) free(cnt);
   const float margin=(float)ap_q15_margin(n);
-  int16_t lanethr[64], lanemax[64], ld[64], lt[64];
+  int16_t lanethr[64], lanemax[64], laneidx[64], ld[64], lt[64];
   int jj[64];
   int total=0;
   for(int i0=0;i0<npairs;){
@@ -1827,20 +1832,25 @@ int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npa
     const long tw=(long)(g0+1<(size_t)ngroup ? n*qw : 0);
     uint64_t bits=0;
     if(ap_q15_screen_perm(p->fft,dr,di,p->qtr+g0*n*qw,p->qti+g0*n*qw,tw,ld,lt,start,end,
-                          lanethr,&bits,stat?lanemax:NULL,p->qscr)) return -1;
+                          lanethr,&bits,stat?lanemax:NULL,lag_idx?laneidx:NULL,p->qscr)) return -1;
     for(int l=0;l<cnt1;l++){
       const int ok=(int)((bits>>l)&1u), j=jj[l];
       pass[j]=(unsigned char)ok;
       total+=ok;
-      if(stat){
+      if(stat || lag_idx){
         const int d=d0+dsel[j], t=t0+tsel[j];
-        const double sdt=(double)p->qds[d]*p->qts[t]/32768.0;
-        stat[j]=sdt>0 ? (float)(sqrt((double)lanemax[l]*32768.0)/sdt) : -1.0f;
+        if(stat) stat[j]=q15_stat_val(p->qds[d],p->qts[t],lanemax[l]);
+        if(lag_idx) lag_idx[j]=(p->qds[d]>0.f && p->qts[t]>0.f) ? laneidx[l] : (int16_t)-1;
       }
     }
     i0+=cnt1;
   }
   return total;
+}
+
+int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npairs,int t0,
+                    float threshold,size_t start,size_t end,unsigned char *pass,float *stat){
+  return ap_mf_q15_pairs_lag(p,d0,dsel,tsel,npairs,t0,threshold,start,end,pass,stat,NULL);
 }
 
 /* Debug accessor: how many data slots the plan actually has. */

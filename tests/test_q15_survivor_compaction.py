@@ -118,9 +118,11 @@ def test_q15_compaction_preserves_outputs_and_stats(native, target, chain, spars
                 peak.index, peak.re, peak.im, peak.magnitude = 123, 1, 2, 3
             # Reuse the actual buffer: rejected rows contain genuine earlier peaks.
             for state in ("allpass", "partial", "allreject", "partial", "allpass"):
+                # Place the second tier's threshold in a gap clear of Q15's ~0.2% rounding
+                # (two pairs at band 512 sit at 3.492 and 3.499 on this seed).
                 thresholds = np.asarray(([0.] * len(chain) if state == "allpass" else
                     [1e8] * len(chain) if state == "allreject" else
-                    [2.5] + [3.5] * (len(chain) - 1)), dtype=np.float32)
+                    [2.5] + [3.56] * (len(chain) - 1)), dtype=np.float32)
                 for plan in (reference, screened):
                     assert native.ap_hmf_set_thresholds(plan, thresholds.ctypes.data, len(chain)) == 0
                 previous = [_fields(peak) for peak in actual]

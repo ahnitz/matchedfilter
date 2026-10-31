@@ -82,6 +82,7 @@ struct ap_hmf_plan {
   unsigned char *qpass;           /* [nd*nt] */
   int *qd,*qt;                    /* the screen's survivors */
   float *qstat;                   /* [nd*nt] the screen's maximum, for MF_HMF_DUMP/TRACE */
+  int16_t *qidx;                  /* [nd*nt] coarse argmax lag of listed Q15 screen */
   long qpassed;
   unsigned long long qticks;
   /* Direct refine (ap_hmf_set_taps, ap_hmf_set_direct): a survivor is refined only at the
@@ -228,7 +229,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->tmpls_half) free(p->tmpls_half);
   if(p->prod_scratch) free(p->prod_scratch);
   if(p->dump) fclose(p->dump);
-  free(p->qpass); free(p->qd); free(p->qt); free(p->qstat);
+  free(p->qpass); free(p->qd); free(p->qt); free(p->qstat); free(p->qidx);
   if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
   free(p->tap_len); free(p->dtime); free(p->dhave);  free(p->dx); free(p->dout); free(p->dfd); free(p->dft);
   free(p);
@@ -411,17 +412,18 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
   if(!p->qpass){
     const size_t np=(size_t)p->nd*p->nt;
     p->qpass=malloc(np); p->qd=malloc(np*sizeof(int)); p->qt=malloc(np*sizeof(int));
-    p->qstat=malloc(np*sizeof(float));
-    if(!p->qpass||!p->qd||!p->qt||!p->qstat){
-      free(p->qpass); free(p->qd); free(p->qt); free(p->qstat);
-      p->qpass=NULL; p->qd=p->qt=NULL; p->qstat=NULL; return -1;
+    p->qstat=malloc(np*sizeof(float)); p->qidx=malloc(np*sizeof(int16_t));
+    if(!p->qpass||!p->qd||!p->qt||!p->qstat||!p->qidx){
+      free(p->qpass); free(p->qd); free(p->qt); free(p->qstat); free(p->qidx);
+      p->qpass=NULL; p->qd=p->qt=NULL; p->qstat=NULL; p->qidx=NULL; return -1;
     }
   }
-  /* The screen decides on its own int16 maximum: no margin (ap_mf_set_q15_margin). The tiers
-     between the first and the last gate the same way on their survivor lists, where their
-     band has a screen; the last stays FP32, whose coarse lag the direct refine reads. */
+  /* The screen decides on its own int16 maximum: no margin (ap_mf_set_q15_margin). Later
+     tiers gate the same way on their survivor lists, where their band has a screen; when the
+     last tier gates in Q15 for a direct-refine plan, ap_mf_q15_pairs_lag also elects its
+     coarse argmax lag. */
   ap_mf_set_q15_margin(p->tier[0].mf,0);
-  for(int i=1;i+1<p->ntiers;i++){
+  for(int i=1;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     tr->q15=ap_mf_q15_lanes(tr->mf)>0;
     if(tr->q15) ap_mf_set_q15_margin(tr->mf,0);
@@ -1067,7 +1069,8 @@ static void reject_row(ap_hmf_plan *p,ap_peak *peaks,int *counts,size_t row,size
 /* Evaluate an already selected pair list. Logical gate identity and thresholds
    stay fixed even when its position in the execution order changes. */
 static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
-                          const int *ds,const int *ts,int count,size_t start,size_t end){
+                          const int *ds,const int *ts,int count,size_t start,size_t end,
+                          int use_q15,int16_t *qlag){
   const size_t r=p->n/tr->m;
   size_t lo=start/r, hi=(end+r-1)/r+1;      /* as ap_hmf_run: one coarse sample past each end */
   if(lo>0) lo--;
@@ -1080,9 +1083,10 @@ static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
     }
   }
   /* A Q15 tier's decision per listed pair goes to p->qpass[j] (free once the first tier's
-     survivors are compacted); an FP32 tier's maximum to its cebuf. */
-  if(tr->q15)
-    return ap_mf_q15_pairs(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL);
+     survivors are compacted), with optional coarse argmax lag in qlag[j]; an FP32 tier's
+     maximum goes to its cebuf. */
+  if(use_q15)
+    return ap_mf_q15_pairs_lag(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL,qlag);
   return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi-lo,tr->thr,
                                 tr->cebuf,NULL,lo,hi,nt);
 }
@@ -1125,6 +1129,8 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     }
     unsigned long long t_0=ap_ticks();
     float *qstat=NULL;               /* set: the screen decided, and this is its maximum */
+    int16_t *qlag=NULL;
+    int use_q15=0;
     if(i==0 && p->q15){
       /* The screen is the first tier: a pair passes when its int16 maximum reaches the
          tier's threshold, and no float run of the tier follows.  Like every tier it answers
@@ -1157,8 +1163,17 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(ap_gate16_run(tr->g16,d0,nd,t0,nt,cstart,cend,tr->cebuf)<0) return -1;
       } else if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
     } else {
-      if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end)<0) return -1;
-      if(tr->q15) tr->lagged=0;
+      if(tr->q15){
+        const int ql = ap_mf_q15_lanes(tr->mf);
+        const long nslabs = ql>0 ? ((long)nd+ql-1)/ql : 1;
+        /* Listed Q15 groups by (data slab, template); below ~2 survivors per group,
+           FP32 pair-batched IFFTs pack arbitrary (d, t) pairs across all SIMD lanes
+           without per-block int16 quantization and finish in fewer transforms. */
+        use_q15 = nfire >= 2L*nslabs*(long)nt;
+      }
+      qlag = (use_q15 && i==p->ntiers-1 && p->direct && p->taps) ? p->qidx : NULL;
+      if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end,use_q15,qlag)<0) return -1;
+      if(use_q15) tr->lagged = (qlag != NULL);
     }
     tr->ticks += ap_ticks()-t_0;
     int nnext=0;
@@ -1170,7 +1185,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       const size_t row=(size_t)d*nt+t;
       ap_peak ce = qstat ? (ap_peak){.index=0, .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
                          : tr->cebuf[row];
-      int fire = qstat || (tr->q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
+      int fire = qstat || (use_q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
       if(i==0 && fire){
         /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
            MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */
@@ -1182,6 +1197,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
           fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",pair,thr,ce.magnitude);
       }
       if(fire){
+        if(qlag) tr->cebuf[row].index = qlag[j];
         tr->fire_d[nnext]=d; tr->fire_t[nnext]=t; nnext++;
       } else {
         reject_row(p,peaks,counts,row,nb);

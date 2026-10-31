@@ -83,3 +83,33 @@ def test_a_reused_result_is_found_again_by_its_own_signature(empty_model):
     assert gc.chain_thresholds(b, N, 6.0, 1e-3, chain, window=WIN) is first
     gc._SIMILAR.clear()                 # only b's own signature can find it now
     assert gc.chain_thresholds(b, N, 6.0, 1e-3, chain, window=WIN) is first
+
+
+def test_candidate_cache_shares_across_banks_with_distinct_direct_costs(empty_model, monkeypatch):
+    """Banks with near-identical profiles and distinct tap lengths (direct_lag / direct_frac)
+    reuse _CAND_CACHE without re-running _chain_candidates, while pricing their own windows."""
+    import json
+    rec = json.loads((DATA / "cost_model_2048_zen5.json").read_text())
+    cm_base = gc.CostModel.from_dict(rec["model"])
+    a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    b = a * (1.0 + 1e-5 * np.random.default_rng(7).standard_normal(N))
+    calls = [0]
+    orig = gc._chain_candidates
+    def counting(*args, **kwargs):
+        calls[0] += 1
+        return orig(*args, **kwargs)
+    monkeypatch.setattr(gc, "_chain_candidates", counting)
+    cm_long = cm_base.with_direct(0.09 * 1400 + 4.0, fraction=0.25)
+    cm_short = cm_base.with_direct(0.09 * 96 + 4.0, fraction=1.0)
+    best1, _ = gc.choose_chain(a, N, 6.0, 1e-2, cost=cm_long, window=WIN)
+    first_calls = calls[0]
+    assert first_calls > 0
+    best2, _ = gc.choose_chain(b, N, 6.0, 1e-2, cost=cm_short, window=WIN)
+    assert calls[0] == first_calls     # zero new _chain_candidates calls on bank 2!
+    # Verify exact match against a cold uncached choose_chain on bank 2
+    gc._CAND_CACHE.clear()
+    gc._CHOICE_CACHE.clear()
+    best2_cold, _ = gc.choose_chain(b, N, 6.0, 1e-2, cost=cm_short, window=WIN)
+    assert best2["chain"] == best2_cold["chain"]
+    assert best2["thresholds"] == best2_cold["thresholds"]
+    assert best2["halfwidth"] == best2_cold["halfwidth"]
