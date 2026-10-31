@@ -24,6 +24,9 @@ int ap_gate16_run(void *g,int d0,int nd,int t0,int nt,size_t ws,size_t we,ap_pea
 int ap_gate16_run_pairs(void *g,int d0,int t0,const int *dsel,const int *tsel,int n,int nt_row,
                         size_t ws,size_t we,ap_peak *out);
 
+#define HMF_MAX_DIRECT_BINS 4
+#define HMF_COARSE_SUBBINS 16
+
 /* One coarse tier of the gate chain. Tier i runs on the survivors of tier i-1
    (tier 0 on every pair); the survivors of the last tier get the full refine. */
 typedef struct {
@@ -43,6 +46,7 @@ typedef struct {
                                      (not under the FP16 gate, whose index has no reader) */
   int q15;                        /* a later tier gating on the listed Q15 screen
                                      (ap_mf_q15_pairs), with the screen on */
+  int last_q15;                   /* this call ran on the listed Q15 screen */
 } hmf_tier;
 
 struct ap_hmf_plan {
@@ -96,6 +100,8 @@ struct ap_hmf_plan {
   size_t *dhave;                  /* [nd] samples present (the rest are zero) */
   float *dx, *dout;               /* [2n] a zero-padded block copy; direct output */
   int *dfd, *dft;                 /* [nd*nt] pairs the transform refines instead */
+  ap_peak *dir_sub;               /* [ns*HMF_COARSE_SUBBINS] coarse sub-bin peaks of multi-bin survivors */
+  size_t dir_sub_cap;
   double dir_lagtap, dir_fftpair; /* priced: ticks per lag x tap, per whole-block refine */
   long dir_pairs, dir_lags, dir_fft, dir_edge;
   unsigned long long dir_ttd, dir_tfft;  /* ticks: direct, and the pairs it left to transform */
@@ -232,6 +238,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   free(p->qpass); free(p->qd); free(p->qt); free(p->qstat); free(p->qidx);
   if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
   free(p->tap_len); free(p->dtime); free(p->dhave);  free(p->dx); free(p->dout); free(p->dfd); free(p->dft);
+  free(p->dir_sub);
   free(p);
 }
 
@@ -326,34 +333,70 @@ double ap_hmf_price_direct(void){
 }
 
 /* Price the direct correlation (ticks per lag x tap) and the whole-block refine (ticks per
-   pair: one inverse transform and its peak scan) on this core, best of a few reps. */
+   surviving pair: real-series mirror if active, split-layout data ingest, fused frequency
+   product, inverse transform, and peak scan across L2-resident slots) on this core. */
 static void price_direct(ap_hmf_plan *p){
   const size_t n=p->n;
-  const int L=256, nl=32;
+  const int L=256, nl=32, nslot=4;
   float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float));
   float *tr=ap_alloc64((size_t)L*sizeof(float));
   float *ti=p->tap_cplx ? ap_alloc64((size_t)L*sizeof(float)) : NULL;
-  float *spec=ap_alloc64(2*n*sizeof(float));
+  float *dout=ap_alloc64(2*(size_t)nl*sizeof(float));
+  float *spec=ap_alloc64((size_t)nslot*2*n*sizeof(float));
+  float *dr=ap_alloc64((size_t)nslot*n*sizeof(float));
+  float *di=ap_alloc64((size_t)nslot*n*sizeof(float));
+  float *tr_s=ap_alloc64((size_t)nslot*n*sizeof(float));
+  float *ti_s=ap_alloc64((size_t)nslot*n*sizeof(float));
+  float *prod=ap_alloc64(2*n*sizeof(float));
   ap_peak pk[4];
-  if(!x||!tr||(p->tap_cplx&&!ti)||!spec){ free(x); free(tr); free(ti); free(spec); return; }
+  if(!x||!tr||(p->tap_cplx&&!ti)||!dout||!spec||!dr||!di||!tr_s||!ti_s||!prod){
+    free(x); free(tr); free(ti); free(dout); free(spec);
+    free(dr); free(di); free(tr_s); free(ti_s); free(prod);
+    return;
+  }
   for(int i=0;i<2*(nl+L);i++) x[i]=(float)((i*7919)%1000)/1000.f-0.5f;
   for(int i=0;i<L;i++) tr[i]=(float)((i*104729)%1000)/1000.f-0.5f;
   if(ti) for(int i=0;i<L;i++) ti[i]=(float)((i*65537)%1000)/1000.f-0.5f;
-  for(size_t i=0;i<2*n;i++) spec[i]=(float)((i*31337)%1000)/1000.f-0.5f;
-  double best_d=1e30,best_f=1e30;
-  for(int r=0;r<5;r++){
+  for(size_t i=0;i<(size_t)nslot*2*n;i++) spec[i]=(float)((i*31337)%1000)/1000.f-0.5f;
+  int n1=0, n2=0;
+  if(!ap_plan_split(p->full_fft,&n1,&n2)) n1=n2=0;
+  const int w=ap_plan_lanes(p->full_fft);
+  const int gmajor=!p->is_dif && w>0 && n1>0 && n1%w==0
+                   && (size_t)n1*n2==n && ap_has_fused_prod(p->full_fft);
+  const ap_prod_kernel pkern=gmajor ? ap_plan_prod_kernel(p->full_fft,1e30f)
+                                    : (ap_prod_kernel){NULL,NULL};
+  for(int s=0;s<nslot;s++)
+    ap_split_store_on(p->full_fft,spec+(size_t)s*2*n,
+                      tr_s+(size_t)s*n,ti_s+(size_t)s*n,n,1,gmajor?n1:0,n2,w);
+  double best_d=1e30, best_f=1e30;
+  for(int r=0;r<7;r++){
+    const int s=r&(nslot-1);
+    float *sp=spec+(size_t)s*2*n;
+    float *drs=dr+(size_t)s*n, *dis=di+(size_t)s*n;
+    const float *trs=tr_s+(size_t)s*n, *tis=ti_s+(size_t)s*n;
     unsigned long long a=ap_ticks();
-    ap_td_corr_ex_on(p->full_fft,x,p->real_series,tr,ti,L,nl,p->dout);
+    ap_td_corr_ex_on(p->full_fft,x,p->real_series,tr,ti,L,nl,dout);
     unsigned long long b=ap_ticks();
-    int c=0;
-    ap_binmax(p->full_fft,spec,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n,NULL);
+    if(p->real_series) ap_real_split_mirror_on(p->full_fft,sp,n);
+    if(gmajor && pkern.run){
+      ap_split_store_on(p->full_fft,sp,drs,dis,n,0,n1,n2,w);
+      pkern.run(pkern.context,drs,dis,trs,tis,n,1e30f,pk,1,0,n,NULL);
+    } else {
+      for(size_t k=0;k<n;k++){
+        const float xr=sp[2*k], xi=sp[2*k+1], hr=trs[k], hi=tis[k];
+        prod[2*k]=xr*hr-xi*hi; prod[2*k+1]=xr*hi+xi*hr;
+      }
+      int c=0;
+      ap_binmax(p->full_fft,prod,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n,NULL);
+    }
     unsigned long long e=ap_ticks();
     if((double)(b-a)<best_d) best_d=(double)(b-a);
     if((double)(e-b)<best_f) best_f=(double)(e-b);
   }
   p->dir_lagtap=best_d/((double)nl*L);
   p->dir_fftpair=best_f;
-  free(x); free(tr); free(ti); free(spec);
+  free(x); free(tr); free(ti); free(dout); free(spec);
+  free(dr); free(di); free(tr_s); free(ti_s); free(prod);
 }
 
 int ap_hmf_price_direct_pair(ap_hmf_plan *p,double *lagtap,double *fftpair){
@@ -915,27 +958,34 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
 }
 
 /* One survivor by direct correlation: every lag within dir_hw coarse samples of the coarse
-   lags in loc (ncl entries; index < 0 skipped), binned exactly as the transform's scan bins
-   its lags. Returns the bins written above threshold, or -2 when the pair is priced cheaper
-   as a whole block (or its windows would read past the block). */
+   lags in loc (ncl entries; index < 0 skipped), binned with phase offset rem = ph % binsize
+   into the row's nb touched output bins. Returns the bins written above threshold, or -2 when
+   the pair is priced cheaper as a whole block (or its windows would read past the block). */
 static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size_t ncl,
-                              size_t R,size_t binsize,float threshold,
+                              size_t R,size_t binsize,size_t rem,float threshold,
                               ap_peak *out,size_t nb,size_t start,size_t end){
   const size_t n=p->n;
   const int L=p->tap_len[t], c=L/2;
   const long hw=(long)p->dir_hw*(long)R;
-  /* the windows: sorted (loc is in lag order), merged where they touch */
-  long lo[64], hi[64]; int nw=0; long nlag=0;
+  /* Build, sort, and merge touching or overlapping lag windows. */
+  long rlo[64], rhi[64]; int nr=0;
   for(size_t j=0;j<ncl;j++){
     if(loc[j].index<0) continue;
     long a=(long)loc[j].index*(long)R-hw, b=(long)loc[j].index*(long)R+hw+1;
     if(a<(long)start) a=(long)start;
     if(b>(long)end) b=(long)end;
     if(a>=b) continue;
-    if(nw && a<=hi[nw-1]){ if(b>hi[nw-1]) hi[nw-1]=b; continue; }
-    if(nw==64) return -2;
-    lo[nw]=a; hi[nw]=b; nw++;
+    if(nr==64) return -2;
+    int pos=nr++;
+    while(pos>0 && rlo[pos-1]>a){ rlo[pos]=rlo[pos-1]; rhi[pos]=rhi[pos-1]; pos--; }
+    rlo[pos]=a; rhi[pos]=b;
   }
+  long lo[64], hi[64]; int nw=0; long nlag=0;
+  for(int w=0;w<nr;w++){
+    if(nw && rlo[w]<=hi[nw-1]){ if(rhi[w]>hi[nw-1]) hi[nw-1]=rhi[w]; continue; }
+    lo[nw]=rlo[w]; hi[nw]=rhi[w]; nw++;
+  }
+  if(!nw) return -2;
   for(int w=0;w<nw;w++) nlag+=hi[w]-lo[w];
   if(p->trace) fprintf(stderr,"    [direct] pair d=%d t=%d coarse lag %ld R=%zu hw=%ld windows %d lags %ld L=%d"
                        " price %.0f vs %.0f\n",d,t,loc[0].index,R,hw,nw,nlag,L,p->dir_lagtap*(double)nlag*L,
@@ -974,20 +1024,20 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
     for(int i=0;i<m;i++){
       const float re=p->dout[2*i], im=p->dout[2*i+1], m2=re*re+im*im;
       const long k=lo[w]+i;
-      const size_t b=(size_t)(k-(long)start)/binsize;
+      const size_t b=((size_t)(k-(long)start)+rem)/binsize;
       if(m2>out[b].magnitude){ out[b].magnitude=m2; out[b].index=k; out[b].re=re; out[b].im=im; }
     }
   }
-  /* A maximum on a window's edge (one the search window did not put there) may be the
-     shoulder of a peak outside it: the localisation the window rests on (the gate model's
-     draws) did not hold for this pair, and it takes the whole-block transform instead. On
-     data the model describes this never fires (captured consumer calls); on data it does
-     not, it is what keeps the answer the transform's. */
+  /* A maximum on an internal edge of a direct window inside its bin may be the shoulder of a
+     peak outside the window; fall back to the whole-block transform to preserve exactness. */
   for(size_t b=0;b<nb;b++){
     const long k=out[b].index;
     if(k<0) continue;
+    const size_t blo = b==0 ? start : start+b*binsize-rem;
+    size_t bhi = start+(b+1)*binsize-rem;
+    if(bhi>end) bhi=end;
     for(int w=0;w<nw;w++)
-      if((k==lo[w] && lo[w]>(long)start) || (k==hi[w]-1 && hi[w]<(long)end)){ p->dir_edge++; return -2; }
+      if((k==lo[w] && lo[w]>(long)blo) || (k==hi[w]-1 && hi[w]<(long)bhi)){ p->dir_edge++; return -2; }
   }
   int cnt=0;
   for(size_t b=0;b<nb;b++){
@@ -998,40 +1048,137 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
   return cnt;
 }
 
+static int survivor_needs_sub(const ap_hmf_plan *p,const hmf_tier *tr,
+                              int gd,int gt,size_t row,size_t start,size_t hi,
+                              size_t R,size_t binsize){
+  if(!p->dtime[gd]) return 0;
+  const size_t ph=hmf_row_phase(p,gd);
+  const size_t ntouch=(hi-1-start+ph)/binsize - ph/binsize + 1;
+  if(ntouch<2 || ntouch>HMF_MAX_DIRECT_BINS) return 0;
+  const ap_peak ce=tr->cebuf[row];
+  if(ce.index<0) return 0;
+  const long hw=(long)p->dir_hw*(long)R;
+  long a0=(long)ce.index*(long)R-hw, b0=(long)ce.index*(long)R+hw+1;
+  if(a0<(long)start) a0=(long)start;
+  if(b0>(long)hi) b0=(long)hi;
+  return b0>a0 && p->dir_lagtap*(double)(b0-a0)*p->tap_len[gt] < p->dir_fftpair;
+}
+
 static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       int d0, int t0, int nt, int nfire,
                       size_t binsize, float threshold,
                       ap_peak *peaks, int *counts, size_t start, size_t end){
   if(nfire<=0) return 0;
   const size_t nb=hmf_nbins_phased(p,binsize,start,end,hmf_row_phase(p,d0+fire_d[0]));
-  /* One bin per pair: the answer is the window's largest |z|, and it lies by its last tier's
-     largest coarse lag (ce.index) -- the window is dir_hw coarse samples either side of it.
-     Several bins ask for every bin's maximum above threshold, which one window cannot
-     promise: those refine by transform. "One bin" is the bins the row's samples touch: a
-     bin phase pads a row with empty bins (a call's rows share one bin count), and a padded
-     row whose window lies in one bin is still a one-bin pair -- refined as its unpadded
-     call would refine it, not by transform. */
+  /* Refine rows touching up to HMF_MAX_DIRECT_BINS output bins directly around each touched
+     bin's last-tier coarse peak (no extra work when unsplit into 1 bin; batched sub-window
+     coarse election on tr->mf for 2..4 touched bins). Rows touching more bins, or whose
+     window cost exceeds dir_fftpair, refine by whole-block transform. */
   const size_t hi=end>p->n ? p->n : end;
-  if(!(p->direct && p->taps && start<hi && hi-1-start<binsize && p->tier[p->ntiers-1].lagged))
+  if(!(p->direct && p->taps && start<hi
+       && (hi-1-start)/binsize < HMF_MAX_DIRECT_BINS
+       && p->tier[p->ntiers-1].lagged))
     return hmf_refine_fft(p,fire_d,fire_t,d0,t0,nt,nfire,binsize,threshold,
                           peaks,counts,start,end);
   hmf_tier *tr=&p->tier[p->ntiers-1];
   const size_t R=p->n/tr->m;
+  size_t cstart=start/R; if(cstart>0) cstart--;
+  size_t cend=(hi+R-1)/R+1; if(cend>tr->m) cend=tr->m;
+  const size_t cspan=cend>cstart ? cend-cstart : 1;
+  const size_t cbs=(cspan+HMF_COARSE_SUBBINS-1)/HMF_COARSE_SUBBINS;
+  const int ncb=(int)((cspan+cbs-1)/cbs);
+  const float sthr=tr->last_q15 ? tr->thr*0.97f : tr->thr;
+  const float thr2=sthr>0.f ? sthr*sthr : 0.f;
   unsigned long long q1=ap_ticks();
-  int total=0, nf=0;
+
+  /* Batch coarse sub-window peaks across multi-bin direct survivors on pair-batched plans. */
+  int ns=0, have_sub=0;
+  for(int j=0;j<nfire;j++){
+    const int d=fire_d[j], t=fire_t[j];
+    if(survivor_needs_sub(p,tr,d0+d,t0+t,(size_t)d*nt+t,start,hi,R,binsize)){
+      p->dfd[ns]=d; p->dft[ns]=t; ns++;
+    }
+  }
+  if(ns>0 && ncb>1){
+    const size_t need=(size_t)ns*(size_t)ncb;
+    if(p->dir_sub_cap<need){
+      ap_peak *buf=ap_alloc64(need*sizeof(ap_peak));
+      if(!buf) return -1;
+      free(p->dir_sub); p->dir_sub=buf; p->dir_sub_cap=need;
+    }
+    const int rc=ap_mf_run_pairs_packed(tr->mf,d0,p->dfd,p->dft,ns,t0,
+                                        cbs,sthr,p->dir_sub,cstart,cend);
+    if(rc<0) return -1;
+    have_sub=(rc>0);
+  }
+
+  int total=0, nf=0, s=0;
   for(int j=0;j<nfire;j++){
     const int d=fire_d[j], t=fire_t[j];
     const size_t row=(size_t)d*nt+t;
     const size_t ph=hmf_row_phase(p,d0+d);
-    const size_t jb=ph/binsize;                 /* the row's one touched bin when unsplit */
+    const size_t jb0=ph/binsize, jb1=(hi-1-start+ph)/binsize;
+    const size_t ntouch=jb1-jb0+1, rem=ph%binsize;
     int c=-2;
-    if(p->dtime[d0+d] && jb==(hi-1-start+ph)/binsize){
+    if(ntouch==1 && p->dtime[d0+d] && tr->cebuf[row].index>=0){
       const ap_peak ce=tr->cebuf[row];
-      if(ce.index>=0)
-        c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,threshold,peaks+row*nb+jb,1,start,end);
+      c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,rem,threshold,
+                           peaks+row*nb+jb0,1,start,hi);
+    } else if(survivor_needs_sub(p,tr,d0+d,t0+t,row,start,hi,R,binsize)){
+      const ap_peak ce=tr->cebuf[row];
+      const ap_peak *cp=have_sub ? p->dir_sub+(size_t)s*(size_t)ncb : NULL;
+      s++;
+      ap_peak loc[HMF_MAX_DIRECT_BINS];
+      int need_corr=0, corr_ok=1;
+      for(size_t u=0;u<ntouch;u++){
+        const size_t blo = u==0 ? start : start+u*binsize-rem;
+        size_t bhi = start+(u+1)*binsize-rem;
+        if(bhi>hi) bhi=hi;
+        size_t cblo=blo/R; if(cblo>0) cblo--;
+        size_t cbhi=(bhi+R-1)/R+1; if(cbhi>tr->m) cbhi=tr->m;
+        if((size_t)ce.index>=cblo && (size_t)ce.index<cbhi){
+          loc[u]=ce;
+          continue;
+        }
+        if(cp){
+          const size_t qlo=cblo>cstart ? (cblo-cstart)/cbs : 0;
+          size_t qhi=cbhi>cstart ? (cbhi-1-cstart)/cbs : 0;
+          if(qhi>=(size_t)ncb) qhi=(size_t)ncb-1;
+          ap_peak best={-1,0.f,0.f,0.f};
+          int ambig=0;
+          for(size_t q=qlo;q<=qhi;q++){
+            const ap_peak pk=cp[q];
+            if(pk.index<0) continue;
+            if((size_t)pk.index>=cblo && (size_t)pk.index<cbhi){
+              if(best.index<0 || pk.magnitude>best.magnitude) best=pk;
+            } else if(best.index<0 || pk.magnitude>best.magnitude){
+              ambig=1;
+            }
+          }
+          if(!ambig){
+            loc[u]=best;
+            continue;
+          }
+        }
+        if(!need_corr){
+          if(ap_mf_correlate(tr->mf,d0+d,1,t0+t,1,tr->scratch)){ corr_ok=0; break; }
+          need_corr=1;
+        }
+        long bk=-1;
+        float bm2=thr2;
+        for(size_t jc=cblo;jc<cbhi;jc++){
+          const float re=tr->scratch[2*jc], im=tr->scratch[2*jc+1], m2=re*re+im*im;
+          if(bk<0 ? (m2>=bm2) : (m2>bm2)){ bm2=m2; bk=(long)jc; }
+        }
+        loc[u]=(ap_peak){bk,0.f,0.f,0.f};
+      }
+      if(corr_ok)
+        c=refine_direct_pair(p,d0+d,t0+t,loc,ntouch,R,binsize,rem,threshold,
+                             peaks+row*nb+jb0,ntouch,start,hi);
     }
     if(c==-2){ p->dfd[nf]=d; p->dft[nf]=t; nf++; continue; }
-    for(size_t b=0;b<nb;b++) if(b!=jb) peaks[row*nb+b]=(ap_peak){-1,0.f,0.f,0.f};
+    for(size_t b=0;b<jb0;b++) peaks[row*nb+b]=(ap_peak){-1,0.f,0.f,0.f};
+    for(size_t b=jb1+1;b<nb;b++) peaks[row*nb+b]=(ap_peak){-1,0.f,0.f,0.f};
     if(counts) counts[row]=c;
     total+=c;
   }
@@ -1087,7 +1234,7 @@ static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
      maximum goes to its cebuf. */
   if(use_q15)
     return ap_mf_q15_pairs_lag(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL,qlag);
-  return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi-lo,tr->thr,
+  return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi>lo?hi-lo:1,tr->thr,
                                 tr->cebuf,NULL,lo,hi,nt);
 }
 
@@ -1118,6 +1265,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     const float thr=tr->thr;
     tr->lagged = !(tr->g16 && i==0 && !p->q15);
+    tr->last_q15 = 0;
     const int *checked_d=fire_d,*checked_t=fire_t;
     int nchecked=i==0 ? nd*nt : nfire;
     if(i==0 && (p->q15 || !tr->g16) && tr->npending){
@@ -1173,7 +1321,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       }
       qlag = (use_q15 && i==p->ntiers-1 && p->direct && p->taps) ? p->qidx : NULL;
       if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end,use_q15,qlag)<0) return -1;
-      if(use_q15) tr->lagged = (qlag != NULL);
+      if(use_q15){ tr->lagged = (qlag != NULL); tr->last_q15 = 1; }
     }
     tr->ticks += ap_ticks()-t_0;
     int nnext=0;
@@ -1183,8 +1331,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       const int d = checked_d ? checked_d[j] : j/nt;
       const int t = checked_t ? checked_t[j] : j%nt;
       const size_t row=(size_t)d*nt+t;
-      ap_peak ce = qstat ? (ap_peak){.index=0, .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
-                         : tr->cebuf[row];
+      const ap_peak ce = qstat ? (ap_peak){.index=0,
+                                           .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
+                               : tr->cebuf[row];
       int fire = qstat || (use_q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
       if(i==0 && fire){
         /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what

@@ -2127,7 +2127,8 @@ const ap_backend *Backend(void){
     nullptr,
 #endif
     q15_screen_perm, q15_slab8, split_store, scale_load, lanes_transpose,
-    fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window
+    fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window,
+    q15_sumsq, q15_data, q15_lanethr
   };
   return &be;
 }

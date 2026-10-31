@@ -165,8 +165,12 @@ template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
   return vq{_mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)p))};
 }
 template<int T, long B> static HWY_INLINE vq q15_tile_data(const int16_t *p){
+  if(T == 16){
+    const __m256i lo = _mm256_set1_epi16(p[0]);
+    const __m256i hi = _mm256_set1_epi16(p[B]);
+    return vq{_mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1)};
+  }
   __m512i v = _mm512_set1_epi16(p[0]);
-  if(T == 16) return vq{_mm512_mask_set1_epi16(v, 0xffff0000u, p[B])};
   v = _mm512_mask_set1_epi16(v, 0x0000ff00u, p[B]);
   v = _mm512_mask_set1_epi16(v, 0x00ff0000u, p[2 * B]);
   return vq{_mm512_mask_set1_epi16(v, 0xff000000u, p[3 * B])};
@@ -523,6 +527,129 @@ static void q15_slab8(size_t N, const float *const *rr, const float *const *ri, 
 }
 
 static int q15_lanes(void){ return AP_QW; }
+
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+#define MF_Q15PREP_SECTION __attribute__((section(".text.mf_q15prep")))
+#else
+#define MF_Q15PREP_SECTION
+#endif
+
+/* Vectorised sum of squares sum_{k<N} (re[k]^2 + im[k]^2); invariant to group-major layout. */
+static HWY_NOINLINE MF_Q15PREP_SECTION double q15_sumsq(size_t N, const float *re, const float *im){
+  vf s0 = V_ZERO(), s1 = V_ZERO();
+  size_t k = 0;
+  for(; k + 2 * (size_t)AP_W <= N; k += 2 * (size_t)AP_W){
+    const vf r0 = V_LOADU(re + k), i0 = V_LOADU(im + k);
+    const vf r1 = V_LOADU(re + k + AP_W), i1 = V_LOADU(im + k + AP_W);
+    s0 = V_FMADD(r0, r0, V_FMADD(i0, i0, s0));
+    s1 = V_FMADD(r1, r1, V_FMADD(i1, i1, s1));
+  }
+  for(; k + (size_t)AP_W <= N; k += (size_t)AP_W){
+    const vf r0 = V_LOADU(re + k), i0 = V_LOADU(im + k);
+    s0 = V_FMADD(r0, r0, V_FMADD(i0, i0, s0));
+  }
+  double ss = (double)hn::ReduceSum(AP_D, V_ADD(s0, s1));
+  for(; k < N; k++) ss += (double)re[k] * re[k] + (double)im[k] * im[k];
+  return ss;
+}
+
+/* Quantise one data block's split spectrum into [N][3] = (dr, di, -di) int16 triples,
+   handling both natural order (n1 <= 0) and group-major order ([n1/w][n2][w]). */
+static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, const float *im,
+                                                     int n1, int n2, int w, int16_t *qd,
+                                                     float *scale_out){
+  const double ss = q15_sumsq(N, re, im);
+  const double D = (AP_Q15_L1 - 1.5 * (double)N) * 32768.0 / AP_Q15_TNORM(N) - sqrt((double)N);
+  const double sc = !isfinite(ss) ? -1.0 : ss > 0.0 ? 0.999 * D / sqrt(ss) : 0.0;
+  *scale_out = (float)sc;
+  if(!(sc > 0.0)){
+    memset(qd, 0, N * 3 * sizeof(int16_t));
+    return;
+  }
+  const float scf = (float)sc;
+  const vf vs = V_SET1(scf);
+  const vq qz = Q_ZERO();
+  if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) &&
+     N % (size_t)AP_QW == 0){
+    for(size_t k = 0; k < N; k += (size_t)AP_QW){
+      const vi r0 = hn::NearestInt(V_MUL(V_LOADU(re + k), vs));
+      const vi r1 = hn::NearestInt(V_MUL(V_LOADU(re + k + AP_W), vs));
+      const vi i0 = hn::NearestInt(V_MUL(V_LOADU(im + k), vs));
+      const vi i1 = hn::NearestInt(V_MUL(V_LOADU(im + k + AP_W), vs));
+      const vq qr = hn::OrderedDemote2To(AP_DQ, r0, r1);
+      const vq qi = hn::OrderedDemote2To(AP_DQ, i0, i1);
+      hn::StoreInterleaved3(qr, qi, Q_SUB(qz, qi), AP_DQ, qd + 3 * k);
+    }
+    return;
+  }
+  if(w == AP_W && n1 > 0 && n1 % AP_QW == 0 && (size_t)n1 * (size_t)n2 == N){
+    const int ng = n1 / AP_W;
+    for(int b = 0; b < n2; b++){
+      for(int g = 0; g < ng; g += 2){
+        const size_t j0 = ((size_t)g * (size_t)n2 + (size_t)b) * (size_t)AP_W;
+        const size_t j1 = ((size_t)(g + 1) * (size_t)n2 + (size_t)b) * (size_t)AP_W;
+        const size_t k = (size_t)b * (size_t)n1 + (size_t)g * (size_t)AP_W;
+        const vi r0 = hn::NearestInt(V_MUL(V_LOADU(re + j0), vs));
+        const vi r1 = hn::NearestInt(V_MUL(V_LOADU(re + j1), vs));
+        const vi i0 = hn::NearestInt(V_MUL(V_LOADU(im + j0), vs));
+        const vi i1 = hn::NearestInt(V_MUL(V_LOADU(im + j1), vs));
+        const vq qr = hn::OrderedDemote2To(AP_DQ, r0, r1);
+        const vq qi = hn::OrderedDemote2To(AP_DQ, i0, i1);
+        hn::StoreInterleaved3(qr, qi, Q_SUB(qz, qi), AP_DQ, qd + 3 * k);
+      }
+    }
+    return;
+  }
+  for(size_t k = 0; k < N; k++){
+    size_t j = k;
+    if(n1 > 0 && w > 0){
+      const size_t a = k % (size_t)n1, b = k / (size_t)n1;
+      j = (a / (size_t)w) * (size_t)n2 * (size_t)w + b * (size_t)w + a % (size_t)w;
+    }
+    int r = (int)lrintf(re[j] * scf), i = (int)lrintf(im[j] * scf);
+    if(r > 32767) r = 32767; else if(r < -32767) r = -32767;
+    if(i > 32767) i = 32767; else if(i < -32767) i = -32767;
+    qd[3 * k] = (int16_t)r; qd[3 * k + 1] = (int16_t)i; qd[3 * k + 2] = (int16_t)-i;
+  }
+}
+
+/* Vectorised int16 lane thresholds across AP_QW lanes (qds_stride == 0 broadcasts qds[0]). */
+static HWY_NOINLINE MF_Q15PREP_SECTION void q15_lanethr(float threshold, const float *qds,
+                                                        int qds_stride, const float *qts,
+                                                        float margin, int nomargin, int16_t *out){
+  if(!qds_stride && qds[0] < 0.f){
+    hn::StoreU(Q_SET1(-32768), AP_DQ, out);
+    return;
+  }
+  const vf vthr = V_SET1(threshold);
+  const vf vinv = V_SET1((float)(1.0 / 32768.0));
+  const vf vadj = V_SET1(1.0f - 1e-4f);
+  const vf vmarg = V_SET1(margin);
+  const vf v2m = V_SET1(2.0f * margin);
+  const vf vone = V_SET1(1.0f);
+  const vf vz = V_ZERO();
+  const vf vmin = V_SET1(-32768.0f);
+  const vf vmax = V_SET1(32767.0f);
+  const vf vz_out = !(threshold > 0.f) ? vmin : vmax;
+  vi parts[2];
+  for(int h = 0; h < 2; h++){
+    const int u = h * AP_W;
+    const vf vd = qds_stride ? V_LOADU(qds + u) : V_SET1(qds[0]);
+    const vf vt = V_LOADU(qts + u);
+    const vf ds = V_MUL(vd, vinv);
+    const vf eq = nomargin ? hn::IfThenElse(hn::Lt(V_MUL(ds, vt), v2m), vmarg, vz) : vmarg;
+    const vf q = V_SUB(V_MUL(V_MUL(V_MUL(vthr, ds), vadj), vt), eq);
+    const vf T = V_SUB(V_MUL(V_MUL(q, q), vinv), vone);
+    vf r = hn::IfThenElse(hn::Ge(T, vmax), vmax, hn::Ceil(T));
+    r = hn::IfThenElse(hn::Gt(q, vz), r, vmin);
+    r = hn::IfThenElse(hn::Or(hn::Eq(vd, vz), hn::Eq(vt, vz)), vz_out, r);
+    r = hn::IfThenElse(hn::Or(hn::Lt(vd, vz), hn::Lt(vt, vz)), vmin, r);
+    parts[h] = hn::ConvertTo(AP_DI, r);
+  }
+  hn::StoreU(hn::OrderedDemote2To(AP_DQ, parts[0], parts[1]), AP_DQ, out);
+}
+
+#undef MF_Q15PREP_SECTION
 
 }  // namespace HWY_NAMESPACE
 }  // namespace ap

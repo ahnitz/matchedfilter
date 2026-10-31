@@ -304,3 +304,26 @@ int ap_q15_screen_tile(const ap_plan *p, int T, const int16_t *dq,
      !dq || !tr || !ti || !lanethr || !bits || !scratch) return -1;
   return b->q15_screen_tile(p->n,T,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
 }
+
+int ap_q15_sumsq(const ap_plan *p, const float *re, const float *im, double *ss_out){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_sumsq || !re || !im || !ss_out) return -1;
+  *ss_out=b->q15_sumsq(p->n,re,im);
+  return 0;
+}
+
+int ap_q15_data(const ap_plan *p, const float *re, const float *im, int n1, int n2, int w,
+                int16_t *qd, float *scale_out){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_data || !re || !im || !qd || !scale_out) return -1;
+  b->q15_data(p->n,re,im,n1,n2,w,qd,scale_out);
+  return 0;
+}
+
+int ap_q15_lanethr(const ap_plan *p, float threshold, const float *qds, int qds_stride,
+                   const float *qts, float margin, int nomargin, int16_t *out){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_lanethr || !qds || !qts || !out) return -1;
+  b->q15_lanethr(threshold,qds,qds_stride,qts,margin,nomargin,out);
+  return 0;
+}

@@ -1047,7 +1047,8 @@ class TimeDomainFilterBank:
                     # that is priced cheaper than a whole-block transform). At other rate
                     # ratios the spectra are cut or padded and the taps are not the filter.
                     if self.binsize is not None:
-                        plan._one_bin_frac = max(0.0, (self.binsize - n_valid + 1) / float(self.binsize))
+                        # Fraction of blocks whose valid span touches at most HMF_MAX_DIRECT_BINS (4) bins.
+                        plan._one_bin_frac = min(1.0, max(0.0, (4 * self.binsize - n_valid + 1) / float(self.binsize)))
                     plan.set_taps(group_taps, group_counts)
             else:
                 factory = (lambda n_=chosen_N, T_=T, dev=self.device:

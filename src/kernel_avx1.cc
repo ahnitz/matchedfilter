@@ -68,6 +68,9 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.q15_screen_tile = NULL;
     be.q15_screen_perm = NULL;
     be.q15_slab8 = NULL;
+    be.q15_sumsq = NULL;
+    be.q15_data = NULL;
+    be.q15_lanethr = NULL;
     ready = 1;
   }
   return &be;
