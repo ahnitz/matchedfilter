@@ -1041,7 +1041,7 @@ class TimeDomainFilterBank:
                 plan._governed, plan._arm = True, getattr(self, '_bank_arm', _trial.DEFAULT)
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
-                if self.rate_ratio == 1.0 and hasattr(plan, "set_taps") and not self.complex_taps:
+                if self.rate_ratio == 1.0 and hasattr(plan, "set_taps"):
                     # The taps themselves, for the CPU's direct refine (survivors refined at
                     # the few lags their coarse tier points to, by direct correlation, where
                     # that is priced cheaper than a whole-block transform). At other rate

@@ -310,15 +310,19 @@ int ap_hmf_set_sparse(ap_hmf_plan *p, int on);
 
 /* Direct refine. ap_hmf_set_taps gives each template's real FIR taps (row t: counts[t]
    taps, stride floats per row, centre tap counts[t]/2 at lag 0 -- the filter whose
-   spectrum ap_hmf_set_template holds). With ap_hmf_set_direct on, ap_hmf_run_series
-   refines a survivor only at the lags within `halfwidth` last-tier coarse samples of a
-   last-tier lag at or above that tier's threshold, by direct correlation, wherever that is
-   priced cheaper than its whole-block transform (both timed on this core when turned on);
-   the rest, and every ap_hmf_run call, refine by transform as before. */
+   spectrum ap_hmf_set_template holds); ap_hmf_set_taps_complex takes complex64 taps (stride
+   complex elements per row) and conjugates them at ingest. With ap_hmf_set_direct on,
+   ap_hmf_run_series refines a survivor only at the lags within `halfwidth` last-tier coarse
+   samples of a last-tier lag at or above that tier's threshold, by direct correlation,
+   wherever that is priced cheaper than its whole-block transform (both timed on this core
+   when turned on); the rest, and every ap_hmf_run call, refine by transform as before. */
 int ap_hmf_set_taps(ap_hmf_plan *p, const float *taps, size_t stride, const int64_t *counts);
+int ap_hmf_set_taps_complex(ap_hmf_plan *p, const float *taps, size_t stride,
+                            const int64_t *counts);
 int ap_hmf_set_direct(ap_hmf_plan *p, int on, int halfwidth);
 /* Ticks per lag x tap of the direct correlation on this core (< 0 on failure). */
 double ap_hmf_price_direct(void);
+double ap_hmf_price_direct_mode(int x_real, int tap_cplx);
 /* The two prices a survivor's direct-or-transform choice compares, timed on this plan's
    kernels: ticks per lag x tap of the direct correlation and per pair of the whole-block
    refine. ap_hmf_set_direct_prices gives a plan prices measured once (a plan otherwise

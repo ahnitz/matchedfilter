@@ -71,11 +71,16 @@ typedef struct {
   int (*q15_screen)(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                     size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                     int16_t *lanemax, void *scratch);
-  /* Direct correlation with real taps over nlag consecutive lags (td-inl.h):
-     out[i] = sum_k taps[k] x[i+k], x and out interleaved complex. */
+  /* Direct correlation over nlag consecutive lags (td-inl.h):
+     out[i] = sum_k (tr[k] + j ti[k]) * x[i+k], with x real (x_real) or interleaved complex,
+     and ti NULL for real taps. */
   void (*td_corr)(const float *x, const float *taps, int L, int nlag, float *out);
-  /* A real block's full spectrum from its half-size transform (rsplit-inl.h). */
+  void (*td_corr_ex)(const float *x, int x_real, const float *tr, const float *ti, int L,
+                     int nlag, float *out);
+  /* A real block's full or half spectrum from its half-size transform (rsplit-inl.h). */
   void (*real_split)(const float *Z, const float *tw, size_t n, float *X);
+  void (*real_split_pos)(const float *Z, const float *tw, size_t n, float *X);
+  void (*real_split_mirror)(float *X, size_t n);
   /* The root stage's band-limited product, merged for a half-size backward transform
      (rsplit-inl.h). */
   void (*root_merge)(const float *D, const float *T, size_t k0, size_t k1, float scale,

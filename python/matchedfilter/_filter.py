@@ -1250,9 +1250,10 @@ class MatchedFilter:
         nb = layout.nbins
         ph = layout.phase
         shape = (nblk, nt, nb)
-        ep = self._execution_plan()
         real = ser.dtype == np.float32
         stride = 2 if real and ser.strides == (8,) else 1
+        self._want_real = real
+        ep = self._execution_plan()
         held = self.__dict__.get("_ep_real")
         if real or (held is not None and held[0] is ep and held[1]):
             # The plan reads what it is given: real samples (one lane of a complex series,
@@ -1260,8 +1261,11 @@ class MatchedFilter:
             if not ep.set_real_series(real, stride) and real:
                 ser = np.ascontiguousarray(ser, dtype=np.complex64)
                 real, stride = False, 1
+                self._want_real = False
                 ep.set_real_series(False)
             self._ep_real = (ep, real)
+        if self.__dict__.get("_applied_real") is not real and hasattr(self, "_sync_direct_prices"):
+            self._sync_direct_prices(ep, real)
         cser = ser
         if stride == 2:
             # The contiguous floats the lane lies in: the C plan reads every second one.

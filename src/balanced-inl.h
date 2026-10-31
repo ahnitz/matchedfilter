@@ -18,10 +18,11 @@
 #include <time.h>
 #include "elemfft-inl.h"
 #if defined(AP_SIMD_AVX1)
-/* The AVX1 build (kernel_avx1.cc) takes the Q15 screen, the direct refine's correlation and
-   the real-series kernels from the SSE4 back end; it needs the L1D query and the loads here. */
+/* The AVX1 build (kernel_avx1.cc) omits only the integer Q15 screen; td-inl.h and
+   rsplit-inl.h compile at 8 float lanes through simd-avx1.h. */
 #include "q15.h"
-#include "loads-inl.h"
+#include "td-inl.h"
+#include "rsplit-inl.h"
 #else
 #include "q15-inl.h"
 #include "td-inl.h"
@@ -1747,7 +1748,8 @@ const ap_backend *Backend(void){
     create, destroy, fft, supported,
     binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split,
     pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr,
-    q15_lanes, q15_screen, td_corr, real_split, root_merge,
+    q15_lanes, q15_screen, td_corr, td_corr_ex, real_split, real_split_pos, real_split_mirror,
+    root_merge,
 #if AP_Q15_TAIL
     q15_screen_tile,
 #else

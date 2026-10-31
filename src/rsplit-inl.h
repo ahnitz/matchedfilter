@@ -5,8 +5,8 @@
  *     W = e^{-2 pi i / n},  k = 0 .. h,  and X[n-k] = conj X[k].
  *
  * tw holds cos and sin of 2 pi k / n, interleaved, for k = 0 .. h. Z and X are interleaved
- * complex. Vectorised over k: a vector of Z[k..k+N) against the same run of Z[h-k] loaded
- * backwards and reversed; X[k..k+N) is stored forward and its conjugate mirror reversed.
+ * complex. Vectorised through the V_* layer so every Highway target and the 8-lane AVX1 build
+ * compile the same kernels.
  */
 #include <string.h>
 #include "simd-inl.h"
@@ -23,35 +23,34 @@ HWY_BEFORE_NAMESPACE();
 namespace ap {
 namespace HWY_NAMESPACE {
 
-
-static void real_split(const float *HWY_RESTRICT Z, const float *HWY_RESTRICT tw, size_t n,
-                       float *HWY_RESTRICT X) {
-  const size_t h = n / 2;
+template <bool MIRROR>
+static HWY_INLINE void real_split_t(const float *HWY_RESTRICT Z, const float *HWY_RESTRICT tw,
+                                    size_t n, float *HWY_RESTRICT X) {
+  const size_t h = n / 2, W = (size_t)AP_W;
   X[0] = Z[0] + Z[1];
   X[1] = 0.f;
   X[2 * h] = Z[0] - Z[1];
   X[2 * h + 1] = 0.f;
-  const hn::ScalableTag<float> d;
-  const size_t N = hn::Lanes(d);
-  const auto half = hn::Set(d, 0.5f);
+  const vf half = V_SET1(0.5f), sg = V_SIGNMASK();
   size_t k = 1;
-  for (; k + N <= h; k += N) {
-    hn::Vec<decltype(d)> zr, zi, rr, ri, c, s;
-    hn::LoadInterleaved2(d, Z + 2 * k, zr, zi);
-    hn::LoadInterleaved2(d, Z + 2 * (h - k - N + 1), rr, ri);   /* Z[h-k-N+1 .. h-k] */
-    rr = hn::Reverse(d, rr);
-    ri = hn::Reverse(d, ri);                                      /* now Z[h-k-j], j = 0..N-1 */
-    hn::LoadInterleaved2(d, tw + 2 * k, c, s);
+  for (; k + W <= h; k += W) {
+    vf zr, zi, rr, ri, c, s;
+    v_deint(Z + 2 * k, &zr, &zi);
+    v_deint(Z + 2 * (h - k - W + 1), &rr, &ri);   /* Z[h-k-W+1 .. h-k] */
+    rr = v_reverse(rr);
+    ri = v_reverse(ri);                           /* now Z[h-k-j], j = 0..W-1 */
+    v_deint(tw + 2 * k, &c, &s);
     /* conj Z[h-k] = (rr, -ri) */
-    const auto er = hn::Mul(half, hn::Add(zr, rr));
-    const auto ei = hn::Mul(half, hn::Sub(zi, ri));
-    const auto orr = hn::Mul(half, hn::Add(zi, ri));              /* (zi - (-ri)) / 2 */
-    const auto oi = hn::Mul(half, hn::Sub(rr, zr));               /* -(zr - rr) / 2 */
-    const auto xr = hn::Add(er, hn::MulAdd(orr, c, hn::Mul(oi, s)));
-    const auto xi = hn::Add(ei, hn::MulSub(oi, c, hn::Mul(orr, s)));
-    hn::StoreInterleaved2(xr, xi, d, X + 2 * k);
-    hn::StoreInterleaved2(hn::Reverse(d, xr), hn::Neg(hn::Reverse(d, xi)), d,
-                          X + 2 * (n - k - N + 1));
+    const vf er = V_MUL(half, V_ADD(zr, rr));
+    const vf ei = V_MUL(half, V_SUB(zi, ri));
+    const vf orr = V_MUL(half, V_ADD(zi, ri));    /* (zi - (-ri)) / 2 */
+    const vf oi = V_MUL(half, V_SUB(rr, zr));     /* -(zr - rr) / 2 */
+    const vf xr = V_ADD(er, V_FMADD(orr, c, V_MUL(oi, s)));
+    const vf xi = V_ADD(ei, V_FMSUB(oi, c, V_MUL(orr, s)));
+    v_inter(X + 2 * k, xr, xi);
+    if constexpr (MIRROR) {
+      v_inter(X + 2 * (n - k - W + 1), v_reverse(xr), V_XOR(v_reverse(xi), sg));
+    }
   }
   for (; k < h; k++) {
     const size_t r = h - k;
@@ -60,8 +59,40 @@ static void real_split(const float *HWY_RESTRICT Z, const float *HWY_RESTRICT tw
     const float orr = 0.5f * (zi - ci), oi = -0.5f * (zr - cr);
     const float c = tw[2 * k], s = tw[2 * k + 1];
     const float xr = er + (orr * c + oi * s), xi = ei + (oi * c - orr * s);
-    X[2 * k] = xr; X[2 * k + 1] = xi;
-    X[2 * (n - k)] = xr; X[2 * (n - k) + 1] = -xi;
+    X[2 * k] = xr;
+    X[2 * k + 1] = xi;
+    if constexpr (MIRROR) {
+      X[2 * (n - k)] = xr;
+      X[2 * (n - k) + 1] = -xi;
+    }
+  }
+}
+
+static void real_split(const float *HWY_RESTRICT Z, const float *HWY_RESTRICT tw, size_t n,
+                       float *HWY_RESTRICT X) {
+  real_split_t<true>(Z, tw, n, X);
+}
+
+/* Non-negative bins 0 .. n/2 only: coarse tiers never read k > n/2, and the negative bins are
+   mirrored lazily on the few blocks whose survivors refine by transform. */
+static void real_split_pos(const float *HWY_RESTRICT Z, const float *HWY_RESTRICT tw, size_t n,
+                           float *HWY_RESTRICT X) {
+  real_split_t<false>(Z, tw, n, X);
+}
+
+/* Fill X[n/2 + 1 .. n - 1] = conj(X[n/2 - 1 .. 1]) from a half-spectrum X[0 .. n/2]. */
+static void real_split_mirror(float *HWY_RESTRICT X, size_t n) {
+  const size_t h = n / 2, W = (size_t)AP_W;
+  const vf sg = V_SIGNMASK();
+  size_t k = 1;
+  for (; k + W <= h; k += W) {
+    vf xr, xi;
+    v_deint(X + 2 * k, &xr, &xi);
+    v_inter(X + 2 * (n - k - W + 1), v_reverse(xr), V_XOR(v_reverse(xi), sg));
+  }
+  for (; k < h; k++) {
+    X[2 * (n - k)] = X[2 * k];
+    X[2 * (n - k) + 1] = -X[2 * k + 1];
   }
 }
 
@@ -75,14 +106,13 @@ static void real_split(const float *HWY_RESTRICT Z, const float *HWY_RESTRICT tw
  *
  *     Z[k] = (P[k] + conj P[h-k]) + i w^k (P[k] - conj P[h-k]),  w = e^{+2 pi i / n},  k < h,
  *
- * with P[0] and P[h] taken real, as a complex-to-real transform takes them. The pair (k, h-k)
- * is formed together, so each input bin is read once: with A = P[k], B = P[h-k] and
- * w^{h-k} = -conj w^k, both outputs come from S = A + conj B and E = A - conj B. tw holds cos
- * and sin of 2 pi k / n for k = 0 .. h (real_split's table). */
+ * with P[0] and P[h] taken real, as a complex-to-real transform takes them. Partitioning
+ * [1, h/2) at the active band's endpoints and their mirrors zeroes empty intervals outright and
+ * leaves the active ones branchless and mask-free. */
 static void root_merge(const float *HWY_RESTRICT D, const float *HWY_RESTRICT T, size_t k0,
                        size_t k1, float scale, const float *HWY_RESTRICT tw, size_t n,
                        float *HWY_RESTRICT Z) {
-  const size_t h = n / 2, q = h / 2;
+  const size_t h = n / 2, q = h / 2, W = (size_t)AP_W;
   auto prod = [&](size_t k, float &pr, float &pi) {
     if (k >= k0 && k < k1) {
       const float dr = D[2 * k], di = D[2 * k + 1], tr = T[2 * k], ti = T[2 * k + 1];
@@ -114,39 +144,95 @@ static void root_merge(const float *HWY_RESTRICT D, const float *HWY_RESTRICT T,
     Z[0] = a0 + bh;
     Z[1] = a0 - bh;
   }
-  const hn::ScalableTag<float> d;
-  const hn::RebindToSigned<decltype(d)> di;
-  const size_t N = hn::Lanes(d);
-  const auto sc = hn::Set(d, scale);
-  const auto lo = hn::Set(di, (int32_t)k0), hi = hn::Set(di, (int32_t)k1);
-  size_t k = 1;
-  for (; k + N <= q; k += N) {
-    const size_t r0 = h - k - N + 1;        /* P[r0 .. h-k], loaded then reversed */
-    hn::Vec<decltype(d)> dr, dI, tr, tI, er, eI, ur, uI, c, s;
-    hn::LoadInterleaved2(d, D + 2 * k, dr, dI);
-    hn::LoadInterleaved2(d, T + 2 * k, tr, tI);
-    hn::LoadInterleaved2(d, D + 2 * r0, er, eI);
-    hn::LoadInterleaved2(d, T + 2 * r0, ur, uI);
-    er = hn::Reverse(d, er); eI = hn::Reverse(d, eI);
-    ur = hn::Reverse(d, ur); uI = hn::Reverse(d, uI);
-    const auto fi = hn::Iota(di, (int32_t)k);
-    const auto ri = hn::Sub(hn::Set(di, (int32_t)(h - k)), hn::Iota(di, 0));
-    const auto mf = hn::RebindMask(d, hn::And(hn::Ge(fi, lo), hn::Lt(fi, hi)));
-    const auto mr = hn::RebindMask(d, hn::And(hn::Ge(ri, lo), hn::Lt(ri, hi)));
-    const auto ar = hn::IfThenElseZero(mf, hn::Mul(sc, hn::MulAdd(tr, dr, hn::Mul(tI, dI))));
-    const auto ai = hn::IfThenElseZero(mf, hn::Mul(sc, hn::MulSub(tr, dI, hn::Mul(tI, dr))));
-    const auto br = hn::IfThenElseZero(mr, hn::Mul(sc, hn::MulAdd(ur, er, hn::Mul(uI, eI))));
-    const auto bi = hn::IfThenElseZero(mr, hn::Mul(sc, hn::MulSub(ur, eI, hn::Mul(uI, er))));
-    hn::LoadInterleaved2(d, tw + 2 * k, c, s);
-    const auto sr = hn::Add(ar, br), si = hn::Sub(ai, bi);
-    const auto xr = hn::Sub(ar, br), xi = hn::Add(ai, bi);
-    const auto u = hn::MulAdd(c, xi, hn::Mul(s, xr));
-    const auto v = hn::MulSub(c, xr, hn::Mul(s, xi));
-    hn::StoreInterleaved2(hn::Sub(sr, u), hn::Add(si, v), d, Z + 2 * k);
-    hn::StoreInterleaved2(hn::Reverse(d, hn::Add(sr, u)), hn::Reverse(d, hn::Sub(v, si)), d,
-                          Z + 2 * r0);
+  if (q == 0) return;
+
+  /* Partition [1, q) at the active band [k0, k1) and its mirror [h + 1 - k1, h + 1 - k0). */
+  auto clamp_q = [&](size_t x) -> size_t { return x < 1 ? 1 : (x > q ? q : x); };
+  size_t a_lo = 1, a_hi = 1, r_lo = 1, r_hi = 1;
+  if (k0 < k1) {
+    a_lo = clamp_q(k0);
+    a_hi = clamp_q(k1);
+    r_lo = clamp_q(k1 <= h + 1 ? h + 1 - k1 : 0);
+    r_hi = clamp_q(k0 <= h ? h + 1 - k0 : 0);
   }
-  for (; k <= q; k++) pair(k);              /* the tail, and k = h/2 (its own mirror) */
+  size_t pts[6] = {1, a_lo, a_hi, r_lo, r_hi, q};
+  for (int i = 1; i < 6; i++) {
+    size_t v = pts[i];
+    int j = i - 1;
+    while (j >= 0 && pts[j] > v) { pts[j + 1] = pts[j]; j--; }
+    pts[j + 1] = v;
+  }
+
+  const vf sc = V_SET1(scale), sg = V_SIGNMASK();
+  for (int seg = 0; seg < 5; seg++) {
+    const size_t lo_s = pts[seg], hi_s = pts[seg + 1];
+    if (lo_s >= hi_s) continue;
+    const int hasA = (k0 < k1) && (lo_s >= k0 && lo_s < k1);
+    const int hasB = (k0 < k1) && (h - lo_s >= k0 && h - lo_s < k1);
+    if (!hasA && !hasB) {
+      const size_t cnt = hi_s - lo_s;
+      memset(Z + 2 * lo_s, 0, 2 * cnt * sizeof(float));
+      memset(Z + 2 * (h - hi_s + 1), 0, 2 * cnt * sizeof(float));
+      continue;
+    }
+    size_t k = lo_s;
+    if (hasA && !hasB) {
+      for (; k + W <= hi_s; k += W) {
+        const size_t r0 = h - k - W + 1;
+        vf dr, dI, tr, tI, c, s;
+        v_deint(D + 2 * k, &dr, &dI);
+        v_deint(T + 2 * k, &tr, &tI);
+        v_deint(tw + 2 * k, &c, &s);
+        const vf ar = V_MUL(sc, V_FMADD(tr, dr, V_MUL(tI, dI)));
+        const vf ai = V_MUL(sc, V_FMSUB(tr, dI, V_MUL(tI, dr)));
+        const vf u = V_FMADD(c, ai, V_MUL(s, ar));
+        const vf v = V_FMSUB(c, ar, V_MUL(s, ai));
+        v_inter(Z + 2 * k, V_SUB(ar, u), V_ADD(ai, v));
+        v_inter(Z + 2 * r0, v_reverse(V_ADD(ar, u)), v_reverse(V_SUB(v, ai)));
+      }
+    } else if (!hasA && hasB) {
+      for (; k + W <= hi_s; k += W) {
+        const size_t r0 = h - k - W + 1;
+        vf er, eI, ur, uI, c, s;
+        v_deint(D + 2 * r0, &er, &eI);
+        v_deint(T + 2 * r0, &ur, &uI);
+        er = v_reverse(er); eI = v_reverse(eI);
+        ur = v_reverse(ur); uI = v_reverse(uI);
+        v_deint(tw + 2 * k, &c, &s);
+        const vf br = V_MUL(sc, V_FMADD(ur, er, V_MUL(uI, eI)));
+        const vf bi = V_MUL(sc, V_FMSUB(ur, eI, V_MUL(uI, er)));
+        const vf nbr = V_XOR(br, sg), nbi = V_XOR(bi, sg);
+        const vf u = V_FMADD(c, bi, V_MUL(s, nbr));
+        const vf v = V_FMSUB(c, nbr, V_MUL(s, bi));
+        v_inter(Z + 2 * k, V_SUB(br, u), V_ADD(nbi, v));
+        v_inter(Z + 2 * r0, v_reverse(V_ADD(br, u)), v_reverse(V_ADD(v, bi)));
+      }
+    } else {
+      for (; k + W <= hi_s; k += W) {
+        const size_t r0 = h - k - W + 1;
+        vf dr, dI, tr, tI, er, eI, ur, uI, c, s;
+        v_deint(D + 2 * k, &dr, &dI);
+        v_deint(T + 2 * k, &tr, &tI);
+        v_deint(D + 2 * r0, &er, &eI);
+        v_deint(T + 2 * r0, &ur, &uI);
+        er = v_reverse(er); eI = v_reverse(eI);
+        ur = v_reverse(ur); uI = v_reverse(uI);
+        v_deint(tw + 2 * k, &c, &s);
+        const vf ar = V_MUL(sc, V_FMADD(tr, dr, V_MUL(tI, dI)));
+        const vf ai = V_MUL(sc, V_FMSUB(tr, dI, V_MUL(tI, dr)));
+        const vf br = V_MUL(sc, V_FMADD(ur, er, V_MUL(uI, eI)));
+        const vf bi = V_MUL(sc, V_FMSUB(ur, eI, V_MUL(uI, er)));
+        const vf sr = V_ADD(ar, br), si = V_SUB(ai, bi);
+        const vf xr = V_SUB(ar, br), xi = V_ADD(ai, bi);
+        const vf u = V_FMADD(c, xi, V_MUL(s, xr));
+        const vf v = V_FMSUB(c, xr, V_MUL(s, xi));
+        v_inter(Z + 2 * k, V_SUB(sr, u), V_ADD(si, v));
+        v_inter(Z + 2 * r0, v_reverse(V_ADD(sr, u)), v_reverse(V_SUB(v, si)));
+      }
+    }
+    for (; k < hi_s; k++) pair(k);
+  }
+  pair(q);                                  /* k = h/2 (its own mirror) */
 }
 
 }  // namespace HWY_NAMESPACE

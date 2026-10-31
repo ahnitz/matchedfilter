@@ -822,17 +822,20 @@ static PyObject *HMF_set_thresholds(HMFObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
-/* set_taps(taps, counts): taps float32 (nt, stride) C-contiguous, counts int64 (nt,). */
+/* set_taps(taps, stride, counts, complex=False): taps float32 or complex64 (nt, stride),
+   counts int64 (nt,). */
 static PyObject *HMF_set_taps(HMFObject *self,PyObject *args){
-  Py_buffer bt,bc; Py_ssize_t stride;
-  if(!PyArg_ParseTuple(args,"y*ny*",&bt,&stride,&bc)) return NULL;
+  Py_buffer bt,bc; Py_ssize_t stride; int cplx=0;
+  if(!PyArg_ParseTuple(args,"y*ny*|p",&bt,&stride,&bc,&cplx)) return NULL;
   int r=-1;
-  if(stride>0 && buf_holds(bt.len,self->nt,stride,(Py_ssize_t)sizeof(float))
+  const Py_ssize_t elem=cplx ? 2*(Py_ssize_t)sizeof(float) : (Py_ssize_t)sizeof(float);
+  if(stride>0 && buf_holds(bt.len,self->nt,stride,elem)
      && bc.len>=(Py_ssize_t)self->nt*(Py_ssize_t)sizeof(int64_t))
-    r=ap_hmf_set_taps(self->p,(const float*)bt.buf,(size_t)stride,(const int64_t*)bc.buf);
+    r = cplx ? ap_hmf_set_taps_complex(self->p,(const float*)bt.buf,(size_t)stride,(const int64_t*)bc.buf)
+             : ap_hmf_set_taps(self->p,(const float*)bt.buf,(size_t)stride,(const int64_t*)bc.buf);
   PyBuffer_Release(&bt); PyBuffer_Release(&bc);
   if(r<0){ PyErr_SetString(PyExc_ValueError,"matchedfilter: bad taps (need nt rows of float32 "
-                           "taps, int64 counts in [1, min(stride, n)])"); return NULL; }
+                           "or complex64 taps, int64 counts in [1, min(stride, n)])"); return NULL; }
   Py_RETURN_NONE;
 }
 /* set_real_series(on) -> True if run_series now reads real float32 series. */
@@ -1732,9 +1735,10 @@ static PyObject *M_gate16_max(PyObject *self, PyObject *args){
 }
 
 
-static PyObject *M_price_direct(PyObject *self,PyObject *unused){
-  (void)self; (void)unused;
-  return PyFloat_FromDouble(ap_hmf_price_direct());
+static PyObject *M_price_direct(PyObject *self,PyObject *args){
+  (void)self; int x_real=0, tap_cplx=0;
+  if(!PyArg_ParseTuple(args,"|pp",&x_real,&tap_cplx)) return NULL;
+  return PyFloat_FromDouble(ap_hmf_price_direct_mode(x_real,tap_cplx));
 }
 
 /* Root(n): the root stage of a hierarchical search (ap_root_real). */
@@ -1813,7 +1817,7 @@ static PyMethodDef methods[]={
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16_max",M_gate16_max,METH_VARARGS,"gate16_max(N, data, templates, nt) -> bytes of nt float32 FP16 maxima (-1: not fired), or None"},
-  {"price_direct",M_price_direct,METH_NOARGS,"price_direct() -> ticks per lag x tap of the direct refine's correlation"},
+  {"price_direct",M_price_direct,METH_VARARGS,"price_direct(real_series=False, complex_taps=False) -> ticks per lag x tap of the direct refine's correlation"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},

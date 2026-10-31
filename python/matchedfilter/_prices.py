@@ -54,16 +54,18 @@ def _cpu_forward_platform(n):
 _DIRECT_LAGTAP = {}
 
 
-def _direct_lagtap():
+def _direct_lagtap(real_series=False, complex_taps=False):
     """Ticks per lag x tap of the direct refine on this machine: timed once and kept in
     MF_COST_FILE, so every process sharing the file prices chains alike (the chain choice
     depends on it)."""
     from . import gatechain
-    key = "direct-lagtap|%s|%s" % (_core.backend() if hasattr(_core, "backend") else "",
-                                   gatechain.cpu_gate_kind())
+    rs, ct = bool(real_series), bool(complex_taps)
+    mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
+    key = "direct-lagtap|%s|%s%s" % (_core.backend() if hasattr(_core, "backend") else "",
+                                     gatechain.cpu_gate_kind(), mode)
 
     def measure():
-        v = float(_core.price_direct())
+        v = float(_core.price_direct(rs, ct) if (rs or ct) else _core.price_direct())
         return v, ({"value": v} if v > 0 else None)     # a failed price is not stored
     return price_once(_DIRECT_LAGTAP, key, "choice|" + key, measure,
                       lambda r: float(r["value"]) if isinstance(r, dict)
@@ -75,15 +77,17 @@ def _direct_lagtap():
 _DIRECT_PAIR = {}
 
 
-def _direct_pair_prices(n, plan):
+def _direct_pair_prices(n, plan, real_series=False, complex_taps=False):
     """The prices every CPU plan of size n compares, per survivor, to refine it directly or by
     its whole-block transform: timed once on `plan`'s kernels and kept in MF_COST_FILE. A plan
     timing its own made the choice depend on that plan's timing noise: two plans of one bank
     layout, a merged call and its separate calls, refined the pairs near the boundary
     differently and so reported them to different fp32 rounding."""
     from . import gatechain
-    key = "direct-pair|%d|%s|%s" % (int(n), _core.backend() if hasattr(_core, "backend") else "",
-                                     gatechain.cpu_gate_kind())
+    rs, ct = bool(real_series), bool(complex_taps)
+    mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
+    key = "direct-pair|%d|%s|%s%s" % (int(n), _core.backend() if hasattr(_core, "backend") else "",
+                                      gatechain.cpu_gate_kind(), mode)
 
     def measure():
         got = plan.price_direct_pair()

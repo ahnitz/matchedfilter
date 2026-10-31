@@ -110,6 +110,10 @@ static inline void v_inter(float *p, vf re, vf im) {
   _mm256_storeu_ps(p, _mm256_permute2f128_ps(a, b, 0x20));
   _mm256_storeu_ps(p + 8, _mm256_permute2f128_ps(a, b, 0x31));
 }
+static inline vf v_reverse(vf v) {
+  const vf s = _mm256_permute2f128_ps(v, v, 0x01);
+  return _mm256_permute_ps(s, 0x1b);
+}
 
 /* 8 x 8 transpose: in-lane 32- and 64-bit interleaves, then the 128-bit halves swapped. */
 static inline void v_transpose(const vf *in, vf *out) {

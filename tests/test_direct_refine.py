@@ -266,3 +266,155 @@ def test_plans_of_one_size_compare_the_same_direct_prices(monkeypatch):
     assert a[0] > 0 and a[1] > 0, a
     assert a == b, (a, b)
     assert len(_prices._DIRECT_PAIR) == 1
+
+
+@pytest.mark.parametrize("real_kind", ["complex", "real_contig", "real_stride2"])
+@pytest.mark.parametrize("complex_taps", [False, True])
+def test_direct_refine_real_and_complex_combinations(real_kind, complex_taps, monkeypatch):
+    """Direct refine handles all {real (stride 1 & 2), complex} x {real, complex} tap/series
+    combinations and matches the whole-block transform."""
+    from matchedfilter.benchmark import _inspiral_power
+    rng = np.random.default_rng(17)
+    n, T, nblocks, nsig = 2048, 32, 48, 24
+    counts = (2 * rng.integers(48, 128, T) + 1).astype(np.int64)
+    if complex_taps:
+        taps = np.zeros((T, counts.max()), np.complex64)
+        for t in range(T):
+            L = int(counts[t])
+            ph = 0.4 + 0.05 * t
+            w = np.zeros(L, np.complex128)
+            w[L // 2] = np.exp(1j * ph)
+            w += 0.15 * np.hanning(L) * np.exp(1j * np.linspace(0, 3 + 0.1 * t, L)) / np.sqrt(L)
+            taps[t, :L] = w.astype(np.complex64)
+    else:
+        taps = np.zeros((T, counts.max()), np.float32)
+        for t in range(T):
+            L = int(counts[t])
+            x = np.zeros(L)
+            x[L // 2] = 1.0
+            x += 0.15 * np.hanning(L) * np.cos(np.linspace(0, 3 + 0.1 * t, L)) / np.sqrt(L)
+            taps[t, :L] = x.astype(np.float32)
+    filt, valid = template_spectra(taps, counts, n)
+    spec = np.conj(filt)
+    cbad, vend = int(valid[:, 0].max()), int(valid[:, 1].min())
+    step = vend - cbad
+    # include a partial trailing block so zero-padded edge gathering is exercised too
+    total = step * (nblocks - 1) + vend + 7
+    tot_fft = 1 << int(np.ceil(np.log2(total + n)))
+    p = _inspiral_power(tot_fft); p = p / p.sum()
+    if real_kind == "complex":
+        w = (rng.standard_normal(tot_fft) + 1j * rng.standard_normal(tot_fft)) / np.sqrt(2)
+        full = np.fft.ifft(np.sqrt(p) * w) * np.sqrt(tot_fft)
+        full *= np.sqrt(2.0 / np.mean(np.abs(full) ** 2))
+        pulse = np.fft.ifft(p) * tot_fft
+        gap = (total - 2 * n) // max(nsig, 1)
+        for i in range(nsig):
+            tau = cbad + 64 + i * gap
+            full += rng.uniform(8.5, 11.0) * np.exp(2j * np.pi * rng.random()) * np.roll(pulse, tau)
+        series = full[:total].astype(np.complex64)
+    else:
+        # One-sided positive-frequency inspiral profile: real series filtered by analytic/real taps
+        p1 = p.copy()
+        p1[tot_fft // 2:] = 0.0
+        p1 /= p1.sum()
+        w = rng.standard_normal(tot_fft)
+        W = np.fft.rfft(w)
+        S = np.zeros_like(W)
+        m = min(len(S), tot_fft // 2)
+        S[:m] = W[:m] * np.sqrt(p1[:m] * tot_fft)
+        full = np.fft.irfft(S, n=tot_fft)
+        full /= np.std(full)
+        pulse = np.real(np.fft.ifft(p1) * tot_fft) * 2.0
+        gap = (total - 2 * n) // max(nsig, 1)
+        for i in range(nsig):
+            tau = cbad + 64 + i * gap
+            full += rng.uniform(8.5, 11.0) * np.roll(pulse, tau)
+        rser = full[:total].astype(np.float32)
+        if real_kind == "real_stride2":
+            packed = np.empty(total, np.complex64)
+            packed.real = rng.standard_normal(total).astype(np.float32)
+            packed.imag = rser
+            series = packed.imag    # stride-8 float32 view
+        else:
+            series = rser
+
+    starts = np.arange(nblocks) * step
+    layout = (starts, np.full(nblocks, cbad), np.full(nblocks, vend))
+    q = n // 32
+    window = ((cbad // q) * q, n - (cbad // q) * q)
+    ref = _inspiral_power(n)
+    if real_kind != "complex":
+        ref = ref.copy()
+        ref[n // 2:] = 0.0
+    data = (n, taps, counts, spec, series, layout, ref, window)
+
+    # Use the direct plan's exact coarse thresholds on the transform plan so both pass the
+    # identical survivor set to refine.
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    hf1 = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
+                                search_window=window)
+    hf1.set_reference(ref); hf1.set_templates(spec); hf1.set_taps(taps, counts)
+    i1, v1 = hf1.run_series(series, *layout, binsize=n, threshold=6.0, raw=True)
+    i1, v1, st = i1.copy(), v1.copy(), hf1.direct_stats()
+    thr = hf1._resolve().thresholds
+
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+    hf0 = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
+                                search_window=window)
+    hf0.set_reference(ref); hf0.set_templates(spec); hf0.set_coarse_threshold(thr)
+    i0, v0 = hf0.run_series(series, *layout, binsize=n, threshold=6.0, raw=True)
+    assert (i0 >= 0).sum() > 15
+    assert st["pairs"] > 0, st
+    np.testing.assert_array_equal(i1, i0)
+    m = i0 >= 0
+    np.testing.assert_allclose(v1[m], v0[m], rtol=2e-5, atol=1e-4)
+
+
+def test_time_domain_bank_complex_taps_uses_direct_refine(monkeypatch):
+    """TimeDomainFilterBank passes complex64 taps to HierarchicalFilter so real-series +
+    complex-taps consumer calls take direct refine instead of whole-block IFFTs."""
+    from matchedfilter.benchmark import _inspiral_power
+    rng = np.random.default_rng(29)
+    n, T = 2048, 24
+    counts = np.full(T, 161, np.int64)
+    taps = np.zeros((T, 161), np.complex64)
+    for t in range(T):
+        L = 161
+        w = np.zeros(L, np.complex128)
+        w[L // 2] = np.exp(1j * 0.2 * t)
+        w += 0.1 * np.hanning(L) * np.exp(1j * np.linspace(0, 2.5, L)) / np.sqrt(L)
+        taps[t] = w.astype(np.complex64)
+    ref = _inspiral_power(n).copy()
+    ref[n // 2:] = 0.0
+    total = 32768
+    p1 = _inspiral_power(total).copy()
+    p1[total // 2:] = 0.0
+    p1 /= p1.sum()
+    W = np.fft.rfft(rng.standard_normal(total))
+    S = np.zeros_like(W)
+    S[:total // 2] = W[:total // 2] * np.sqrt(p1[:total // 2] * total)
+    x = (np.fft.irfft(S, n=total) / np.std(np.fft.irfft(S, n=total))).astype(np.float64)
+    pulse = np.real(np.fft.ifft(p1) * total) * 2.0
+    for tau in (4096, 12000, 22000):
+        x += 8.5 * np.roll(pulse, tau)
+    x = x.astype(np.float32)
+
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    b_dir = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+                                    threshold=6.0, false_dismissal=1e-2, fft_lengths=(n,))
+    b_dir.set_reference(ref)
+    r_dir = b_dir.filter_series(x)
+    dir_pairs = sum(g.plan.direct_stats().get("pairs", 0) for g in b_dir._groups if g.is_hier)
+    assert dir_pairs > 0
+
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+    b_fft = mf.TimeDomainFilterBank(taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+                                    threshold=6.0, false_dismissal=1e-2, fft_lengths=(n,))
+    b_fft.set_reference(ref)
+    r_fft = b_fft.filter_series(x)
+    assert len(r_dir.template_indices) > 10
+    np.testing.assert_array_equal(r_dir.template_indices, r_fft.template_indices)
+    np.testing.assert_array_equal(r_dir.sample_indices, r_fft.sample_indices)
+    np.testing.assert_allclose(r_dir.snr, r_fft.snr, rtol=2e-5, atol=1e-4)
+
