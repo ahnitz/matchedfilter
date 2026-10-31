@@ -316,10 +316,10 @@ What changed in the tests, and why none is a fitted margin:
 - `test_gate_draws`: the C search equals the Python one with window sets. `signal_draws`
   holds exactly the detections asked for, a smaller request is a larger one's prefix in
   any order, and its maxima lie where the engine searches.
-- `test_fdr_calibration`: the engine and the true coarse statistic are tested two-sided
-  against the plan's own modelled dismissal on 200,000 independent model detections
-  (seed 977), not against fd. The plan's own scatter (0.14 fd) would otherwise dominate
-  the binomial counts. The budget claim is a new test,
+- `test_fdr_calibration` and `test_fdr_engine`: the true coarse statistic and the engine
+  are tested two-sided against the plan's own modelled dismissal on 200,000 independent
+  model detections (seed 977), not against fd. The plan's own scatter (0.14 fd) would
+  otherwise dominate the binomial counts. The budget claim is `test_fdr_plans`'
   `test_plans_dismiss_the_budget_on_average`: 100 model seeds per profile, every chain's
   plan and the pick judged on 1M independent detections. Their means are within 3.5
   standard errors of fd, and the share above 1.25 fd within 3.5 of fit_order's, both

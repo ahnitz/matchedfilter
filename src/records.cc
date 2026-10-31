@@ -1,4 +1,8 @@
-/* The running-maximum records of the gate model's simulation (_core.c's M_simulate): of one
+/* The gate model's simulation kernels (_core.c's M_simulate), under Highway's dispatch.
+ *
+ * Power: A[e] = |g y[e] + d[e]|^2 of complex y and d, and the largest A, in one pass.
+ *
+ * Records: the running-maximum records of one
  * statistic's values (squares: non-negative) read outward from a start, every value that
  * exceeds all before it, as (distance, sqrt value). Records are rare -- about ln L of L values
  * of white noise, more where the profile makes neighbouring lags alike -- so the scan reads 16
@@ -11,6 +15,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "records.cc"
@@ -21,6 +26,47 @@ HWY_BEFORE_NAMESPACE();
 namespace ap_records {
 namespace HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex (interleaved);
+   returns the largest A. The maximum is taken over the values' bit patterns: for
+   non-negative floats they order as the values do, so a NaN orders as it did in the scalar
+   loop this replaced. */
+float Power(const float *y, const float *d, float g, long long m, float *A) {
+  const hn::CappedTag<float, 16> df;
+  const hn::RebindToUnsigned<decltype(df)> du;
+  using V = hn::Vec<decltype(df)>;
+  const long long N = (long long)hn::Lanes(df);
+  const V vg = hn::Set(df, g);
+  auto mx = hn::Zero(du);
+  long long e = 0;
+  for (; m - e >= N; e += N) {
+    V re, im;
+    hn::LoadInterleaved2(df, y + 2 * e, re, im);
+    re = hn::Mul(vg, re);
+    im = hn::Mul(vg, im);
+    if (d) {
+      V dr, di;
+      hn::LoadInterleaved2(df, d + 2 * e, dr, di);
+      re = hn::Add(re, dr);
+      im = hn::Add(im, di);
+    }
+    const V v = hn::MulAdd(re, re, hn::Mul(im, im));
+    hn::StoreU(v, df, A + e);
+    mx = hn::Max(mx, hn::BitCast(du, v));
+  }
+  uint32_t best = hn::ReduceMax(du, mx);
+  for (; e < m; e++) {
+    const float re = g * y[2 * e] + (d ? d[2 * e] : 0.f), im = g * y[2 * e + 1] + (d ? d[2 * e + 1] : 0.f);
+    const float v = re * re + im * im;
+    uint32_t u;
+    memcpy(&u, &v, 4);
+    A[e] = v;
+    best = u > best ? u : best;
+  }
+  float r;
+  memcpy(&r, &best, 4);
+  return r;
+}
 
 /* Whether any of the nv vectors v has a lane above b. */
 template <class D, class V>
@@ -64,10 +110,20 @@ static HWY_INLINE long long LaneRecords(D d, V x, V *bv, long long dist, int32_t
   const size_t cnt = hn::CountTrue(d, m);
   if (cnt) {
     if (kk + (long long)cnt > cap) return -1;
+    /* Compressed into a vector's worth of local lanes, then the cnt records copied:
+       CompressBlendedStore at pos + kk reads and rewrites a whole vector on some targets
+       (NEON: a load, a blend and a store), past the arrays' end when the records reach
+       it (ASan, arm64, 2026-10-30). Records are rare, so the copy costs nothing. */
     const hn::RebindToSigned<D> di;
     const auto at = hn::Add(hn::Iota(di, 0), hn::Set(di, (int32_t)dist));
-    hn::CompressBlendedStore(at, hn::RebindMask(di, m), di, pos + kk);
-    hn::CompressBlendedStore(hn::Sqrt(x), m, d, val + kk);
+    HWY_ALIGN int32_t ps[16];
+    HWY_ALIGN float vs[16];
+    hn::CompressStore(at, hn::RebindMask(di, m), di, ps);
+    hn::CompressStore(hn::Sqrt(x), m, d, vs);
+    for (size_t l = 0; l < cnt; l++) {
+      pos[kk + (long long)l] = ps[l];
+      val[kk + (long long)l] = vs[l];
+    }
     kk += (long long)cnt;
   }
   *bv = hn::MaxOfLanes(d, inc);
@@ -123,15 +179,24 @@ HWY_AFTER_NAMESPACE();
 #if HWY_ONCE
 namespace ap_records {
 HWY_EXPORT(Records);
+HWY_EXPORT(Power);
 /* Dispatched unqualified from inside the namespace (see gauss.cc). */
 static int Dispatch(const float *a, long long e0, int dir, long long L, long long d0,
                     int32_t *pos, float *val, long long *k, long long cap) {
   return HWY_DYNAMIC_DISPATCH(Records)(a, e0, dir, L, d0, pos, val, k, cap);
 }
+static float DispatchPower(const float *y, const float *d, float g, long long m, float *A) {
+  return HWY_DYNAMIC_DISPATCH(Power)(y, d, g, m, A);
+}
 }  // namespace ap_records
 /* The records of a[e0], a[e0 + dir], ... (L values, dir +1 or -1), each exceeding all before
    it (the first always), appended at pos[*k], val[*k] as (distance i + d0, sqrt value) for
    the i-th, *k advanced past them. Returns 0, or -1 when the arrays (cap entries) are full. */
+/* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex: simulate's
+   statistics, for the best target this CPU runs. Returns the largest A. */
+extern "C" float ap_sim_power(const float *y, const float *d, float g, long long m, float *A) {
+  return ap_records::DispatchPower(y, d, g, m, A);
+}
 extern "C" int ap_sim_records(const float *a, long long e0, int dir, long long L, long long d0,
                               int32_t *pos, float *val, long long *k, long long cap) {
   return ap_records::Dispatch(a, e0, dir, L, d0, pos, val, k, cap);

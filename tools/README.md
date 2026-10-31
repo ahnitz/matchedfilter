@@ -145,7 +145,8 @@ the kernel identities after an external compile); `coarse_layout.py` (the fp16 c
 
 **Merge gate and CI**: `gate.py` (every pre-merge check), `ci_status.py` (Actions
 verdicts), `sanitize.sh` and `sanitize_report.py` (ASan/UBSan runs and their
-annotations), `migrate_cost_file.py` (cost-file format migration).
+annotations), `test_durations.py` (tests/durations.json, the module weights the sharded
+runs balance by), `migrate_cost_file.py` (cost-file format migration).
 
 **Production-like benchmarks**: `ladder.py`, `ab_ladder.py`, `prodlen.py`, `ladder_diff.py`,
 `ladder_coverage.py`, `ladder_profiles.py`, `profile_cpu_ladder.py`, `hier_bench.py`,

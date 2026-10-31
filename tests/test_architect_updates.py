@@ -181,9 +181,10 @@ def test_time_domain_filter_bank_narrow_slice_and_template_index():
     assert np.all(narrow_res.sample_indices < 30500)
 
 
-def test_chain_trial_work_normalization(monkeypatch):
-    """A plan's joint trial takes a round from a full-template series call, timed per (block x
-    template) pair, and none from a follow-up slice."""
+def test_chain_trial_rounds_come_from_full_calls(monkeypatch):
+    """A plan's joint trial takes a round from a full-template series call -- the time of one
+    timed run of that call -- and none from a follow-up slice. (Rounds are judged as ratios
+    to the default arm; the call's pairs only scale the logs, _trial.run_round.)"""
     def inspiral_power(n, exponent=-7 / 3.0, knee_frac=0.0150):
         p = np.zeros(n, dtype=np.float32)
         k = np.arange(1, n // 2).astype(np.float64)
@@ -212,9 +213,13 @@ def test_chain_trial_work_normalization(monkeypatch):
     if not mf.get_autotune_state()["trials"]:
         pytest.skip("no Q15 screen for this chain here: a plan has one arm, so no trial")
     assert rounds() == []
-    # A full call over 4 blocks is one round, per pair.
+    # A full call over 4 blocks is one round, a run of this call: within the call's own wall
+    # time, which holds on any machine (a fixed limit of 1 ms failed under a sanitizer).
     starts = np.array([0, n, 2 * n, 3 * n], dtype=np.uintp)
+    import time
+    t0 = time.perf_counter()
     hf.run_series(series, starts=starts, win_start=np.zeros(4, dtype=np.uintp),
                   win_end=np.full(4, n, dtype=np.uintp), binsize=n, threshold=5.0)
+    elapsed = time.perf_counter() - t0
     s = rounds()
-    assert len(s) == 1 and 0 < s[0] < 1e-3          # seconds per (block x template) pair
+    assert len(s) == 1 and 0 < s[0] <= elapsed, (s, elapsed)

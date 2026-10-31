@@ -333,6 +333,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- The gate model's simulation read and rewrote past the end of its records arrays on ARM:
+  the records scan stored each vector's records with `CompressBlendedStore`, which on NEON
+  loads, blends and stores a whole vector at the destination (AddressSanitizer, Linux
+  arm64, in every nightly since 2026-10-28). It now compresses into local lanes and copies
+  the records. Results are unchanged.
+- The musllinux wheel builds again (it failed from 2026-10-27): the simulation's power
+  pass used GCC's `target_clones`, which needs IFUNC, and musl has none. It now runs under
+  Highway's dispatch as the other kernels do (`ap_sim_power`, src/records.cc), with
+  identical output on dev2 (noise maxima and a chain choice compared bit for bit).
+- The nightly's sanitizer shards fit their time: `--shard` places test modules heaviest
+  first into the lightest shard, by each module's seconds in tests/durations.json
+  (tools/test_durations.py), where it dealt them in turn by name, and the false-dismissal
+  calibration tests, a quarter of the suite in one module, are three
+  (test_fdr_calibration, test_fdr_engine, test_fdr_plans). The predicted heaviest of 12
+  shards is 1.2x the mean, against 2.9x. A timing test that held a run to 1 ms checks it
+  against the call's own time instead.
+
 - `gatechain.calibrate_costs` was a wrapper that measured 256-block calls, where plans, tools
   and tests (through `_calibration.calibrate_costs`) measured 32, and cost models were cached
   and stored under n, template count and series group alone: whichever calibration ran first
