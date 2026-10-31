@@ -412,3 +412,89 @@ def test_block_size_ranking_models_with_every_draw(fresh, monkeypatch):
     fine = np.exp(-np.arange(4097) / 600.0); fine[:30] = 0
     cal.price_block_sizes(fine, 0.25, 2048.0, 300, 150, 64, 6.0, 0.01, [2048, 4096])
     assert seen and set(seen) == {gc.model_draws(0.01)[1]}, seen
+
+
+@pytest.mark.parametrize("nrows", [1, 7, 8, 15, 16, 17, 33])
+@pytest.mark.parametrize("n, cut", [(256, 113), (256, 200), (4096, 1901)])
+def test_simulate_batch_boundaries_and_spectrum_modes(fresh, nrows, n, cut):
+    """M_simulate produces identical records across batch boundaries (SIM_ROWS = 16, lane widths
+    4/8/16), both with half-spectrum splitting (kmax <= n / 2) and full-spectrum transforms
+    (kmax > n / 2), covering pairbatch (64, 128) and balanced (256..4096) sizes."""
+    p = _profile(n).copy()
+    p[cut:] = 0.0
+    p = gc._norm_profile(p, n)
+    bands = gc.candidate_bands(n)
+    Fb = [float(p[:b].sum()) for b in bands]
+    sim = dict(p=p, Fb=Fb, rows=0, t=np.empty(0, np.int64), u=np.empty(0), recs=None, tab=None)
+    gc._extend_signal(sim, n, bands, 6.0, 1, 19)
+    tab = sim["tab"]
+    t, _ = gc._arrivals(19, n // bands[0], 0, nrows)
+    fi = (np.arange(nrows) % gc._NF).astype(np.int32)
+    srec, nrec = gc._simulate(p, n, bands, nrows, 0, 19, (tab, t, fi), True, keep_at=5.5)
+
+    # Verify against NumPy float64 backward transforms row by row.
+    scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
+    kmax = int(np.flatnonzero(p)[-1]) + 1
+    stream = (gc._DOMAIN_SIGNAL << 32) | 19
+    for r in range(nrows):
+        d = _fill(2 * kmax, 2 * r * n, seed=stream) * np.repeat(scale[:kmax], 2)
+        x = d[0::2].astype(np.float64) + 1j * d[1::2]
+        # Noise records per band
+        for bi, (b, (pos, val, off)) in enumerate(zip(bands, nrec)):
+            yb = np.fft.ifft(x[:b], b) * b * (gc._SIG / math.sqrt(Fb[bi]))
+            ab = np.abs(yb) ** 2
+            wp, wv = _records_one_at_a_time(ab.astype(np.float32), 0, 1, b, 0)
+            sl = slice(off[r], off[r + 1])
+            np.testing.assert_array_equal(pos[sl], wp)
+            np.testing.assert_allclose(val[sl], wv, rtol=1e-5, atol=1e-5)
+        # Signal records for fine (s = 0) and coarse bands (s = 1..nb)
+        yf = np.fft.ifft(x, n) * n * gc._SIG
+        tr = int(t[r])
+        df = tab[int(fi[r]), 0].astype(np.complex128)
+        af = np.empty(n, np.float64)
+        af[:n - tr] = np.abs(yf[tr:] + df[:n - tr]) ** 2
+        af[n - tr:] = np.abs(yf[:tr] + df[n - tr:]) ** 2
+        kept = af.max() >= 5.5 ** 2
+        sp0, sv0, so0 = srec[0]
+        if not kept:
+            for q in range(2 * (1 + len(bands))):
+                assert srec[q][2][r] == srec[q][2][r + 1]
+            continue
+        wp, wv = _records_one_at_a_time(af.astype(np.float32), 0, 1, n, 0)
+        sl = slice(so0[r], so0[r + 1])
+        np.testing.assert_allclose(sv0[sl][-1], wv[-1], rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(len(_core.targets()) < 2 if hasattr(_core, "targets") else True,
+                    reason="one SIMD target in this build")
+def test_simulate_numerical_equivalence_across_isas():
+    """M_simulate agrees within float32 roundoff across all compiled SIMD targets (AVX3, AVX2,
+    AVX, SSE4) across both pairbatch (64, 128) and balanced (256..4096) transforms."""
+    code = (
+        "import sys, numpy as np\n"
+        "from matchedfilter import gatechain as gc\n"
+        "out = {}\n"
+        "for n in (2048, 4096):\n"
+        "    p = np.exp(-np.arange(n) / (n / 7.0)) + 1e-4\n"
+        "    p[:n // 100] = 0; p[int(0.46 * n):] = 0\n"
+        "    p = gc._norm_profile(p, n)\n"
+        "    bands = gc.usable_bands(p, n)\n"
+        "    C, F = gc.signal_draws(p, n, bands, 6.0, 250, seed=31, window=(128, n - 128))\n"
+        "    N = gc.noise_block_maxima(p, n, bands, nsim=250, seed=31, window=(128, n - 128))\n"
+        "    out['C_%d' % n] = C; out['F_%d' % n] = F; out['N_%d' % n] = N\n"
+        "np.savez(sys.argv[1], **out)\n"
+    )
+    got = {}
+    for isa in _core.targets():
+        path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "sim_%s_%d.npz" % (isa, os.getpid()))
+        env = dict(os.environ, MF_ISA=isa)
+        r = subprocess.run([sys.executable, "-c", code, path], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, (isa, r.stderr[-500:])
+        with np.load(path) as z:
+            got[isa] = {k: z[k].copy() for k in z.files}
+        os.unlink(path)
+    ref_isa, ref = next(iter(got.items()))
+    for isa, vals in got.items():
+        for k in ref:
+            assert vals[k].shape == ref[k].shape, (isa, ref_isa, k)
+            np.testing.assert_allclose(vals[k], ref[k], rtol=1e-5, atol=1e-5, err_msg=f"{isa} vs {ref_isa} {k}")

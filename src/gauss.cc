@@ -192,16 +192,82 @@ static HWY_NOINLINE void Steps(uint32_t *st, uint64_t n, float *const *dst0, con
    which no piece changes how it stores them: the long ones, where every piece stores straight
    into its row, in one Steps call, the few a piece stores in part one at a time, and where no
    piece stores, only the generators move (Skip). */
+/* SIMD Threefry-2x32-20 of counters (x0, x1) under key (k0, k1): bit-identical to threefry. */
+template <class DU, class VU>
+static HWY_INLINE void ThreefryVec(DU du, VU &x0, VU &x1, uint32_t k0, uint32_t k1) {
+  const uint32_t k2 = k0 ^ k1 ^ 0x1BD11BDAu;
+  const VU vk0 = hn::Set(du, k0), vk1 = hn::Set(du, k1), vk2 = hn::Set(du, k2);
+  x0 = hn::Add(x0, vk0); x1 = hn::Add(x1, vk1);
+  // s = 1
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<13>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<15>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<26>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<6>(x1), x0);
+  x0 = hn::Add(x0, vk1); x1 = hn::Add(x1, hn::Set(du, k2 + 1u));
+  // s = 2
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<17>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<29>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<16>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<24>(x1), x0);
+  x0 = hn::Add(x0, vk2); x1 = hn::Add(x1, hn::Set(du, k0 + 2u));
+  // s = 3
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<13>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<15>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<26>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<6>(x1), x0);
+  x0 = hn::Add(x0, vk0); x1 = hn::Add(x1, hn::Set(du, k1 + 3u));
+  // s = 4
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<17>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<29>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<16>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<24>(x1), x0);
+  x0 = hn::Add(x0, vk1); x1 = hn::Add(x1, hn::Set(du, k2 + 4u));
+  // s = 5
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<13>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<15>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<26>(x1), x0);
+  x0 = hn::Add(x0, x1); x1 = hn::Xor(Rotl<6>(x1), x0);
+  x0 = hn::Add(x0, vk2); x1 = hn::Add(x1, hn::Set(du, k0 + 5u));
+}
+
+/* Seed all G blocks' eight generators across SIMD lanes in two Threefry passes (even counters
+   give words 0, 1; odd counters give words 2, 3), bit-for-bit matching seed_block. */
+template <size_t G>
+static HWY_INLINE void SeedBlocks(uint32_t *st, const Piece *pc, uint32_t k0, uint32_t k1) {
+  using T = GenLanes<G>;
+  const typename T::DU du;
+  const size_t L = T::L(), NV = T::NV();
+  HWY_ALIGN uint32_t x0e[8 * G], x1e[8 * G], x0o[8 * G], x1o[8 * G];
+  for (size_t g = 0; g < G; g++) {
+    for (uint32_t j = 0; j < 8; j++) {
+      const uint64_t ce = pc[g].b * 16 + 2 * j, co = ce + 1;
+      x0e[8 * g + j] = (uint32_t)ce; x1e[8 * g + j] = (uint32_t)(ce >> 32);
+      x0o[8 * g + j] = (uint32_t)co; x1o[8 * g + j] = (uint32_t)(co >> 32);
+    }
+  }
+  const auto one = hn::Set(du, 1u);
+  for (size_t v = 0; v < NV; v++) {
+    auto e0 = hn::Load(du, x0e + v * L), e1 = hn::Load(du, x1e + v * L);
+    ThreefryVec(du, e0, e1, k0, k1);
+    hn::Store(hn::Or(e0, one), du, st + 0 * 8 * G + v * L);
+    hn::Store(e1, du, st + 1 * 8 * G + v * L);
+    auto o0 = hn::Load(du, x0o + v * L), o1 = hn::Load(du, x1o + v * L);
+    ThreefryVec(du, o0, o1, k0, k1);
+    hn::Store(o0, du, st + 2 * 8 * G + v * L);
+    hn::Store(o1, du, st + 3 * 8 * G + v * L);
+  }
+}
+
 template <size_t G, bool kScaled>
 static void FillPieces(const Piece *pc, uint32_t k0, uint32_t k1) {
   HWY_ALIGN uint32_t st[32 * G];
   HWY_ALIGN float buf[16 * G];                     // a step a piece stores only in part
   static const float ones[8] = {1, 1, 1, 1, 1, 1, 1, 1};   // the scale of a step not scaled in place
   /* piece g's steps [q0, q1) hold its draws, of which [f0, f1) go straight into its row */
+  SeedBlocks<G>(st, pc, k0, k1);
   uint64_t q0[G], q1[G], f0[G], f1[G], qmax = 0;
   for (size_t g = 0; g < G; g++) {
     const Piece &p = pc[g];
-    seed_block(st + 8 * g, 8 * G, p.b, k0, k1);
     q0[g] = p.lo / 16; q1[g] = (p.hi + 15) / 16;
     const bool straight = !kScaled || (p.at & 1) == 0;
     f0[g] = straight ? (p.lo + 15) / 16 : q1[g];

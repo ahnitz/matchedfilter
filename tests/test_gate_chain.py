@@ -831,3 +831,38 @@ def test_calibrations_sharing_band_costs_in_any_order(monkeypatch, order):
         for b in gc.candidate_bands(n):
             if gc._q15_band(b) and gc.cpu_gate_kind() != "f16":
                 assert b in cm.screen and cm.screen[b]["recheck"] >= 0, (n, b)
+
+
+def test_lazy_fit_and_shared_candidate_cache(monkeypatch):
+    """choose_chain fits Half-B thresholds lazily only when accessed, and chain_thresholds
+    reuses _CAND_CACHE across cost models that differ only in direct_lag."""
+    gc = mf.gatechain
+    prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
+    cm = _recorded_model().with_direct(0.02)
+    monkeypatch.setattr(gc, "_CHOICE_CACHE", type(gc._CHOICE_CACHE)())
+    monkeypatch.setattr(gc, "_CAND_CACHE", type(gc._CAND_CACHE)())
+    fits = []
+    orig_fit = gc._fit
+    monkeypatch.setattr(gc, "_fit", lambda *a, **k: fits.append(1) or orig_fit(*a, **k))
+    best, ranked = gc.choose_chain(prof, 2048, 6.0, 1e-3, cost=cm, max_tiers=3, window=(192, 1856))
+    assert best is not None and len(ranked) > 5
+    # Only the winning plan (or none until thresholds are read) has been fit, not all ranked chains.
+    assert len(fits) <= 1
+    _ = [p["thresholds"] for p in ranked]
+    assert len(fits) == len(ranked)
+    for p in ranked:
+        assert len(p["thresholds"]) == len(p["chain"])
+        assert len(p["reach"]) == len(p["chain"]) + 1
+
+    # chain_thresholds with distinct direct_lag values shares _CAND_CACHE across models:
+    # 1-tier chains reuse choose_chain's entry directly (0 searches), and multi-tier chains
+    # search at most once for the first prune=False call and 0 times thereafter.
+    searches = []
+    orig_cc = gc._chain_candidates
+    monkeypatch.setattr(gc, "_chain_candidates", lambda *a, **k: searches.append(1) or orig_cc(*a, **k))
+    p1 = gc.chain_thresholds(prof, 2048, 6.0, 1e-3, (64,), cost=cm.with_direct(0.05), window=(192, 1856))
+    p2 = gc.chain_thresholds(prof, 2048, 6.0, 1e-3, (64,), cost=cm.with_direct(0.12), window=(192, 1856))
+    assert p1 is not None and p2 is not None and len(searches) == 0
+    m1 = gc.chain_thresholds(prof, 2048, 6.0, 1e-3, (256, 512), cost=cm.with_direct(0.05), window=(192, 1856))
+    m2 = gc.chain_thresholds(prof, 2048, 6.0, 1e-3, (256, 512), cost=cm.with_direct(0.12), window=(192, 1856))
+    assert m1 is not None and m2 is not None and len(searches) == 1

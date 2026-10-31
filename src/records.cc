@@ -172,6 +172,48 @@ int Records(const float *a, long long e0, int dir, long long L, long long d0, in
                  : Scan<-1>(a, e0, L, d0, pos, val, k, cap);
 }
 
+/* Complex multiply out[k] = x[k] * tw[k] for k < m (interleaved float32 complex). */
+void Twiddle(const float *x, const float *tw, size_t m, float *out) {
+  const hn::CappedTag<float, 16> df;
+  using V = hn::Vec<decltype(df)>;
+  const size_t N = hn::Lanes(df);
+  size_t k = 0;
+  for (; k + N <= m; k += N) {
+    V xr, xi, wr, wi;
+    hn::LoadInterleaved2(df, x + 2 * k, xr, xi);
+    hn::LoadInterleaved2(df, tw + 2 * k, wr, wi);
+    const V or_ = hn::MulSub(xr, wr, hn::Mul(xi, wi));
+    const V oi = hn::MulAdd(xr, wi, hn::Mul(xi, wr));
+    hn::StoreInterleaved2(or_, oi, df, out + 2 * k);
+  }
+  for (; k < m; k++) {
+    const float xr = x[2 * k], xi = x[2 * k + 1];
+    const float wr = tw[2 * k], wi = tw[2 * k + 1];
+    out[2 * k] = xr * wr - xi * wi;
+    out[2 * k + 1] = xr * wi + xi * wr;
+  }
+}
+
+/* Interleave two m-complex arrays into one 2m-complex array: out[2e] = even_c[e],
+   out[2e + 1] = odd_c[e], treating each complex float32 pair as one 64-bit lane. */
+void InterleaveComplex(const float *even_c, const float *odd_c, size_t m, float *out) {
+  const hn::CappedTag<uint64_t, 8> du;
+  const size_t N = hn::Lanes(du);
+  const uint64_t *pe = reinterpret_cast<const uint64_t *>(even_c);
+  const uint64_t *po = reinterpret_cast<const uint64_t *>(odd_c);
+  uint64_t *dst = reinterpret_cast<uint64_t *>(out);
+  size_t e = 0;
+  for (; e + N <= m; e += N) {
+    const auto ve = hn::LoadU(du, pe + e);
+    const auto vo = hn::LoadU(du, po + e);
+    hn::StoreInterleaved2(ve, vo, du, dst + 2 * e);
+  }
+  for (; e < m; e++) {
+    dst[2 * e] = pe[e];
+    dst[2 * e + 1] = po[e];
+  }
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ap_records
 HWY_AFTER_NAMESPACE();
@@ -180,6 +222,8 @@ HWY_AFTER_NAMESPACE();
 namespace ap_records {
 HWY_EXPORT(Records);
 HWY_EXPORT(Power);
+HWY_EXPORT(Twiddle);
+HWY_EXPORT(InterleaveComplex);
 /* Dispatched unqualified from inside the namespace (see gauss.cc). */
 static int Dispatch(const float *a, long long e0, int dir, long long L, long long d0,
                     int32_t *pos, float *val, long long *k, long long cap) {
@@ -187,6 +231,12 @@ static int Dispatch(const float *a, long long e0, int dir, long long L, long lon
 }
 static float DispatchPower(const float *y, const float *d, float g, long long m, float *A) {
   return HWY_DYNAMIC_DISPATCH(Power)(y, d, g, m, A);
+}
+static void DispatchTwiddle(const float *x, const float *tw, size_t m, float *out) {
+  HWY_DYNAMIC_DISPATCH(Twiddle)(x, tw, m, out);
+}
+static void DispatchInterleave(const float *even_c, const float *odd_c, size_t m, float *out) {
+  HWY_DYNAMIC_DISPATCH(InterleaveComplex)(even_c, odd_c, m, out);
 }
 }  // namespace ap_records
 /* The records of a[e0], a[e0 + dir], ... (L values, dir +1 or -1), each exceeding all before
@@ -200,5 +250,12 @@ extern "C" float ap_sim_power(const float *y, const float *d, float g, long long
 extern "C" int ap_sim_records(const float *a, long long e0, int dir, long long L, long long d0,
                               int32_t *pos, float *val, long long *k, long long cap) {
   return ap_records::Dispatch(a, e0, dir, L, d0, pos, val, k, cap);
+}
+extern "C" void ap_sim_twiddle(const float *x, const float *tw, size_t m, float *out) {
+  if (m) ap_records::DispatchTwiddle(x, tw, m, out);
+}
+extern "C" void ap_sim_interleave_complex(const float *even_c, const float *odd_c, size_t m,
+                                          float *out) {
+  if (m) ap_records::DispatchInterleave(even_c, odd_c, m, out);
 }
 #endif

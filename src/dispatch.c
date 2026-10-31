@@ -83,6 +83,15 @@ int ap_fft_real_batch(ap_plan *p,const float *const *srcs,const size_t *haves,si
   if(!p || !p->be->fft_real_batch) return -1;
   return p->be->fft_real_batch(p->h,srcs,haves,stride,cnt,scale,rtw,mirror,outs);
 }
+int ap_fft_backward_batch(ap_plan *p,const float *const *srcs,size_t have_bins,int cnt,
+                          float *const *outs){
+  if(!p || !p->be->fft_backward_batch) return -1;
+  return p->be->fft_backward_batch(p->h,srcs,have_bins,cnt,outs);
+}
+void ap_fft_backward_padded(ap_plan *p,const float *in,size_t have_bins,float *out){
+  if(p->be->fft_backward_padded) p->be->fft_backward_padded(p->h,in,have_bins,out);
+  else p->be->fft(p->h,in,out,1);
+}
 
 void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
   pick()->td_corr(x,taps,L,nlag,out);

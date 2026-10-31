@@ -639,8 +639,9 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             continue
         q = max(n // 32, 1)                  # the bank prices its windows on this grid
         lo = (int(margin) // q) * q
+        feed_nt = int(ntemplates) if _gc._is_gpu(device) else None
         key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers), str(device),
-               _gc.cpu_gate_kind(), int(ntemplates))
+               _gc.cpu_gate_kind(), feed_nt)
         hit = _gc._PRICE_CACHE.get(key)
         if hit is None:
             ref = _gc.rebin_profile(fine, delta_f, data_rate, n)

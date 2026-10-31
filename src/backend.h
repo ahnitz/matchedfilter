@@ -124,6 +124,11 @@ typedef struct {
                    int16_t *qd, float *scale_out);
   void (*q15_lanethr)(float threshold, const float *qds, int qds_stride, const float *qts,
                       float margin, int nomargin, int16_t *out);
+  /* Multi-block backward transforms across SIMD lanes on a small (pairbatch) plan, zero-padded past have_bins. */
+  int (*fft_backward_batch)(void *, const float *const *srcs, size_t have_bins, int cnt,
+                            float *const *outs);
+  /* Backward transform zero-padded past have_bins complex bins into stage A. */
+  void (*fft_backward_padded)(void *, const float *in, size_t have_bins, float *out);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
