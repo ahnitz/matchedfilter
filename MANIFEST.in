@@ -6,6 +6,8 @@ recursive-include examples *.py
 recursive-include src *.c *.cc *.h *.py
 recursive-include python *.c *.h
 recursive-include tests *.c *.h *.py
+# The module weights --shard balances by (tools/test_durations.py).
+include tests/durations.json
 # Reference spectra used by the tests shipped in the source archive.
 recursive-include tests/data *.npy *.npz *.json *.log *.log.gz
 recursive-include tools *.py *.sh *.cpp *.cu README.md
