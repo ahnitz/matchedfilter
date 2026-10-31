@@ -1030,6 +1030,8 @@ float ap_sim_power(const float *y, const float *d, float g, long long m, float *
    (src/records.cc). Returns 0, or -1 when the arrays (cap entries) are full. */
 int ap_sim_records(const float *a, long long e0, int dir, long long L, long long d0,
                    int32_t *pos, float *val, long long *k, long long cap);
+void ap_sim_twiddle(const float *x, const float *tw, size_t m, float *out);
+void ap_sim_interleave_complex(const float *even_c, const float *odd_c, size_t m, float *out);
 /* running_records(a, e0, dir, L, d0, pos, val): ap_sim_records over a (float32, non-negative)
    into pos (int32) and val (float32, pos's length) from their start: the record count, or -1
    when they are too short (simulate's records, for the tests). */
@@ -1070,6 +1072,53 @@ static int sr_take(PyObject *po,PyObject *vo,PyObject *oo,Py_ssize_t want,long l
          && pb[s].len==vb[s].len && ob[s].itemsize==8 && (strcmp(ob[s].format,"q")==0||strcmp(ob[s].format,"l")==0) && ob[s].len/8==nrows+1)){ *ok=0; break; }
   }
   return got;
+}
+/* Emit running-maximum records for one active row r at stage s (0 = fine, 1..nb = coarse bands)
+   from its transformed time series Yr (m complex samples). Returns -1 if a record array fills. */
+static int sim_emit_row(long long r, Py_ssize_t s, long long n, Py_ssize_t nb, long long m,
+                        float g, float keep2, int has_sig, int has_noise, int *kept_r,
+                        const float *Yr, float *A, const float *tab, const long long *tv,
+                        const int *fi, Py_buffer *spb, Py_buffer *svb, Py_buffer *sob,
+                        long long *ks, Py_buffer *npb, Py_buffer *nvb, Py_buffer *nob,
+                        long long *kn){
+  if(has_noise && s>0){
+    const int q=(int)(s-1);
+    ((long long*)nob[q].buf)[r]=kn[q];
+    ap_sim_power(Yr,NULL,g,m,A);
+    if(ap_sim_records(A,0,1,m,0,(int32_t*)npb[q].buf,(float*)nvb[q].buf,&kn[q],nvb[q].len/4)<0)
+      return -1;
+  }
+  if(!has_sig) return 0;
+  if(!*kept_r){
+    for(int side=0;side<2;side++){
+      const int q=(int)(2*s+side);
+      ((long long*)sob[q].buf)[r]=ks[q];
+    }
+    return 0;
+  }
+  /* |noise + response| at lag js + e (mod m), e = 0 .. m-1: the response's table holds,
+     per phase rho = t - js R, its values in that order (tab[f, s, rho m + e]) */
+  const long long R = n/m, t=tv[r], js = t/R;
+  const float *D = tab+(size_t)2*fi[r]*(1+nb)*n + (size_t)2*s*n + (size_t)2*(t - js*R)*m;
+  const float m1=ap_sim_power(Yr+2*js,D,g,m-js,A), m2=ap_sim_power(Yr,D+2*(m-js),g,js,A+(m-js));
+  if(s==0 && keep2>0.f){
+    const float mx = m1>m2 ? m1 : m2;
+    if(mx<keep2){
+      /* no window keeps this draw: no records, and no band's signal pass */
+      *kept_r=0;
+      for(int side=0;side<2;side++) ((long long*)sob[side].buf)[r]=ks[side];
+      return 0;
+    }
+  }
+  for(int side=0;side<2;side++){
+    const int q=(int)(2*s+side);
+    ((long long*)sob[q].buf)[r]=ks[q];
+    /* right: distances 0 .. m-1 forward; left: lag js - e is A[m - e], e = 1 .. m-1 */
+    if(ap_sim_records(A, side ? m-1 : 0, side ? -1 : 1, side ? m-1 : m, side ? 1 : 0,
+                      (int32_t*)spb[q].buf, (float*)svb[q].buf, &ks[q], svb[q].len/4)<0)
+      return -1;
+  }
+  return 0;
 }
 /* The gate model's simulation, whole (gatechain._simulate): row r of nrows is a block's n
    bins, bins [0, kmax) complex draws (row0 + r) * 2n .. of stream `seed` (ap_gauss_fill_rows)
@@ -1136,75 +1185,249 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   }
   /* the noise alone needs no bins past the widest band */
   const long long kfill = has_sig ? kmax : (kmax < b[nb-1] ? kmax : b[nb-1]);
-  ap_plan *pf = has_sig ? ap_create((size_t)n) : NULL, *pl[32]={0}; ok = !has_sig || pf!=NULL;
-  for(Py_ssize_t i=0;i<nb && ok;i++) if(!(pl[i]=ap_create((size_t)b[i]))) ok=0;
-  /* rows are drawn SIM_ROWS at a time (ap_gauss_fill_rows: two blocks share a vector on
-     AVX-512, and a row of n = 2048 reads one block) */
-  enum { SIM_ROWS = 2 };
-  const size_t bytes=((size_t)(2*n*4)+63)/64*64;
-  float *X=(float*)ap_alloc64(SIM_ROWS*bytes), *Y=(float*)ap_alloc64(bytes),
-        *A=(float*)ap_alloc64(bytes/2+64);
+  /* When simulating signals on a one-sided/bandlimited spectrum (kfill <= n / 2), the fine
+     n-point backward transform splits into two n/2-point transforms: its even lags are the
+     unmodified n/2-point backward transform (shared directly with the widest band when
+     b[nb - 1] == n / 2, eliminating its transform entirely), and its odd lags are the
+     n/2-point transform of X[k] * exp(+2 pi i k / n). */
+  const int half_split = has_sig && n >= 128 && (n & (n - 1)) == 0 && kfill <= n / 2;
+  const long long nh = n / 2;
+  const int share_widest = half_split && b[nb - 1] == nh;
+  ap_plan *pf = NULL, *ph_own = NULL, *ph = NULL, *pl[32] = {0};
+  for(Py_ssize_t i=0;i<nb && ok;i++){
+    pl[i] = ap_create((size_t)b[i]);
+    if(!pl[i]) ok=0;
+  }
+  if(ok && has_sig){
+    if(half_split){
+      ph = share_widest ? pl[nb-1] : (ph_own = ap_create((size_t)nh));
+      if(!ph) ok=0;
+    } else {
+      pf = ap_create((size_t)n);
+      if(!pf) ok=0;
+    }
+  }
+  /* Rows are drawn and transformed in SIM_ROWS batches (16 = widest SIMD lane count).
+     Pairbatch outputs are spaced by 2*m + 16 floats (+64B pad avoids L1D set aliasing). */
+  enum { SIM_ROWS = 16 };
+  size_t max_pb_m = 0;
+  if(ok){
+    if(pf && ap_plan_pairbatch(pf) > 0 && (size_t)n > max_pb_m) max_pb_m = (size_t)n;
+    if(ph && ap_plan_pairbatch(ph) > 0 && (size_t)nh > max_pb_m) max_pb_m = (size_t)nh;
+    for(Py_ssize_t i=0;i<nb;i++)
+      if(ap_plan_pairbatch(pl[i]) > 0 && (size_t)b[i] > max_pb_m) max_pb_m = (size_t)b[i];
+  }
+  const size_t xfloats = ((size_t)(2*kfill)+15u)&~(size_t)15u;
+  const size_t ysingle = ((size_t)(2*n)+15u)&~(size_t)15u;
+  const size_t ypb = max_pb_m ? (size_t)AP_MAX_LANES * (2u * max_pb_m + 16u) : 0u;
+  const size_t yalloc = ysingle > ypb ? ysingle : ypb;
+  const size_t yhfloats = half_split ? ((size_t)(2*nh) + 16u) : 0u;
+  const int ph_w = (half_split && ph) ? ap_plan_pairbatch(ph) : 0;
+  const size_t ph_lanes = ph_w > 0 ? (size_t)AP_MAX_LANES : 1u;
+  float *X = (float*)ap_alloc64(SIM_ROWS * xfloats * sizeof(float)),
+        *Y = (float*)ap_alloc64(yalloc * sizeof(float)),
+        *A = (float*)ap_alloc64((ysingle/2 + 16u) * sizeof(float)),
+        *Yhalf = half_split ? (float*)ap_alloc64(SIM_ROWS * yhfloats * sizeof(float)) : NULL,
+        *Yodd = half_split ? (float*)ap_alloc64(ph_lanes * yhfloats * sizeof(float)) : NULL,
+        *Xtw = half_split ? (float*)ap_alloc64(ph_lanes * xfloats * sizeof(float)) : NULL,
+        *tw = half_split ? (float*)ap_alloc64((xfloats + 16u) * sizeof(float)) : NULL;
+  const int mem_ok = X && Y && A && (!half_split || (Yhalf && Yodd && Xtw && tw));
   long long ks[64]={0}, kn[32]={0}, done=nrows;
-  if(ok && X && Y && A){
+  if(ok && mem_ok){
     const float *scale=(const float*)sc.buf, *tab=has_sig ? (const float*)tb.buf : NULL;
     const long long *tv=has_sig ? (const long long*)tt.buf : NULL; const int *fi=has_sig ? (const int*)fib.buf : NULL;
     const float fs=(float)fscale, keep2=(float)(keep_at*keep_at);
     Py_BEGIN_ALLOW_THREADS
-    memset(X,0,SIM_ROWS*bytes);   /* bins past kfill stay empty */
-    for(long long r=0;r<nrows;r++){
-      long long ks0[64], kn0[32];   /* the counts before this row, should it not fit */
-      memcpy(ks0,ks,(size_t)ns*sizeof *ks); memcpy(kn0,kn,(size_t)nb*sizeof *kn);
-      int full=0;
-      const float *Xr = X + (r % SIM_ROWS) * (bytes/4);
-      if(r % SIM_ROWS == 0){
-        const long long rows = nrows-r < SIM_ROWS ? nrows-r : SIM_ROWS;
-        ap_gauss_fill_rows(X,bytes/4,(size_t)rows,(size_t)(2*kfill),(uint64_t)seed,(uint64_t)(2*(row0+r)*n),
-                           (uint64_t)(2*n),scale);
+    if(half_split){
+      const double step_ang = 2.0 * 3.14159265358979323846 / (double)n;
+      for(long long k=0;k<kfill;k++){
+        const double ang = step_ang * (double)k;
+        tw[2*k] = (float)cos(ang);
+        tw[2*k+1] = (float)sin(ang);
       }
-      int kept = 1;             /* with a signal: the row's fine maximum somewhere reaches keep_at */
-      for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb && !full; s++){
+    }
+    for(long long r0=0;r0<nrows;r0+=SIM_ROWS){
+      const int B = (int)(nrows-r0 < SIM_ROWS ? nrows-r0 : SIM_ROWS);
+      long long ks_batch[64], kn_batch[32];
+      memcpy(ks_batch,ks,(size_t)ns*sizeof *ks); memcpy(kn_batch,kn,(size_t)nb*sizeof *kn);
+      ap_gauss_fill_rows(X,xfloats,(size_t)B,(size_t)(2*kfill),(uint64_t)seed,
+                         (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
+      int kept[SIM_ROWS];
+      for(int bi=0;bi<B;bi++) kept[bi]=1;
+      int batch_full=0;
+      if(half_split){
+        /* Precompute even half-transforms Yhalf[0..B-1] once (reused at s = nb when share_widest). */
+        const size_t hv_h = (size_t)kfill;
+        if(ph_w > 0){
+          for(int a0=0;a0<B;a0+=ph_w){
+            const int cnt = B-a0 < ph_w ? B-a0 : ph_w;
+            const float *srcs[AP_MAX_LANES];
+            float *outs[AP_MAX_LANES];
+            for(int l=0;l<cnt;l++){
+              srcs[l] = X + (size_t)(a0+l)*xfloats;
+              outs[l] = Yhalf + (size_t)(a0+l)*yhfloats;
+            }
+            ap_fft_backward_batch(ph,srcs,hv_h,cnt,outs);
+          }
+        } else {
+          for(int bi=0;bi<B;bi++)
+            ap_fft_backward_padded(ph,X+(size_t)bi*xfloats,hv_h,Yhalf+(size_t)bi*yhfloats);
+        }
+      }
+      for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb && !batch_full; s++){
         const long long m = s==0 ? n : b[s-1];
         const float g = s==0 ? fs : bs[s-1];
-        /* a transform only reads its input (backend.h), so the row's transforms all read Xr */
-        ap_fft(s==0 ? pf : pl[s-1],Xr,Y,AP_BACKWARD);
-        if(has_noise && s>0){
-          /* the noise alone, lags 0 .. m-1 */
-          const int q=(int)(s-1); long long *off=(long long*)nob[q].buf; off[r]=kn[q];
-          ap_sim_power(Y,NULL,g,m,A);
-          if(ap_sim_records(A,0,1,m,0,(int32_t*)npb[q].buf,(float*)nvb[q].buf,&kn[q],nvb[q].len/4)<0){ full=1; break; }
-        }
-        if(!has_sig) continue;
-        if(!kept){
-          for(int side=0;side<2;side++){ const int q=(int)(2*s+side); ((long long*)sob[q].buf)[r]=ks[q]; }
+        if(s==0 && half_split){
+          const size_t hv_h = (size_t)kfill;
+          if(ph_w > 0){
+            for(int a0=0;a0<B && !batch_full;a0+=ph_w){
+              const int cnt = B-a0 < ph_w ? B-a0 : ph_w;
+              const float *srcs[AP_MAX_LANES];
+              float *outs[AP_MAX_LANES];
+              for(int l=0;l<cnt;l++){
+                float *xt = Xtw + (size_t)l*xfloats;
+                ap_sim_twiddle(X+(size_t)(a0+l)*xfloats,tw,hv_h,xt);
+                srcs[l] = xt;
+                outs[l] = Yodd + (size_t)l*yhfloats;
+              }
+              ap_fft_backward_batch(ph,srcs,hv_h,cnt,outs);
+              for(int l=0;l<cnt;l++){
+                const int bi = a0+l;
+                ap_sim_interleave_complex(Yhalf+(size_t)bi*yhfloats,outs[l],(size_t)nh,Y);
+                if(sim_emit_row(r0+bi,0,n,nb,n,g,keep2,has_sig,has_noise,&kept[bi],
+                                Y,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
+                  batch_full=1;
+                  break;
+                }
+              }
+            }
+          } else {
+            for(int bi=0;bi<B;bi++){
+              ap_sim_twiddle(X+(size_t)bi*xfloats,tw,hv_h,Xtw);
+              ap_fft_backward_padded(ph,Xtw,hv_h,Yodd);
+              ap_sim_interleave_complex(Yhalf+(size_t)bi*yhfloats,Yodd,(size_t)nh,Y);
+              if(sim_emit_row(r0+bi,0,n,nb,n,g,keep2,has_sig,has_noise,&kept[bi],
+                              Y,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
+                batch_full=1;
+                break;
+              }
+            }
+          }
           continue;
         }
-        /* |noise + response| at lag js + e (mod m), e = 0 .. m-1: the response's table holds,
-           per phase rho = t - js R, its values in that order (tab[f, s, rho m + e]) */
-        const long long R = n/m, t=tv[r], js = t/R;
-        const float *D = tab+(size_t)2*fi[r]*(1+nb)*n + (size_t)2*s*n + (size_t)2*(t - js*R)*m;
-        const float m1=ap_sim_power(Y+2*js,D,g,m-js,A), m2=ap_sim_power(Y,D+2*(m-js),g,js,A+(m-js));
-        if(s==0 && keep2>0.f){
-          const float mx = m1>m2 ? m1 : m2;
-          if(mx<keep2){
-            /* no window keeps this draw: no records, and no band's signal pass */
-            kept=0;
-            for(Py_ssize_t q=0;q<ns;q++) ((long long*)sob[q].buf)[r]=ks[q];
-            if(!has_noise) break;
-            continue;
+        if(share_widest && s==nb){
+          for(int bi=0;bi<B;bi++){
+            if(!(has_noise || kept[bi])){
+              const long long r=r0+bi;
+              for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
+              continue;
+            }
+            if(sim_emit_row(r0+bi,s,n,nb,m,g,keep2,has_sig,has_noise,&kept[bi],
+                            Yhalf+(size_t)bi*yhfloats,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
+              batch_full=1;
+              break;
+            }
+          }
+          continue;
+        }
+        ap_plan *ps = s==0 ? pf : pl[s-1];
+        const size_t hv = (size_t)(kfill < m ? kfill : m);
+        const int w = ap_plan_pairbatch(ps);
+        if(w > 0){
+          const size_t bstride = 2u * (size_t)m + 16u;
+          int active[SIM_ROWS], nact=0;
+          const float *srcs[SIM_ROWS];
+          for(int bi=0;bi<B;bi++){
+            if(s==0 || has_noise || kept[bi]){
+              srcs[nact]=X+(size_t)bi*xfloats;
+              active[nact++]=bi;
+            }
+          }
+          int next_bi=0;
+          for(int a0=0;a0<nact && !batch_full;a0+=w){
+            const int cnt = nact-a0 < w ? nact-a0 : w;
+            float *outs[AP_MAX_LANES];
+            for(int l=0;l<cnt;l++) outs[l]=Y+(size_t)l*bstride;
+            ap_fft_backward_batch(ps,srcs+a0,hv,cnt,outs);
+            for(int l=0;l<cnt;l++){
+              const int target=active[a0+l];
+              while(next_bi<target){
+                const long long r=r0+next_bi++;
+                for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
+              }
+              if(sim_emit_row(r0+target,s,n,nb,m,g,keep2,has_sig,has_noise,&kept[target],
+                              outs[l],A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
+                batch_full=1;
+                break;
+              }
+              next_bi++;
+            }
+          }
+          while(next_bi<B && !batch_full){
+            const long long r=r0+next_bi++;
+            for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
+          }
+        } else {
+          for(int bi=0;bi<B;bi++){
+            if(!(s==0 || has_noise || kept[bi])){
+              const long long r=r0+bi;
+              for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
+              continue;
+            }
+            ap_fft_backward_padded(ps,X+(size_t)bi*xfloats,hv,Y);
+            if(sim_emit_row(r0+bi,s,n,nb,m,g,keep2,has_sig,has_noise,&kept[bi],
+                            Y,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
+              batch_full=1;
+              break;
+            }
           }
         }
-        for(int side=0;side<2;side++){
-          const int q=(int)(2*s+side);
-          long long *off=(long long*)sob[q].buf; off[r]=ks[q];
-          /* right: distances 0 .. m-1 forward; left: lag js - e is A[m - e], e = 1 .. m-1 */
-          if(ap_sim_records(A, side ? m-1 : 0, side ? -1 : 1, side ? m-1 : m, side ? 1 : 0,
-                            (int32_t*)spb[q].buf, (float*)svb[q].buf, &ks[q], svb[q].len/4)<0){ full=1; break; }
-        }
       }
-      if(full){
-        /* the row's records so far are dropped: rows [0, r) are the call's */
-        memcpy(ks,ks0,(size_t)ns*sizeof *ks); memcpy(kn,kn0,(size_t)nb*sizeof *kn);
-        done=r;
+      if(batch_full){
+        /* A record array filled inside this batch: rewind to batch start and replay row by row
+           so `done` stops at the exact first row whose records do not fit. */
+        memcpy(ks,ks_batch,(size_t)ns*sizeof *ks); memcpy(kn,kn_batch,(size_t)nb*sizeof *kn);
+        for(int bi=0;bi<B;bi++){
+          const long long r=r0+bi;
+          long long ks0[64], kn0[32];
+          memcpy(ks0,ks,(size_t)ns*sizeof *ks); memcpy(kn0,kn,(size_t)nb*sizeof *kn);
+          int full=0, kept1=1;
+          const float *Xr=X+(size_t)bi*xfloats;
+          for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb && !full; s++){
+            const long long m = s==0 ? n : b[s-1];
+            const float g = s==0 ? fs : bs[s-1];
+            if(!(s==0 || has_noise || kept1)){
+              for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
+              continue;
+            }
+            const float *Yr_row = Y;
+            if(s==0 && half_split){
+              const size_t hv_h = (size_t)kfill;
+              ap_sim_twiddle(Xr,tw,hv_h,Xtw);
+              const float *xt = Xtw;
+              if(ph_w > 0) ap_fft_backward_batch(ph,&xt,hv_h,1,&Yodd);
+              else ap_fft_backward_padded(ph,Xtw,hv_h,Yodd);
+              ap_sim_interleave_complex(Yhalf+(size_t)bi*yhfloats,Yodd,(size_t)nh,Y);
+            } else if(share_widest && s==nb){
+              Yr_row = Yhalf + (size_t)bi * yhfloats;
+            } else {
+              ap_plan *ps = s==0 ? pf : pl[s-1];
+              const size_t hv = (size_t)(kfill < m ? kfill : m);
+              if(ap_plan_pairbatch(ps) > 0) ap_fft_backward_batch(ps,&Xr,hv,1,&Y);
+              else ap_fft_backward_padded(ps,Xr,hv,Y);
+            }
+            if(sim_emit_row(r,s,n,nb,m,g,keep2,has_sig,has_noise,&kept1,
+                            Yr_row,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
+              full=1;
+              break;
+            }
+          }
+          if(full){
+            memcpy(ks,ks0,(size_t)ns*sizeof *ks); memcpy(kn,kn0,(size_t)nb*sizeof *kn);
+            done=r;
+            break;
+          }
+        }
         break;
       }
     }
@@ -1212,12 +1435,13 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     if(has_noise) for(Py_ssize_t q=0;q<nb;q++) ((long long*)nob[q].buf)[done]=kn[q];
     Py_END_ALLOW_THREADS
   }
-  free(X); free(Y); free(A);
+  free(X); free(Y); free(A); free(Yhalf); free(Yodd); free(Xtw); free(tw);
   if(pf) ap_destroy(pf);
+  if(ph_own) ap_destroy(ph_own);
   for(Py_ssize_t i=0;i<nb;i++){ if(pl[i]) ap_destroy(pl[i]); }
   SIM_RELEASE();
   #undef SIM_RELEASE
-  if(!ok || !X || !Y || !A){ PyErr_SetString(PyExc_MemoryError,"simulate: no FFT plan or buffer"); return NULL; }
+  if(!ok || !mem_ok){ PyErr_SetString(PyExc_MemoryError,"simulate: no FFT plan or buffer"); return NULL; }
   PyObject *so=Py_None, *no=Py_None; Py_INCREF(Py_None); Py_INCREF(Py_None);
   if(has_sig){ Py_DECREF(so); so=PyTuple_New(ns); for(Py_ssize_t q=0;q<ns;q++) PyTuple_SET_ITEM(so,q,PyLong_FromLongLong(ks[q])); }
   if(has_noise){ Py_DECREF(no); no=PyTuple_New(nb); for(Py_ssize_t q=0;q<nb;q++) PyTuple_SET_ITEM(no,q,PyLong_FromLongLong(kn[q])); }
@@ -1363,7 +1587,8 @@ static void cc_rec(cc_state *c, int i, double *prefix, double remaining, int nde
     for(int j=0;j<cut;j++) if(!c->dead[low[j]]){ c->dead[low[j]]=mark; nnew++; }
     const int cnt=cc_filter(c,i,g,alive,nalive,c->alive[i+1]);
     prefix[i]=(double)g; fracs[i]=(double)cnt/(double)c->Nn;
-    cc_rec(c,i+1,prefix,remaining-share,ndead+nnew,c->alive[i+1],cnt,fracs);
+    if(!(c->prune && fracs[i]>c->useless))
+      cc_rec(c,i+1,prefix,remaining-share,ndead+nnew,c->alive[i+1],cnt,fracs);
     for(int j=0;j<cut;j++) if(c->dead[low[j]]==mark) c->dead[low[j]]=0;
   }
 }

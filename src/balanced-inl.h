@@ -1277,6 +1277,254 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *
   return 0;
 }
 
+/* Backward transform of cnt (1 .. AP_W) complex spectra in parallel across SIMD lanes on a
+   small (element-transform) plan, zero-padded past have_bins complex bins to N: backward is
+   conj(FFT(conj(x))), matching fft(..., conj=1). */
+static HWY_NOINLINE MF_FWD_SECTION int fft_backward_batch(void *vp, const float *const *srcs,
+                                                          size_t have_bins, int cnt,
+                                                          float *const *outs) {
+  BP *p = (BP *)vp;
+  if (!p || !p->small || cnt < 1 || cnt > AP_W) return -1;
+  const size_t N = p->N, W = (size_t)AP_W;
+  const size_t hv = have_bins < N ? have_bins : N;
+  const vf sg = V_SIGNMASK(), vz = V_ZERO();
+  for (size_t j0 = 0; j0 < N; j0 += W) {
+    const int slot0 = einp(&p->ea, (int)j0);
+    if (j0 + W <= hv) {
+      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+      for (int l = 0; l < cnt; l++) {
+        vf a, b;
+        v_deint(srcs[l] + 2 * j0, &a, &b);
+        rr[l] = a;
+        ri[l] = V_XOR(b, sg);
+      }
+      for (int l = cnt; l < AP_W; l++) {
+        rr[l] = vz;
+        ri[l] = vz;
+      }
+      V_TRANSPOSE(rr, tr);
+      V_TRANSPOSE(ri, ti);
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = tr[u];
+        p->bI[slot0 + u] = ti[u];
+      }
+    } else if (j0 >= hv) {
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = vz;
+        p->bI[slot0 + u] = vz;
+      }
+    } else {
+      const size_t rem = hv - j0;
+      for (size_t u = 0; u < rem; u++) {
+        float sr[AP_W] = {0}, si[AP_W] = {0};
+        for (int l = 0; l < cnt; l++) {
+          sr[l] = srcs[l][2 * (j0 + u)];
+          si[l] = srcs[l][2 * (j0 + u) + 1];
+        }
+        p->bR[slot0 + (int)u] = V_LOADU(sr);
+        p->bI[slot0 + (int)u] = V_XOR(V_LOADU(si), sg);
+      }
+      for (size_t u = rem; u < W; u++) {
+        p->bR[slot0 + (int)u] = vz;
+        p->bI[slot0 + (int)u] = vz;
+      }
+    }
+  }
+  small_efft(p);
+  for (size_t k0 = 0; k0 < N; k0 += W) {
+    vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
+    for (int u = 0; u < AP_W; u++) {
+      const int e = eidx(&p->ea, (int)(k0 + (size_t)u));
+      kr[u] = p->bR[e];
+      ki[u] = p->bI[e];
+    }
+    V_TRANSPOSE(kr, or_);
+    V_TRANSPOSE(ki, oi);
+    for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_[l], V_XOR(oi[l], sg));
+  }
+  return 0;
+}
+
+/* Pruned backward Stage A for inputs whose complex bins [have_bins, N) are identically zero
+   (such as one-sided/bandlimited frequency-domain simulation rows). */
+static HWY_NOINLINE MF_FWD_SECTION void stageA_backward_padded(BP *p, const float *in,
+                                                               size_t have_bins) {
+  const size_t hv = have_bins < p->N ? have_bins : p->N;
+  if (hv >= p->N) {
+    stageA(p, in, 1);
+    return;
+  }
+  const int N1 = p->N1, N2 = p->N2, NG = N1 / AP_W, G = p->gblk;
+  const int n1_shift = __builtin_ctz((unsigned)N1);
+  const vf sg = V_SIGNMASK(), vz = V_ZERO();
+  vf TR[AP_W], TI[AP_W], OR[AP_W], OI[AP_W];
+  const int M1 = p->eb.single ? N2 : p->b1, M2 = p->eb.single ? 1 : p->b2, st = p->eb.st;
+  for (int g0 = 0; g0 < NG; g0 += G) {
+    const int GG = (NG - g0 < G) ? NG - g0 : G;
+    const size_t col0 = (size_t)AP_W * (size_t)g0;
+    if (col0 >= hv) {
+      for (int gg = 0; gg < GG; gg++) {
+        const int g = g0 + gg;
+        for (int b = 0; b < N2 / AP_W; b++) {
+          float *er = p->ire + (size_t)b * N1 * AP_W + (size_t)AP_W * g * AP_W;
+          float *ei = p->iim + (size_t)b * N1 * AP_W + (size_t)AP_W * g * AP_W;
+          for (int i = 0; i < AP_W; i++) {
+            V_STOREU(er + (size_t)i * AP_W, vz);
+            V_STOREU(ei + (size_t)i * AP_W, vz);
+          }
+        }
+      }
+      continue;
+    }
+    if (GG == 1) {
+      for (int e2 = 0; e2 < M2; e2++) {
+        const size_t row0 = (size_t)e2 * (size_t)M1 * (size_t)N1 + col0;
+        vf *restrict dR = p->bR + (size_t)e2 * st;
+        vf *restrict dI = p->bI + (size_t)e2 * st;
+        int e1_full = 0;
+        if (hv >= row0 + (size_t)AP_W) {
+          const size_t nf = ((hv - row0 - (size_t)AP_W) >> n1_shift) + 1;
+          e1_full = nf < (size_t)M1 ? (int)nf : M1;
+        }
+        const float *sp = in + 2 * row0;
+        for (int e1 = 0; e1 < e1_full; e1++) {
+          vf r, i;
+          v_deint(sp, &r, &i);
+          dR[e1] = r;
+          dI[e1] = V_XOR(i, sg);
+          sp += 2 * N1;
+        }
+        int e1_zero = e1_full;
+        if (e1_full < M1) {
+          const size_t base = row0 + (size_t)e1_full * (size_t)N1;
+          if (base < hv) {
+            float sr[AP_W] = {0}, si[AP_W] = {0};
+            const float *s = in + 2 * base;
+            const size_t rem = hv - base;
+            for (size_t u = 0; u < rem; u++) {
+              sr[u] = s[2 * u];
+              si[u] = s[2 * u + 1];
+            }
+            dR[e1_full] = V_LOADU(sr);
+            dI[e1_full] = V_XOR(V_LOADU(si), sg);
+            e1_zero = e1_full + 1;
+          }
+        }
+        for (int e1 = e1_zero; e1 < M1; e1++) {
+          dR[e1] = vz;
+          dI[e1] = vz;
+        }
+      }
+      if ((size_t)N1 + col0 >= hv) {
+        const vf r0 = p->bR[0], i0 = p->bI[0];
+        for (int k2 = 0; k2 < N2; k2++) {
+          const int eb = eidx(&p->eb, k2);
+          p->bR[eb] = r0;
+          p->bI[eb] = i0;
+        }
+        stageA_tail(p, g0, TR, TI, OR, OI, p->bR, p->bI);
+      } else {
+        stageA_body(p, g0, TR, TI, OR, OI, p->bR, p->bI);
+      }
+      continue;
+    }
+    for (int e2 = 0; e2 < M2; e2++) {
+      for (int e1 = 0; e1 < M1; e1++) {
+        const size_t rbase = (size_t)(e2 * M1 + e1) * (size_t)N1 + col0;
+        if (rbase + (size_t)AP_W * (size_t)GG <= hv) {
+          const float *sp = in + 2 * rbase;
+          for (int gg = 0; gg < GG; gg++) {
+            vf r, i;
+            v_deint(sp + 2 * (size_t)AP_W * gg, &r, &i);
+            vf *dR = p->bR + (size_t)gg * p->bstride + (size_t)e2 * st;
+            vf *dI = p->bI + (size_t)gg * p->bstride + (size_t)e2 * st;
+            dR[e1] = r;
+            dI[e1] = V_XOR(i, sg);
+          }
+        } else if (rbase >= hv) {
+          for (int gg = 0; gg < GG; gg++) {
+            vf *dR = p->bR + (size_t)gg * p->bstride + (size_t)e2 * st;
+            vf *dI = p->bI + (size_t)gg * p->bstride + (size_t)e2 * st;
+            dR[e1] = vz;
+            dI[e1] = vz;
+          }
+        } else {
+          for (int gg = 0; gg < GG; gg++) {
+            const size_t base = rbase + (size_t)AP_W * (size_t)gg;
+            vf *dR = p->bR + (size_t)gg * p->bstride + (size_t)e2 * st;
+            vf *dI = p->bI + (size_t)gg * p->bstride + (size_t)e2 * st;
+            if (base + (size_t)AP_W <= hv) {
+              vf r, i;
+              v_deint(in + 2 * base, &r, &i);
+              dR[e1] = r;
+              dI[e1] = V_XOR(i, sg);
+            } else if (base >= hv) {
+              dR[e1] = vz;
+              dI[e1] = vz;
+            } else {
+              float sr[AP_W] = {0}, si[AP_W] = {0};
+              const float *s = in + 2 * base;
+              const size_t rem = hv - base;
+              for (size_t u = 0; u < rem; u++) {
+                sr[u] = s[2 * u];
+                si[u] = s[2 * u + 1];
+              }
+              dR[e1] = V_LOADU(sr);
+              dI[e1] = V_XOR(V_LOADU(si), sg);
+            }
+          }
+        }
+      }
+    }
+    for (int gg = 0; gg < GG; gg++) {
+      const int g = g0 + gg;
+      const size_t gcol = (size_t)AP_W * (size_t)g;
+      vf *gR = p->bR + (size_t)gg * p->bstride;
+      vf *gI = p->bI + (size_t)gg * p->bstride;
+      if (gcol >= hv) {
+        for (int b = 0; b < N2 / AP_W; b++) {
+          float *er = p->ire + (size_t)b * N1 * AP_W + (size_t)AP_W * g * AP_W;
+          float *ei = p->iim + (size_t)b * N1 * AP_W + (size_t)AP_W * g * AP_W;
+          for (int i = 0; i < AP_W; i++) {
+            V_STOREU(er + (size_t)i * AP_W, vz);
+            V_STOREU(ei + (size_t)i * AP_W, vz);
+          }
+        }
+      } else if ((size_t)N1 + gcol >= hv) {
+        const vf r0 = gR[0], i0 = gI[0];
+        for (int k2 = 0; k2 < N2; k2++) {
+          const int eb = eidx(&p->eb, k2);
+          gR[eb] = r0;
+          gI[eb] = i0;
+        }
+        stageA_tail(p, g, TR, TI, OR, OI, gR, gI);
+      } else {
+        stageA_body(p, g, TR, TI, OR, OI, gR, gI);
+      }
+    }
+  }
+}
+
+static HWY_NOINLINE MF_FWD_SECTION void fft_backward_padded(void *vp, const float *in,
+                                                            size_t have_bins, float *out) {
+  BP *p = (BP *)vp;
+  if (p->small) {
+    fft_backward_batch(vp, &in, have_bins, 1, &out);
+    return;
+  }
+  const int N1 = p->N1, N2 = p->N2;
+  const vf sg = V_SIGNMASK();
+  stageA_backward_padded(p, in, have_bins);
+  for (int b = 0; b < N2 / AP_W; b++) {
+    vf *RR, *RI;
+    stageB(p, b, &RR, &RI, 1);
+    for (int k1 = 0; k1 < N1; k1++) {
+      int e = eidx(&p->ea, k1);
+      v_inter(out + 2 * ((size_t)k1 * N2 + AP_W * b), RR[e], V_XOR(RI[e], sg));
+    }
+  }
+}
+
 /* Forward transform + real_split of cnt (1 .. AP_W) real blocks of length n = 2 * p->N in
    parallel across SIMD lanes on a half-size small plan (h = p->N): vertical real_split computes
    bins k and h - k together without deinterleave or vector reversal, then transposes positive
@@ -2128,7 +2376,8 @@ const ap_backend *Backend(void){
 #endif
     q15_screen_perm, q15_slab8, split_store, scale_load, lanes_transpose,
     fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window,
-    q15_sumsq, q15_data, q15_lanethr
+    q15_sumsq, q15_data, q15_lanethr,
+    fft_backward_batch, fft_backward_padded
   };
   return &be;
 }

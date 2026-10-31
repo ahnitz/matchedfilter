@@ -55,6 +55,9 @@ int  ap_fft_forward_batch(ap_plan *p, const float *const *srcs, const size_t *ha
                           float scale, float *const *outs);
 int  ap_fft_real_batch(ap_plan *p, const float *const *srcs, const size_t *haves, size_t stride,
                        int cnt, float scale, const float *rtw, int mirror, float *const *outs);
+int  ap_fft_backward_batch(ap_plan *p, const float *const *srcs, size_t have_bins, int cnt,
+                           float *const *outs);
+void ap_fft_backward_padded(ap_plan *p, const float *in, size_t have_bins, float *out);
 
 /* Direct correlation over nlag consecutive lags: out[i] = sum_{k<L} (tr[k] + j ti[k]) x[i+k]
    (td-inl.h). x holds nlag + L - 1 samples (real when x_real != 0, else interleaved complex);

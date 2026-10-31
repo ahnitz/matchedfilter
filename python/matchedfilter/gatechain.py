@@ -340,14 +340,19 @@ def _extend_signal(sim, n, bands, snr, kept, seed):
         # (bins [0, b), normalised as the band is): a band of b lags R apart at [rho b + e]
         # holds it at its lag e after the one rho samples before the signal, d = e R - rho
         # samples after it
+        j = np.arange(_NF)[:, None]
+        q = p[None, :] * np.exp((-2j * np.pi / (_NF * n)) * j * k[None, :])
         tab = np.empty((_NF, 1 + len(bands), n), np.complex64)
-        for j in range(_NF):
-            q = p * np.exp(-2j * np.pi * k * (j / _NF) / n)
-            for s, (m, f) in enumerate([(n, 1.0)] + list(zip(bands, Fb))):
-                resp = np.fft.ifft(np.where(k < m, q, 0.0) if m < n else q) * (n * snr / np.sqrt(f))
-                R = n // m
-                d = (np.arange(m)[None, :] * R - np.arange(R)[:, None]) % n
-                tab[j, s] = resp[d].reshape(-1)
+        tab[:, 0] = np.fft.ifft(q, axis=1) * (n * snr)
+        qm = np.zeros_like(q)
+        prev_m = 0
+        for s, (m, f) in enumerate(zip(bands, Fb), 1):
+            qm[:, prev_m:m] = q[:, prev_m:m]
+            prev_m = m
+            resp = np.fft.ifft(qm, axis=1) * (n * snr / np.sqrt(f))
+            R = n // m
+            d = (np.arange(m)[None, :] * R - np.arange(R)[:, None]).reshape(-1) % n
+            tab[:, s] = resp[:, d]
         sim["tab"] = tab
     # Draws whose fine statistic stays below snr at every lag cannot be kept by any window and
     # hold no records. About 0.6 are kept at a usual snr, far fewer at a large one, where only
@@ -449,8 +454,12 @@ def _rows(rec, keep):
         return rec
     pos, val, off = rec
     cnt = np.diff(off)[keep]
+    tot = int(cnt.sum())
+    if off[0] == 0 and tot == int(off[-1]):
+        # Unkept rows hold no records (_extend_signal): pos and val are already contiguous.
+        return pos[:tot], val[:tot], np.concatenate(([0], np.cumsum(cnt)))
     starts = off[:-1][keep]
-    idx = np.repeat(starts - np.concatenate(([0], np.cumsum(cnt)[:-1])), cnt) + np.arange(cnt.sum())
+    idx = np.repeat(starts - np.concatenate(([0], np.cumsum(cnt)[:-1])), cnt) + np.arange(tot)
     return pos[idx], val[idx], np.concatenate(([0], np.cumsum(cnt)))
 
 
@@ -645,20 +654,39 @@ _LOG_TABLES = {}
 
 def _log_table(rows, kind):
     """(log densities, values) of a CostModel table of (density, value) rows: the values as
-    given ("cost") or log of their ratio to the density ("ratio"), the arrays the
+    given ("cost") or log of their ratio to the density ("ratio"), the tuples the
     interpolations read."""
     hit = _LOG_TABLES.get((id(rows), kind))
     if hit is not None and hit[0] is rows:
         return hit[1], hit[2]
-    fs = np.log([r[0] for r in rows])
+    fs = tuple(math.log(r[0]) for r in rows)
     if kind == "cost":
-        vs = np.asarray([r[1] for r in rows], dtype=np.float64)
+        vs = tuple(float(r[1]) for r in rows)
     else:
-        vs = np.log([r[1] / r[0] for r in rows])
+        vs = tuple(math.log(r[1] / r[0]) for r in rows)
     _LOG_TABLES[(id(rows), kind)] = (rows, fs, vs)     # rows held: the id cannot be reused
     if len(_LOG_TABLES) > 4096:
         _LOG_TABLES.pop(next(iter(_LOG_TABLES)))
     return fs, vs
+
+
+def _interp_clamped(x, fs, vs):
+    """Clamped piecewise-linear interpolation on small sorted tuples (fs, vs), matching np.interp."""
+    if x <= fs[0]:
+        return vs[0]
+    if x >= fs[-1]:
+        return vs[-1]
+    j = 0
+    last = len(fs) - 2
+    while j < last and fs[j + 1] <= x:
+        j += 1
+    dx = fs[j + 1] - fs[j]
+    if dx == 0.0:
+        return vs[j + 1]
+    dy = vs[j + 1] - vs[j]
+    if dy == 0.0:
+        return vs[j]
+    return (x - fs[j]) * (dy / dx) + vs[j]
 
 
 def band_forward_wanted(n, band, f, forced=None):
@@ -717,7 +745,7 @@ class CostModel:
     def _interp(rows, f):
         """Cost per survivor at density f: linear in log f, clamped to the measured range."""
         fs, vs = _log_table(rows, "cost")
-        return float(np.interp(math.log(max(f, 1e-12)), fs, vs))
+        return _interp_clamped(math.log(max(f, 1e-12)), fs, vs)
 
     def refine(self, f):
         return self._interp(self._refine, f)
@@ -759,8 +787,8 @@ class CostModel:
         if sc is None or not sc["excess"]:
             return None
         fs, ratio = _log_table(sc["excess"], "ratio")
-        return min(1.0, max(reach1, 1e-6) * float(np.exp(
-            np.interp(math.log(max(reach1, 1e-6)), fs, ratio))))
+        return min(1.0, max(reach1, 1e-6) * math.exp(
+            _interp_clamped(math.log(max(reach1, 1e-6)), fs, ratio)))
 
     def first_tier(self, b, reach1):
         """(cost per pair, q15) of the cheaper first tier at band b, where reach1 is the float
@@ -963,6 +991,7 @@ def _reach(N, cols, thresholds):
 
 
 _KEPT = OrderedDict()
+_KEPT_MAX = 4096
 
 
 def kept_draws(sig, bands, chain, snr):
@@ -979,11 +1008,28 @@ def kept_draws(sig, bands, chain, snr):
     if hit is not None and hit[0] is C and hit[1] is F:
         _KEPT.move_to_end(key)
         return hit[2]
-    keep = F[:, cols].max(1) >= snr
-    out = C[keep][:, cols]
+    # When F broadcasts one fine maximum across all columns (signal_draws), filter C once per
+    # (C, F, snr) and slice columns per chain rather than copying and scanning F[:, cols].
+    if F.ndim == 2 and F.shape[1] > 0 and F.strides[1] == 0:
+        bkey = ("kept_all", id(C), id(F), float(snr))
+        bhit = _KEPT.get(bkey)
+        if bhit is not None and bhit[0] is C and bhit[1] is F:
+            _KEPT.move_to_end(bkey)
+            c_kept = bhit[2]
+        else:
+            c_kept = C[F[:, 0] >= snr]
+            _KEPT[bkey] = (C, F, c_kept)
+            while len(_KEPT) > _KEPT_MAX:
+                _KEPT.popitem(last=False)
+        out = c_kept[:, cols]
+    else:
+        keep = F[:, cols[0]] >= snr
+        for c in cols[1:]:
+            keep = keep | (F[:, c] >= snr)
+        out = C[keep][:, cols]
     out.setflags(write=False)
     _KEPT[key] = (C, F, out)
-    while len(_KEPT) > 512:
+    while len(_KEPT) > _KEPT_MAX:
         _KEPT.popitem(last=False)
     return out
 
@@ -1007,7 +1053,19 @@ def _halves(x):
     """(search half, fit half) of the detections x: its even rows and its odd rows, each
     contiguous. The detections are independent draws in simulation order, so the halves are
     independent of each other."""
-    return np.ascontiguousarray(x[0::2]), np.ascontiguousarray(x[1::2])
+    key = ("halves", id(x))
+    hit = _KEPT.get(key)
+    if hit is not None and hit[0] is x:
+        _KEPT.move_to_end(key)
+        return hit[1], hit[2]
+    a = np.ascontiguousarray(x[0::2])
+    b = np.ascontiguousarray(x[1::2])
+    a.setflags(write=False)
+    b.setflags(write=False)
+    _KEPT[key] = (x, a, b)
+    while len(_KEPT) > _KEPT_MAX:
+        _KEPT.popitem(last=False)
+    return a, b
 
 
 def _distances(sig, lags, bands, chain, snr, n):
@@ -1028,7 +1086,7 @@ def _distances(sig, lags, bands, chain, snr, n):
     out = np.abs(fat[keep] - cat[keep, col]) / (n // b)
     out.setflags(write=False)
     _KEPT[key] = (F, fat, cat, out)
-    while len(_KEPT) > 512:
+    while len(_KEPT) > _KEPT_MAX:
         _KEPT.popitem(last=False)
     return out
 
@@ -1050,12 +1108,12 @@ def _all_halfwidths(dist, allow):
     up = np.ceil(dist[dist > hmin]).astype(np.int64)
     out = (None,) + tuple(sorted({hmin} | {int(h) for h in up}))
     _KEPT[key] = (dist, out)
-    while len(_KEPT) > 512:
+    while len(_KEPT) > _KEPT_MAX:
         _KEPT.popitem(last=False)
     return out
 
 
-def _halfwidths(dist, allow, cost, chain, n):
+def _halfwidths(dist, allow, cost, chain, n, all_hws=None):
     """The direct refine's candidate half-widths for `chain` on the search half (dist its
     detections' _distances): None, the whole-block refine, which loses no detection; and,
     where the cost model prices a direct refine for the chain (CostModel.prices_direct), each
@@ -1069,14 +1127,101 @@ def _halfwidths(dist, allow, cost, chain, n):
     R = n // int(chain[-1])
     top = max(v for _, v in cost._refine)
     hmax = int((top / cost.direct_lag - 1.0) // (2 * R))      # 2 h R + 1 lags priced below top
-    all_hws = _all_halfwidths(dist, allow)
+    if all_hws is None:
+        all_hws = _all_halfwidths(dist, allow)
     if len(all_hws) < 2 or hmax < all_hws[1]:
         return (None,)
     return (None,) + tuple(h for h in all_hws[1:] if h <= hmax)
 
 
+class _LazyPlan(dict):
+    """A plan_chain dict whose fit-half thresholds and noise reach materialize on first read."""
+
+    __slots__ = ("_pending",)
+
+    def __init__(self, eager, pending):
+        super().__init__(eager)
+        self._pending = pending
+
+    def _materialize(self):
+        pending = self._pending
+        if pending is None:
+            return
+        self._pending = None
+        B, dB, th, hw, fd, noise, cols = pending
+        thresholds, halfwidth = _fit(B, dB, th, hw, fd)
+        super().__setitem__("thresholds", thresholds)
+        super().__setitem__("reach", tuple(_reach(noise, cols, thresholds)))
+        super().__setitem__("halfwidth", halfwidth)
+
+    def __getitem__(self, key):
+        if not super().__contains__(key) and self._pending is not None:
+            self._materialize()
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        if not super().__contains__(key) and self._pending is not None:
+            self._materialize()
+        return super().get(key, default)
+
+    def __contains__(self, key):
+        if super().__contains__(key):
+            return True
+        if self._pending is not None:
+            self._materialize()
+            return super().__contains__(key)
+        return False
+
+    def __len__(self):
+        if self._pending is not None:
+            self._materialize()
+        return super().__len__()
+
+    def __iter__(self):
+        if self._pending is not None:
+            self._materialize()
+        return super().__iter__()
+
+    def keys(self):
+        if self._pending is not None:
+            self._materialize()
+        return super().keys()
+
+    def values(self):
+        if self._pending is not None:
+            self._materialize()
+        return super().values()
+
+    def items(self):
+        if self._pending is not None:
+            self._materialize()
+        return super().items()
+
+    def copy(self):
+        if self._pending is not None:
+            self._materialize()
+        return dict(self)
+
+    def __eq__(self, other):
+        if self._pending is not None:
+            self._materialize()
+        if isinstance(other, _LazyPlan) and other._pending is not None:
+            other._materialize()
+        return super().__eq__(other)
+
+    def __repr__(self):
+        if self._pending is not None:
+            self._materialize()
+        return super().__repr__()
+
+    def __reduce__(self):
+        if self._pending is not None:
+            self._materialize()
+        return (dict, (dict(self),))
+
+
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               memo=None, lags=None):
+               memo=None, lags=None, lazy_fit=False):
     """The thresholds and direct-refine half-width for `chain` that meet the false-dismissal
     budget fd at minimum modelled cost.
 
@@ -1115,7 +1260,8 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     cols = [bands.index(b) for b in chain]
     A, B = _halves(kept_draws(sig, bands, chain, snr))
     K = int(round(float(fd) * (A.shape[0] + 1))) - 1      # the search half's budget, as the fit's
-    if K < 0 or B.shape[0] < 1:
+    fit_j = int(round(float(fd) * (B.shape[0] + 1)))
+    if K < 0 or fit_j < 1 or fit_j > B.shape[0]:
         return None
     dA = dB = dA_all = None
     allow = -1
@@ -1125,8 +1271,9 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         if cost is not None and cost.prices_direct(chain):
             dA, dB = dA_all, dB_all
     all_hws = _all_halfwidths(dA_all, allow)
-    hws = _halfwidths(dA, allow, cost, chain, n)
-    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune), all_hws)
+    hws = _halfwidths(dA, allow, cost, chain, n, all_hws=all_hws)
+    eff_prune = bool(prune) and len(chain) > 1
+    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), eff_prune, all_hws)
     hit = _CAND_CACHE.get(key) if key is not None else None
     if hit is not None and hit[0] is sig[0] and hit[1] is noise:
         _CAND_CACHE.move_to_end(key)
@@ -1135,36 +1282,69 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         cand_hws = all_hws if key is not None else hws
         dead = tuple(np.empty(0, np.int64) if h is None else np.flatnonzero(dA_all > h)
                      for h in cand_hws)
-        cands = _chain_candidates(A, noise, cols, K, prune, dead)
+        cands = _chain_candidates(A, noise, cols, K, eff_prune, dead)
         if key is not None:
             _CAND_CACHE[key] = (sig[0], noise, cands)
             while len(_CAND_CACHE) > _CAND_CACHE_MAX:
                 _CAND_CACHE.popitem(last=False)
     best = None
-    for pth, preach, lasts in cands:
-        for hw, last in zip(hws, lasts):
-            if last is None:
-                continue
-            th, reach = pth + (last[0],), preach + (last[1],)
-            c = cost.chain_cost(chain, list(reach), hw) if cost is not None else _flop_cost(chain, list(reach), n)
-            if ntemplates and getattr(cost, "feed", None):
-                # the change from the feed `block` was measured with; pick_stable's tie window
-                # is absolute-valued, so a change that takes a total below zero still compares
-                c += cost.feed_delta(chain, list(reach), ntemplates)
-            if best is None or c < best[0]:
-                best = (float(c), th, reach, hw)
+    has_feed = bool(ntemplates and getattr(cost, "feed", None))
+    k = len(chain)
+    # Hoist prefix tier costs across candidate half-widths when pricing on CostModel (k >= 2)
+    if isinstance(cost, CostModel) and k >= 2 and not has_feed:
+        b0 = chain[0]
+        later = chain[1:]
+        prices_dir = cost.prices_direct(chain)
+        dlag = getattr(cost, "direct_lag", 0.0) if prices_dir else 0.0
+        dfrac = getattr(cost, "direct_frac", 1.0) if prices_dir else 1.0
+        R = n // int(chain[-1]) if prices_dir else 0
+        for pth, preach, lasts in cands:
+            c_prefix, _ = cost.first_tier(b0, preach[1])
+            for idx_t, bt in enumerate(later, 1):
+                ri = preach[idx_t]
+                c_prefix += ri * cost.sparse(bt, ri)
+            for hw, last in zip(hws, lasts):
+                if last is None:
+                    continue
+                f = last[1]
+                r_cost = cost.refine(f)
+                if hw is not None and prices_dir:
+                    d_cost = min(r_cost, dlag * (2 * int(hw) * R + 1))
+                    r_cost = (1.0 - dfrac) * r_cost + dfrac * d_cost
+                c = c_prefix + f * r_cost
+                if best is None or c < best[0]:
+                    best = (float(c), pth + (last[0],), preach + (f,), hw)
+    else:
+        for pth, preach, lasts in cands:
+            for hw, last in zip(hws, lasts):
+                if last is None:
+                    continue
+                th, reach = pth + (last[0],), preach + (last[1],)
+                c = cost.chain_cost(chain, list(reach), hw) if cost is not None else _flop_cost(chain, list(reach), n)
+                if has_feed:
+                    # the change from the feed `block` was measured with; pick_stable's tie window
+                    # is absolute-valued, so a change that takes a total below zero still compares
+                    c += cost.feed_delta(chain, list(reach), ntemplates)
+                if best is None or c < best[0]:
+                    best = (float(c), th, reach, hw)
     if best is None:
         return None
     c, th, reach, hw = best
+    q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
+    missed = 0 if hw is None else int(np.count_nonzero(dA > hw))
+    search_info = dict(thresholds=th, reach=reach, halfwidth=hw, missed=missed, K=K)
+    if lazy_fit:
+        return _LazyPlan(
+            dict(chain=tuple(chain), cost=c, q15=q15, search=search_info),
+            (B, dB, th, hw, fd, noise, cols),
+        )
     fit = _fit(B, dB, th, hw, fd)
     if fit is None:
         return None
     thresholds, halfwidth = fit
-    q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
-    missed = 0 if hw is None else int(np.count_nonzero(dA > hw))
     return dict(chain=tuple(chain), thresholds=thresholds,
                 reach=tuple(_reach(noise, cols, thresholds)), halfwidth=halfwidth, cost=c,
-                q15=q15, search=dict(thresholds=th, reach=reach, halfwidth=hw, missed=missed, K=K))
+                q15=q15, search=search_info)
 
 
 def _fit(B, dist, thresholds, hw, fd):
@@ -1391,7 +1571,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, memo=memo, lags=lags)
+                        ntemplates=ntemplates, memo=memo, lags=lags, lazy_fit=True)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1449,8 +1629,11 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True)
     if drawn is None:
         return None
+    sig, lags = drawn
     noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
-    out = plan_chain(drawn[0], noise, bands, list(chain), fd, cost, n, snr, lags=drawn[1])
+    memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
+            int(nsim), int(nsamp))
+    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, memo=memo, lags=lags)
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out
