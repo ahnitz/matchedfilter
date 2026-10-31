@@ -205,10 +205,10 @@ def band_windows(rowwin, n, band):
     return out
 
 
-def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold, *,
+def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                        upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
                        slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS,
-                       handle_out=None, refine_reach=None, phase=None):
+                       handle_out=None, refine_reach=None, phase=None, band_offsets=None):
     """hier_peaks_grouped for any backend whose hier_peaks accepts row_windows: one
     recording, each tier a single dispatch over all rows, per-row windows in the kernels.
 
@@ -220,12 +220,15 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
         raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
     groups, nb, win, window = grouped_row_windows(groups, n, data.shape[0], binsize,
                                                   max_bins, nbins, phase)
+    extra = {} if handle_out is None else {"handle_out": handle_out}
+    if band_offsets is not None:
+        extra["band_offsets"] = band_offsets
     return ctx.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=int(binsize),
                           threshold=threshold, window=window, upload_data=False, nbins=nb,
                           upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
                           raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
                           sparse=sparse, row_windows=(groups, win), refine_reach=refine_reach,
-                          **({} if handle_out is None else {"handle_out": handle_out}))
+                          **extra)
 
 
 def window_results(hit, counts, starts, idx, val, template, n, by_count=True):

@@ -1234,9 +1234,10 @@ class Executor(HierOps):
 
     # ---- grouped hierarchical calls -----------------------------------------------------
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
-                           threshold, *, upload_tmpl=True, cascade_band=None, ct1=None,
+                           threshold, upload_tmpl=True, cascade_band=None, ct1=None,
                            raw_thr1=None, slot=None, async_submit=False, sparse=False,
-                           nbins=None, handle_out=None, refine_reach=None, phase=None):
+                           nbins=None, handle_out=None, refine_reach=None, phase=None,
+                           band_offsets=None):
         """Hierarchical peaks over row ranges of one spectra batch, each with its own window:
         one recording, every tier one dispatch over all rows, each row's window read from a
         table on the device (_gpuhost.hier_peaks_grouped). groups holds (lo, hi, a, b): rows
@@ -1248,4 +1249,4 @@ class Executor(HierOps):
                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,
                                   async_submit=async_submit, sparse=sparse, nbins=nbins,
                                   max_bins=MAX_BINS, handle_out=handle_out, phase=phase,
-                                  refine_reach=refine_reach)
+                                  refine_reach=refine_reach, band_offsets=band_offsets)

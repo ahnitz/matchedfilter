@@ -16,7 +16,7 @@ void seriesForwardBands(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                         StructuredBuffer<float2> series,
                         StructuredBuffer<uint> starts,
                         RWStructuredBuffer<float2> bands,
-                        uniform uint seriesLength, uniform uint B SERIES_LAYOUT)
+                        uniform uint seriesLength, uniform uint B, uniform uint k0 SERIES_LAYOUT)
 {
     uint tid = lid.x;
     _tid = tid;
@@ -33,8 +33,13 @@ void seriesForwardBands(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     forwardTransform(r, tid);
     [unroll] for (uint k = 0; k < R; ++k) {
         uint index = slotToIndex(tid * R + k);
-        if (index < B)
-            bands[gid.x * B + index] = float2(r[k].x, -r[k].y);
+        if (k0 == 0) {
+            if (index < B)
+                bands[gid.x * B + index] = float2(r[k].x, -r[k].y);
+        } else if (index >= k0 && index < k0 + B) {
+            bands[gid.x * B + (index & (B - 1))] =
+                (index < (N >> 1)) ? float2(r[k].x, -r[k].y) : float2(0.0, 0.0);
+        }
     }
 }
 

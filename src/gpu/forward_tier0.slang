@@ -23,7 +23,7 @@ void forwardTier0(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                   RWStructuredBuffer<uint> band0,
                   RWStructuredBuffer<float2> band1,
                   uniform uint seriesLength, uniform uint B0, uniform uint B1,
-                  uniform uint scaleBits SERIES_LAYOUT)
+                  uniform uint scaleBits, uniform uint k0_0, uniform uint k0_1 SERIES_LAYOUT)
 {
     uint tid = lid.x;
     _tid = tid;
@@ -41,11 +41,25 @@ void forwardTier0(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     [unroll] for (uint k = 0; k < R; ++k) {
         uint index = slotToIndex(tid * R + k);
         float2 v = float2(r[k].x, -r[k].y);
-        if (index < B0) {
-            const float s = asfloat(scaleBits);
-            band0[gid.x * B0 + index] = f32tof16(v.x * s) | (f32tof16(v.y * s) << 16);
+        if (k0_0 == 0) {
+            if (index < B0) {
+                const float s = asfloat(scaleBits);
+                band0[gid.x * B0 + index] = f32tof16(v.x * s) | (f32tof16(v.y * s) << 16);
+            }
+        } else if (index >= k0_0 && index < k0_0 + B0) {
+            uint out0 = 0u;
+            if (index < (N >> 1)) {
+                const float s = asfloat(scaleBits);
+                out0 = f32tof16(v.x * s) | (f32tof16(v.y * s) << 16);
+            }
+            band0[gid.x * B0 + (index & (B0 - 1))] = out0;
         }
-        if (index < B1)
-            band1[gid.x * B1 + index] = v;
+        if (k0_1 == 0) {
+            if (index < B1)
+                band1[gid.x * B1 + index] = v;
+        } else if (B1 > 0 && index >= k0_1 && index < k0_1 + B1) {
+            band1[gid.x * B1 + (index & (B1 - 1))] =
+                (index < (N >> 1)) ? v : float2(0.0, 0.0);
+        }
     }
 }

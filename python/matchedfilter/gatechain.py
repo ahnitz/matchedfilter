@@ -43,6 +43,7 @@ import os
 from contextlib import contextmanager
 from collections import OrderedDict
 from itertools import combinations
+from typing import NamedTuple
 
 import hashlib
 import numpy as np
@@ -91,6 +92,65 @@ _NOISE_CACHE = OrderedDict()
 _CACHE_MAX = 64
 
 
+class GateTier(NamedTuple):
+    """One coarse gate tier: transform length `band` and starting fine bin `k0`."""
+    band: int
+    k0: int = 0
+
+
+def _band_slice(n, b, k0):
+    """Active fine-bin range (k0, khi) for coarse band `b` starting at `k0`."""
+    k0 = int(k0)
+    if k0 <= 0:
+        return 0, int(b)
+    return k0, min(k0 + int(b), int(n) // 2)
+
+
+def band_offset(power, n, b):
+    """Starting fine bin k0 (8-bin aligned, 0 <= k0 <= n // 2 - b) maximizing worst-case
+    midpoint coarse SNR per unit fine SNR over [k0, k0 + b).
+
+    Parameters
+    ----------
+    power : array_like
+        Expected nonnegative filter-output power per fine frequency bin (length `n`).
+    n : int
+        Full fine FFT block length.
+    b : int
+        Coarse band transform length.
+
+    Returns
+    -------
+    int
+        Optimal 8-bin-aligned starting bin `k0`, or `0` when shifting improves midpoint
+        coarse SNR by at most 0.01 per unit fine SNR (or `b >= n // 2`).
+    """
+    n, b = int(n), int(b)
+    if b >= n // 2 or b < 1:
+        return 0
+    p = np.asarray(power, dtype=np.float64)
+    if p.shape != (n,) or not np.all(np.isfinite(p)):
+        return 0
+    pos = np.where(p > 0.0, p, 0.0)
+    tot = float(pos.sum())
+    if tot <= 0.0:
+        return 0
+    w = pos[:n // 2] / tot
+    if float(w.sum()) <= 0.0:
+        return 0
+    k = np.arange(n // 2, dtype=np.float64)
+    cf = np.concatenate(([0.0], np.cumsum(w)))
+    cz = np.concatenate(([0.0j], np.cumsum(w * np.exp(1j * np.pi * k / b))))
+    k0s = np.arange(0, n // 2 - b + 1, 8, dtype=np.int64)
+    f = cf[k0s + b] - cf[k0s]
+    z = np.abs(cz[k0s + b] - cz[k0s])
+    rho = np.where(f > 1e-12, z / np.sqrt(np.maximum(f, 1e-30)), 0.0)
+    best = int(np.argmax(rho))
+    if rho[best] > rho[0] + 0.01:
+        return int(k0s[best])
+    return 0
+
+
 def candidate_bands(n, floor=_MIN_BAND):
     """Every band a tier can use at transform size n: powers of two in [floor, n/2]."""
     out, b = [], int(floor)
@@ -103,7 +163,12 @@ def candidate_bands(n, floor=_MIN_BAND):
 def usable_bands(power, n, floor=_MIN_BAND):
     """Candidate bands that hold some of the profile's power (a band with none cannot gate)."""
     p = np.asarray(power, dtype=np.float64)
-    return [b for b in candidate_bands(n, floor) if p[:b].sum() > 0]
+    out = []
+    for b in candidate_bands(n, floor):
+        k0, khi = _band_slice(n, b, band_offset(p, n, b))
+        if p[k0:khi].sum() > 0:
+            out.append(b)
+    return out
 
 
 def enumerate_chains(n, max_tiers=3, floor=_MIN_BAND, bands=None):
@@ -165,13 +230,14 @@ def _gate_features_uncached(p, n, m):
     tot = p.sum()
     out = []
     for b in candidate_bands(int(n)):
-        q = p[:b]
+        k0, khi = _band_slice(int(n), b, band_offset(p, n, b))
+        q = p[k0:khi]
         f = q.sum() / tot if tot > 0 else 0.0
         if f <= 0:
             out.append(0.0)
             continue
         ds = np.linspace(0.0, (n // b) / 2.0, m)
-        g = np.abs(np.exp(2j * np.pi * np.outer(ds, np.arange(b)) / n) @ (q / q.sum())).min()
+        g = np.abs(np.exp(2j * np.pi * np.outer(ds, np.arange(k0, khi)) / n) @ (q / q.sum())).min()
         out.append(float(np.sqrt(f) * g))
     return np.array(out)
 
@@ -253,18 +319,20 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     engine's direct refine compares them (hmf.c refine_direct_pair)."""
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
-    Fb = np.array([p[:b].sum() for b in bands])
-    if Fb[0] <= 0:
+    k0s = tuple(band_offset(p, n, b) for b in bands)
+    Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
+    if np.any(Fb <= 0):
         return None          # a band holding no power cannot gate; callers drop such bands (usable_bands)
     lags = _engine_lags(n, bands, window)
     ndet = int(ndet)
-    key = _key(p, n, bands, float(snr), ndet, int(seed), lags, _NF)
+    extra = (k0s,) if any(k0s) else ()
+    key = _key(p, n, bands, float(snr), ndet, int(seed), lags, _NF, *extra)
     hit = _SIGNAL_CACHE.get(key)
     if hit is not None:
         _SIGNAL_CACHE.move_to_end(key)
         return hit[0] if not lags_too else hit
-    sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed))
-    skey = ("sim", id(sim), n, tuple(bands), float(snr), ndet, int(seed), lags, _NF)
+    sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed), k0s=k0s)
+    skey = ("sim", id(sim), n, tuple(bands), float(snr), ndet, int(seed), lags, _NF, *extra)
     shit = _SIGNAL_CACHE.get(skey)
     if shit is not None and shit[0] is sim:
         _SIGNAL_CACHE.move_to_end(skey)
@@ -280,7 +348,7 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
         kept = sim["t"].size
         sim = _signal_records(p, n, bands, Fb, float(snr),
                               kept + int(math.ceil((ndet - det.size) * kept / max(det.size, 1))) + 1,
-                              int(seed))
+                              int(seed), k0s=k0s)
     end = int(det[ndet - 1]) + 1 if ndet > 0 else 0
     C, F, at = C[:end], F[:end], (at[0][:end], at[1][:end])
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
@@ -302,14 +370,16 @@ def _arrivals(seed, R, row0, rows):
     return (np.concatenate(ts)[s:s + rows].astype(np.int64), np.concatenate(us)[s:s + rows])
 
 
-def _signal_records(p, n, bands, Fb, snr, kept, seed):
+def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None):
     """signal_draws' simulation, with at least `kept` draws kept: a dict holding the profile
     it simulates and, per kept draw, the signal's integer arrival t in [0, R_max), a uniform u
     in [0, 1) placing it in a window, and per statistic (fine, then each band) and side
     (right, left) the records (pos, val, off) of its running maximum outward from the signal.
     Extended in place when a request needs more kept draws: a row's draws depend only on its
     row, so the draws are those of one simulation run at once."""
-    key = _key(p, n, bands, snr, seed, _NF)
+    k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
+    extra = (k0s,) if any(k0s) else ()
+    key = _key(p, n, bands, snr, seed, _NF, *extra)
     sim = _SIGNAL_RECORDS.get(key)
     if sim is not None:
         _SIGNAL_RECORDS.move_to_end(key)
@@ -317,38 +387,47 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed):
         # profiles alike in the gates' response share a simulation (_similar_get), whatever
         # window each searches: a job's banks have nearly one reference profile. It is
         # extended with its own profile, so it stays one simulation.
-        params = (n, tuple(bands), snr, seed, _NF)
+        params = (n, tuple(bands), snr, seed, _NF) + extra
         unit, sim = _similar_get("signal-records", p, params)
         if sim is None:
-            sim = dict(p=p, Fb=Fb, rows=0, t=np.empty(0, np.int64), u=np.empty(0), recs=None,
-                       tab=None)
+            sim = dict(p=p, Fb=Fb, k0s=k0s, rows=0, t=np.empty(0, np.int64), u=np.empty(0),
+                       recs=None, tab=None)
             _similar_put("signal-records", unit, params, sim, keep=_RECORDS_MAX)
         _SIGNAL_RECORDS[key] = sim
         while len(_SIGNAL_RECORDS) > _RECORDS_MAX:
             _SIGNAL_RECORDS.popitem(last=False)
     if sim["t"].size < kept:
-        _extend_signal(sim, n, bands, snr, kept, seed)
+        _extend_signal(sim, n, bands, snr, kept, seed, k0s=k0s)
     return sim
 
 
-def _extend_signal(sim, n, bands, snr, kept, seed):
+def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None):
     """Simulate further rows of `sim` until it holds `kept` kept draws."""
     p, Fb = sim["p"], sim["Fb"]
+    if k0s is None:
+        k0s = sim.get("k0s") or ((0,) * len(bands))
+    else:
+        k0s = tuple(int(x) for x in k0s)
     if sim["tab"] is None:
         k = np.arange(n)
         # the signal's response, per arrival fraction, for the fine statistic then each band
-        # (bins [0, b), normalised as the band is): a band of b lags R apart at [rho b + e]
-        # holds it at its lag e after the one rho samples before the signal, d = e R - rho
-        # samples after it
+        # (active bins [k0, khi), normalised as the band is): a band of b lags R apart at
+        # [rho b + e] holds it at its lag e after the one rho samples before the signal,
+        # d = e R - rho samples after it
         j = np.arange(_NF)[:, None]
         q = p[None, :] * np.exp((-2j * np.pi / (_NF * n)) * j * k[None, :])
         tab = np.empty((_NF, 1 + len(bands), n), np.complex64)
         tab[:, 0] = np.fft.ifft(q, axis=1) * (n * snr)
         qm = np.zeros_like(q)
-        prev_m = 0
-        for s, (m, f) in enumerate(zip(bands, Fb), 1):
-            qm[:, prev_m:m] = q[:, prev_m:m]
-            prev_m = m
+        prev_lo, prev_hi = 0, 0
+        for s, (m, f, k0) in enumerate(zip(bands, Fb, k0s), 1):
+            k_lo, k_hi = _band_slice(n, m, k0)
+            if k_lo == prev_lo and k_hi >= prev_hi:
+                qm[:, prev_hi:k_hi] = q[:, prev_hi:k_hi]
+            else:
+                qm.fill(0)
+                qm[:, k_lo:k_hi] = q[:, k_lo:k_hi]
+            prev_lo, prev_hi = k_lo, k_hi
             resp = np.fft.ifft(qm, axis=1) * (n * snr / np.sqrt(f))
             R = n // m
             d = (np.arange(m)[None, :] * R - np.arange(R)[:, None]).reshape(-1) % n
@@ -362,7 +441,8 @@ def _extend_signal(sim, n, bands, snr, kept, seed):
     # overshoots stays for a later request. The model's noise blocks (_NOISE_BLOCKS) are the
     # first rows' noise alone, recorded as they run (a third of a row's work): later rows'
     # are left to noise_block_maxima, which simulates them should a request read that far.
-    nkey = _key(p, n, bands, seed)
+    extra = (k0s,) if any(k0s) else ()
+    nkey = _key(p, n, bands, seed, *extra)
     ts, us, parts = [sim["t"]], [sim["u"]], [] if sim["recs"] is None else [sim["recs"]]
     rows, have = sim["rows"], sim["t"].size
     while have < kept:
@@ -374,7 +454,8 @@ def _extend_signal(sim, n, bands, snr, kept, seed):
             step = min(step, _NOISE_BLOCKS - rows)
         t, u = _arrivals(seed, n // bands[0], rows, step)
         fi = ((rows + np.arange(step)) % _NF).astype(np.int32)
-        recs, nrec = _simulate(p, n, bands, step, rows, seed, (sim["tab"], t, fi), noise, keep_at=snr)
+        recs, nrec = _simulate(p, n, bands, step, rows, seed, (sim["tab"], t, fi), noise,
+                               keep_at=snr, k0s=k0s)
         if nrec is not None:
             _add_noise_records(nkey, rows, step, nrec)
         keep = np.diff(recs[0][2]) > 0          # a kept draw's fine maximum has a record
@@ -485,7 +566,7 @@ def _grown(a, keep, size):
     return out
 
 
-def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.0):
+def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.0, k0s=None):
     """Rows row0 .. row0 + rows of the gate model's one simulation (_core.simulate): with
     signal = (tab, t, fi) its records outward from the signal (none for a draw whose fine
     statistic is below keep_at at every lag), and with noise each band's records of the noise
@@ -494,9 +575,12 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     and side (fine first, right then left), and per band, the records (pos, val, off); pos and
     val may be views of arrays a few percent longer."""
     from . import _core
+    k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
+    sim_extra = (k0s,) if any(k0s) else ()
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kmax = int(np.flatnonzero(p)[-1]) + 1
-    bscale = tuple(float(_SIG / np.sqrt(p[:b].sum())) for b in bands)
+    bscale = tuple(float(_SIG / np.sqrt(p[slice(*_band_slice(n, b, k0))].sum()))
+                   for b, k0 in zip(bands, k0s))
     stream = (_DOMAIN_SIGNAL << 32) | (int(seed) & 0xFFFFFFFF)
     tab, t, fi = signal if signal is not None else (None,) * 3
     # Room: a side's running maximum over L lags has about ln L + 0.58 records of white noise,
@@ -543,7 +627,7 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
                                      tuple(int(b) for b in bands), bscale, float(_SIG), tab,
                                      None if t is None else t[done:done + todo],
                                      None if fi is None else fi[done:done + todo],
-                                     *sig, *noi, float(keep_at))
+                                     *sig, *noi, float(keep_at), *sim_extra)
         counts = list(sk or ()) + list(nk or ())
         for q in range(nq):
             co[q][:got + 1] += have[q]
@@ -583,7 +667,7 @@ def _add_noise_records(key, row0, rows, recs):
         _NOISE_RECORDS.popitem(last=False)
 
 
-def _noise_records(p, n, bands, nsim, seed):
+def _noise_records(p, n, bands, nsim, seed, k0s=None):
     """Per band, the records (pos int32, val float32, off int64) of each simulated block's
     running maximum of the band's normalised coarse statistic of the noise alone over its b
     lags, rows in order: row r's records are [off[r], off[r + 1]).
@@ -591,7 +675,12 @@ def _noise_records(p, n, bands, nsim, seed):
     The blocks are signal_draws' (_simulate), so a simulation of fewer blocks is a prefix of
     one of more: a request reads the prefix of a larger simulation held (a signal
     simulation's included), or extends a smaller one."""
-    key = _key(p, n, bands, seed)
+    if k0s is None:
+        k0s = tuple(band_offset(p, n, b) for b in bands)
+    else:
+        k0s = tuple(int(x) for x in k0s)
+    extra = (k0s,) if any(k0s) else ()
+    key = _key(p, n, bands, seed, *extra)
     hit = _NOISE_RECORDS.get(key)
     if hit is not None:
         _NOISE_RECORDS.move_to_end(key)
@@ -600,7 +689,7 @@ def _noise_records(p, n, bands, nsim, seed):
             return tuple((pos[:off[nsim]], val[:off[nsim]], off[:nsim + 1]) for pos, val, off in recs)
     else:
         have, recs = 0, None
-    _, new = _simulate(p, n, bands, nsim - have, have, seed)
+    _, new = _simulate(p, n, bands, nsim - have, have, seed, k0s=k0s)
     _add_noise_records(key, have, nsim - have, new)
     return _NOISE_RECORDS[key][1]
 
@@ -610,7 +699,8 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
 
     Exact for stationary Gaussian noise with output profile `power`: bins are
     independent with variance p_k; band b's coarse grid is the b-point inverse
-    transform of bins [0, b), normalised to unit per-component variance.
+    transform of its active band [k0, khi) wrapped to cyclic slots, normalised
+    to unit per-component variance.
     `window` = (start, end) in samples is the lag range each block's search
     covers; every tier takes its maximum over the coarse lags the engine
     visits for it (hmf.c: cstart = start/R - 1, cend = ceil(end/R)), so a
@@ -618,6 +708,8 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
     """
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
+    k0s = tuple(band_offset(p, n, b) for b in bands)
+    extra = (k0s,) if any(k0s) else ()
     win = (0, n) if window is None else (int(window[0]), int(window[1]))
     # Each band's coarse statistic is circularly stationary over its lags (independent
     # bins), so a window's maximum depends only on how many lags it covers, not where:
@@ -625,12 +717,12 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
     from ._windows import coarse_lags
     # the engine's coarse lags for the window (one sample past each end)
     counts = tuple(int(c1 - c0) for c0, c1 in (coarse_lags(n, b, win[0], win[1]) for b in bands))
-    key = _key(p, n, bands, int(nsim), int(seed), counts)
+    key = _key(p, n, bands, int(nsim), int(seed), counts, *extra)
     hit = _NOISE_CACHE.get(key)
     if hit is not None:
         _NOISE_CACHE.move_to_end(key)
         return hit
-    sim_params = (n, tuple(bands), int(nsim), int(seed), counts)
+    sim_params = (n, tuple(bands), int(nsim), int(seed), counts) + extra
     unit, hit = _similar_get("noise", p, sim_params)
     if hit is not None:
         _cache_put(_NOISE_CACHE, key, hit)
@@ -1221,7 +1313,7 @@ class _LazyPlan(dict):
 
 
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               memo=None, lags=None, lazy_fit=False):
+               memo=None, lags=None, lazy_fit=False, offsets=None):
     """The thresholds and direct-refine half-width for `chain` that meet the false-dismissal
     budget fd at minimum modelled cost.
 
@@ -1333,16 +1425,17 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
     missed = 0 if hw is None else int(np.count_nonzero(dA > hw))
     search_info = dict(thresholds=th, reach=reach, halfwidth=hw, missed=missed, K=K)
+    offs = (0,) * len(chain) if offsets is None else tuple(int(x) for x in offsets)
     if lazy_fit:
         return _LazyPlan(
-            dict(chain=tuple(chain), cost=c, q15=q15, search=search_info),
+            dict(chain=tuple(chain), offsets=offs, cost=c, q15=q15, search=search_info),
             (B, dB, th, hw, fd, noise, cols),
         )
     fit = _fit(B, dB, th, hw, fd)
     if fit is None:
         return None
     thresholds, halfwidth = fit
-    return dict(chain=tuple(chain), thresholds=thresholds,
+    return dict(chain=tuple(chain), offsets=offs, thresholds=thresholds,
                 reach=tuple(_reach(noise, cols, thresholds)), halfwidth=halfwidth, cost=c,
                 q15=q15, search=search_info)
 
@@ -1537,9 +1630,11 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     nsim = dsim if nsim is None else int(nsim)
     if nsamp is None:
         return None, []          # the tail bound needs more detections than the model holds
+    k0_cand = tuple(band_offset(p, n, b) for b in candidate_bands(n, floor))
+    extra = (k0_cand,) if any(k0_cand) else ()
     params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
               # ntemplates prices the feed
-              None if not getattr(cost, "feed", None) else int(ntemplates or 0))
+              None if not getattr(cost, "feed", None) else int(ntemplates or 0)) + extra
     key = (_gm._profile_sig(p),) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -1568,10 +1663,12 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), window,
             int(nsim), int(nsamp))
+    offsets_by_band = {b: band_offset(power, n, b) for b in bands}
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
+        offs = tuple(offsets_by_band[b] for b in chain)
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, memo=memo, lags=lags, lazy_fit=True)
+                        ntemplates=ntemplates, memo=memo, lags=lags, lazy_fit=True, offsets=offs)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1613,12 +1710,14 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     nsim = dsim if nsim is None else int(nsim)
     if nsamp is None:
         return None              # the tail bound needs more detections than the model holds
-    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost))
+    k0_chain = tuple(band_offset(p, n, b) for b in chain)
+    extra = (k0_chain,) if any(k0_chain) else ()
+    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost), *extra)
     hit = _PLAN_CACHE.get(key)
     if hit is not None:
         _PLAN_CACHE.move_to_end(key)
         return hit
-    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost))
+    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost)) + extra
     unit, hit = _similar_get("plan", p, sim_params)
     if hit is not None:
         _cache_put(_PLAN_CACHE, key, hit)
@@ -1633,7 +1732,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
     memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
             int(nsim), int(nsamp))
-    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, memo=memo, lags=lags)
+    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, memo=memo, lags=lags,
+                     offsets=k0_chain)
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out

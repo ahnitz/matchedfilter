@@ -867,172 +867,172 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 2222
+#line 2227
 [[kernel]] void seriesForwardListed(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_spectra_1 [[buffer(3)]], uint device* entryPointParams_blockList_1 [[buffer(4)]], uint device* entryPointParams_blockArgs_1 [[buffer(5)]])
 {
 
-#line 2222
+#line 2227
     thread KernelContext_0 kernelContext_2;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->entryPointParams_0 = entryPointParams_1;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->entryPointParams_spectra_0 = entryPointParams_spectra_1;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->entryPointParams_blockList_0 = entryPointParams_blockList_1;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->entryPointParams_blockArgs_0 = entryPointParams_blockArgs_1;
 
-#line 2222
+#line 2227
     threadgroup array<uint, int(8192)> stg_1;
 
-#line 2222
+#line 2227
     (&kernelContext_2)->stg_0 = &stg_1;
 
-#line 2230
+#line 2235
     uint tid_1 = lid_0.x;
     (&kernelContext_2)->_tid_0 = tid_1;
     (&kernelContext_2)->_stgBase_0 = 0U;
     uint _S30 = entryPointParams_blockArgs_1[int(0)];
 
-#line 2233
+#line 2238
     uint item_0 = gid_0.x;
     for(;;)
     {
 
-#line 2234
+#line 2239
         if(item_0 < _S30)
         {
         }
         else
         {
 
-#line 2234
+#line 2239
             break;
         }
 
-#line 2235
+#line 2240
         uint row_0 = (&kernelContext_2)->entryPointParams_blockList_0[item_0];
         uint _S31 = (&kernelContext_2)->entryPointParams_starts_0[row_0];
         thread array<float2, int(16)> r_5;
 
-#line 2237
+#line 2242
         uint k_0 = 0U;
         for(;;)
         {
 
-#line 2238
+#line 2243
             if(k_0 < 16U)
             {
             }
             else
             {
 
-#line 2238
+#line 2243
                 break;
             }
 
-#line 2239
+#line 2244
             uint offset_0 = tid_1 + 512U * k_0;
             float2 _S32 = float2(0.0f, 0.0f);
 
-#line 2240
+#line 2245
             bool _S33;
             if(_S31 < ((&kernelContext_2)->entryPointParams_0->seriesLength_0))
             {
 
-#line 2241
+#line 2246
                 _S33 = offset_0 < ((&kernelContext_2)->entryPointParams_0->seriesLength_0 - _S31);
 
-#line 2241
+#line 2246
             }
             else
             {
 
-#line 2241
+#line 2246
                 _S33 = false;
 
-#line 2241
+#line 2246
             }
 
-#line 2241
+#line 2246
             float2 x_2;
 
-#line 2241
+#line 2246
             if(_S33)
             {
 
-#line 2241
+#line 2246
                 x_2 = seriesSample_0((&kernelContext_2)->entryPointParams_series_0, _S31 + offset_0, (&kernelContext_2)->entryPointParams_0->seriesLayout_0);
 
-#line 2241
+#line 2246
             }
             else
             {
 
-#line 2241
+#line 2246
                 x_2 = _S32;
 
-#line 2241
+#line 2246
             }
 
             r_5[k_0] = float2(x_2.x / 8192.0f, - x_2.y / 8192.0f);
 
-#line 2238
+#line 2243
             k_0 = k_0 + 1U;
 
-#line 2238
+#line 2243
         }
 
-#line 2238
+#line 2243
         forwardTransform_0(&r_5, tid_1, &kernelContext_2);
 
-#line 2238
+#line 2243
         uint k_1 = 0U;
 
-#line 2246
+#line 2251
         for(;;)
         {
 
-#line 2246
+#line 2251
             if(k_1 < 16U)
             {
             }
             else
             {
 
-#line 2246
+#line 2251
                 break;
             }
 
-#line 2246
+#line 2251
             *((&kernelContext_2)->entryPointParams_spectra_0+(row_0 * 8192U + slotToIndex_0(tid_1 * 16U + k_1))) = packed_float2(float2(r_5[k_1].x, - r_5[k_1].y)) ;
 
-#line 2246
+#line 2251
             k_1 = k_1 + 1U;
 
-#line 2246
+#line 2251
         }
 
 
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2234
+#line 2239
         item_0 = item_0 + (&kernelContext_2)->entryPointParams_0->gridSize_0;
 
-#line 2234
+#line 2239
     }
 
-#line 2252
+#line 2257
     return;
 }

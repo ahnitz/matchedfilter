@@ -170,7 +170,7 @@ def work(r, groups):
     if entry == "seriesForward":
         return groups * fft_flops(n), 2 * groups * n * 8, 2 * groups * n * 8
     if entry == "packCoarse":
-        _, band, count, packed = p
+        _, band, count, packed = p[:4]
         return 0, count * (8 + (4 if packed else 8)), count * (8 + (4 if packed else 8))
     if entry == "compactPairs":
         pairs = p[0]
