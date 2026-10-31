@@ -785,16 +785,19 @@ uint slotToIndex(uint slot)
     return idx;
 }
 
+#if COARSE16
 //: Register v's |v|^2 bits as the coarse election compares them: 0 outside [ws, we),
-//: +inf in window when the thread's registers overflowed (ov; Metal's fail-open).
+//: +inf in window when an element is non-finite or the thread's registers overflowed (ov).
 uint c16Mag(C v, uint slot, uint ws, uint we, bool ov)
 {
     uint idx = slotToIndex(slot);
     bool live = (idx >= ws && idx < we);
+    uint nonfin = ((bit_cast<uint>(v) & 0x7C007C00u) + 0x04000400u) & 0x80008000u;
     float x = float(v.x), y = float(v.y);
-    uint m = live ? asuint(x * x + y * y) : 0u;
-    return (ov && live) ? 0x7F800000u : m;
+    uint m = live ? min(asuint(x * x + y * y), 0x7F800000u) : 0u;
+    return ((ov || nonfin != 0u) && live) ? 0x7F800000u : m;
 }
+#endif
 
 
 //: The filter itself, as a plain function so more than one entry point can
@@ -1058,7 +1061,9 @@ void filterPair(uint pair, uint tid,
         // NOPAIR: a ragged group's spare slot (filterPair), computed for its barriers only.
         if (pair != NOPAIR && winner != 0xffffffffu && winner == wslot) {
             peakIdx[pair] = int(slotToIndex(wslot));
-            peakVal[pair] = float2(float(bestV.x), float(bestV.y));
+            peakVal[pair] = (best >= 0x7F800000u)
+                          ? float2(3.402823e38f, 0.0f)
+                          : float2(float(bestV.x), float(bestV.y));
         }
         if (pair != NOPAIR && tid == 0 && wslot == 0xffffffffu) {
             peakIdx[pair] = -1;
@@ -1078,7 +1083,12 @@ void filterPair(uint pair, uint tid,
         // zero can never beat a seed of >= 0, so the window costs a select
         // and no divergence.
         float _rx = float(r[i].x), _ry = float(r[i].y);
+#if COARSE16
+        uint _nf = ((bit_cast<uint>(r[i]) & 0x7C007C00u) + 0x04000400u) & 0x80008000u;
+        myMag[i] = live ? (_nf != 0u ? 0x7F800000u : min(asuint(_rx*_rx + _ry*_ry), 0x7F800000u)) : 0u;
+#else
         myMag[i] = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
+#endif
 #if defined(MF_METAL) && COARSE16
         // FAIL OPEN on fp16 overflow. Metal compiles with fast math, under which an inf
         // or NaN magnitude compares unpredictably. An fp16 exponent field of all ones
@@ -1166,7 +1176,13 @@ void filterPair(uint pair, uint tid,
         MF_UNROLL for (uint i = 0; i < R; ++i) {
             if (tid * R + i == stg[_stgBase+1]) {
                 peakIdx[pair] = int(slotToIndex(tid * R + i));
+#if COARSE16
+                peakVal[pair] = (stg[_stgBase] >= 0x7F800000u)
+                              ? float2(3.402823e38f, 0.0f)
+                              : float2(float(r[i].x), float(r[i].y));
+#else
                 peakVal[pair] = float2(float(r[i].x), float(r[i].y));
+#endif
             }
         }
         if (tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
@@ -1270,7 +1286,9 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         if (pair != NOPAIR && stg[_stgBase+1] == tid*R+i) {
             peakIdx[pair] = int(slotToIndex(tid*R+i));
-            peakVal[pair] = float2(float(lane == 0u ? re[i].x : re[i].y),
+            peakVal[pair] = (stg[_stgBase] >= 0x7F800000u)
+                          ? float2(3.402823e38f, 0.0f)
+                          : float2(float(lane == 0u ? re[i].x : re[i].y),
                                    float(lane == 0u ? im[i].x : im[i].y));
         }
     }
@@ -1947,25 +1965,34 @@ void tcStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     }
 
     GroupMemoryBarrierWithGroupSync();
-    if (tid == 0) stg[0] = thrBits;
+    if (tid == 0) { stg[0] = thrBits; stg[1] = 0xffffffffu; }
     GroupMemoryBarrierWithGroupSync();
     if (best > thrBits) InterlockedMax(stg[0], best);
     GroupMemoryBarrierWithGroupSync();
 
-    uint slot = pair * TC_OTHER + k2;
-    if (tid == 0 && stg[0] == thrBits) {
-        candMag[slot] = thrBits;
-        candIdx[slot] = -1;
-        candVal[slot] = float2(0.0f, 0.0f);
-    }
-    GroupMemoryBarrierWithGroupSync();
+    uint winner = 0xffffffffu;
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k1 = slotToIndex(tid * R + i);
         uint idx = k1 * TC_OTHER + k2;
         bool live = (idx >= winStart && idx < winEnd);
         uint mg = live ? asuint(r[i].x * r[i].x + r[i].y * r[i].y) : 0u;
-        if (mg > thrBits && stg[0] == mg) {
-            candMag[slot] = mg;
+        if (mg > thrBits && stg[0] == mg)
+            winner = min(winner, idx);
+    }
+    if (winner != 0xffffffffu) InterlockedMin(stg[1], winner);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint slot = pair * TC_OTHER + k2;
+    if (tid == 0 && stg[1] == 0xffffffffu) {
+        candMag[slot] = thrBits;
+        candIdx[slot] = -1;
+        candVal[slot] = float2(0.0f, 0.0f);
+    }
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
+        uint k1 = slotToIndex(tid * R + i);
+        uint idx = k1 * TC_OTHER + k2;
+        if (idx == stg[1]) {
+            candMag[slot] = stg[0];
             candIdx[slot] = int(idx);
             candVal[slot] = float2(float(r[i].x), float(r[i].y));
         }

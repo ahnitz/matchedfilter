@@ -646,6 +646,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             ref = _gc.rebin_profile(fine, delta_f, data_rate, n)
             hit = (None, None, None)
             if ref is not None:
+                ref = ref.astype(np.float32, copy=False)
                 cm = device_costs(n, device, ntemplates)
                 best, _ = _gc.choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
                                            ntemplates=ntemplates)

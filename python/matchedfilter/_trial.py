@@ -148,7 +148,9 @@ class Trial:
 
     def tick(self) -> Optional[str]:
         """A call of the trial's instances that could not be a round."""
-        self.choice.tick()
+        ch = self.choice
+        with _AUTOTUNE_LOCK:
+            ch.tick()
         return self.winner
 
 
@@ -163,11 +165,14 @@ def trial(key: str, arms: Callable[[], Sequence[str]]) -> Trial:
         tr = _TRIALS.get(key)
     if tr is None:
         proposed = list(arms())
+        created = False
         with _AUTOTUNE_LOCK:
             tr = _TRIALS.get(key)
             if tr is None:
                 tr = _TRIALS[key] = Trial(key, proposed)
-                _log_autotune("TRIAL %s arms %s", key, list(tr.arms))
+                created = True
+        if created:
+            _log_autotune("TRIAL %s arms %s", key, list(tr.arms))
     return tr
 
 

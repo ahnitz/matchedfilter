@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 #include "alloc.h"
 #include "env.h"
 #include "matchedfilter.h"
@@ -140,7 +141,7 @@ static int alloc_pair(float **a,float **b,size_t bytes){
 
 /* like: the plan whose back end a sub-plan uses (NULL: the active target). */
 static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_plan *like){
-  if(ndata<1||ntmpl<1) return NULL;
+  if(ndata<1||ntmpl<1||(size_t)ndata>(size_t)INT_MAX/(size_t)ntmpl) return NULL;
   ap_mf_plan *p = calloc(1,sizeof(*p));
   if(!p) return NULL;
   p->n=n; p->nd=ndata; p->nt=ntmpl;
@@ -1542,6 +1543,19 @@ static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
   p->qdok[d]=1;
 }
 
+/* One lane's int16 threshold from its data and template scales.  Without the margin
+   (p->qnomargin) the screen gates on its own statistic when quantisation rounding is small
+   against one SNR unit; when an out-of-window glitch crushes qds*qts/2^15 below 2*margin,
+   the deterministic bound margin is restored so an in-window signal cannot be rounded below
+   threshold. */
+static inline int16_t q15_lanethr(float threshold,float qds,float qts,float margin,int nomargin){
+  const float ds=qds*(float)(1.0/32768.0);
+  const float eq=(!nomargin || ds*qts<2.0f*margin) ? margin : 0.0f;
+  const float q=threshold*ds*(1.0f-1e-4f)*qts-eq;
+  const float T=q*q*(float)(1.0/32768.0)-1.0f;
+  return !(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
+}
+
 /* Keep tail scheduling separate so it does not expand the ordinary screen's
    register allocation or data-quantization call sites on other backends. */
 static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int first,
@@ -1551,7 +1565,7 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
                       unsigned char *pass, float *stat){
   const size_t n=p->n;
   const int qw=p->qw;                      /* 32 on AVX-512, 16 on AVX2 */
-  const float EQ=p->qnomargin ? 0.0f : (float)ap_q15_margin(n);
+  const float margin=(float)ap_q15_margin(n);
   int16_t lanethr[64], lanemax[64];
   int total=0;
   for(int d=d0;d<first;d++) if(!p->qdok[d]) q15_data(p,d);
@@ -1561,12 +1575,8 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
     const int blocks=qw/width, active=l1-off<width ? l1-off : width;
     for(int d=d0;d<first;d+=blocks){
       for(int b=0;b<blocks;b++){
-        const float a=threshold*p->qds[d+b]*(float)(1.0/32768.0)*(1.0f-1e-4f);
-        for(int l=0;l<width;l++){
-          const float q=a*bl[off+l]-EQ;
-          const float T=q*q*(float)(1.0/32768.0)-1.0f;
-          lanethr[b*width+l]=!(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
-        }
+        for(int l=0;l<width;l++)
+          lanethr[b*width+l]=q15_lanethr(threshold,p->qds[d+b],bl[off+l],margin,p->qnomargin);
       }
       uint64_t bits=0;
       if(ap_q15_screen_tile(p->fft,width,p->qd+(size_t)d*n*3,tr+off,ti+off,
@@ -1597,7 +1607,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
   if(start>=end) return 0;
   if(q15_prepare(p)) return -1;
   const size_t n=p->n; const int qw=p->qw;
-  const float EQ=p->qnomargin ? 0.0f : (float)ap_q15_margin(n);
+  const float margin=(float)ap_q15_margin(n);
   float bl[64];
   int16_t lanethr[64], lanemax[64];
   int total=0;
@@ -1631,12 +1641,8 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
          q = threshold*sd*st/2^15 - EQ.  A lane with q <= 0, or with a zero
          or non-finite scale, always passes.  The 1e-4 covers the float
          tier's own rounding (~1e-6 relative). */
-      const float a=threshold*p->qds[d]*(float)(1.0/32768.0)*(1.0f-1e-4f);
-      for(int l=0;l<qw;l++){
-        const float q=a*bl[l]-EQ;
-        const float T=q*q*(float)(1.0/32768.0)-1.0f;
-        lanethr[l] = !(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
-      }
+      for(int l=0;l<qw;l++)
+        lanethr[l] = q15_lanethr(threshold,p->qds[d],bl[l],margin,p->qnomargin);
       uint64_t bits=0;
       if(ap_q15_screen(p->fft,p->qd+(size_t)d*n*3,tr,ti,start,end,lanethr,&bits,
                        stat?lanemax:NULL,p->qscr)) return -1;
@@ -1749,7 +1755,7 @@ int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npa
   for(int b=0;b<nbucket;b++) cnt[b+1]+=cnt[b];
   for(int j=0;j<npairs;j++) order[cnt[key[j]]++]=j;
   if(cnt!=cstack) free(cnt);
-  const float EQ=p->qnomargin ? 0.0f : (float)ap_q15_margin(n);
+  const float margin=(float)ap_q15_margin(n);
   int16_t lanethr[64], lanemax[64], ld[64], lt[64];
   int jj[64];
   int total=0;
@@ -1765,10 +1771,7 @@ int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npa
       if(!p->qtok[t]) q15_template(p,t);
       jj[l]=j; ld[l]=(int16_t)(d%qw); lt[l]=(int16_t)(t-gp*2*qw);
       /* as ap_mf_q15_screen */
-      const float a=threshold*p->qds[d]*(float)(1.0/32768.0)*(1.0f-1e-4f);
-      const float qq=a*p->qts[t]-EQ;
-      const float T=qq*qq*(float)(1.0/32768.0)-1.0f;
-      lanethr[l]=!(qq>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
+      lanethr[l]=q15_lanethr(threshold,p->qds[d],p->qts[t],margin,p->qnomargin);
     }
     const int16_t *dr=p->qdx+(size_t)slab*2*n*qw, *di=dr+n*qw;
     const size_t g0=(size_t)gp*2;

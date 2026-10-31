@@ -13,6 +13,7 @@
 #include "matchedfilter.h"
 #include "transform.h"
 #include "q15.h"
+#include "alloc.h"
 
 /* Whether a buffer of len bytes holds a x b elements of elem bytes, computed by division:
    the product of caller-supplied counts can overflow, and the check then passes. */
@@ -1138,8 +1139,8 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
      AVX-512, and a row of n = 2048 reads one block) */
   enum { SIM_ROWS = 2 };
   const size_t bytes=((size_t)(2*n*4)+63)/64*64;
-  float *X=(float*)aligned_alloc(64,SIM_ROWS*bytes), *Y=(float*)aligned_alloc(64,bytes),
-        *A=(float*)aligned_alloc(64,bytes/2+64);
+  float *X=(float*)ap_alloc64(SIM_ROWS*bytes), *Y=(float*)ap_alloc64(bytes),
+        *A=(float*)ap_alloc64(bytes/2+64);
   long long ks[64]={0}, kn[32]={0}, done=nrows;
   if(ok && X && Y && A){
     const float *scale=(const float*)sc.buf, *tab=has_sig ? (const float*)tb.buf : NULL;

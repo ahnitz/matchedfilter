@@ -1,6 +1,5 @@
 """Persistent kernel choices follow compiled artifacts, kernel by kernel."""
 import json
-from pathlib import Path
 
 import pytest
 
@@ -8,14 +7,14 @@ from matchedfilter import _kernel_id
 
 
 def _write_manifest(folder, files):
-    kernels = {Path(f).stem: {"file": f} for f in files}
+    kernels = {_kernel_id._stem_of(f, (".spv", ".ptx.gz", ".metal")): {"file": f} for f in files}
     (folder / "manifest.json").write_text(json.dumps({"kernels": kernels}))
 
 
 @pytest.fixture
 def package(tmp_path, monkeypatch):
     """A package with two kernels per backend and manifests that name them (no digests)."""
-    for folder, suffix in (("spirv", ".spv"), ("ptx", ".ptx"), ("metal", ".metal")):
+    for folder, suffix in (("spirv", ".spv"), ("ptx", ".ptx.gz"), ("metal", ".metal")):
         (tmp_path / folder).mkdir()
         for stem in ("tierb_256", "compact_peaks"):
             (tmp_path / folder / (stem + suffix)).write_bytes(("%s %s" % (folder, stem)).encode())
@@ -34,7 +33,7 @@ def _ids():
 def test_cuda_only_rebuild_changes_only_cuda_identity(package):
     _kernel_id.stamp(package)
     before = _ids()
-    (package / "ptx" / "compact_peaks.ptx").write_bytes(b"new compiler or generated constants")
+    (package / "ptx" / "compact_peaks.ptx.gz").write_bytes(b"new compiler or generated constants")
     _kernel_id.stamp(package, ("cuda",))
     after = _ids()
     assert after["cuda"] != before["cuda"]
@@ -87,7 +86,7 @@ def test_normal_startup_does_not_read_kernel_bank(package, monkeypatch):
 
 def test_a_manifest_without_digests_hashes_the_programs_it_names(package):
     before = _ids()["cuda"]                       # the fixture's manifests carry no digests
-    (package / "ptx" / "compact_peaks.ptx").write_bytes(b"changed")
+    (package / "ptx" / "compact_peaks.ptx.gz").write_bytes(b"changed")
     assert _ids()["cuda"] != before
 
 

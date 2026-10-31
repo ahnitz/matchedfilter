@@ -136,9 +136,10 @@ def test_hierarchical_results_with_screen_are_flat_peaks(chain, monkeypatch):
         hf.set_templates(np.conj(tm))
         hf.set_data(data)
         hf._ensure()
-        assert hf._mf.set_q15(q) == q or not q
-        if q and not hf._mf.q15_stats()[0]:
+        ok = hf._mf.set_q15(q)
+        if q and (not ok or not hf._mf.q15_stats()[0]):
             pytest.skip("no Q15 screen for this band")
+        assert ok
         res = hf.run(binsize=n // 4, threshold=4.0)
         if q:
             assert hf._mf.q15_stats()[1] > 0          # the screen ran and passed pairs
@@ -168,3 +169,39 @@ def test_cost_model_prices_the_screen():
     import json
     rt = mf.gatechain.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
     assert rt.signature() == cm.signature()
+
+
+def test_avx1_disables_inherited_sse4_q15_screen():
+    if "AVX" not in mf.targets():
+        pytest.skip("AVX target not built on this platform")
+    prev = mf.backend()
+    try:
+        mf.set_target("AVX")
+        assert mf._core.MF(256, 1, 1).q15_lanes() == 0
+    finally:
+        mf.set_target(prev)
+
+
+def test_q15_nomargin_restores_bound_under_out_of_window_glitch(monkeypatch):
+    monkeypatch.setenv("MF_GATE16", "0")
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    n, band, nd, nt = 4096, 256, 4, 24
+    if mf._core.MF(band, 1, 1).q15_lanes() == 0:
+        pytest.skip("no Q15 screen on this back end")
+    # Lag n // 2 (inside window [n//4, 3*n//4)) has correlation peak 8.0, while lag 16
+    # (outside window) has impulse 5000.0, crushing qds so qds*qts/2^15 < 2*margin.
+    k = np.arange(n, dtype=np.float64)
+    D = np.zeros((nd, n), dtype=np.complex64)
+    D[0] = (5000.0 * np.exp(-2j * np.pi * k * 16 / n)
+            + 8.0 * np.exp(-2j * np.pi * k * (n // 2) / n)).astype(np.complex64)
+    H = np.ones((nt, n), dtype=np.complex64) / np.float32(n)
+    hf = mf.HierarchicalFilter(n, nd, nt, chain=(band,), snr=5.5, fd=1e-3)
+    hf.set_reference(np.ones(n, dtype=np.float32))
+    hf.set_templates(H)
+    hf.set_data(D)
+    hf._ensure()
+    if not hf._mf.set_q15(True) or not hf._mf.q15_stats()[0]:
+        pytest.skip("no Q15 screen for this band")
+    res = hf.run(binsize=n // 2, threshold=7.5, window=(n // 4, 3 * n // 4))
+    assert (res["index"][0, :, 0] == n // 2).all()
+    np.testing.assert_allclose(np.abs(res["value"][0, :, 0]), 8.0, rtol=1e-3, atol=1e-2)

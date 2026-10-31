@@ -68,13 +68,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def highway():
-    """(include dir, support sources, libraries to link) for Highway.
+    """(include dir, support sources, libraries to link, library dirs) for Highway.
 
     The vendored submodule first, so a clone builds without anything
     installed; then HIGHWAY_ROOT, then the usual system places.
     """
     roots = [os.path.join(HERE, "third_party", "highway")]
     if HIGHWAY_ROOT:
+        roots.insert(0, os.path.join(HIGHWAY_ROOT, "include"))
         roots.insert(0, HIGHWAY_ROOT)
     roots += ["/usr/include", "/usr/local/include", sys.prefix + "/include"]
     for d in roots:
@@ -86,8 +87,11 @@ def highway():
         srcs = [os.path.join(d, "hwy", f)
                 for f in ("targets.cc", "abort.cc", "per_target.cc")]
         if all(os.path.isfile(s) for s in srcs):
-            return d, srcs, []
-        return d, [], ["hwy"]
+            return d, srcs, [], []
+        prefix = os.path.dirname(os.path.abspath(d)) if os.path.basename(d) == "include" else d
+        lib_dirs = [p for p in (os.path.join(prefix, "lib"), os.path.join(prefix, "lib64"))
+                    if os.path.isdir(p)]
+        return d, [], ["hwy"], lib_dirs
     sys.exit(
         "matchedfilter needs Google Highway to build, and the vendored copy\n"
         "is missing.  From a git clone:\n"
@@ -96,7 +100,7 @@ def highway():
     )
 
 
-HWY_INC, HWY_SRC, HWY_LIBS = highway()
+HWY_INC, HWY_SRC, HWY_LIBS, HWY_LIBDIRS = highway()
 
 DEFS = [("HWY_DISABLED_TARGETS", "(%s)" % "|".join(DISABLED))]
 # Ablation builds. AP_NOXPOSE=1 removes stage A's corner turn, which makes
@@ -122,6 +126,24 @@ SOURCES = (
 
 
 class BuildExt(build_ext):
+    def _filter_flags(self, flags):
+        probe_only = [f for f in flags if "split-unaligned" in f]
+        if not probe_only:
+            return flags
+        supported = getattr(self, "_split_unaligned_ok", None)
+        if supported is None:
+            probe_src = os.path.join(self.build_temp, "_flag_probe.c")
+            with open(probe_src, "w") as f:
+                f.write("int mf_flag_probe(void) { return 0; }\n")
+            try:
+                self.compiler.compile([probe_src], output_dir=self.build_temp,
+                                      extra_postargs=probe_only)
+                supported = True
+            except Exception:
+                supported = False
+            self._split_unaligned_ok = supported
+        return flags if supported else [f for f in flags if "split-unaligned" not in f]
+
     def build_extension(self, ext):
         objects = []
         os.makedirs(self.build_temp, exist_ok=True)
@@ -131,13 +153,14 @@ class BuildExt(build_ext):
                 output_dir=os.path.join(self.build_temp, "g%d" % i),
                 macros=defines,
                 include_dirs=ext.include_dirs,
-                extra_postargs=flags,
+                extra_postargs=self._filter_flags(flags),
                 debug=self.debug,
             )
         self.compiler.link_shared_object(
             objects,
             self.get_ext_fullpath(ext.name),
             libraries=["m"] + HWY_LIBS,
+            library_dirs=HWY_LIBDIRS,
             # vDSP for the block forward where it is faster (src/fft_accel.c).
             extra_postargs=["-framework", "Accelerate"] if sys.platform == "darwin" else [],
             debug=self.debug,

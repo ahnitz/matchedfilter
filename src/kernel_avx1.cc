@@ -3,9 +3,10 @@
  *
  * Built with -mavx and AP_SIMD_AVX1, which puts simd-avx1.h under the same kernel headers the
  * Highway targets use (balanced-inl.h and everything it includes for the float path). The
- * table starts as the SSE4 back end's and replaces its float entries: the Q15 screen (int16,
- * which AVX1 cannot widen), the direct refine's correlation and the real-series kernels stay
- * SSE4's. Results are the SSE4 path's bit for bit: both multiply then add (no FMA). The block
+ * table starts as the SSE4 back end's and replaces its float entries: the direct refine's
+ * correlation and the real-series kernels stay SSE4's, while SSE4's 8-lane int16 Q15 screen is
+ * disabled so AVX1 screens directly at 8 float lanes without quantisation overhead. Results are
+ * the SSE4 path's bit for bit: both multiply then add (no FMA). The block
  * and spectrum loads (loads-inl.h) are AVX's too: split_store's vector path takes the plan's
  * lane width, 8 here, so SSE4's copy ran its scalar loop.
  */
@@ -52,6 +53,11 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.split_store = k::split_store;     /* its vector path needs w == the plan's 8 lanes */
     be.scale_load = k::scale_load;
     be.lanes_transpose = k::lanes_transpose;
+    be.q15_lanes = NULL;
+    be.q15_screen = NULL;
+    be.q15_screen_tile = NULL;
+    be.q15_screen_perm = NULL;
+    be.q15_slab8 = NULL;
     ready = 1;
   }
   return &be;

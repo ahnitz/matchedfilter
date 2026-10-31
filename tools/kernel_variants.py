@@ -26,6 +26,7 @@ build for those backends. `list` and `check` need no compiler.
 """
 import argparse
 import fnmatch
+import gzip
 import hashlib
 import json
 import os
@@ -51,7 +52,7 @@ ITEMS_KERNEL = GPU_SRC / "refine_bounded.slang"
 #: Each backend's artifact folder in the package, the slangc target, and the artifact suffix.
 BACKENDS = {"vulkan": ("spirv", "spirv", ".spv"),
             "metal": ("metal", "metal", ".metal"),
-            "cuda": ("ptx", "ptx", ".ptx")}
+            "cuda": ("ptx", "ptx", ".ptx.gz")}
 MANIFEST_SCHEMA = 2
 
 #: The slangc every checked-in kernel (spirv/, ptx/, metal/) is built with. A different
@@ -833,7 +834,10 @@ def artifact_facts(v, folder):
         info = reflect(path.read_bytes())
         return dict(lds_bytes=info["shared_bytes"], local_size=list(info["local_size"]),
                     descriptors=info["descriptors"], push_bytes=info["push_bytes"])
-    text = path.read_text()
+    raw = path.read_bytes()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    text = raw.decode("utf-8")
     return dict(lds_bytes=static_shared(text) if v.backend == "cuda" else msl_shared(text))
 
 
@@ -979,10 +983,13 @@ def compile_variant(slangc, v, folder, nvrtc=None, env=None):
         else:
             src = pathlib.Path(tmp) / v.src
             src.write_text(v.text())
+        raw_out = (pathlib.Path(tmp) / (v.stem + ".ptx")) if v.backend == "cuda" else out
         # In the temporary folder: NVRTC writes its precompiled header (default_program.pch)
         # to the working directory, and parallel compiles there delete each other's.
-        proc = subprocess.run(command(slangc, v, src, out, nvrtc), capture_output=True,
+        proc = subprocess.run(command(slangc, v, src, raw_out, nvrtc), capture_output=True,
                               text=True, env=env, cwd=tmp)
+        if proc.returncode == 0 and v.backend == "cuda":
+            out.write_bytes(gzip.compress(raw_out.read_bytes(), compresslevel=9, mtime=0))
     if proc.returncode != 0:
         raise RuntimeError("slangc failed for %s (%s), exit status %d:\n%s"
                            % (v.file, v.entry, proc.returncode, proc.stderr))
@@ -1033,10 +1040,10 @@ def check(package=PACKAGE):
         root = pathlib.Path(package) / folder
         want = {v.file for v in variants(backend)}
         have = {p.name for p in root.iterdir()
-                if p.is_file() and p.suffix == suffix}
+                if p.is_file() and p.name.endswith(suffix)}
         missing, extra = sorted(want - have), sorted(have - want)
         stray = sorted(p.name for p in root.iterdir() if p.is_file()
-                       and p.suffix not in (suffix, ".json", ".metallib"))
+                       and not (p.name.endswith(suffix) or p.suffix in (".json", ".metallib")))
         problems = []
         if missing:
             problems.append("not shipped: %s" % ", ".join(missing))

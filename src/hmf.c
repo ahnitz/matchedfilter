@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <limits.h>
 #include "ticks.h"
 #include "alloc.h"
 #include "env.h"
@@ -135,6 +136,9 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   p->nt=ntmpl; p->ntiers=ntiers;
   const int grp = ap_hmf_effective_group(n, series_group);
   p->dgroup=grp; p->nd=ndata>grp ? ndata : grp;
+  if((size_t)p->nd > (size_t)INT_MAX / (size_t)ntmpl){
+    ap_hmf_destroy(p); return NULL;
+  }
   if(p->is_dif){
     p->full=ap_mf_create(p->k, 2*p->nd, ntmpl);
     p->twiddles=ap_alloc64(2*p->k*sizeof(float));
@@ -234,16 +238,24 @@ int ap_hmf_set_taps(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t
     p->dout=ap_alloc64(2*p->n*sizeof(float));
     p->dfd=malloc((size_t)p->nd*p->nt*sizeof(int));
     p->dft=malloc((size_t)p->nd*p->nt*sizeof(int));
-    if(!p->taps||!p->tap_len||!p->dx||!p->dout||!p->dfd||!p->dft) return -1;
+    if(!p->taps||!p->tap_len||!p->dx||!p->dout||!p->dfd||!p->dft) goto fail;
   }
   for(int t=0;t<p->nt;t++){
     free(p->taps[t]);
     p->taps[t]=ap_alloc64((size_t)counts[t]*sizeof(float));
-    if(!p->taps[t]) return -1;
+    if(!p->taps[t]) goto fail;
     memcpy(p->taps[t],taps+(size_t)t*stride,(size_t)counts[t]*sizeof(float));
     p->tap_len[t]=(int)counts[t];
   }
   return 0;
+fail:
+  if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); p->taps=NULL; }
+  free(p->tap_len); p->tap_len=NULL;
+  free(p->dx); p->dx=NULL;
+  free(p->dout); p->dout=NULL;
+  free(p->dfd); p->dfd=NULL;
+  free(p->dft); p->dft=NULL;
+  return -1;
 }
 
 /* Ticks per lag x tap of the direct correlation on this core (best of a few reps): what

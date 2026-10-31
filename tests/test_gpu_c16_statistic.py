@@ -137,3 +137,27 @@ def test_every_coarse_layout_reports_the_statistic(B):
                     B, layout, err.max())
     finally:
         ctx.destroy()
+
+
+@pytest.mark.parametrize("B", [64, 1024])
+def test_every_coarse_layout_fails_open_on_fp16_overflow(B):
+    """A loud transient that overflows fp16 (producing Inf/NaN in butterfly intermediates)
+    must fail open to a finite sentinel above any threshold on every c16 layout, never
+    silently suppressing the pair via NaN > best == false."""
+    from conftest import gpu_backend, gpu_context
+    backend = gpu_backend()
+    nt = 16
+    rng = np.random.default_rng(9876 + B)
+    T = (rng.standard_normal((nt, B)) + 1j * rng.standard_normal((nt, B))).astype(np.complex64)
+    # 1e12 overflows half16 even after threshold-anchored pow2 scaling, creating Inf - Inf = NaN.
+    D = np.full((1, B), 1e12 + 1e12j, dtype=np.complex64)
+    ctx = gpu_context(backend)
+    try:
+        if not ctx._x_has_c16(B):
+            pytest.skip("band %d has no fp16 coarse tier" % B)
+        for layout in ctx._x_coarse_candidates(B):
+            vals = _layout_values(ctx, layout, B, D, T, thr=8.0)
+            assert np.all(np.isfinite(vals) & (vals >= 1e20)), (
+                "band %d layout %r failed to fail-open on fp16 overflow: %r" % (B, layout, vals))
+    finally:
+        ctx.destroy()
