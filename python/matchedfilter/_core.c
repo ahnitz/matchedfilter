@@ -1346,13 +1346,13 @@ static inline void sim_prep_band(const float *Xr, const float *Xo, long long kfi
 
 static PyObject *M_simulate(PyObject *self,PyObject *args){
   (void)self;
-  PyObject *sco,*bo,*bso,*tbo,*to,*fio,*spo,*svo,*soo,*npo,*nvo,*noo,*k0o=Py_None,*alo=Py_None;
+  PyObject *sco,*bo,*bso,*tbo,*to,*fio,*spo,*svo,*soo,*npo,*nvo,*noo,*k0o=Py_None,*alo=Py_None,*kmo=Py_None;
   unsigned long long seed; long long row0,nrows,kmax; double fscale, keep_at=0.0;
-  if(!PyArg_ParseTuple(args,"OKLLLOOdOOOOOOOOO|dOO",&sco,&seed,&row0,&nrows,&kmax,&bo,&bso,&fscale,&tbo,&to,&fio,&spo,&svo,&soo,&npo,&nvo,&noo,&keep_at,&k0o,&alo)) return NULL;
+  if(!PyArg_ParseTuple(args,"OKLLLOOdOOOOOOOOO|dOOO",&sco,&seed,&row0,&nrows,&kmax,&bo,&bso,&fscale,&tbo,&to,&fio,&spo,&svo,&soo,&npo,&nvo,&noo,&keep_at,&k0o,&alo,&kmo)) return NULL;
   if(!PyTuple_Check(bo)||!PyTuple_Check(bso)){ PyErr_SetString(PyExc_TypeError,"simulate: bands and bscale must be tuples"); return NULL; }
   const Py_ssize_t nb=PyTuple_GET_SIZE(bo), ns=2*(1+nb);
-  const int has_sig = tbo!=Py_None, has_noise = npo!=Py_None;
-  if(nb<1||nb>31||PyTuple_GET_SIZE(bso)!=nb||nrows<1||row0<0||!(has_sig||has_noise)){
+  const int has_sig = tbo!=Py_None, has_noise = npo!=Py_None, skip_fine = kmo!=Py_None;
+  if(nb<1||nb>31||PyTuple_GET_SIZE(bso)!=nb||nrows<1||row0<0||!(has_sig||has_noise)||(skip_fine&&!has_sig)){
     PyErr_SetString(PyExc_ValueError,"simulate: one bscale per band, 1..31 bands, nrows >= 1, row0 >= 0, signal or noise outputs"); return NULL;
   }
   long long b[32], k0[32]={0}, khi[32]={0}; float bs[32], al[32], be[32]; int any_k0=0, any_alpha=0;
@@ -1381,9 +1381,13 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     }
   }
   if(PyErr_Occurred()) return NULL;
-  Py_buffer sc,tb={0},tt={0},fib={0}; int gin=0, ok=1;
+  Py_buffer sc,tb={0},tt={0},fib={0},kmb={0}; int gin=0, got_km=0, ok=1;
   Py_buffer *in[4]={&sc,&tb,&tt,&fib}; PyObject *io[4]={sco,tbo,to,fio};
   for(;gin<(has_sig?4:1);gin++) if(PyObject_GetBuffer(io[gin],in[gin],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ ok=0; break; }
+  if(ok && skip_fine){
+    if(PyObject_GetBuffer(kmo,&kmb,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0;
+    else { got_km=1; ok = (kmb.itemsize==1 && kmb.len==nrows); }
+  }
   Py_buffer spb[64],svb[64],sob[64],npb[32],nvb[32],nob[32]; int sgot=0, ngot=0;
   if(ok && has_sig) sgot=sr_take(spo,svo,soo,ns,nrows,spb,svb,sob,&ok);
   if(ok && has_noise) ngot=sr_take(npo,nvo,noo,nb,nrows,npb,nvb,nob,&ok);
@@ -1412,14 +1416,15 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   #define SIM_RELEASE() do{ \
     for(int s=0;s<sgot;s++){ PyBuffer_Release(&spb[s]); PyBuffer_Release(&svb[s]); PyBuffer_Release(&sob[s]); } \
     for(int s=0;s<ngot;s++){ PyBuffer_Release(&npb[s]); PyBuffer_Release(&nvb[s]); PyBuffer_Release(&nob[s]); } \
+    if(got_km) PyBuffer_Release(&kmb); \
     for(int i=0;i<gin;i++) PyBuffer_Release(in[i]); }while(0)
   if(!ok){
     SIM_RELEASE();
     if(!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError,"simulate: scale float32 (n), 1 <= kmax <= n; bands ascending, dividing n, <= 32768; with a signal tab complex64 (NF, 1 + bands, n), t int64 in [0, n), fi int32 in [0, NF) (nrows), pos int32 per statistic and side, and per band for the noise; val float32 of pos's length, off int64 (nrows + 1)");
     return NULL;
   }
-  /* the noise alone needs no bins past the highest active coarse bin */
-  const long long kfill = has_sig ? kmax : (kmax < max_band_hi ? kmax : max_band_hi);
+  /* the noise alone (or a sub-band splice with precomputed kept_mask) needs no bins past max_band_hi */
+  const long long kfill = (has_sig && !skip_fine) ? kmax : (kmax < max_band_hi ? kmax : max_band_hi);
   long long max_alpha_hi = 0;
   if(any_alpha){
     for(Py_ssize_t i=0;i<nb;i++){
@@ -1434,7 +1439,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
      unmodified n/2-point backward transform (shared directly with the widest band when
      b[nb - 1] == n / 2 and k0[nb - 1] == 0, eliminating its transform entirely), and its odd
      lags are the n/2-point transform of X[k] * exp(+2 pi i k / n). */
-  const int half_split = has_sig && n >= 128 && (n & (n - 1)) == 0 && kfill <= n / 2;
+  const int half_split = has_sig && !skip_fine && n >= 128 && (n & (n - 1)) == 0 && kfill <= n / 2;
   const long long nh = n / 2;
   const int share_widest = half_split && b[nb - 1] == nh && k0[nb - 1] == 0 && al[nb - 1] >= 1.f;
   ap_plan *pf = NULL, *ph_own = NULL, *ph = NULL, *pl[32] = {0};
@@ -1442,7 +1447,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     pl[i] = ap_create((size_t)b[i]);
     if(!pl[i]) ok=0;
   }
-  if(ok && has_sig){
+  if(ok && has_sig && !skip_fine){
     if(half_split){
       ph = share_widest ? pl[nb-1] : (ph_own = ap_create((size_t)nh));
       if(!ph) ok=0;
@@ -1487,6 +1492,8 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   if(ok && mem_ok){
     const float *scale=(const float*)sc.buf, *tab=has_sig ? (const float*)tb.buf : NULL;
     const long long *tv=has_sig ? (const long long*)tt.buf : NULL; const int *fi=has_sig ? (const int*)fib.buf : NULL;
+    const unsigned char *km=skip_fine ? (const unsigned char*)kmb.buf : NULL;
+    const Py_ssize_t s0 = (has_sig && !skip_fine) ? 0 : 1;
     const float fs=(float)fscale, keep2=(float)(keep_at*keep_at);
     Py_BEGIN_ALLOW_THREADS
     if(half_split){
@@ -1509,7 +1516,13 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
                            (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
       }
       int kept[SIM_ROWS];
-      for(int bi=0;bi<B;bi++) kept[bi]=1;
+      for(int bi=0;bi<B;bi++) kept[bi] = km ? (km[r0+bi]!=0) : 1;
+      if(skip_fine){
+        for(int bi=0;bi<B;bi++){
+          ((long long*)sob[0].buf)[r0+bi]=0;
+          ((long long*)sob[1].buf)[r0+bi]=0;
+        }
+      }
       int batch_full=0;
       if(half_split){
         /* Precompute even half-transforms Yhalf[0..B-1] once (reused at s = nb when share_widest). */
@@ -1530,7 +1543,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
             ap_fft_backward_padded(ph,X+(size_t)bi*xfloats,hv_h,Yhalf+(size_t)bi*yhfloats);
         }
       }
-      for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb && !batch_full; s++){
+      for(Py_ssize_t s = s0; s<=nb && !batch_full; s++){
         const long long m = s==0 ? n : b[s-1];
         const float g = s==0 ? fs : bs[s-1];
         if(s==0 && half_split){
@@ -1663,10 +1676,14 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
           const long long r=r0+bi;
           long long ks0[64], kn0[32];
           memcpy(ks0,ks,(size_t)ns*sizeof *ks); memcpy(kn0,kn,(size_t)nb*sizeof *kn);
-          int full=0, kept1=1;
+          int full=0, kept1 = km ? (km[r]!=0) : 1;
+          if(skip_fine){
+            ((long long*)sob[0].buf)[r]=0;
+            ((long long*)sob[1].buf)[r]=0;
+          }
           const float *Xr=X+(size_t)bi*xfloats;
           const float *Xo=Xorth ? Xorth+(size_t)bi*xorth_floats : NULL;
-          for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb && !full; s++){
+          for(Py_ssize_t s = s0; s<=nb && !full; s++){
             const long long m = s==0 ? n : b[s-1];
             const float g = s==0 ? fs : bs[s-1];
             if(!(s==0 || has_noise || kept1)){
@@ -2310,10 +2327,123 @@ static PyTypeObject RootType={
   .tp_doc="Root(n): the root stage of a hierarchical search, to a real series of n samples",
 };
 
+/* tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence
+   over an m_c-template chunk without multi-threaded BLAS wakeup overhead. */
+static PyObject *M_tier0_pair_scores(PyObject *self,PyObject *args){
+  (void)self;
+  Py_buffer ur={0},ui={0},sr={0},si={0},vc={0},r2={0},bs={0};
+  PyObject *uro,*uio,*sro,*sio,*vco,*r2o,*bso;
+  if(!PyArg_ParseTuple(args,"OOOOOOO",&uro,&uio,&sro,&sio,&vco,&r2o,&bso)) return NULL;
+  Py_buffer *bufs[7]={&ur,&ui,&sr,&si,&vc,&r2,&bs};
+  PyObject *objs[7]={uro,uio,sro,sio,vco,r2o,bso};
+  int got=0, ok=1;
+  for(int i=0;i<7;i++){
+    int flags = (i>=5) ? (PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)
+                       : (PyBUF_C_CONTIGUOUS|PyBUF_FORMAT);
+    if(PyObject_GetBuffer(objs[i],bufs[i],flags)<0){ ok=0; break; }
+    got=i+1;
+  }
+  Py_ssize_t mc=0, len=0, nsh=0;
+  if(ok){
+    ok = ur.ndim==2 && ui.ndim==2 && sr.ndim==2 && si.ndim==2
+         && vc.ndim==1 && r2.ndim==2 && bs.ndim==2
+         && ur.itemsize==4 && strcmp(ur.format,"f")==0
+         && ui.itemsize==4 && strcmp(ui.format,"f")==0
+         && sr.itemsize==4 && strcmp(sr.format,"f")==0
+         && si.itemsize==4 && strcmp(si.format,"f")==0
+         && vc.itemsize==8 && strcmp(vc.format,"d")==0
+         && r2.itemsize==4 && strcmp(r2.format,"f")==0
+         && bs.itemsize==4 && (strcmp(bs.format,"i")==0 || strcmp(bs.format,"l")==0);
+    if(ok){
+      mc=ur.shape[0]; len=ur.shape[1]; nsh=sr.shape[0];
+      ok = mc>=0 && len>=1 && nsh>=1
+           && ui.shape[0]==mc && ui.shape[1]==len
+           && sr.shape[1]==len && si.shape[0]==nsh && si.shape[1]==len
+           && vc.shape[0]==mc
+           && r2.shape[0]==mc && r2.shape[1]==mc
+           && bs.shape[0]==mc && bs.shape[1]==mc;
+    }
+  }
+  if(!ok){
+    for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pair_scores: invalid buffer shapes or dtypes");
+    return NULL;
+  }
+  float *Br=NULL, *Bi=NULL;
+  if(mc>=2){
+    const size_t nbuf=(size_t)nsh*(size_t)mc*(size_t)len;
+    Br=(float*)ap_alloc64(nbuf*sizeof(float));
+    Bi=(float*)ap_alloc64(nbuf*sizeof(float));
+    if(!Br || !Bi){
+      free(Br); free(Bi);
+      for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
+      return PyErr_NoMemory();
+    }
+  }
+  const float * restrict Urp=(const float*)ur.buf;
+  const float * restrict Uip=(const float*)ui.buf;
+  const float * restrict Srp=(const float*)sr.buf;
+  const float * restrict Sip=(const float*)si.buf;
+  const double * restrict Vcp=(const double*)vc.buf;
+  float * restrict R2p=(float*)r2.buf;
+  int32_t * restrict Bsp=(int32_t*)bs.buf;
+  Py_BEGIN_ALLOW_THREADS
+  memset(R2p,0,(size_t)mc*(size_t)mc*sizeof(float));
+  memset(Bsp,0,(size_t)mc*(size_t)mc*sizeof(int32_t));
+  if(mc>=2){
+    for(Py_ssize_t s=0;s<nsh;s++){
+      const float * restrict sr_row=Srp+(size_t)s*(size_t)len;
+      const float * restrict si_row=Sip+(size_t)s*(size_t)len;
+      for(Py_ssize_t b=0;b<mc;b++){
+        const float * restrict ur_b=Urp+(size_t)b*(size_t)len;
+        const float * restrict ui_b=Uip+(size_t)b*(size_t)len;
+        float * restrict br_sb=Br+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
+        float * restrict bi_sb=Bi+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
+        for(Py_ssize_t k=0;k<len;k++){
+          const float srk=sr_row[k], sik=si_row[k], urk=ur_b[k], uik=ui_b[k];
+          br_sb[k]=srk*urk-sik*uik;
+          bi_sb[k]=srk*uik+sik*urk;
+        }
+      }
+    }
+    for(Py_ssize_t a=0;a<mc;a++){
+      const double va=Vcp[a];
+      const float * restrict ur_a=Urp+(size_t)a*(size_t)len;
+      const float * restrict ui_a=Uip+(size_t)a*(size_t)len;
+      for(Py_ssize_t b=a+1;b<mc;b++){
+        const double vb=Vcp[b];
+        const double vmin = va<vb ? va : vb;
+        const double vmax = va>vb ? va : vb;
+        if(vmin < 0.85*vmax) continue;
+        float best_r2=-1.f;
+        int32_t best_idx=0;
+        for(Py_ssize_t s=0;s<nsh;s++){
+          const float * restrict br_sb=Br+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
+          const float * restrict bi_sb=Bi+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
+          float re=0.f, im=0.f;
+          for(Py_ssize_t k=0;k<len;k++){
+            re += ur_a[k]*br_sb[k] + ui_a[k]*bi_sb[k];
+            im += ui_a[k]*br_sb[k] - ur_a[k]*bi_sb[k];
+          }
+          const float val=re*re+im*im;
+          if(val>best_r2){ best_r2=val; best_idx=(int32_t)s; }
+        }
+        R2p[(size_t)a*(size_t)mc+(size_t)b]=best_r2;
+        Bsp[(size_t)a*(size_t)mc+(size_t)b]=best_idx;
+      }
+    }
+  }
+  Py_END_ALLOW_THREADS
+  free(Br); free(Bi);
+  for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless, dsets) -> [(earlier thresholds, earlier reach, lasts)]: gatechain._chain_candidates's search"},
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
+  {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},

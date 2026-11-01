@@ -792,6 +792,7 @@ class HierarchicalFilter(MatchedFilter):
                         cost=base_cm, max_tiers=tiers, window=self.search_window
                     )
                     best_upper = best_uncl["cost"] if best_uncl is not None else float("inf")
+                    best_b0 = int(best_uncl["chain"][0]) if best_uncl is not None else self.n
                     lb_by_b0 = {
                         int(b0): min(
                             (q["cost"] for q in lb_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
@@ -800,10 +801,11 @@ class HierarchicalFilter(MatchedFilter):
                         for b0 in cand_bands
                     }
                     ordered_b0 = sorted((int(b) for b in cand_bands), key=lambda b: (lb_by_b0[b], b))
-                    slack = 1.0 + _gatechain.TIE + 0.02
+                    tie_slack = 1.0 + _gatechain.TIE
                     for b0 in ordered_b0:
-                        if lb_by_b0[b0] > best_upper * slack:
-                            break
+                        limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
+                        if lb_by_b0[b0] >= limit:
+                            continue
                         cl = self._tier0_cluster_for_band(b0, templates=tmpl)
                         if cl is not None and math.isfinite(lb_by_b0[b0]):
                             csig_now = self._clusters_sig()
@@ -816,6 +818,7 @@ class HierarchicalFilter(MatchedFilter):
                             )
                             if cur_best is not None and cur_best["cost"] < best_upper:
                                 best_upper = cur_best["cost"]
+                                best_b0 = int(cur_best["chain"][0])
 
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())

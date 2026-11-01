@@ -360,3 +360,50 @@ def test_kill_switch_and_fallback_transitions(monkeypatch):
     res_edit = hf_on.run(binsize=n // 4, threshold=5.5)
     assert hf_on._mf.tier0_cluster_count() == 0
     assert res_edit.shape == res_off.shape
+
+
+def test_single_column_alpha_simulation_splice_equivalence():
+    """Spliced sub-band alpha draws match a direct single-band simulation on both signal and noise."""
+    n = 2048
+    power, _, _ = _make_colored_correlated_bank(n, 8, 256, seed=1234)
+    bands = [128, 256, 512, 1024]
+    alphas = (1.0, 0.96, 1.0, 1.0)
+    lag_pads = (0, 1, 0, 0)
+    win = (128, 1920)
+
+    gc._SIGNAL_RECORDS.clear()
+    gc._NOISE_RECORDS.clear()
+    gc._SIGNAL_CACHE.clear()
+    gc._NOISE_CACHE.clear()
+
+    # Spliced multi-band simulation reusing base draws
+    (c_multi, f_multi), _ = gc.signal_draws(
+        power, n, bands, snr=6.0, ndet=512, seed=77, window=win, lags_too=True,
+        alphas=alphas, _exact=True
+    )
+    n_multi = gc.noise_block_maxima(
+        power, n, bands, nsim=2048, seed=77, window=win,
+        alphas=alphas, lag_pads=lag_pads, _exact=True
+    )
+
+    # Direct unclustered columns must be bit-for-bit identical
+    (c_base, f_base), _ = gc.signal_draws(
+        power, n, bands, snr=6.0, ndet=512, seed=77, window=win, lags_too=True, _exact=True
+    )
+    n_base = gc.noise_block_maxima(
+        power, n, bands, nsim=2048, seed=77, window=win, _exact=True
+    )
+    np.testing.assert_array_equal(f_multi, f_base)
+    for col in (0, 2, 3):
+        np.testing.assert_array_equal(c_multi[:, col], c_base[:, col])
+        np.testing.assert_array_equal(n_multi[:, col], n_base[:, col])
+
+    # Direct 1-band noise simulation on b=256 with alpha=0.96, lag_pad=1 must match column 1
+    gc._NOISE_RECORDS.clear()
+    gc._NOISE_CACHE.clear()
+    n_single = gc.noise_block_maxima(
+        power, n, [256], nsim=2048, seed=77, window=win,
+        alphas=(0.96,), lag_pads=(1,), _exact=True
+    )
+    np.testing.assert_array_equal(n_multi[:, 1], n_single[:, 0])
+
