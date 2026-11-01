@@ -194,6 +194,10 @@ class HierarchicalFilter(MatchedFilter):
         self._chosen_csig = ()
         self._synced_t0 = None
         self._gt0_checked = 0
+        self._input_psd = None
+        self._psd_auto_ref = False
+        self._template_alphas = None
+        self._psd_ver = 0
         # The joint-trial arm this plan runs (_trial): DEFAULT, a lock, or a trial's arm. A plan
         # inside a bank is governed by the bank's trial and runs none of its own.
         self._arm, self._governed, self._forced = _trial.DEFAULT, False, False
@@ -299,9 +303,11 @@ class HierarchicalFilter(MatchedFilter):
         chain = ",".join(str(int(b)) for b in self._chain)
         cl = self._active_tier0_cluster(self._chain)
         ctag = "|t0=%g" % round(cl.ratio, 2) if cl is not None else ""
-        return "plan|%d|%g|%g|%d|%s|%s%s%s" % (self.n, float(self._fs_snr or self.snr), float(self.fd),
-                                               tiers, self.device, chain,
-                                               "" if self._direct_key() is None else "|direct", ctag)
+        ptag = "|psd" if self._input_psd is not None else ""
+        return "plan|%d|%g|%g|%d|%s|%s%s%s%s" % (self.n, float(self._fs_snr or self.snr), float(self.fd),
+                                                  tiers, self.device, chain,
+                                                  "" if self._direct_key() is None else "|direct",
+                                                  ctag, ptag)
 
     def _tier0_cluster_eligible(self):
         """Return True when Tier-0 coarse centroid clustering applies to this plan."""
@@ -345,7 +351,8 @@ class HierarchicalFilter(MatchedFilter):
             return None, None
         k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
         cands = _gatechain.cluster_tier0_candidates(
-            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=4
+            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=4,
+            input_psd=self._input_psd,
         )
         self._tier0_cand_cache[b] = cands
         return cands
@@ -379,7 +386,8 @@ class HierarchicalFilter(MatchedFilter):
             if forced_chain is not None and len(forced_chain) >= 2 and forced_chain[0] == b:
                 pl = _gatechain.chain_thresholds(
                     self._pending_ref, self.n, snr, self.fd, forced_chain,
-                    cost=cm_cand, window=self.search_window, tier0_cluster=cand
+                    cost=cm_cand, window=self.search_window, tier0_cluster=cand,
+                    template_alphas=self._template_alphas,
                 )
                 c_val = float("inf") if pl is None else (
                     pl["cost"] + cm_cand.feed_delta(
@@ -389,10 +397,11 @@ class HierarchicalFilter(MatchedFilter):
             else:
                 tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
                 a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
+                t0_arg = {b: cand} if self._template_alphas is not None else {b: (a_q, cand.lag_pad)}
                 _, plans = _gatechain.choose_chain(
                     self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                     cost=cm_cand, max_tiers=tiers, window=self.search_window,
-                    tier0_clusters={b: (a_q, cand.lag_pad)}
+                    tier0_clusters=t0_arg, template_alphas=self._template_alphas,
                 )
                 c_val = min(
                     (q["cost"] for q in plans if len(q["chain"]) >= 2 and q["chain"][0] == b),
@@ -503,6 +512,8 @@ class HierarchicalFilter(MatchedFilter):
             plan.set_band_offsets(list(self._desired_offsets(self._chain)))
         if self._pending_ref is not None:
             plan.set_reference(self._pending_ref)
+        if self._input_psd is not None and hasattr(plan, "set_input_psd"):
+            plan.set_input_psd(self._input_psd)
         if templates is None:
             self._load_held_templates(plan)
         else:
@@ -552,6 +563,8 @@ class HierarchicalFilter(MatchedFilter):
                 plan.set_band_offsets(list(r.offsets))
                 if self._pending_ref is not None:
                     plan.set_reference(self._pending_ref)
+                if self._input_psd is not None and hasattr(plan, "set_input_psd"):
+                    plan.set_input_psd(self._input_psd)
                 self._reload_templates()
             plan.set_thresholds(list(r.thresholds))
             self._sync_tier0_clusters(plan)
@@ -662,7 +675,7 @@ class HierarchicalFilter(MatchedFilter):
             cl0 = self._active_tier0_cluster(self._chain)
             pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
                                              self._chain, cost=cost, window=self.search_window,
-                                             tier0_cluster=cl0)
+                                             tier0_cluster=cl0, template_alphas=self._template_alphas)
             if pl is not None:
                 th = tuple(float(x) for x in pl["thresholds"])
                 for v in th:
@@ -713,13 +726,135 @@ class HierarchicalFilter(MatchedFilter):
         self._fs_snr = float(snr) if snr is not None and float(snr) > 0 else None
         self._resolved = None
 
+    def _normalize_input_psd(self, psd):
+        """Normalize an input PSD argument to a validated length-``n`` float32 array or ``None``."""
+        if psd is False:
+            return None
+        if psd is None or (isinstance(psd, str) and psd.lower() == "white"):
+            return np.ones(self.n, dtype=np.float32)
+        p = np.asarray(_from_any(psd), dtype=np.float32)
+        if p.ndim != 1:
+            raise ValueError("input PSD must be a one-dimensional array")
+        h = self.n // 2
+        if p.shape == (self.n,):
+            full = np.ascontiguousarray(p, dtype=np.float32).copy()
+        elif p.shape == (h + 1,):
+            full = np.empty(self.n, dtype=np.float32)
+            full[:h + 1] = p
+            if h > 1:
+                full[h + 1:] = p[1:h][::-1]
+        elif p.shape == (h,):
+            full = np.empty(self.n, dtype=np.float32)
+            full[:h] = p
+            full[h] = p[-1]
+            if h > 1:
+                full[h + 1:] = p[1:h][::-1]
+        else:
+            raise ValueError("input PSD must have length %d or %d, got %s"
+                             % (self.n, h + 1, p.shape))
+        if not np.isfinite(full).all() or np.any(full < 0) or not np.any(full > 0):
+            raise ValueError("input PSD must be finite, nonnegative, with positive total power")
+        return full
+
+    def _templates_for_psd(self):
+        """Return currently held template spectra on CPU or GPU without forcing a plan build."""
+        t = self._templates_for_clustering()
+        if t is not None:
+            return t
+        t = self._held_templates
+        if isinstance(t, list):
+            rows = [x for x in t if x is not None]
+            if rows:
+                return np.asarray(rows, dtype=np.complex64)
+        gtmpl = getattr(self, "_gtmpl", None)
+        if isinstance(gtmpl, np.ndarray):
+            return gtmpl
+        return None
+
+    def _refresh_psd_model(self, templates=None):
+        """Recompute the bank-mean output profile (if auto-managed) and per-template band alphas."""
+        if self._input_psd is None:
+            self._template_alphas = None
+            if self._psd_auto_ref:
+                self._pending_ref = None
+                self._psd_auto_ref = False
+            return
+        tmpl = self._templates_for_psd() if templates is None else templates
+        if tmpl is None:
+            self._template_alphas = None
+            return
+        explicit_ref = None if (self._pending_ref is None or self._psd_auto_ref) else self._pending_ref
+        bar_p, t_alphas = _gatechain.compute_psd_template_model(
+            tmpl, self._input_psd, self.n, hermitian=self._hermitian, power=explicit_ref
+        )
+        self._template_alphas = t_alphas
+        if explicit_ref is None and bar_p is not None:
+            self._pending_ref = bar_p
+            self._psd_auto_ref = True
+
+    def set_input_psd(self, psd=None):
+        """Set the input noise power spectral density for per-template coarse variance equalization.
+
+        When enabled, each template's coarse-band power fraction is weighted by ``psd`` and
+        normalized individually by ``1 / sqrt(f_{t,i})`` so every template and Tier-0 centroid
+        has unit coarse noise variance, while gate calibration draws signal and noise amplitudes
+        across the heterogeneous template distribution. When no explicit reference has been set
+        via :meth:`set_reference`, the bank-mean output power profile is derived automatically
+        once templates are loaded.
+
+        Parameters
+        ----------
+        psd : array_like, str, bool, or None, optional
+            Per-bin input noise PSD of length ``n`` (two-sided or one-sided padded) or
+            ``n // 2 + 1`` (one-sided non-negative frequencies). Pass ``None`` or ``"white"``
+            (default) for flat unit-variance white input noise, or ``False`` to disable
+            per-template PSD normalization.
+
+        Returns
+        -------
+        None
+        """
+        norm_psd = self._normalize_input_psd(psd)
+        if norm_psd is None and self._input_psd is None:
+            return
+        if (norm_psd is not None and self._input_psd is not None
+                and np.array_equal(norm_psd, self._input_psd)):
+            return
+        self._input_psd = norm_psd
+        self._psd_ver += 1
+        self._resolved = None
+        self._tier0_clusters = {}
+        self._tier0_cand_cache = {}
+        self._synced_t0 = None
+        if self._gpu is not None:
+            self._tdirty = True
+            self._ckey = None
+            self.__dict__.pop("_call_plans", None)
+
+        # Recompute bank-mean profile and per-template band signal-retention factors
+        self._refresh_psd_model()
+        if self._pinned is None and self._chain is not None and self._cal_thr is None:
+            self._chain = None
+            self._mf = None
+            return
+        if self._mf is not None:
+            if hasattr(self._mf, "set_band_offsets"):
+                self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
+            if self._pending_ref is not None:
+                self._mf.set_reference(self._pending_ref)
+            else:
+                self._mf.set_reference(None)
+            if hasattr(self._mf, "set_input_psd"):
+                self._mf.set_input_psd(self._input_psd)
+            self._reload_templates()
+
     def set_reference(self, power):
         """Set the reference SNR distribution: expected power per bin of the filter output.
 
         Only its shape matters. The profile must describe every template in
         this plan. Pass ``None`` to use each template's own band fraction
-        (explicit thresholds only). Changing it recalibrates the thresholds of
-        the chain in use.
+        (explicit thresholds only, unless :meth:`set_input_psd` is active).
+        Changing it recalibrates the thresholds of the chain in use.
         """
         if power is not None:
             p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
@@ -727,7 +862,12 @@ class HierarchicalFilter(MatchedFilter):
                 raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
             if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
                 raise ValueError("reference must be finite, nonnegative, with positive total power")
-            if self._pending_ref is not None and np.array_equal(p, self._pending_ref):
+            if (self._pending_ref is not None and not self._psd_auto_ref
+                    and np.array_equal(p, self._pending_ref)):
+                return
+            if (self._pending_ref is not None and self._psd_auto_ref
+                    and np.array_equal(p, self._pending_ref)):
+                self._psd_auto_ref = False
                 return
         self._resolved = None
         if self._gpu is not None:
@@ -736,20 +876,28 @@ class HierarchicalFilter(MatchedFilter):
             self.__dict__.pop("_call_plans", None)
         if power is None:
             self._pending_ref = None
+            self._psd_auto_ref = False
             self._tier0_clusters = {}
             self._tier0_cand_cache = {}
             self._synced_t0 = None
+            if self._input_psd is not None:
+                self._refresh_psd_model()
             if self._mf is not None:
                 if hasattr(self._mf, "set_band_offsets"):
                     self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
-                self._mf.set_reference(None)
+                self._mf.set_reference(self._pending_ref)
                 self._reload_templates()
             return
+        self._psd_auto_ref = False
         self._pending_ref = p.copy()
         self._tier0_clusters = {}
         self._tier0_cand_cache = {}
         self._synced_t0 = None
-        if self._pinned is None and self._chain is not None and (self._chosen_csig or self._tier0_cluster_eligible()):
+        if self._input_psd is not None:
+            self._refresh_psd_model()
+        if (self._pinned is None and self._chain is not None
+                and (self._chosen_csig or self._tier0_cluster_eligible()
+                     or (self._input_psd is not None and self._cal_thr is None))):
             self._chain = None
             self._mf = None
         if self._mf is not None:
@@ -857,11 +1005,13 @@ class HierarchicalFilter(MatchedFilter):
                     opt_cm = base_cm.with_tier0_cluster({int(b): 0.25 for b in cand_bands})
                     _, lb_plans = _gatechain.choose_chain(
                         self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
-                        cost=opt_cm, max_tiers=tiers, window=self.search_window
+                        cost=opt_cm, max_tiers=tiers, window=self.search_window,
+                        template_alphas=self._template_alphas,
                     )
                     best_uncl, uncl_plans = _gatechain.choose_chain(
                         self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
-                        cost=base_cm, max_tiers=tiers, window=self.search_window
+                        cost=base_cm, max_tiers=tiers, window=self.search_window,
+                        template_alphas=self._template_alphas,
                     )
                     best_upper = best_uncl["cost"] if best_uncl is not None else float("inf")
                     best_b0 = int(best_uncl["chain"][0]) if best_uncl is not None else self.n
@@ -899,12 +1049,15 @@ class HierarchicalFilter(MatchedFilter):
                         for cand in cands:
                             self._tier0_clusters[b0] = cand
                             csig_now = self._clusters_sig()
-                            t0_now = {b: (a, lp) for b, _, a, lp in csig_now}
+                            if self._template_alphas is not None:
+                                t0_now = {b: c for b, c in self._tier0_clusters.items() if c is not None}
+                            else:
+                                t0_now = {b: (a, lp) for b, _, a, lp in csig_now}
                             cm_now = base_cm.with_tier0_cluster({b: r for b, r, _, _ in csig_now})
                             cur_best, cur_plans = _gatechain.choose_chain(
                                 self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                 cost=cm_now, max_tiers=tiers, window=self.search_window,
-                                tier0_clusters=t0_now
+                                tier0_clusters=t0_now, template_alphas=self._template_alphas,
                             )
                             cand_b0_cost = min(
                                 (q["cost"] for q in cur_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
@@ -928,14 +1081,25 @@ class HierarchicalFilter(MatchedFilter):
                _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct)
         if csig:
             key = key + (csig,)
+        if self._template_alphas is not None and self._cal_thr is None:
+            t0_mtags = tuple(
+                (b, _gatechain._alpha_key_token(cl.member_alphas))
+                for b, cl in sorted(self._tier0_clusters.items())
+                if cl is not None and cl.member_alphas is not None
+            )
+            key = key + (("tal", _gatechain._alpha_key_token(self._template_alphas[1]), t0_mtags),)
         with _AUTOTUNE_LOCK:
             hit = _chains._CHAIN_CHOICE.get(key)
         if hit is None:
-            t0_choice = {b: (a, lp) for b, _, a, lp in csig} if csig else None
+            if self._template_alphas is not None and csig:
+                t0_choice = {b: cl for b, cl in self._tier0_clusters.items() if cl is not None}
+            else:
+                t0_choice = {b: (a, lp) for b, _, a, lp in csig} if csig else None
             best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                                   cost=self._cost_model(), max_tiers=tiers,
                                                   window=self.search_window,
-                                                  tier0_clusters=t0_choice)
+                                                  tier0_clusters=t0_choice,
+                                                  template_alphas=self._template_alphas)
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
             hit = (tuple(best["chain"]), tuple(tuple(q["chain"]) for q in plans))
@@ -1006,23 +1170,42 @@ class HierarchicalFilter(MatchedFilter):
                 self._chain, self._mf, self._resolved = None, None, None
                 self._ckey = None
                 self.__dict__.pop("_call_plans", None)
-            return super().set_templates(spectra, index=index)
+            if self._gpu is None and self._input_psd is not None and self._pending_ref is None:
+                row = np.atleast_2d(np.asarray(_from_any(spectra), dtype=np.complex64))
+                self._refresh_psd_model(templates=row)
+            out = super().set_templates(spectra, index=index)
+            if self._input_psd is not None:
+                self._refresh_psd_model()
+                if self._cal_thr is None:
+                    self._resolved = None
+                if self._pinned is None and self._chain is not None and self._cal_thr is None:
+                    self._chain, self._mf = None, None
+                elif self._mf is not None and self._psd_auto_ref and self._pending_ref is not None:
+                    if hasattr(self._mf, "set_band_offsets"):
+                        self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
+                    self._mf.set_reference(self._pending_ref)
+                    if hasattr(self._mf, "set_input_psd"):
+                        self._mf.set_input_psd(self._input_psd)
+                    self._reload_templates()
+            return out
         if self._gpu is not None:
-            super().set_templates(spectra, index=None)
+            out = super().set_templates(spectra, index=None)
             self._clusters_allowed = True
             self._tier0_clusters = {}
             self._tier0_cand_cache = {}
             self._synced_t0 = None
             self._ckey = None
             self.__dict__.pop("_call_plans", None)
+            if self._input_psd is not None:
+                self._refresh_psd_model()
             if self._cal_thr is None:
                 self._resolved = None
-            if self._pinned is None and self._chain is not None and (
-                self._chosen_csig or self._tier0_cluster_eligible()
-            ):
+            if (self._pinned is None and self._chain is not None
+                    and (self._chosen_csig or self._tier0_cluster_eligible()
+                         or (self._input_psd is not None and self._cal_thr is None))):
                 self._chain = None
                 self._mf = None
-            return
+            return out
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
         if a.ndim != 2:
             raise ValueError(f"expected 2D array of spectra, got {a.shape}")
@@ -1040,9 +1223,13 @@ class HierarchicalFilter(MatchedFilter):
         self._tier0_clusters = {}
         self._tier0_cand_cache = {}
         self._synced_t0 = None
+        if self._input_psd is not None:
+            self._refresh_psd_model(templates=a)
         if self._cal_thr is None:
             self._resolved = None
-        if self._pinned is None and self._chain is not None and (self._chosen_csig or self._tier0_cluster_eligible()):
+        if (self._pinned is None and self._chain is not None
+                and (self._chosen_csig or self._tier0_cluster_eligible()
+                     or (self._input_psd is not None and self._cal_thr is None))):
             self._chain = None
             self._mf = None
         rebuild = self._mf is None or getattr(self._mf, 'k', self.n) != k
@@ -1055,6 +1242,10 @@ class HierarchicalFilter(MatchedFilter):
         try:
             plan = self._ensure(templates=a)
             if not rebuild:
+                if self._input_psd is not None and self._psd_auto_ref and self._pending_ref is not None:
+                    if hasattr(plan, "set_band_offsets"):
+                        plan.set_band_offsets(list(self._desired_offsets(self._chain)))
+                    plan.set_reference(self._pending_ref)
                 plan.set_template_batch(0, a)
                 self._sync_tier0_clusters(plan)
         finally:
@@ -1111,6 +1302,12 @@ class HierarchicalFilter(MatchedFilter):
                 self.__dict__.pop("_call_plans", None)
                 if self._pinned is None and self._chain is not None and self._chosen_csig:
                     self._chain, self._mf = None, None
+            if self._input_psd is not None:
+                self._refresh_psd_model()
+                if self._pinned is None and self._chain is not None and self._cal_thr is None:
+                    self._chain, self._mf = None, None
+                elif self._mf is not None and self._psd_auto_ref and self._pending_ref is not None:
+                    self._mf.set_reference(self._pending_ref)
         if self._mf is not None:
             self._mf.set_hermitian(self._hermitian)
         # The GPU kernels take full spectra: half-length templates were unpacked when
@@ -1144,11 +1341,16 @@ class HierarchicalFilter(MatchedFilter):
         offsets = (0,) * len(bands) if offsets is None else offsets
         out = []
         power = total = None
+        per_template = f is None or self._input_psd is not None
         for i, (b, k0) in enumerate(zip(bands, offsets)):
             k0, khi = _gatechain._band_slice(self.n, b, k0)
-            if f is None:
+            if per_template:
                 if power is None:
-                    power = H.real * H.real + H.imag * H.imag
+                    power = (H.real.astype(np.float64) * H.real.astype(np.float64)
+                             + H.imag.astype(np.float64) * H.imag.astype(np.float64))
+                    if self._input_psd is not None:
+                        psd_w = np.asarray(self._input_psd[:H.shape[1]], dtype=np.float64)
+                        power = power * psd_w[None, :]
                     total = power.sum(axis=1, dtype=np.float64)
                 frac = np.divide(power[:, k0:khi].sum(axis=1, dtype=np.float64), total,
                                  out=np.zeros_like(total), where=total > 0)
@@ -1186,7 +1388,7 @@ class HierarchicalFilter(MatchedFilter):
                 and (self._gtmpl is None or H.ctypes.data == self._gtmpl.ctypes.data))
             else None
         )
-        ck = (chain, offsets, f, H.ctypes.data, H.shape, None if cl is None else id(cl))
+        ck = (chain, offsets, f, self._psd_ver, H.ctypes.data, H.shape, None if cl is None else id(cl))
         if getattr(self, "_ckey", None) != ck or self._tdirty:
             if cl is not None:
                 ct1 = self._coarse_templates(

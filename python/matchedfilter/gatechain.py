@@ -43,7 +43,7 @@ import os
 from contextlib import contextmanager
 from collections import OrderedDict
 from itertools import combinations
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import hashlib
 import numpy as np
@@ -106,6 +106,7 @@ class Tier0Cluster(NamedTuple):
     lag_pad: int
     ratio: float
     alpha: float
+    member_alphas: Optional[np.ndarray] = None
 
 
 def _band_slice(n, b, k0):
@@ -116,7 +117,9 @@ def _band_slice(n, b, k0):
     return k0, min(k0 + int(b), int(n) // 2)
 
 
-def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4):
+def cluster_tier0_candidates(
+    spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4, input_psd=None
+):
     """Build Pass-1 (``k <= 2``) and optional Pass-2 (``k <= max_arity``) Tier-0 centroid banks.
 
     Parameters
@@ -135,6 +138,11 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
     max_arity : int, optional
         Maximum cluster arity for Pass 2 in ``{2, 3, 4}`` (default ``4``).
+    input_psd : array_like, optional
+        Known per-bin input noise PSD ``S_x[k]`` (default ``None``). When provided,
+        each template ``t`` is normalized by its own ``1 / sqrt(f_{t,0})`` using exact
+        ``S_x[k]`` weights so both merged centroids and singletons have unit coarse
+        noise variance.
 
     Returns
     -------
@@ -163,16 +171,29 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     if f0 <= 0.0:
         return None, None
 
-    # Estimate scale-free inverse-PSD weights W_k from p_ref / mean_t |H_t[k]|^2
     H_band = np.asarray(H[:, k_lo:k_hi], dtype=np.complex128)
-    scale = 1.0 / math.sqrt(f0)
-    C = H_band * scale
     h_pow = H_band.real * H_band.real + H_band.imag * H_band.imag
-    m_bin = h_pow.mean(axis=0)
-    m_max = float(m_bin.max())
-    if m_max <= 0.0:
-        return None, None
-    W = p_band / np.maximum(m_bin, 1e-6 * m_max)
+    if input_psd is not None:
+        # Exact per-template whitened coarse normalization under known input PSD S_x[k]
+        psd_w = np.asarray(input_psd, dtype=np.float64)[:H.shape[1]]
+        if psd_w.shape[0] < k_hi:
+            return None, None
+        full_pow = ((H.real.astype(np.float64) ** 2 + H.imag.astype(np.float64) ** 2)
+                    * psd_w[None, :]).sum(axis=1)
+        W = np.asarray(psd_w[k_lo:k_hi], dtype=np.float64)
+        band_pow = np.sum(h_pow * W[None, :], axis=1)
+        f_t0 = np.divide(band_pow, full_pow, out=np.zeros_like(band_pow), where=full_pow > 0.0)
+        sc_t = np.divide(1.0, np.sqrt(f_t0), out=np.zeros_like(f_t0), where=f_t0 > 0.0)
+        C = H_band * sc_t[:, None]
+    else:
+        # Estimate scale-free inverse-PSD weights W_k from p_ref / mean_t |H_t[k]|^2
+        scale = 1.0 / math.sqrt(f0)
+        C = H_band * scale
+        m_bin = h_pow.mean(axis=0)
+        m_max = float(m_bin.max())
+        if m_max <= 0.0:
+            return None, None
+        W = p_band / np.maximum(m_bin, 1e-6 * m_max)
     sqrt_W = np.sqrt(W)
     c_pow = C.real * C.real + C.imag * C.imag
     v = np.sum(c_pow * W[None, :], axis=1)
@@ -353,7 +374,8 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         raw_a = float(np.mean(alphas_arr) - 0.5 * np.std(alphas_arr))
         eff_a = max(0.5, min(1.0, math.floor(raw_a * 50.0 + 1e-9) / 50.0))
         return Tier0Cluster(specs=specs_out, offsets=offs_i32, members=mems_i32,
-                            lag_pad=lpad, ratio=rat, alpha=eff_a)
+                            lag_pad=lpad, ratio=rat, alpha=eff_a,
+                            member_alphas=alphas_arr.astype(np.float32))
 
     pair_a_list, pair_b_list, pair_dl_list = _run_chunked_matching(
         perm, nt, U64, v, floor2
@@ -637,7 +659,9 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     return cl_k2, cl_hi
 
 
-def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=2):
+def cluster_tier0_templates(
+    spectra, power, n, band, k0=0, rho_min=0.90, max_arity=2, input_psd=None
+):
     """Build a lag-and-phase-aligned Tier-0 coarse centroid bank up to ``max_arity``.
 
     Parameters
@@ -656,21 +680,141 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_ari
         Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
     max_arity : int, optional
         Maximum templates merged into a single centroid in ``{2, 3, 4}`` (default ``2``).
+    input_psd : array_like, optional
+        Known per-bin input noise PSD ``S_x[k]`` (default ``None``).
 
     Returns
     -------
     Tier0Cluster or None
         Precomputed centroid spectra ``(nt0, b0)``, CSR ``offsets`` ``(nt0 + 1,)``,
         ``members`` ``(nt,)``, coarse window ``lag_pad``, quantized count ``ratio``,
-        and conservative signal-retention factor ``alpha``, or ``None`` when ``nt < 2``
-        or fewer than 15% of templates merge.
+        conservative signal-retention factor ``alpha``, and per-template ``member_alphas``,
+        or ``None`` when ``nt < 2`` or fewer than 15% of templates merge.
     """
     cl_k2, cl_hi = cluster_tier0_candidates(
-        spectra, power, n, band, k0=k0, rho_min=rho_min, max_arity=max_arity
+        spectra, power, n, band, k0=k0, rho_min=rho_min, max_arity=max_arity,
+        input_psd=input_psd,
     )
     if int(max_arity) <= 2 or cl_hi is None:
         return cl_k2
     return cl_hi
+
+
+def compute_psd_template_model(spectra, input_psd, n, hermitian=False, power=None, floor=_MIN_BAND):
+    """Compute bank-mean output profile and per-template coarse retention matrix under `input_psd`.
+
+    Parameters
+    ----------
+    spectra : array_like
+        Complex frequency-domain template bank of shape ``(nt, k_bins)``.
+    input_psd : array_like
+        Per-bin input noise PSD ``S_x[k]`` of length ``>= k_bins``.
+    n : int
+        Full fine FFT block length.
+    hermitian : bool, optional
+        Whether ``spectra`` uses half-length Hermitian packing (``k_bins == n // 2`` with
+        Nyquist packed in DC's imaginary part; default ``False``).
+    power : array_like, optional
+        Explicit length-``n`` reference profile override (default ``None``, which uses
+        the bank-mean output profile ``bar_p``).
+    floor : int, optional
+        Smallest candidate coarse band (default ``_MIN_BAND``).
+
+    Returns
+    -------
+    tuple
+        ``(bar_p, template_alphas)`` where ``bar_p`` is the length-``n`` float32 bank-mean
+        output power profile (or ``None`` if all templates are zero) and ``template_alphas``
+        is ``(cand_bands, alphas_2d)`` with ``alphas_2d`` of shape ``(nt, len(cand_bands))``
+        float32 (or ``None`` when ``nt < 2`` or all templates match ``ref_p``).
+    """
+    n = int(n)
+    H = np.asarray(spectra)
+    if H.ndim != 2 or H.shape[0] < 1:
+        return None, None
+    nt, k_bins = int(H.shape[0]), int(H.shape[1])
+    psd_full = np.asarray(input_psd, dtype=np.float64)
+    if psd_full.ndim != 1 or psd_full.shape[0] < k_bins:
+        return None, None
+
+    # Build per-template normalized length-n output power profiles matching hmf.c folding
+    p_t = np.zeros((nt, n), dtype=np.float64)
+    if k_bins == n // 2 and hermitian:
+        w0 = psd_full[0]
+        wn = psd_full[k_bins] if psd_full.shape[0] > k_bins else psd_full[k_bins - 1]
+        w_pos = psd_full[1:k_bins]
+        w_neg = (psd_full[k_bins + 1:n][::-1]
+                 if psd_full.shape[0] >= n else psd_full[1:k_bins])
+        rsq = (H[:, 1:k_bins].real.astype(np.float64) ** 2
+               + H[:, 1:k_bins].imag.astype(np.float64) ** 2)
+        dc_pow = w0 * (H[:, 0].real.astype(np.float64) ** 2)
+        nyq_pow = wn * (H[:, 0].imag.astype(np.float64) ** 2)
+        pos_pow = rsq * w_pos[None, :]
+        neg_pow = rsq * w_neg[None, :]
+        tot = dc_pow + nyq_pow + pos_pow.sum(axis=1) + neg_pow.sum(axis=1)
+        valid = tot > 0.0
+        if not np.any(valid):
+            return None, None
+        inv_tot = np.zeros(nt, dtype=np.float64)
+        inv_tot[valid] = 1.0 / tot[valid]
+        p_t[valid, 0] = dc_pow[valid] * inv_tot[valid]
+        p_t[valid, 1:k_bins] = pos_pow[valid] * inv_tot[valid, None]
+        p_t[valid, k_bins] = nyq_pow[valid] * inv_tot[valid]
+        p_t[valid, k_bins + 1:] = (neg_pow[valid] * inv_tot[valid, None])[:, ::-1]
+    else:
+        psd_w = psd_full[:k_bins]
+        raw_pow = ((H.real.astype(np.float64) ** 2 + H.imag.astype(np.float64) ** 2)
+                   * psd_w[None, :])
+        tot = raw_pow.sum(axis=1)
+        valid = tot > 0.0
+        if not np.any(valid):
+            return None, None
+        p_t[valid, :k_bins] = raw_pow[valid] / tot[valid, None]
+
+    bar_p64 = p_t[valid].mean(axis=0)
+    bar_sum = float(bar_p64.sum())
+    if bar_sum <= 0.0:
+        return None, None
+    bar_p64 /= bar_sum
+    if not np.all(valid):
+        p_t[~valid] = bar_p64
+    bar_p = bar_p64.astype(np.float32)
+
+    if nt < 2 and power is None:
+        return bar_p, None
+    ref_p = bar_p64 if power is None else _norm_profile(power, n)
+    c_bands = candidate_bands(n, floor)
+    if not c_bands:
+        return bar_p, None
+
+    # Separate per-template signal retention (amp * scalloping) from fine-coarse noise correlation
+    sig_alphas = np.ones((nt, len(c_bands)), dtype=np.float32)
+    noise_alphas = np.ones((nt, len(c_bands)), dtype=np.float32)
+    trapz_w = np.array([0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5], dtype=np.float64) / 8.0
+    for j, b in enumerate(c_bands):
+        k0 = band_offset(ref_p, n, b)
+        k_lo, k_hi = _band_slice(n, b, k0)
+        f_bar = float(ref_p[k_lo:k_hi].sum())
+        if f_bar <= 0.0:
+            continue
+        q_t = p_t[:, k_lo:k_hi]
+        f_t = q_t.sum(axis=1)
+        amp_ratio = np.sqrt(np.maximum(f_t, 0.0) / f_bar)
+        ds = np.linspace(0.0, (n // b) / 2.0, 9)
+        k_idx = np.arange(k_lo, k_hi, dtype=np.float64)
+        exp_mat = np.exp((2j * np.pi / n) * np.outer(k_idx, ds))
+        g_bar = np.abs((ref_p[k_lo:k_hi] / f_bar) @ exp_mat)
+        q_norm = np.divide(q_t, f_t[:, None], out=np.zeros_like(q_t), where=f_t[:, None] > 0.0)
+        g_t = np.abs(q_norm @ exp_mat)
+        scal_ratio = (g_t / np.maximum(g_bar[None, :], 1e-6)) @ trapz_w
+        scal_ratio = np.where(f_t > 0.0, scal_ratio, 1.0)
+        sig_alphas[:, j] = (amp_ratio * scal_ratio).astype(np.float32)
+        noise_alphas[:, j] = np.minimum(1.0, amp_ratio).astype(np.float32)
+
+    alphas = np.stack([sig_alphas, noise_alphas], axis=0)
+    if np.allclose(alphas, 1.0, atol=1e-3):
+        return bar_p, None
+    return bar_p, (tuple(int(b) for b in c_bands), alphas)
 
 
 def band_offset(power, n, b):
@@ -877,6 +1021,49 @@ _ARRIVAL_ROWS = 1 << 14
 _SIGNAL_RECORDS = OrderedDict()
 
 
+def _is_alpha_matrix(alphas):
+    return isinstance(alphas, np.ndarray) and alphas.ndim in (2, 3)
+
+
+def _alpha_key_token(alphas):
+    """Hashable cache token for `alphas` (tuple of scalars, 1D/2D/3D ndarray, or None)."""
+    if alphas is None:
+        return None
+    if isinstance(alphas, np.ndarray):
+        return ("arr", alphas.shape, hashlib.sha1(np.ascontiguousarray(alphas).tobytes()).digest())
+    return alphas
+
+
+def _select_template_alphas(template_alphas, bands):
+    """Align `(src_bands, alphas)` or `(nt, nb)` / `(2, nt, nb)` matrix onto `bands`, or `None`."""
+    if template_alphas is None:
+        return None
+    if isinstance(template_alphas, tuple) and len(template_alphas) == 2:
+        src_bands, mat = template_alphas
+        idx_map = {int(b): j for j, b in enumerate(src_bands)}
+        if not all(int(b) in idx_map for b in bands):
+            return None
+        cols = [idx_map[int(b)] for b in bands]
+        return np.ascontiguousarray(mat[..., cols], dtype=np.float32)
+    if _is_alpha_matrix(template_alphas) and template_alphas.shape[-1] == len(bands):
+        return np.ascontiguousarray(template_alphas, dtype=np.float32)
+    return None
+
+
+def _combine_tier0_alphas(base_mat, bands, b0, sp, scalar_alpha):
+    """Combine per-template `base_mat` (or None) with Tier-0 cluster retention on band `b0`."""
+    if base_mat is None:
+        return tuple(scalar_alpha if b == b0 else 1.0 for b in bands)
+    out = np.array(base_mat, dtype=np.float32, copy=True)
+    col = bands.index(b0)
+    m_al = getattr(sp, "member_alphas", None)
+    if isinstance(m_al, np.ndarray) and m_al.shape == (out.shape[-2],):
+        out[..., col] *= m_al.astype(np.float32)
+    else:
+        out[..., col] *= np.float32(scalar_alpha)
+    return out
+
+
 def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=False,
                  alphas=None, _exact=False):
     """Joint draws of every band's coarse window maximum and the fine window maximum under a
@@ -911,6 +1098,10 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     if alphas is None:
         bands = sorted(int(b) for b in bands)
         al = None
+    elif _is_alpha_matrix(alphas):
+        order = np.argsort([int(b) for b in bands], kind="stable")
+        bands = [int(bands[i]) for i in order]
+        al = np.ascontiguousarray(np.round(alphas[..., order], 4), dtype=np.float32)
     else:
         ba = sorted((int(b), float(a)) for b, a in zip(bands, alphas))
         bands = [b for b, _ in ba]
@@ -922,7 +1113,8 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
         return None          # a band holding no power cannot gate; callers drop such bands (usable_bands)
     lags = _engine_lags(n, bands, window)
     ndet = int(ndet)
-    extra = (k0s, al) if al is not None else ((k0s,) if any(k0s) else ())
+    al_tok = _alpha_key_token(al)
+    extra = (k0s, al_tok) if al_tok is not None else ((k0s,) if any(k0s) else ())
     if _exact:
         extra = extra + ("exact",)
     key = _key(p, n, bands, float(snr), ndet, int(seed), lags, _NF, *extra)
@@ -991,10 +1183,15 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _ex
     Extended in place when a request needs more kept draws: a row's draws depend only on its
     row, so the draws are those of one simulation run at once."""
     k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
-    al = tuple(float(a) for a in alphas) if (alphas is not None and any(a < 1.0 for a in alphas)) else None
-    sub_idx = [i for i, a in enumerate(al) if a < 1.0] if al is not None else []
+    if _is_alpha_matrix(alphas):
+        al = np.ascontiguousarray(alphas, dtype=np.float32)
+        sub_idx = []
+    else:
+        al = tuple(float(a) for a in alphas) if (alphas is not None and any(a < 1.0 for a in alphas)) else None
+        sub_idx = [i for i, a in enumerate(al) if a < 1.0] if al is not None else []
     use_base = 0 < len(sub_idx) < len(bands)
-    extra = (k0s, al) if al is not None else ((k0s,) if any(k0s) else ())
+    al_tok = _alpha_key_token(al)
+    extra = (k0s, al_tok) if al_tok is not None else ((k0s,) if any(k0s) else ())
     key = _key(p, n, bands, snr, seed, _NF, *extra)
     sim = _SIGNAL_RECORDS.get(key)
     if sim is not None:
@@ -1035,7 +1232,8 @@ def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None, alphas=None):
         k0s = tuple(int(x) for x in k0s)
     if alphas is None:
         alphas = sim.get("alphas")
-    sub_idx = [i for i, a in enumerate(alphas) if a < 1.0] if alphas is not None else []
+    is_mat = _is_alpha_matrix(alphas)
+    sub_idx = [] if (alphas is None or is_mat) else [i for i, a in enumerate(alphas) if a < 1.0]
     if 0 < len(sub_idx) < len(bands):
         base = _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=k0s, alphas=None, _exact=True)
         target_rows = base["rows"]
@@ -1107,7 +1305,7 @@ def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None, alphas=None):
                 qm[:, k_lo:k_hi] = q[:, k_lo:k_hi]
             prev_lo, prev_hi = k_lo, k_hi
             scale_s = n * snr / np.sqrt(f)
-            if alphas is not None and alphas[s - 1] < 1.0:
+            if alphas is not None and not is_mat and alphas[s - 1] < 1.0:
                 scale_s *= float(alphas[s - 1])
             resp = np.fft.ifft(qm, axis=1) * scale_s
             R = n // m
@@ -1122,7 +1320,8 @@ def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None, alphas=None):
     # overshoots stays for a later request. The model's noise blocks (_NOISE_BLOCKS) are the
     # first rows' noise alone, recorded as they run (a third of a row's work): later rows'
     # are left to noise_block_maxima, which simulates them should a request read that far.
-    extra = (k0s, alphas) if alphas is not None else ((k0s,) if any(k0s) else ())
+    al_tok = _alpha_key_token(alphas)
+    extra = (k0s, al_tok) if al_tok is not None else ((k0s,) if any(k0s) else ())
     nkey = _key(p, n, bands, seed, *extra)
     km_cur = sim.get("keep_mask")
     kms = [np.empty(0, np.uint8) if km_cur is None else km_cur]
@@ -1262,8 +1461,11 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     val may be views of arrays a few percent longer."""
     from . import _core
     k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
-    al_arg = (tuple(float(a) for a in alphas)
-              if (alphas is not None and any(float(a) < 1.0 for a in alphas)) else None)
+    if _is_alpha_matrix(alphas):
+        al_arg = np.ascontiguousarray(alphas, dtype=np.float32)
+    else:
+        al_arg = (tuple(float(a) for a in alphas)
+                  if (alphas is not None and any(float(a) < 1.0 for a in alphas)) else None)
     if kept_mask is None:
         if al_arg is not None:
             sim_extra = (k0s, al_arg)
@@ -1380,9 +1582,14 @@ def _noise_records(p, n, bands, nsim, seed, k0s=None, alphas=None):
         k0s = tuple(band_offset(p, n, b) for b in bands)
     else:
         k0s = tuple(int(x) for x in k0s)
-    al = tuple(float(a) for a in alphas) if (alphas is not None and any(a < 1.0 for a in alphas)) else None
-    sub_idx = [i for i, a in enumerate(al) if a < 1.0] if al is not None else []
-    extra = (k0s, al) if al is not None else ((k0s,) if any(k0s) else ())
+    if _is_alpha_matrix(alphas):
+        al = np.ascontiguousarray(alphas, dtype=np.float32)
+        sub_idx = []
+    else:
+        al = tuple(float(a) for a in alphas) if (alphas is not None and any(a < 1.0 for a in alphas)) else None
+        sub_idx = [i for i, a in enumerate(al) if a < 1.0] if al is not None else []
+    al_tok = _alpha_key_token(al)
+    extra = (k0s, al_tok) if al_tok is not None else ((k0s,) if any(k0s) else ())
     key = _key(p, n, bands, seed, *extra)
     hit = _NOISE_RECORDS.get(key)
     if hit is not None:
@@ -1430,6 +1637,12 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
         bands = sorted(int(b) for b in bands)
         al = None
         lps = (0,) * len(bands)
+    elif _is_alpha_matrix(alphas):
+        lp_in = (0,) * len(bands) if lag_pads is None else lag_pads
+        order = np.argsort([int(b) for b in bands], kind="stable")
+        bands = [int(bands[i]) for i in order]
+        al = np.ascontiguousarray(np.round(alphas[..., order], 4), dtype=np.float32)
+        lps = tuple(max(0, int(lp_in[i])) for i in order)
     else:
         al_in = (1.0,) * len(bands) if alphas is None else alphas
         lp_in = (0,) * len(bands) if lag_pads is None else lag_pads
@@ -1439,7 +1652,8 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
         al = al_raw if any(a < 1.0 for a in al_raw) else None
         lps = tuple(max(0, lp) for _, _, lp in bal)
     k0s = tuple(band_offset(p, n, b) for b in bands)
-    extra = (k0s, al) if al is not None else ((k0s,) if any(k0s) else ())
+    al_tok = _alpha_key_token(al)
+    extra = (k0s, al_tok) if al_tok is not None else ((k0s,) if any(k0s) else ())
     if _exact:
         extra = extra + ("exact",)
     win = (0, n) if window is None else (int(window[0]), int(window[1]))
@@ -2439,7 +2653,7 @@ def _cached_band_offsets(p, sig_p, n, floor):
 
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
-                 ntemplates=None, nsamp=None, tier0_clusters=None):
+                 ntemplates=None, nsamp=None, tier0_clusters=None, template_alphas=None):
     """Price every chain and return (best, all plans sorted by cost): plan_chain's plans,
     ranked by their searched cost, (None, []) when none can be planned. nsamp: the
     detections to draw (default: model_draws').
@@ -2461,9 +2675,12 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
             t0_map[int(b)] = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
     sig_p = _gm._profile_sig(p)
     c_bands, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
+    base_mat = _select_template_alphas(template_alphas, bands) if bands else None
     extra = (k0_cand,) if any(k0_cand) else ()
     if t0_map:
         extra = extra + (("t0", tuple(sorted(t0_map.items()))),)
+    if base_mat is not None:
+        extra = extra + (("tal", _alpha_key_token(np.ascontiguousarray(np.round(base_mat, 4), np.float32))),)
     params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
               # ntemplates prices the feed
               None if not getattr(cost, "feed", None) else int(ntemplates or 0)) + extra
@@ -2478,14 +2695,17 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         return hit
     offsets_map = dict(zip(c_bands, k0_cand))
     out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp,
-                        bands=bands, offsets_by_band=offsets_map, tier0_clusters=t0_map)
+                        bands=bands, offsets_by_band=offsets_map,
+                        tier0_clusters=tier0_clusters if tier0_clusters and int(max_tiers) >= 2 else None,
+                        template_alphas=base_mat)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
-                  nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None):
+                  nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None,
+                  template_alphas=None):
     p = _norm_profile(power, n)
     if bands is None:
         bands = usable_bands(p, n, floor)
@@ -2501,14 +2721,17 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
     if np.any(Fb <= 0):
         return None, []
+    base_mat = _select_template_alphas(template_alphas, bands)
     # Resolve the canonical profile in _SIGNAL_RECORDS so base and clustered draws share one realization
     sr_kw = {"k0s": k0s} if any(k0s) else {}
+    if base_mat is not None:
+        sr_kw["alphas"] = np.ascontiguousarray(np.round(base_mat, 4), dtype=np.float32)
     p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
-    drawn = signal_draws(p_base, n, bands, snr, nsamp, window=win, lags_too=True)
+    drawn = signal_draws(p_base, n, bands, snr, nsamp, window=win, lags_too=True, alphas=base_mat)
     if drawn is None:
         return None, []
     sig, lags = drawn
-    noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=win)
+    noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=win, alphas=base_mat)
     memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
             int(nsim), int(nsamp))
 
@@ -2516,13 +2739,15 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     t0_draws = {}
     if tier0_clusters and int(max_tiers) >= 2 and len(bands) >= 2:
         t0_map = {}
+        t0_raw = {}
         for b, sp in tier0_clusters.items():
             a, lp = (sp.alpha, sp.lag_pad) if hasattr(sp, "alpha") else sp
             t0_map[int(b)] = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
+            t0_raw[int(b)] = sp
         t0_bands = [b for b in bands[:-1] if b in t0_map]
         for b0 in t0_bands:
             a0, lp0 = t0_map[b0]
-            al_b0 = tuple(a0 if b == b0 else 1.0 for b in bands)
+            al_b0 = _combine_tier0_alphas(base_mat, bands, b0, t0_raw[b0], a0)
             lp_b0 = tuple(lp0 if b == b0 else 0 for b in bands)
             drawn_b0 = signal_draws(p_base, n, bands, snr, nsamp, window=win,
                                     lags_too=True, alphas=al_b0)
@@ -2568,7 +2793,7 @@ calibrate_costs = None
 
 
 def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=None, window=None,
-                     nsamp=None, tier0_cluster=None):
+                     nsamp=None, tier0_cluster=None, template_alphas=None):
     """The plan (plan_chain's: thresholds, reach, the direct refine's half-width where the
     cost model prices one, cost) for one given chain under `power`, or None where it cannot
     be planned. nsamp: the detections to draw (default: model_draws').
@@ -2590,6 +2815,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         a, lp = (tier0_cluster.alpha, tier0_cluster.lag_pad) if hasattr(tier0_cluster, "alpha") else tier0_cluster
         t0_cl = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
     sig_p = _gm._profile_sig(p)
+    _, _, bands = _cached_band_offsets(p, sig_p, n, floor)
+    base_mat = _select_template_alphas(template_alphas, bands) if bands else None
     ch_off_key = ("chain", sig_p, int(n), chain)
     k0_chain = _OFFSET_CACHE.get(ch_off_key)
     if k0_chain is None:
@@ -2600,6 +2827,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     extra = (k0_chain,) if any(k0_chain) else ()
     if t0_cl is not None:
         extra = extra + (("t0", t0_cl),)
+    if base_mat is not None:
+        extra = extra + (("tal", _alpha_key_token(np.ascontiguousarray(np.round(base_mat, 4), np.float32))),)
     key = (sig_p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost), *extra)
     hit = _PLAN_CACHE.get(key)
     if hit is not None:
@@ -2610,12 +2839,11 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     if hit is not None:
         _cache_put(_PLAN_CACHE, key, hit)
         return hit
-    _, _, bands = _cached_band_offsets(p, sig_p, n, floor)
     if not set(chain) <= set(bands):
         return None
     if t0_cl is not None:
         b0 = chain[0]
-        al_vec = tuple(t0_cl[0] if b == b0 else 1.0 for b in bands)
+        al_vec = _combine_tier0_alphas(base_mat, bands, b0, tier0_cluster, t0_cl[0])
         lp_vec = tuple(t0_cl[1] if b == b0 else 0 for b in bands)
         drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True, alphas=al_vec)
         if drawn is None:
@@ -2626,11 +2854,11 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         memo = ("choose_t0", id(sig[0]), id(noise), chain[0], t0_cl, n, float(snr), float(fd),
                 tuple(bands), win, int(nsim), int(nsamp))
     else:
-        drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True)
+        drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True, alphas=base_mat)
         if drawn is None:
             return None
         sig, lags = drawn
-        noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
+        noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window, alphas=base_mat)
         memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
                 int(nsim), int(nsamp))
     out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, memo=memo, lags=lags,
