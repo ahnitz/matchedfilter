@@ -118,6 +118,15 @@ def test_fft_forward_scaled_and_real_batch_guard_page(target, h, stride):
         ctypes.c_void_p, float_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_float, float_p,
     ]
     lib.ap_fft_forward_scaled.restype = None
+    lib.ap_fft_forward_batch.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(float_p),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_int,
+        ctypes.c_float,
+        ctypes.POINTER(float_p),
+    ]
+    lib.ap_fft_forward_batch.restype = ctypes.c_int
     lib.ap_fft_real_batch.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(float_p),
@@ -202,6 +211,37 @@ def test_fft_forward_scaled_and_real_batch_guard_page(target, h, stride):
                         np.testing.assert_allclose(
                             outs_arr[l, :nbins], expected[l][:nbins], rtol=3e-5, atol=3e-5
                         )
+
+        # 3. Test ap_fft_forward_batch (complex N = h) for full and partial batches at guard page
+        if plan_pb and stride == 1:
+            W = lib.ap_plan_lanes(plan_pb)
+            cscale = 1.0 / h
+            for cnt, all_full in ((W, True), (W, False), (max(1, W - 3), False)):
+                srcs = (float_p * cnt)()
+                haves = (ctypes.c_size_t * cnt)()
+                outs_arr = np.full((cnt, h), np.nan + 1j * np.nan, dtype=np.complex64)
+                outs = (float_p * cnt)()
+                expected = []
+                for l in range(cnt):
+                    hv = h if all_full else [h, h - 1, 16, 17, 1, 0][l % 6]
+                    # Position complex start so raw[2*s_idx .. 2*(s_idx + hv) - 1] ends at raw[-1]
+                    s_idx = (total_floats // 2) - hv if hv > 0 else 0
+                    if all_full and l + 1 < cnt:
+                        s_idx = max(0, s_idx - (cnt - 1 - l))
+                    srcs[l] = ctypes.cast(base_addr + 2 * s_idx * 4, float_p)
+                    haves[l] = hv
+                    outs[l] = outs_arr[l].view(np.float32).ctypes.data_as(float_p)
+                    padded = np.zeros(h, dtype=np.complex64)
+                    if hv > 0:
+                        padded[:hv] = (
+                            raw[2 * s_idx : 2 * (s_idx + hv) : 2]
+                            + 1j * raw[2 * s_idx + 1 : 2 * (s_idx + hv) : 2]
+                        )
+                    expected.append(np.fft.fft(padded) * cscale)
+                rc = lib.ap_fft_forward_batch(plan_pb, srcs, haves, cnt, cscale, outs)
+                assert rc == 0
+                for l in range(cnt):
+                    np.testing.assert_allclose(outs_arr[l], expected[l], rtol=3e-5, atol=3e-5)
     finally:
         if plan_bal:
             lib.ap_destroy(plan_bal)
