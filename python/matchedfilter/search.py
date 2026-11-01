@@ -291,6 +291,31 @@ class _InnerBatch:
             support[j] = state["regions"]
         return {r: j for j, r in enumerate(rows)}
 
+    def prepare_job(self, channel, rows):
+        """Prepare channel's first len(rows) slots and return (slot_of, (corr_job, commit))
+        for coupled CPU middle-to-leaf execution."""
+        state = self._chan[channel]
+        k = len(rows)
+        if state["slots"] is None or state["slots"].shape[0] < k:
+            state["slots"] = _aligned_zeros((k, self.length), dtype=np.complex64)
+            state["support"] = [[] for _ in range(k)]
+        support = state["support"]
+        regions = state["regions"]
+        sel = None if k == self.n_rows else rows
+        out_support = _merge([w for j in range(k) for w in support[j]])
+
+        def commit():
+            for j in range(k):
+                support[j] = regions
+
+        job = (self.bank, state["series"], dict(
+            windows=regions,
+            templates=sel,
+            out=state["slots"][:k],
+            out_support=out_support,
+        ))
+        return {r: j for j, r in enumerate(rows)}, (job, commit)
+
     def view(self, channel, slot, pos):
         """Child pos's series in the slot its row was computed into."""
         row = self._chan[channel]["slots"][slot]
@@ -315,6 +340,7 @@ class _Step(NamedTuple):
     live: set
     on_peaks: Optional[Callable]
     pending: list       # leaves in walk order, searched once the chunk's series exist
+    corr_jobs: list     # CPU inner correlation jobs coupled with leaf filtering
 
 
 class HierarchicalSearch:
@@ -528,7 +554,7 @@ class HierarchicalSearch:
                             live.add(id(node))
                             node = self._parent[id(node)]
                 step = _Step(root, k, active, tags, held, support, need, win, envelopes, pads,
-                             live, on_peaks, [])
+                             live, on_peaks, [], [])
                 self._walk(root, step)
                 submitted = self._submit_leaves(step)
                 # While the device searches this chunk's leaves, the next chunk's root outputs
@@ -559,6 +585,8 @@ class HierarchicalSearch:
         rows = sorted({batch.row_of[pos][0] for pos in wanted})
         slot_of = {}
         regions_by_chan = {}
+        couple_cpu = (batch._alloc is None
+                      and all(not self._kids[id(batch.children[pos])][0] for pos in wanted))
         for c in step.active:
             spans = []
             for pos in wanted:
@@ -566,7 +594,11 @@ class HierarchicalSearch:
             regions = _clip(_merge(spans), 0, L)
             regions_by_chan[c] = regions
             batch.prepare(c, held[c][id(node)], regions)
-            slot_of[c] = batch.compute(c, rows)
+            if couple_cpu:
+                slot_of[c], job = batch.prepare_job(c, rows)
+                step.corr_jobs.append(job)
+            else:
+                slot_of[c] = batch.compute(c, rows)
         members = sorted(wanted, key=lambda p: batch.row_of[p])
         for pos in members:
             child = batch.children[pos]
@@ -606,6 +638,17 @@ class HierarchicalSearch:
         The results are the same either way."""
         leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
         if not leaves:
+            if step.corr_jobs:
+                cjobs = [jb for jb, _ in step.corr_jobs]
+                t_info = {}
+                TimeDomainFilterBank.correlate_and_filter_many(
+                    cjobs, [], timings=t_info,
+                    retain_radius=0 if step.on_peaks is None else None,
+                )
+                if not t_info.get("ephemeral_used", False):
+                    for _, commit in step.corr_jobs:
+                        commit()
+                self.timings["inner"] += t_info["correlate"]
             return None
         t0 = time.perf_counter()
         jobs, where = [], {}
@@ -618,11 +661,35 @@ class HierarchicalSearch:
                     # one window as a slice: filter_series memoises a slice's layout
                     where[(id(lf), c)] = len(jobs)
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w)))
-        deferred = any(getattr(b, "device", None) is not None for b, _, _ in jobs)
-        # On the CPU too as one batch (filter_series_many runs it in order), where the leaves'
-        # the joint trial takes its rounds on real calls (time_domain._joint_round).
-        results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
-        self.timings["leaf"] += time.perf_counter() - t0
+        deferred = any(getattr(b, "device", None) is not None
+                       and _parse_device(b.device).kind == "gpu"
+                       for b, _, _ in jobs)
+        if step.corr_jobs and not deferred:
+            cjobs = [jb for jb, _ in step.corr_jobs]
+            t_info = {}
+            results = TimeDomainFilterBank.correlate_and_filter_many(
+                cjobs, jobs, wait=True, timings=t_info,
+                retain_radius=0 if step.on_peaks is None else None,
+            )
+            if not t_info.get("ephemeral_used", False):
+                for _, commit in step.corr_jobs:
+                    commit()
+            dt_total = time.perf_counter() - t0
+            self.timings["inner"] += t_info["correlate"]
+            self.timings["leaf"] += max(0.0, dt_total - t_info["correlate"])
+        else:
+            if step.corr_jobs:
+                cjobs = [jb for jb, _ in step.corr_jobs]
+                t_info = {}
+                TimeDomainFilterBank.correlate_and_filter_many(cjobs, [], timings=t_info)
+                for _, commit in step.corr_jobs:
+                    commit()
+                self.timings["inner"] += t_info["correlate"]
+                t0 = time.perf_counter()
+            # On the CPU too as one batch (filter_series_many runs it in order), where the leaves'
+            # joint trial takes its rounds on real calls (time_domain._joint_round).
+            results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
+            self.timings["leaf"] += time.perf_counter() - t0
         return leaves, jobs, where, deferred, results
 
     def _finish_leaves(self, step, submitted):
