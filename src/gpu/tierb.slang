@@ -226,6 +226,8 @@ void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<
 #elif defined(MF_CUDA)
 #define ROWWIN_PARAM , StructuredBuffer<uint> rowWin
 #define ROWWIN_ARG , rowWin
+#define CUDA_DATA_PARAM , uniform uint cudaDataStride, uniform uint cudaDataScaleBits
+#define CUDA_DATA_INIT _cudaDataStride = cudaDataStride; _cudaDataScaleBits = cudaDataScaleBits;
 void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<uint> rowWin)
 {
     _binPhase = 0u;
@@ -238,6 +240,10 @@ void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<
 #define ROWWIN_PARAM
 #define ROWWIN_ARG
 void rowWindow(uint d, inout uint winStart, inout uint winEnd) { _binPhase = 0u; }
+#endif
+#ifndef CUDA_DATA_PARAM
+#define CUDA_DATA_PARAM
+#define CUDA_DATA_INIT
 #endif
 //: A data element for the coarse role. With a stride set, the data buffer is
 //: the full fp32 spectra (two words per element) and is rounded to half here,
@@ -332,6 +338,27 @@ uint mfShflXor(uint v, uint s);
 #else
 [ForceInline] uint mfShflXor(uint v, uint s) { return WaveReadLaneAt(v, WaveGetLaneIndex() ^ s); }
 #endif
+
+//: Subgroup-scoped staging barrier for exchange levels whose TB-thread blocks sit inside one
+//: subgroup (stage column = thread). On CUDA, CTAs narrower than a 32-lane warp fall back to
+//: the block barrier (bar.warp.sync -1 requires all 32 lanes active).
+#ifndef MF_SIMD_EXCHANGE
+#define MF_SIMD_EXCHANGE 1
+#endif
+static const uint FFT_LGR_EX = (RADIX == 16) ? 4u : ((RADIX == 32) ? 5u : 6u);
+
+[ForceInline]
+void mfWaveBarrier()
+{
+#if defined(MF_CUDA)
+    if (WG * PPG >= 32u) GroupMemoryBarrierWithWaveSync();
+    else GroupMemoryBarrierWithGroupSync();
+#elif defined(MF_VULKAN) || defined(MF_METAL)
+    GroupMemoryBarrierWithWaveSync();
+#else
+    GroupMemoryBarrierWithGroupSync();
+#endif
+}
 
 #if COARSE16
 typedef half2 H;
@@ -539,12 +566,16 @@ void exchangeS(inout H re[16], inout H im[16],
     uint p0 = computeWant(0, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
     uint i0 = (p0 & lenMask) >> lgSpan;
     uint a0 = i0 * XS + ((p0 >> lgLen) << lgSpan) + (p0 & lenMask & spanMask);
+    const bool local = MF_SIMD_EXCHANGE != 0 && TB <= mfSubgroupSize;
+    const bool localBefore = MF_SIMD_EXCHANGE != 0
+        && (TB == WG ? (TB <= mfSubgroupSize) : ((TB << FFT_LGR_EX) <= mfSubgroupSize));
     MF_UNROLL for (uint c = 0; c < R / CH; ++c) {
         [ForceUnroll] for (uint comp = 0; comp < 2; ++comp) {
-            GroupMemoryBarrierWithGroupSync();
+            if (c == 0u && comp == 0u ? localBefore : local) mfWaveBarrier();
+            else GroupMemoryBarrierWithGroupSync();
             MF_UNROLL for (uint j = 0; j < CH; ++j)
                 stgPut(j * XS + _tid, comp == 0 ? re[c * CH + j] : im[c * CH + j]);
-            GroupMemoryBarrierWithGroupSync();
+            if (local) mfWaveBarrier(); else GroupMemoryBarrierWithGroupSync();
             MF_UNROLL for (uint d = 0; d < R; ++d) {
                 // tid = 0 terms: blk = lane = blk2 = lane2 = 0, all constants
                 uint pz = computeWant(d, TB, len, 0u, 0u, per, TB2, len2, 0u, 0u);
@@ -740,17 +771,6 @@ void innermost(inout C r[RADIX])
 #ifndef SPLIT_STAGE
 #define SPLIT_STAGE 0
 #endif
-#if defined(MF_METAL)
-//: MF_SIMD_EXCHANGE (Metal): SIMD-scoped barriers in exchange levels confined to one SIMD
-//: group (the split-stage exchange). A threadgroup barrier still orders the first write
-//: after a wider level.
-#ifndef MF_SIMD_EXCHANGE
-#define MF_SIMD_EXCHANGE 1
-#endif
-__target_intrinsic(metal, "simdgroup_barrier(mem_flags::mem_threadgroup)")
-void mfSimdBarrier();
-static const uint FFT_LGR_EX = (RADIX == 16) ? 4u : ((RADIX == 32) ? 5u : 6u);
-#endif
 #if SPLIT_STAGE && !COARSE16
 #if (2 * LDS_CAP) < (NLEN)
 #error "SPLIT_STAGE needs staging for R*WG floats"
@@ -768,32 +788,20 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
         src[d] = (rem >> lgSpan) * WG + (b << lgSpan) + (rem & spanMask);
     }
     float xr[RADIX];
-#if defined(MF_METAL) && MF_SIMD_EXCHANGE
-    // A level whose blocks of TB threads sit inside one SIMD group reads only columns its
-    // own SIMD group wrote (stage column = thread), so its barriers can be SIMD-scoped.
-    // The first is not, when the level before was wider: other SIMD groups may still be
-    // reading this group's columns from it. (The falsified attempt of phase 4 scoped
-    // every barrier, that first one included.)
-    const bool local = TB <= mfSubgroupSize;
-    const bool localBefore = (TB << FFT_LGR_EX) <= mfSubgroupSize;
-    if (localBefore) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    // A level whose blocks of TB threads sit inside one subgroup reads only columns its own
+    // subgroup wrote (stage column = thread), so its barriers are subgroup-scoped. The first
+    // write after a wider level stays workgroup-wide so other subgroups finish reading first.
+    const bool local = MF_SIMD_EXCHANGE != 0 && TB <= mfSubgroupSize;
+    const bool localBefore = MF_SIMD_EXCHANGE != 0
+        && (TB == WG ? (TB <= mfSubgroupSize) : ((TB << FFT_LGR_EX) <= mfSubgroupSize));
+    if (localBefore) mfWaveBarrier(); else GroupMemoryBarrierWithGroupSync();
     MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
-    if (local) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    if (local) mfWaveBarrier(); else GroupMemoryBarrierWithGroupSync();
     MF_UNROLL for (uint d = 0; d < R; ++d) xr[d] = asfloat(stg[_stgBase + src[d]]);
-    if (local) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    if (local) mfWaveBarrier(); else GroupMemoryBarrierWithGroupSync();
     MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
-    if (local) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    if (local) mfWaveBarrier(); else GroupMemoryBarrierWithGroupSync();
     MF_UNROLL for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
-#else
-    GroupMemoryBarrierWithGroupSync();
-    MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
-    GroupMemoryBarrierWithGroupSync();
-    MF_UNROLL for (uint d = 0; d < R; ++d) xr[d] = asfloat(stg[_stgBase + src[d]]);
-    GroupMemoryBarrierWithGroupSync();
-    MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
-    GroupMemoryBarrierWithGroupSync();
-    MF_UNROLL for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
-#endif
 }
 #else
 [ForceInline]
@@ -818,10 +826,14 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     uint p0 = computeWant(0, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
     uint a0 = ((p0 & lenMask) >> lgSpan) * XSF + ((p0 >> lgLen) << lgSpan) + (p0 & lenMask & spanMask);
     uint i0 = (p0 & lenMask) >> lgSpan;
+    const bool local = MF_SIMD_EXCHANGE != 0 && TB <= mfSubgroupSize;
+    const bool localBefore = MF_SIMD_EXCHANGE != 0
+        && (TB == WG ? (TB <= mfSubgroupSize) : ((TB << FFT_LGR_EX) <= mfSubgroupSize));
     MF_UNROLL for (uint c = 0; c < R / CH; ++c) {
-        GroupMemoryBarrierWithGroupSync();
+        if (c == 0u ? localBefore : local) mfWaveBarrier();
+        else GroupMemoryBarrierWithGroupSync();
         MF_UNROLL for (uint j = 0; j < CH; ++j) stgPut(j * XSF + _tid, r[c * CH + j]);
-        GroupMemoryBarrierWithGroupSync();
+        if (local) mfWaveBarrier(); else GroupMemoryBarrierWithGroupSync();
         MF_UNROLL for (uint d = 0; d < R; ++d) {
             uint pz = computeWant(d, TB, len, 0u, 0u, per, TB2, len2, 0u, 0u);
             uint iz = (pz & lenMask) >> lgSpan;
@@ -1507,40 +1519,78 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
 [ForceInline]
 void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                  RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-                 uint winStart, uint winEnd, float thr)
+                 uint winStart, uint winEnd, uint nbins, float thr)
 {
     uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
     uint span = winEnd - winStart;
-    H best = H(0.0f), en = H(0.0f);
-    const H esc = H(0.015625f);
+    H best = H(0.0f);
+    uint ovAcc = 0u;
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
         best = max(best, live ? mag2s(re[i], im[i]) : H(0.0f));
-        H sr = re[i] * esc, si = im[i] * esc;
-        en += sr * sr + si * si;
+        // FAIL OPEN on fp16 overflow anywhere in the transform: an exponent field of all
+        // ones in re or im carries into bit 15 (A) or bit 31 (B), exact under fast math.
+        ovAcc |= ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
+               | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
     }
+    if (nbins == 0u) {
+        // Non-final coarse tier: compactPairs tests only !(length(cval[pair]) < thr) and
+        // nothing reads cidx0 or |cval0|. Reduce two pass/fail bits without shuffles on
+        // Vulkan (subgroup ballot) or via one integer OR-shuffle cascade, no sqrt.
+        uint bb = bit_cast<uint>(best);
+        float thr2 = thr * thr;
+        bool infLocalA = ((ovAcc & 0x00008000u) != 0u) || ((bb & 0x7C00u) == 0x7C00u);
+        bool infLocalB = ((ovAcc & 0x80000000u) != 0u) || ((bb & 0x7C000000u) == 0x7C000000u);
+        bool hitLocalA = infLocalA || ((bb & 0x7FFFu) != 0u && float(best.x) >= thr2);
+        bool hitLocalB = infLocalB || ((bb & 0x7FFF0000u) != 0u && float(best.y) >= thr2);
+#if defined(MF_VULKAN)
+        uint4 bA4 = WaveActiveBallot(hitLocalA);
+        uint4 bB4 = WaveActiveBallot(hitLocalB);
+        if (tid == 0) {
+            uint laneId = WaveGetLaneIndex();
+            uint wordIdx = laneId >> 5;
+            const uint subBits = min(WG, 16u);
+            uint wMask = (WG >= 32u) ? 0xFFFFFFFFu : (((1u << subBits) - 1u) << (laneId & 31u));
+            bool hitA = (WG == 64u) ? ((bA4.x | bA4.y) != 0u)
+                      : (((wordIdx == 0u ? bA4.x : bA4.y) & wMask) != 0u);
+            bool hitB = (WG == 64u) ? ((bB4.x | bB4.y) != 0u)
+                      : (((wordIdx == 0u ? bB4.x : bB4.y) & wMask) != 0u);
+            if (pairA != NOPAIR)
+                peakVal[pairA] = hitA ? float2(3.402823e38f, 0.0f) : float2(0.0f, 0.0f);
+            if (pairB != NOPAIR)
+                peakVal[pairB] = hitB ? float2(3.402823e38f, 0.0f) : float2(0.0f, 0.0f);
+        }
+#else
+        uint hitBits = (hitLocalA ? 1u : 0u) | (hitLocalB ? 2u : 0u);
+        [ForceUnroll] for (uint s = 1; s < WG; s <<= 1)
+            hitBits |= mfShflXor(hitBits, s);
+        if (tid == 0) {
+            if (pairA != NOPAIR)
+                peakVal[pairA] = (hitBits & 1u) != 0u ? float2(3.402823e38f, 0.0f) : float2(0.0f, 0.0f);
+            if (pairB != NOPAIR)
+                peakVal[pairB] = (hitBits & 2u) != 0u ? float2(3.402823e38f, 0.0f) : float2(0.0f, 0.0f);
+        }
+#endif
+        return;
+    }
+    uint bb = bit_cast<uint>(best) & 0x7FFF7FFFu;
+    if ((ovAcc & 0x00008000u) != 0u) bb = (bb & 0xFFFF0000u) | 0x7C00u;
+    if ((ovAcc & 0x80000000u) != 0u) bb = (bb & 0x0000FFFFu) | 0x7C000000u;
     [ForceUnroll] for (uint s = 1; s < WG; s <<= 1) {
-        best = max(best, bit_cast<H>(mfShflXor(bit_cast<uint>(best), s)));
-        en += bit_cast<H>(mfShflXor(bit_cast<uint>(en), s));
+        uint other = mfShflXor(bb, s);
+        bb = max(bb & 0xFFFFu, other & 0xFFFFu) | max(bb & 0xFFFF0000u, other & 0xFFFF0000u);
     }
-    // FAIL OPEN. An inf or NaN anywhere in the transform makes the all-lag energy inf or
-    // NaN (sums propagate them, where the packed max may drop a NaN), and so does
-    // |v| >= 2^14 anywhere; an in-window power past fp16 range is +inf in best. Each is an
-    // exponent field of all ones, tested as bits (exact under fast math), and passes with
-    // +inf.
-    uint eb = bit_cast<uint>(en), bb = bit_cast<uint>(best);
-    bool infA = (eb & 0x7C00u) == 0x7C00u || (bb & 0x7C00u) == 0x7C00u;
-    bool infB = (eb & 0x7C000000u) == 0x7C000000u || (bb & 0x7C000000u) == 0x7C000000u;
-    float bA = sqrt(float(best.x)), bB = sqrt(float(best.y));
-    bool hitA = infA || (bA > 0.0f && bA >= thr);
-    bool hitB = infB || (bB > 0.0f && bB >= thr);
-    if (tid == 0 && pairA != NOPAIR) {
-        peakIdx[pairA] = hitA ? 0 : -1;
-        peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f) : (hitA ? float2(bA, 0.0f) : float2(0.0f, 0.0f));
-    }
-    if (tid == 0 && pairB != NOPAIR) {
-        peakIdx[pairB] = hitB ? 0 : -1;
-        peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f) : (hitB ? float2(bB, 0.0f) : float2(0.0f, 0.0f));
+    if (tid == 0) {
+        bool infA = (bb & 0x7C00u) == 0x7C00u;
+        bool infB = (bb & 0x7C000000u) == 0x7C000000u;
+        H bestOut = bit_cast<H>(bb);
+        float bA = sqrt(float(bestOut.x)), bB = sqrt(float(bestOut.y));
+        bool hitA = infA || (bA > 0.0f && bA >= thr);
+        bool hitB = infB || (bB > 0.0f && bB >= thr);
+        if (pairA != NOPAIR)
+            peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f) : (hitA ? float2(bA, 0.0f) : float2(0.0f, 0.0f));
+        if (pairB != NOPAIR)
+            peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f) : (hitB ? float2(bB, 0.0f) : float2(0.0f, 0.0f));
     }
 }
 
@@ -1552,7 +1602,7 @@ void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
 void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                C dreg[RADIX], StructuredBuffer<CVal> tmpl,
                RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-               uint winStart, uint winEnd, uint thrBits)
+               uint winStart, uint winEnd, uint nbins, uint thrBits)
 {
     H re[16], im[16];
     MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) {
@@ -1626,7 +1676,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         // Every backend: the host passes the gate threshold (magnitude bits) when tier 0's
         // index has no reader; 0 asks for the full election (peakTwoWave).
         if (thrBits != 0u)
-            peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, asfloat(thrBits));
+            peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, nbins, asfloat(thrBits));
         else
             peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
@@ -1728,12 +1778,12 @@ void filterPair(uint pair, uint tid,
         bool okA = slotOk && t0 + k < ntmpl, okB = slotOk && t0 + k + 1 < ntmpl;
         filterTwo(okA ? p0 + k : NOPAIR, okB ? p0 + k + 1 : NOPAIR,
                   min(t0 + k, ntmpl - 1u), min(t0 + k + 1, ntmpl - 1u), tid, dreg, tmpl,
-                  peakIdx, peakVal, winStart, winEnd, thrBits);
+                  peakIdx, peakVal, winStart, winEnd, nbins, thrBits);
     }
 #else
     MF_UNROLL for (uint k = 0; k < TILE_T; k += 2)
         filterTwo(p0 + k, p0 + k + 1, t0 + k, t0 + k + 1, tid, dreg, tmpl,
-                  peakIdx, peakVal, winStart, winEnd, thrBits);
+                  peakIdx, peakVal, winStart, winEnd, nbins, thrBits);
 #endif
 #else
     MF_UNROLL for (uint k = 0; k < TILE_T; ++k)
@@ -1759,8 +1809,9 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                 RWStructuredBuffer<float2> peakVal,
                 uniform uint ntmpl, uniform uint winStart, uniform uint winEnd,
                 uniform uint binsize, uniform int binShift, uniform uint nbins,
-                uniform uint thrBits ROWWIN_PARAM)
+                uniform uint thrBits ROWWIN_PARAM CUDA_DATA_PARAM)
 {
+    CUDA_DATA_INIT
     // lid spans PPG pairs of WG threads. Each slice is one pair, and at
     // band 512 one pair is exactly one wave, so WaveActiveMax below still
     // reduces per pair rather than across the group.

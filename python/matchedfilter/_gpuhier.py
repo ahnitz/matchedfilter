@@ -366,7 +366,7 @@ class HierOps:
             slot_val, groups = coarse_launch(nd, ntm, layout[1], layout[2], band)
             lst = self._x_list("coarse timing")
             lst.dispatch(kernel, groups, [data, tmpl, cidx, cval],
-                         (ntm, 0, band, slot_val, band.bit_length() - 1, 1,
+                         (ntm, 0, band, slot_val, band.bit_length() - 1, 0,
                           self._gate_bits(0.0, band, layout)))
             native = lst.end()
             natives.append(native)
@@ -788,7 +788,9 @@ class HierOps:
             slot_val, _ = coarse_launch(nd, nt, layout[1], layout[2], csp)
             gate_bits = (0 if (direct is not None and len(tiers) == 1)
                          else self._gate_bits(thr0, b0, layout))
-            binds["coarse"] = (nt, start(cs), ce, slot_val, csh & 0xFFFFFFFF, 1, gate_bits)
+            # nbins 0 asks a non-final fp16 gate tier for the pass/fail decision alone.
+            binds["coarse"] = (nt, start(cs), ce, slot_val, csh & 0xFFFFFFFF,
+                               0 if len(tiers) > 1 else 1, gate_bits)
         else:
             binds["coarse"] = (nt, start(cs), ce, csp, csh & 0xFFFFFFFF, 1, 0)
         binds["compact0"] = (pairs, _bits(thr0), nbins)
