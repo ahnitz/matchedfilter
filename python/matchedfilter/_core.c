@@ -916,6 +916,48 @@ static PyObject *HMF_series_group(HMFObject *self,PyObject *unused){
   (void)unused; return PyLong_FromLong(ap_hmf_series_group(self->p));
 }
 
+int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
+                              const int *offsets,const int *members,int lag_pad);
+void ap_hmf_clear_tier0_clusters(ap_hmf_plan *p);
+int ap_hmf_tier0_cluster_count(const ap_hmf_plan *p);
+
+static PyObject *HMF_set_tier0_clusters(HMFObject *self,PyObject *args){
+  Py_buffer bsp,boff,bmem;
+  int lag_pad=0;
+  if(!PyArg_ParseTuple(args,"y*y*y*|i",&bsp,&boff,&bmem,&lag_pad)) return NULL;
+  size_t bands[AP_HMF_MAX_TIERS];
+  int nti=ap_hmf_chain(self->p,bands);
+  int valid = boff.len%(Py_ssize_t)sizeof(int)==0
+    && boff.len>=2*(Py_ssize_t)sizeof(int)
+    && bmem.len==(Py_ssize_t)self->nt*(Py_ssize_t)sizeof(int);
+  int nc = valid ? (int)(boff.len/(Py_ssize_t)sizeof(int))-1 : 0;
+  if(valid){
+    valid = nti>=2 && nc>=1 && nc<=self->nt
+      && (size_t)bsp.len == (size_t)nc*2u*bands[0]*sizeof(float);
+  }
+  if(!valid){
+    PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
+    PyErr_SetString(PyExc_ValueError,"set_tier0_clusters: invalid specs, offsets or members buffer shape");
+    return NULL;
+  }
+  int r;
+  Py_BEGIN_ALLOW_THREADS
+  r=ap_hmf_set_tier0_clusters(self->p,nc,(const float*)bsp.buf,
+                              (const int*)boff.buf,(const int*)bmem.buf,lag_pad);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
+  return PyBool_FromLong(r==0);
+}
+static PyObject *HMF_clear_tier0_clusters(HMFObject *self,PyObject *unused){
+  (void)unused;
+  ap_hmf_clear_tier0_clusters(self->p);
+  Py_RETURN_NONE;
+}
+static PyObject *HMF_tier0_cluster_count(HMFObject *self,PyObject *unused){
+  (void)unused;
+  return PyLong_FromLong(ap_hmf_tier0_cluster_count(self->p));
+}
+
 static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
   int h;
   if(!PyArg_ParseTuple(args,"p",&h)) return NULL;
@@ -936,6 +978,9 @@ GUARDED(HMFObject,HMF_price_direct_pair)
 GUARDED(HMFObject,HMF_set_direct_prices)
 GUARDED(HMFObject,HMF_set_q15)
 GUARDED(HMFObject,HMF_q15_stats)
+GUARDED(HMFObject,HMF_set_tier0_clusters)
+GUARDED(HMFObject,HMF_clear_tier0_clusters)
+GUARDED(HMFObject,HMF_tier0_cluster_count)
 GUARDED(HMFObject,HMF_set_data)
 GUARDED(HMFObject,HMF_set_template)
 GUARDED(HMFObject,HMF_set_data_batch)
@@ -966,6 +1011,9 @@ static PyMethodDef HMF_methods[]={
   {"set_direct_prices",(PyCFunction)HMF_set_direct_prices_g,METH_VARARGS,"set_direct_prices(lagtap, fftpair) -> True: the prices the direct-or-transform choice compares"},
   {"set_q15",(PyCFunction)HMF_set_q15_g,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
   {"q15_stats",(PyCFunction)HMF_q15_stats_g,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
+  {"set_tier0_clusters",(PyCFunction)HMF_set_tier0_clusters_g,METH_VARARGS,"set_tier0_clusters(specs, offsets, members, lag_pad=0) -> True if Tier-0 centroid gating is active"},
+  {"clear_tier0_clusters",(PyCFunction)HMF_clear_tier0_clusters_g,METH_NOARGS,"clear_tier0_clusters() -> disable Tier-0 centroid gating"},
+  {"tier0_cluster_count",(PyCFunction)HMF_tier0_cluster_count_g,METH_NOARGS,"tier0_cluster_count() -> active Tier-0 centroid count, or 0 if unclustered"},
   {"set_data",(PyCFunction)HMF_set_data_g,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)HMF_set_template_g,METH_VARARGS,"set_template(i, buffer)"},
   {"set_data_batch",(PyCFunction)HMF_set_data_batch_g,METH_VARARGS,"set_data_batch(i0, buffer)"},
@@ -1177,31 +1225,45 @@ static int sim_emit_row(long long r, Py_ssize_t s, long long n, Py_ssize_t nb, l
    arrays, which are left as rows [0, done) made them (off[done] their end), so that a caller
    can continue from row0 + done with more room instead of starting over. Returns
    (signal counts, noise counts, done), the counts a tuple per array or None. */
-static inline void sim_wrap_band(const float *Xr, long long kfill, long long m,
-                                 long long k_lo, long long k_hi, float *Xw){
+static inline void sim_prep_band(const float *Xr, const float *Xo, long long kfill, long long m,
+                                 long long k_lo, long long k_hi, float alpha, float beta, float *Xw){
   const long long k_end = k_hi < kfill ? k_hi : kfill;
   const long long len = k_end > k_lo ? k_end - k_lo : 0;
+  if(k_lo <= 0 && alpha < 1.f){
+    for(long long j = 0; j < 2*len; j++)
+      Xw[j] = alpha * Xr[j] + beta * Xo[j];
+    if(len < m) memset(Xw + 2*len, 0, (size_t)(2*(m - len))*sizeof(float));
+    return;
+  }
   if(len < m) memset(Xw, 0, (size_t)(2*m)*sizeof(float));
   if(len > 0){
     const long long u0 = k_lo & (m - 1);
     const long long first = len < m - u0 ? len : m - u0;
-    if(first > 0) memcpy(Xw + 2*u0, Xr + 2*k_lo, (size_t)(2*first)*sizeof(float));
-    if(len > first) memcpy(Xw, Xr + 2*(k_lo + first), (size_t)(2*(len - first))*sizeof(float));
+    if(alpha < 1.f){
+      for(long long j = 0; j < 2*first; j++)
+        Xw[2*u0 + j] = alpha * Xr[2*k_lo + j] + beta * Xo[2*k_lo + j];
+      for(long long j = 0; j < 2*(len - first); j++)
+        Xw[j] = alpha * Xr[2*(k_lo + first) + j] + beta * Xo[2*(k_lo + first) + j];
+    } else {
+      if(first > 0) memcpy(Xw + 2*u0, Xr + 2*k_lo, (size_t)(2*first)*sizeof(float));
+      if(len > first) memcpy(Xw, Xr + 2*(k_lo + first), (size_t)(2*(len - first))*sizeof(float));
+    }
   }
 }
 
 static PyObject *M_simulate(PyObject *self,PyObject *args){
   (void)self;
-  PyObject *sco,*bo,*bso,*tbo,*to,*fio,*spo,*svo,*soo,*npo,*nvo,*noo,*k0o=Py_None;
+  PyObject *sco,*bo,*bso,*tbo,*to,*fio,*spo,*svo,*soo,*npo,*nvo,*noo,*k0o=Py_None,*alo=Py_None;
   unsigned long long seed; long long row0,nrows,kmax; double fscale, keep_at=0.0;
-  if(!PyArg_ParseTuple(args,"OKLLLOOdOOOOOOOOO|dO",&sco,&seed,&row0,&nrows,&kmax,&bo,&bso,&fscale,&tbo,&to,&fio,&spo,&svo,&soo,&npo,&nvo,&noo,&keep_at,&k0o)) return NULL;
+  if(!PyArg_ParseTuple(args,"OKLLLOOdOOOOOOOOO|dOO",&sco,&seed,&row0,&nrows,&kmax,&bo,&bso,&fscale,&tbo,&to,&fio,&spo,&svo,&soo,&npo,&nvo,&noo,&keep_at,&k0o,&alo)) return NULL;
   if(!PyTuple_Check(bo)||!PyTuple_Check(bso)){ PyErr_SetString(PyExc_TypeError,"simulate: bands and bscale must be tuples"); return NULL; }
   const Py_ssize_t nb=PyTuple_GET_SIZE(bo), ns=2*(1+nb);
   const int has_sig = tbo!=Py_None, has_noise = npo!=Py_None;
   if(nb<1||nb>31||PyTuple_GET_SIZE(bso)!=nb||nrows<1||row0<0||!(has_sig||has_noise)){
     PyErr_SetString(PyExc_ValueError,"simulate: one bscale per band, 1..31 bands, nrows >= 1, row0 >= 0, signal or noise outputs"); return NULL;
   }
-  long long b[32], k0[32]={0}, khi[32]={0}; float bs[32]; int any_k0=0;
+  long long b[32], k0[32]={0}, khi[32]={0}; float bs[32], al[32], be[32]; int any_k0=0, any_alpha=0;
+  for(Py_ssize_t i=0;i<32;i++){ al[i]=1.f; be[i]=0.f; }
   for(Py_ssize_t i=0;i<nb;i++){ b[i]=PyLong_AsLongLong(PyTuple_GET_ITEM(bo,i)); bs[i]=(float)PyFloat_AsDouble(PyTuple_GET_ITEM(bso,i)); }
   if(k0o!=Py_None){
     if(!PyTuple_Check(k0o)){ PyErr_SetString(PyExc_TypeError,"simulate: k0s must be a tuple"); return NULL; }
@@ -1209,6 +1271,20 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     for(Py_ssize_t i=0;i<nb;i++){
       k0[i]=PyLong_AsLongLong(PyTuple_GET_ITEM(k0o,i));
       if(k0[i]>0) any_k0=1;
+    }
+  }
+  if(alo!=Py_None){
+    if(!PyTuple_Check(alo)){ PyErr_SetString(PyExc_TypeError,"simulate: alphas must be a tuple"); return NULL; }
+    if(PyTuple_GET_SIZE(alo)!=nb){ PyErr_SetString(PyExc_ValueError,"simulate: one alpha per band"); return NULL; }
+    for(Py_ssize_t i=0;i<nb;i++){
+      double av=PyFloat_AsDouble(PyTuple_GET_ITEM(alo,i));
+      if(!(av>0.0 && av<=1.0)){
+        if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"simulate: alphas must lie in (0, 1]");
+        return NULL;
+      }
+      al[i]=(float)av;
+      be[i]=av<1.0 ? (float)sqrt(1.0 - av*av) : 0.f;
+      if(al[i]<1.f) any_alpha=1;
     }
   }
   if(PyErr_Occurred()) return NULL;
@@ -1251,6 +1327,15 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   }
   /* the noise alone needs no bins past the highest active coarse bin */
   const long long kfill = has_sig ? kmax : (kmax < max_band_hi ? kmax : max_band_hi);
+  long long max_alpha_hi = 0;
+  if(any_alpha){
+    for(Py_ssize_t i=0;i<nb;i++){
+      if(al[i] < 1.f){
+        const long long hi_i = khi[i] < kfill ? khi[i] : kfill;
+        if(hi_i > max_alpha_hi) max_alpha_hi = hi_i;
+      }
+    }
+  }
   /* When simulating signals on a one-sided/bandlimited spectrum (kfill <= n / 2), the fine
      n-point backward transform splits into two n/2-point transforms: its even lags are the
      unmodified n/2-point backward transform (shared directly with the widest band when
@@ -1258,7 +1343,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
      lags are the n/2-point transform of X[k] * exp(+2 pi i k / n). */
   const int half_split = has_sig && n >= 128 && (n & (n - 1)) == 0 && kfill <= n / 2;
   const long long nh = n / 2;
-  const int share_widest = half_split && b[nb - 1] == nh && k0[nb - 1] == 0;
+  const int share_widest = half_split && b[nb - 1] == nh && k0[nb - 1] == 0 && al[nb - 1] >= 1.f;
   ap_plan *pf = NULL, *ph_own = NULL, *ph = NULL, *pl[32] = {0};
   for(Py_ssize_t i=0;i<nb && ok;i++){
     pl[i] = ap_create((size_t)b[i]);
@@ -1283,8 +1368,11 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     for(Py_ssize_t i=0;i<nb;i++)
       if(ap_plan_pairbatch(pl[i]) > 0 && (size_t)b[i] > max_pb_m) max_pb_m = (size_t)b[i];
   }
+  const int need_xw = any_k0 || any_alpha;
+  const int need_xorth = any_alpha && max_alpha_hi > 0;
   const size_t xfloats = ((size_t)(2*kfill)+15u)&~(size_t)15u;
-  const size_t xwfloats = any_k0 ? (((size_t)(2*b[nb-1])+15u)&~(size_t)15u) : 0u;
+  const size_t xorth_floats = need_xorth ? (((size_t)(2*max_alpha_hi)+15u)&~(size_t)15u) : 0u;
+  const size_t xwfloats = need_xw ? (((size_t)(2*b[nb-1])+15u)&~(size_t)15u) : 0u;
   const size_t ysingle = ((size_t)(2*n)+15u)&~(size_t)15u;
   const size_t ypb = max_pb_m ? (size_t)AP_MAX_LANES * (2u * max_pb_m + 16u) : 0u;
   const size_t yalloc = ysingle > ypb ? ysingle : ypb;
@@ -1292,14 +1380,16 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   const int ph_w = (half_split && ph) ? ap_plan_pairbatch(ph) : 0;
   const size_t ph_lanes = ph_w > 0 ? (size_t)AP_MAX_LANES : 1u;
   float *X = (float*)ap_alloc64(SIM_ROWS * xfloats * sizeof(float)),
-        *Xw = any_k0 ? (float*)ap_alloc64(SIM_ROWS * xwfloats * sizeof(float)) : NULL,
+        *Xorth = need_xorth ? (float*)ap_alloc64(SIM_ROWS * xorth_floats * sizeof(float)) : NULL,
+        *Xw = need_xw ? (float*)ap_alloc64(SIM_ROWS * xwfloats * sizeof(float)) : NULL,
         *Y = (float*)ap_alloc64(yalloc * sizeof(float)),
         *A = (float*)ap_alloc64((ysingle/2 + 16u) * sizeof(float)),
         *Yhalf = half_split ? (float*)ap_alloc64(SIM_ROWS * yhfloats * sizeof(float)) : NULL,
         *Yodd = half_split ? (float*)ap_alloc64(ph_lanes * yhfloats * sizeof(float)) : NULL,
         *Xtw = half_split ? (float*)ap_alloc64(ph_lanes * xfloats * sizeof(float)) : NULL,
         *tw = half_split ? (float*)ap_alloc64((xfloats + 16u) * sizeof(float)) : NULL;
-  const int mem_ok = X && Y && A && (!any_k0 || Xw) && (!half_split || (Yhalf && Yodd && Xtw && tw));
+  const int mem_ok = X && Y && A && (!need_xw || Xw) && (!need_xorth || Xorth)
+                     && (!half_split || (Yhalf && Yodd && Xtw && tw));
   long long ks[64]={0}, kn[32]={0}, done=nrows;
   if(ok && mem_ok){
     const float *scale=(const float*)sc.buf, *tab=has_sig ? (const float*)tb.buf : NULL;
@@ -1320,6 +1410,11 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
       memcpy(ks_batch,ks,(size_t)ns*sizeof *ks); memcpy(kn_batch,kn,(size_t)nb*sizeof *kn);
       ap_gauss_fill_rows(X,xfloats,(size_t)B,(size_t)(2*kfill),(uint64_t)seed,
                          (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
+      if(Xorth){
+        ap_gauss_fill_rows(Xorth,xorth_floats,(size_t)B,(size_t)(2*max_alpha_hi),
+                           (uint64_t)seed^(2ULL<<32),
+                           (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
+      }
       int kept[SIM_ROWS];
       for(int bi=0;bi<B;bi++) kept[bi]=1;
       int batch_full=0;
@@ -1400,6 +1495,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
         }
         ap_plan *ps = s==0 ? pf : pl[s-1];
         const int wrap_band = s>0 && k0[s-1]>0;
+        const int prep_band = s>0 && (k0[s-1]>0 || al[s-1]<1.f);
         const size_t hv = wrap_band ? (size_t)m : (size_t)(kfill < m ? kfill : m);
         const int w = ap_plan_pairbatch(ps);
         if(w > 0){
@@ -1409,9 +1505,10 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
           for(int bi=0;bi<B;bi++){
             if(s==0 || has_noise || kept[bi]){
               const float *Xr = X+(size_t)bi*xfloats;
-              if(wrap_band){
+              if(prep_band){
+                const float *Xo = Xorth ? Xorth+(size_t)bi*xorth_floats : NULL;
                 float *dst = Xw + (size_t)nact * xwfloats;
-                sim_wrap_band(Xr, kfill, m, k0[s-1], khi[s-1], dst);
+                sim_prep_band(Xr, Xo, kfill, m, k0[s-1], khi[s-1], al[s-1], be[s-1], dst);
                 srcs[nact] = dst;
               } else {
                 srcs[nact] = Xr;
@@ -1451,8 +1548,9 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
               continue;
             }
             const float *Xin = X+(size_t)bi*xfloats;
-            if(wrap_band){
-              sim_wrap_band(Xin, kfill, m, k0[s-1], khi[s-1], Xw);
+            if(prep_band){
+              const float *Xo = Xorth ? Xorth+(size_t)bi*xorth_floats : NULL;
+              sim_prep_band(Xin, Xo, kfill, m, k0[s-1], khi[s-1], al[s-1], be[s-1], Xw);
               Xin = Xw;
             }
             ap_fft_backward_padded(ps,Xin,hv,Y);
@@ -1474,6 +1572,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
           memcpy(ks0,ks,(size_t)ns*sizeof *ks); memcpy(kn0,kn,(size_t)nb*sizeof *kn);
           int full=0, kept1=1;
           const float *Xr=X+(size_t)bi*xfloats;
+          const float *Xo=Xorth ? Xorth+(size_t)bi*xorth_floats : NULL;
           for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb && !full; s++){
             const long long m = s==0 ? n : b[s-1];
             const float g = s==0 ? fs : bs[s-1];
@@ -1494,9 +1593,10 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
             } else {
               ap_plan *ps = s==0 ? pf : pl[s-1];
               const int wrap_band = s>0 && k0[s-1]>0;
+              const int prep_band = s>0 && (k0[s-1]>0 || al[s-1]<1.f);
               const float *Xin = Xr;
-              if(wrap_band){
-                sim_wrap_band(Xr, kfill, m, k0[s-1], khi[s-1], Xw);
+              if(prep_band){
+                sim_prep_band(Xr, Xo, kfill, m, k0[s-1], khi[s-1], al[s-1], be[s-1], Xw);
                 Xin = Xw;
               }
               const size_t hv = wrap_band ? (size_t)m : (size_t)(kfill < m ? kfill : m);
@@ -1522,7 +1622,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     if(has_noise) for(Py_ssize_t q=0;q<nb;q++) ((long long*)nob[q].buf)[done]=kn[q];
     Py_END_ALLOW_THREADS
   }
-  free(X); free(Xw); free(Y); free(A); free(Yhalf); free(Yodd); free(Xtw); free(tw);
+  free(X); free(Xorth); free(Xw); free(Y); free(A); free(Yhalf); free(Yodd); free(Xtw); free(tw);
   if(pf) ap_destroy(pf);
   if(ph_own) ap_destroy(ph_own);
   for(Py_ssize_t i=0;i<nb;i++){ if(pl[i]) ap_destroy(pl[i]); }
