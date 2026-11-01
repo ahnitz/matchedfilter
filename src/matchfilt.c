@@ -1182,7 +1182,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     return 0;
   }
   const int stream = !ap_env_flag("MF_CORR_NO_STREAM",0)
-                     && llc && (size_t)nt*span_sum*8u > 3*(llc/4);
+                     && llc && (size_t)nt*span_sum*8u > (llc/2);
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;
@@ -1213,9 +1213,10 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   if((W || p->gmajor) && nt < p->nt && nblocks >= 1
      && (size_t)nblocks * (2 * n * sizeof(float)) <= cache_lim){
     const size_t spec_bytes = 2 * n * sizeof(float);
-    const size_t l1d = ap_l1d_bytes();
-    const size_t l2_fit = (l2_bytes() * 7) / 8;
-    const int kt_step = (spec_bytes > l1d && 9u * spec_bytes <= l2_fit) ? 4 : 1;
+    const size_t l2 = l2_bytes();
+    const size_t l2_fit = (l2 * 7) / 8;
+    const int kt_step = (spec_bytes >= 16384u && spec_bytes <= 32768u && p->w >= 16
+                         && 9u * spec_bytes <= l2_fit) ? 4 : 1;
     const float inv = 1.0f / (float)n;
     const int gm_n1 = p->gmajor ? p->n1 : 0;
     if(!use_fb && p->real_series && alloc_pair(&p->sfwd, &p->sspec, spec_bytes))
@@ -1320,63 +1321,111 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
         pthread_mutex_unlock(&corr_fwd_mu);
       }
       if(!err){
-        for(int b = 0; b < nblocks; b++){
-          const size_t start = starts[b];
-          const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
-          if(start >= nseries || blo >= nseries - start) continue;
-          const size_t end = bhi < nseries - start ? bhi : nseries - start;
-          const size_t bytes = 2 * (end - blo) * sizeof(float);
-          if(W){
-            const float *Dr = cdr + (size_t)b * n, *Di = cdi + (size_t)b * n;
-            if(p->ebr){
-              for(size_t k = 0; k < n; k++){
-                const float a = Dr[k], bv = Di[k];
-                for(int l = 0; l < W; l++){ p->ebr[k * W + l] = a; p->ebi[k * W + l] = bv; }
-              }
-              Dr = p->ebr; Di = p->ebi;
-            }
-            for(int tt = 0; tt < nt; tt += W){
-              const int cnt = nt - tt < W ? nt - tt : W;
-              const int base = t0 + tt;
-              const float *Tr, *Ti;
-              if(base % W == 0){
-                Tr = p->tre + (size_t)(base / W) * n * W;
-                Ti = p->tim + (size_t)(base / W) * n * W;
-              }else{
-                gather_template_batch(p->tsr, p->tsi, p, base, NULL, 0, cnt);
-                Tr = p->tsr; Ti = p->tsi;
-              }
-              if(ap_corr_prod_batch(p->fft, Dr, Di, Tr, Ti, cnt, p->corrbuf)){
-                err = -1; break;
-              }
-              for(int t = 0; t < cnt; t++){
-                const float *csrc = p->corrbuf + 2 * ((size_t)t * n + blo);
-                out_copy(out + 2 * ((size_t)(tt + t) * nseries + start + blo), csrc, bytes, stream);
-                if(mirror_dst)
-                  fast_nt_copy(mirror_dst + 2 * ((size_t)(tt + t) * mirror_stride + start + blo),
-                               csrc, bytes);
-              }
-            }
-          }else{
-            for(int t = 0; t < nt;){
+        /* Tile blocks in the cached-forward loop whenever templates outgrow L2 or
+           a single pair's working set overflows L2, reusing each template in L2. */
+        int cb_tile = 1;
+        if(!W && nt > kt_step && nblocks > 1){
+          if(3u * spec_bytes > l2){
+            size_t fit = (cache_lim / 2) / spec_bytes;
+            if(fit > 16) fit = 16;
+            if((int)fit > nblocks) fit = (size_t)nblocks;
+            if(fit >= 2) cb_tile = (int)fit;
+          }else if(((size_t)nt + 2u) * spec_bytes > l2
+                   && (size_t)(2 * kt_step + 2) * spec_bytes <= (l2 / 2)){
+            size_t fit = ((l2 / 2) - (size_t)(2 * kt_step) * spec_bytes) / spec_bytes;
+            if(fit > 4) fit = 4;
+            if((int)fit > nblocks) fit = (size_t)nblocks;
+            if(fit >= 2) cb_tile = (int)fit;
+          }
+        }
+        if(!W && cb_tile > 1){
+          for(int b0 = 0; b0 < nblocks && !err; b0 += cb_tile){
+            const int g = nblocks - b0 < cb_tile ? nblocks - b0 : cb_tile;
+            for(int t = 0; t < nt && !err;){
               int kt = nt - t;
               if(kt > kt_step) kt = kt_step;
-              if(ap_corr_prod_window_multi(p->fft, cdr + (size_t)b * n, cdi + (size_t)b * n,
-                                           p->tre + (size_t)(t0 + t) * n, p->tim + (size_t)(t0 + t) * n,
-                                           n, kt, blo, end,
-                                           out + 2 * ((size_t)t * nseries + start + blo),
-                                           2 * nseries, p->scratch, stream)){
-                err = -1; break;
-              }
-              if(mirror_dst){
-                for(int q = 0; q < kt; q++)
-                  fast_nt_copy(mirror_dst + 2 * ((size_t)(t + q) * mirror_stride + start + blo),
-                               out + 2 * ((size_t)(t + q) * nseries + start + blo), bytes);
+              for(int d = 0; d < g; d++){
+                const int b = b0 + d;
+                const size_t start = starts[b];
+                const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
+                if(start >= nseries || blo >= nseries - start) continue;
+                const size_t end = bhi < nseries - start ? bhi : nseries - start;
+                const size_t bytes = 2 * (end - blo) * sizeof(float);
+                if(ap_corr_prod_window_multi(p->fft, cdr + (size_t)b * n, cdi + (size_t)b * n,
+                                             p->tre + (size_t)(t0 + t) * n, p->tim + (size_t)(t0 + t) * n,
+                                             n, kt, blo, end,
+                                             out + 2 * ((size_t)t * nseries + start + blo),
+                                             2 * nseries, p->scratch, stream)){
+                  err = -1; break;
+                }
+                if(mirror_dst){
+                  for(int q = 0; q < kt; q++)
+                    fast_nt_copy(mirror_dst + 2 * ((size_t)(t + q) * mirror_stride + start + blo),
+                                 out + 2 * ((size_t)(t + q) * nseries + start + blo), bytes);
+                }
               }
               t += kt;
             }
           }
-          if(err) break;
+        }else{
+          for(int b = 0; b < nblocks; b++){
+            const size_t start = starts[b];
+            const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
+            if(start >= nseries || blo >= nseries - start) continue;
+            const size_t end = bhi < nseries - start ? bhi : nseries - start;
+            const size_t bytes = 2 * (end - blo) * sizeof(float);
+            if(W){
+              const float *Dr = cdr + (size_t)b * n, *Di = cdi + (size_t)b * n;
+              if(p->ebr){
+                for(size_t k = 0; k < n; k++){
+                  const float a = Dr[k], bv = Di[k];
+                  for(int l = 0; l < W; l++){ p->ebr[k * W + l] = a; p->ebi[k * W + l] = bv; }
+                }
+                Dr = p->ebr; Di = p->ebi;
+              }
+              for(int tt = 0; tt < nt; tt += W){
+                const int cnt = nt - tt < W ? nt - tt : W;
+                const int base = t0 + tt;
+                const float *Tr, *Ti;
+                if(base % W == 0){
+                  Tr = p->tre + (size_t)(base / W) * n * W;
+                  Ti = p->tim + (size_t)(base / W) * n * W;
+                }else{
+                  gather_template_batch(p->tsr, p->tsi, p, base, NULL, 0, cnt);
+                  Tr = p->tsr; Ti = p->tsi;
+                }
+                if(ap_corr_prod_batch(p->fft, Dr, Di, Tr, Ti, cnt, p->corrbuf)){
+                  err = -1; break;
+                }
+                for(int t = 0; t < cnt; t++){
+                  const float *csrc = p->corrbuf + 2 * ((size_t)t * n + blo);
+                  out_copy(out + 2 * ((size_t)(tt + t) * nseries + start + blo), csrc, bytes, stream);
+                  if(mirror_dst)
+                    fast_nt_copy(mirror_dst + 2 * ((size_t)(tt + t) * mirror_stride + start + blo),
+                                 csrc, bytes);
+                }
+              }
+            }else{
+              for(int t = 0; t < nt;){
+                int kt = nt - t;
+                if(kt > kt_step) kt = kt_step;
+                if(ap_corr_prod_window_multi(p->fft, cdr + (size_t)b * n, cdi + (size_t)b * n,
+                                             p->tre + (size_t)(t0 + t) * n, p->tim + (size_t)(t0 + t) * n,
+                                             n, kt, blo, end,
+                                             out + 2 * ((size_t)t * nseries + start + blo),
+                                             2 * nseries, p->scratch, stream)){
+                  err = -1; break;
+                }
+                if(mirror_dst){
+                  for(int q = 0; q < kt; q++)
+                    fast_nt_copy(mirror_dst + 2 * ((size_t)(t + q) * mirror_stride + start + blo),
+                                 out + 2 * ((size_t)(t + q) * nseries + start + blo), bytes);
+                }
+                t += kt;
+              }
+            }
+            if(err) break;
+          }
         }
       }
 #if defined(__x86_64__) || defined(__i386__)
@@ -1390,21 +1439,37 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   }
   if(!W && p->gmajor){
     const size_t spec_bytes=2*n*sizeof(float);
-    const size_t l1d=ap_l1d_bytes();
     const size_t l2=l2_bytes();
-    const size_t l2_fit=(l2*7)/8, l2_tile=(l2*3)/4;
-    const int kt_step=(spec_bytes>l1d && 9u*spec_bytes<=l2_fit) ? 4 : 1;
+    const size_t l2_fit=(l2*7)/8;
+    /* Multi-template Stage A (kt_step=4) helps 16-lane AVX-512 at N<=4096 where 4 intermediates
+       plus a data tile stay well within L1D/L2; at N>=8192 or narrower SIMD, kt_step=1 avoids
+       L1D group spills and extra intermediate write/read traffic. */
+    const int kt_step=(spec_bytes>=16384u && spec_bytes<=32768u && p->w>=16
+                       && 9u*spec_bytes<=l2_fit) ? 4 : 1;
     const size_t out_per_blk=(nblocks>0 ? (span_sum/(size_t)nblocks)*8u : spec_bytes);
     int b_tile=1;
-    if(!use_fb && spec_bytes>32768u && spec_bytes<=65536u && nt>kt_step && nblocks>1){
-      const size_t untiled=((size_t)nt+1u+(size_t)kt_step)*spec_bytes
-                           + (stream ? 0u : (size_t)nt*out_per_blk);
-      if(untiled>l2){
+    if(!use_fb && nt>kt_step && nblocks>1){
+      if(3u*spec_bytes>l2){
+        /* Regime B: a single (Dr, Di) + (tr, ti) + (ire, iim) exceeds L2, so block-outer
+           evicts (Dr, Di) from L2 on every template anyway. Tile blocks within half of LLC
+           so each template spectrum is reused across b_tile blocks in L2/LLC. */
+        const size_t per_blk=spec_bytes+(stream ? 0u : out_per_blk);
+        size_t fit=(cache_lim/2)/(per_blk ? per_blk : spec_bytes);
+        const size_t cap=stream ? 16u : 8u;
+        if(fit>cap) fit=cap;
+        if((int)fit>nblocks) fit=(size_t)nblocks;
+        if(fit>=2) b_tile=(int)fit;
+      }else{
+        /* Regime A: keep b_tile data spectra plus the active template and intermediate
+           comfortably inside half of L2 when the full template bank outgrows L2. */
+        const size_t untiled=((size_t)nt+1u+(size_t)kt_step)*spec_bytes
+                             + (stream ? 0u : (size_t)nt*out_per_blk);
+        const size_t l2_half=l2/2;
         const size_t used=(size_t)(2*kt_step)*spec_bytes;
         const size_t per_blk=spec_bytes+(stream ? 0u : (size_t)kt_step*out_per_blk);
-        if(l2_tile>used+per_blk){
-          size_t fit=(l2_tile-used)/per_blk;
-          if(fit>8) fit=8;
+        if(untiled>l2 && l2_half>=used+2u*per_blk){
+          size_t fit=(l2_half-used)/per_blk;
+          if(fit>4) fit=4;
           if((int)fit>nblocks) fit=(size_t)nblocks;
           if(fit>=2) b_tile=(int)fit;
         }
@@ -1419,7 +1484,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     for(int b0=0;b0<nblocks;){
       const int g=nblocks-b0<step_g ? nblocks-b0 : step_g;
       if(use_fb && forward_series_batch(p,fb,series,nseries,starts+b0,g)<0) return -1;
-      size_t d_start[AP_MAX_LANES],d_blo[AP_MAX_LANES],d_end[AP_MAX_LANES];
+      size_t d_start[32],d_blo[32],d_end[32];
       int scnt=0;
       const int use_tile=(!use_fb && cap_slots>=g && g>1);
       for(int d=0;d<g;d++){
