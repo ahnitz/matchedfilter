@@ -171,15 +171,24 @@ def test_cost_model_prices_the_screen():
     for b, ent in cm.screen.items():
         assert ent["dense"] > 0 and ent["recheck"] > 0
         assert all(q == f for f, q in ent["excess"])          # the screen is the tier: same passes
+        assert ent.get("sparse") and all(v > 0 for _, v in ent["sparse"])
         # The screen is taken unless it is dearer than the float tier by more than TIE (a close
         # call takes the screen, as pick_stable takes the canonical chain).
         cq = ent["dense"] + cm.screen_reach(b, 0.01) * ent["recheck"]
         c, on = cm.first_tier(b, 0.01)
         assert on == (cq <= cm.dense[b] * (1.0 + mf.gatechain.TIE))
         assert c == (cq if on else cm.dense[b])
+        assert cm.sparse_for(b, 0.05, False) == cm.sparse(b, 0.05)
+        assert cm.sparse_for(b, 0.05, True) == cm._interp(ent["sparse"], 0.05)
+        assert cm.unscreened().sparse_for(b, 0.05, True) == cm.sparse(b, 0.05)
     import json
     rt = mf.gatechain.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
     assert rt.signature() == cm.signature()
+    legacy = cm.to_dict()
+    for ent in legacy["screen"].values():
+        ent.pop("sparse", None)
+    rt_legacy = mf.gatechain.CostModel.from_dict(legacy)
+    assert rt_legacy.to_dict() == legacy
 
 
 def test_avx1_exposes_vex_q15_screen():
