@@ -2292,6 +2292,21 @@ int corr_prod_batch(void *vp,const float *dr,const float *di,
   else
     efft_prod((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   size_t k=0;
+  if constexpr (AP_W>=4){
+    const vf sg=V_SIGNMASK();
+    for(;k+(size_t)AP_W<=p->N;k+=(size_t)AP_W){
+      vf rr[AP_W],ri[AP_W],tr_r[AP_W],tr_i[AP_W];
+      for(int j=0;j<AP_W;j++){
+        const int e=eidx(&p->ea,(int)(k+(size_t)j));
+        rr[j]=p->bR[e];
+        ri[j]=V_XOR(p->bI[e],sg);
+      }
+      V_TRANSPOSE(rr,tr_r);
+      V_TRANSPOSE(ri,tr_i);
+      for(int l=0;l<nlane;l++)
+        v_inter(out+2*((size_t)l*p->N+k),tr_r[l],tr_i[l]);
+    }
+  }
   for(;k+1<p->N;k+=2){
     const int e0=eidx(&p->ea,(int)k);
     const int e1=eidx(&p->ea,(int)(k+1));
@@ -2381,42 +2396,218 @@ int corr_prod(void *vp,const float*dr,const float*di,
   return 0;
 }
 
+static HWY_ATTR HWY_INLINE void corr_stream_range(float *dst,const float *src,size_t nf){
+#if defined(AP_SIMD_AVX1) || HWY_ARCH_X86
+  while(nf && ((uintptr_t)dst&15u)){ *dst++=*src++; nf--; }
+  const size_t v=nf/4;
+  for(size_t i=0;i<v;i++) _mm_stream_ps(dst+4*i,_mm_loadu_ps(src+4*i));
+  for(size_t i=4*v;i<nf;i++) dst[i]=src[i];
+#else
+  memcpy(dst,src,nf*sizeof(float));
+#endif
+}
+
+static HWY_ATTR HWY_INLINE void corr_stream_copy(float *dst,const float *src,size_t nf){
+#if defined(AP_SIMD_AVX1) || HWY_ARCH_X86
+  while(nf && ((uintptr_t)dst&15u)){ *dst++=*src++; nf--; }
+  while(nf>=4 && ((uintptr_t)dst&63u)){
+    _mm_stream_ps(dst,_mm_loadu_ps(src));
+    dst+=4; src+=4; nf-=4;
+  }
+  if((uintptr_t)dst&63u){
+    for(size_t i=0;i<nf;i++) dst[i]=src[i];
+    return;
+  }
+#if defined(AP_SIMD_AVX1)
+  if((((uintptr_t)src&31u)!=0) && (((uintptr_t)src&15u)==0)){
+    for(;nf>=32;nf-=32,dst+=32,src+=32){
+      const __m256 v0=_mm256_insertf128_ps(_mm256_castps128_ps256(_mm_load_ps(src)),_mm_load_ps(src+4),1);
+      const __m256 v1=_mm256_insertf128_ps(_mm256_castps128_ps256(_mm_load_ps(src+8)),_mm_load_ps(src+12),1);
+      const __m256 v2=_mm256_insertf128_ps(_mm256_castps128_ps256(_mm_load_ps(src+16)),_mm_load_ps(src+20),1);
+      const __m256 v3=_mm256_insertf128_ps(_mm256_castps128_ps256(_mm_load_ps(src+24)),_mm_load_ps(src+28),1);
+      _mm256_stream_ps(dst,v0);    _mm256_stream_ps(dst+8,v1);
+      _mm256_stream_ps(dst+16,v2); _mm256_stream_ps(dst+24,v3);
+    }
+  }
+  for(;nf>=32;nf-=32,dst+=32,src+=32){
+    const __m256 v0=_mm256_loadu_ps(src),    v1=_mm256_loadu_ps(src+8);
+    const __m256 v2=_mm256_loadu_ps(src+16), v3=_mm256_loadu_ps(src+24);
+    _mm256_stream_ps(dst,v0);    _mm256_stream_ps(dst+8,v1);
+    _mm256_stream_ps(dst+16,v2); _mm256_stream_ps(dst+24,v3);
+  }
+  for(;nf>=8;nf-=8,dst+=8,src+=8)
+    _mm256_stream_ps(dst,_mm256_loadu_ps(src));
+#elif HWY_ARCH_X86 && HWY_TARGET <= HWY_AVX3 && HWY_MAX_BYTES == 64
+  const uintptr_t smis=(uintptr_t)src&63u;
+  if(smis==0){
+    for(;nf>=64;nf-=64,dst+=64,src+=64){
+      const __m512 v0=_mm512_load_ps(src),    v1=_mm512_load_ps(src+16);
+      const __m512 v2=_mm512_load_ps(src+32), v3=_mm512_load_ps(src+48);
+      _mm512_stream_ps(dst,v0);    _mm512_stream_ps(dst+16,v1);
+      _mm512_stream_ps(dst+32,v2); _mm512_stream_ps(dst+48,v3);
+    }
+  }else if((smis&3u)==0 && nf>=80){
+    const int sh=(int)(smis>>2);
+    const float *ap=src-sh;
+    const __m512i idx=_mm512_add_epi32(_mm512_set1_epi32(sh),
+                                       _mm512_setr_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15));
+    __m512 a0=_mm512_load_ps(ap);
+    for(;nf>=80;nf-=64,dst+=64,src+=64,ap+=64){
+      const __m512 a1=_mm512_load_ps(ap+16), a2=_mm512_load_ps(ap+32);
+      const __m512 a3=_mm512_load_ps(ap+48), a4=_mm512_load_ps(ap+64);
+      _mm512_stream_ps(dst,   _mm512_permutex2var_ps(a0,idx,a1));
+      _mm512_stream_ps(dst+16,_mm512_permutex2var_ps(a1,idx,a2));
+      _mm512_stream_ps(dst+32,_mm512_permutex2var_ps(a2,idx,a3));
+      _mm512_stream_ps(dst+48,_mm512_permutex2var_ps(a3,idx,a4));
+      a0=a4;
+    }
+  }
+  for(;nf>=16;nf-=16,dst+=16,src+=16)
+    hn::Stream(V_LOADU(src),AP_D,dst);
+#else
+  if constexpr (AP_W==8){
+    if((((uintptr_t)src&31u)!=0) && (((uintptr_t)src&15u)==0)){
+      const hn::Half<ap_tag> dh;
+      for(;nf>=32;nf-=32,dst+=32,src+=32){
+        const vf v0=hn::Combine(AP_D,hn::LoadU(dh,src+4),hn::LoadU(dh,src));
+        const vf v1=hn::Combine(AP_D,hn::LoadU(dh,src+12),hn::LoadU(dh,src+8));
+        const vf v2=hn::Combine(AP_D,hn::LoadU(dh,src+20),hn::LoadU(dh,src+16));
+        const vf v3=hn::Combine(AP_D,hn::LoadU(dh,src+28),hn::LoadU(dh,src+24));
+        hn::Stream(v0,AP_D,dst);    hn::Stream(v1,AP_D,dst+8);
+        hn::Stream(v2,AP_D,dst+16); hn::Stream(v3,AP_D,dst+24);
+      }
+    }
+  }
+  for(;nf>=(size_t)(4*AP_W);nf-=(size_t)(4*AP_W),dst+=4*AP_W,src+=4*AP_W){
+    const vf v0=V_LOADU(src),        v1=V_LOADU(src+AP_W);
+    const vf v2=V_LOADU(src+2*AP_W), v3=V_LOADU(src+3*AP_W);
+    hn::Stream(v0,AP_D,dst);        hn::Stream(v1,AP_D,dst+AP_W);
+    hn::Stream(v2,AP_D,dst+2*AP_W); hn::Stream(v3,AP_D,dst+3*AP_W);
+  }
+  for(;nf>=(size_t)AP_W;nf-=(size_t)AP_W,dst+=AP_W,src+=AP_W)
+    hn::Stream(V_LOADU(src),AP_D,dst);
+#endif
+  for(;nf>=4;nf-=4,dst+=4,src+=4)
+    _mm_stream_ps(dst,_mm_loadu_ps(src));
+  for(size_t i=0;i<nf;i++) dst[i]=src[i];
+#else
+  memcpy(dst,src,nf*sizeof(float));
+#endif
+}
+
+template<int Align>
+static HWY_ATTR HWY_INLINE void corr_stream_inter(float *p,vf re,vf im){
+#if defined(AP_SIMD_AVX1)
+  if constexpr (Align==0){
+    const vf a=_mm256_unpacklo_ps(re,im), b=_mm256_unpackhi_ps(re,im);
+    _mm256_stream_ps(p,_mm256_permute2f128_ps(a,b,0x20));
+    _mm256_stream_ps(p+8,_mm256_permute2f128_ps(a,b,0x31));
+  }else{
+    alignas(32) float tmp[16];
+    v_inter(tmp,re,im);
+    corr_stream_range(p,tmp,16);
+  }
+#elif HWY_ARCH_X86 && HWY_TARGET <= HWY_AVX3 && HWY_MAX_BYTES == 64
+  if constexpr (Align==0){
+    hn::Stream(hn::InterleaveWholeLower(AP_D,re,im),AP_D,p);
+    hn::Stream(hn::InterleaveWholeUpper(AP_D,re,im),AP_D,p+16);
+  }else{
+    alignas(64) float tmp[32];
+    v_inter(tmp,re,im);
+    corr_stream_range(p,tmp,32);
+  }
+#else
+  if constexpr (AP_W==8 && Align==0){
+    const vf a=hn::InterleaveLower(AP_D,re,im), b=hn::InterleaveUpper(AP_D,re,im);
+    hn::Stream(hn::ConcatLowerLower(AP_D,b,a),AP_D,p);
+    hn::Stream(hn::ConcatUpperUpper(AP_D,b,a),AP_D,p+8);
+  }else if constexpr (AP_W==4 && Align==0){
+    hn::Stream(hn::InterleaveLower(AP_D,re,im),AP_D,p);
+    hn::Stream(hn::InterleaveUpper(AP_D,re,im),AP_D,p+4);
+  }else if constexpr (AP_W==16 && Align==0){
+    hn::Stream(hn::InterleaveWholeLower(AP_D,re,im),AP_D,p);
+    hn::Stream(hn::InterleaveWholeUpper(AP_D,re,im),AP_D,p+16);
+  }else{
+#if HWY_ARCH_X86
+    alignas(64) float tmp[2*AP_W];
+    v_inter(tmp,re,im);
+    corr_stream_range(p,tmp,2*AP_W);
+#else
+    v_inter(p,re,im);
+#endif
+  }
+#endif
+}
+
 static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,const float*di,
                                                         const float*tr,const float*ti,
-                                                        size_t blo,size_t end,float*dst){
+                                                        size_t blo,size_t end,float*dst,
+                                                        float*scratch,int stream){
   BP *p=(BP*)vp;
   if(p->small || blo>end || end>p->N) return -1;
   if(blo==end) return 0;
   stageA_prod_gm(p,dr,di,tr,ti);
-  const int N1=p->N1,N2=p->N2;
+  const int N2=p->N2;
+  const size_t uN2=(size_t)N2, em1=end-1;
+  const size_t q_lo=blo/uN2, r_lo=blo%uN2;
+  const size_t q_hi=em1/uN2, r_hi=em1%uN2;
   const vf sg=V_SIGNMASK();
+  const uintptr_t mis64=((uintptr_t)dst-2*blo*sizeof(float))&63u;
+  if(stream && scratch && !(AP_W==16 && mis64==0 && p->N<=65536)){
+    for(int b=0;b<N2/AP_W;b++){
+      const size_t base=(size_t)AP_W*(size_t)b;
+      const long lo = base+(size_t)(AP_W-1) >= r_lo ? (long)q_lo : (long)q_lo+1;
+      const long hi = base <= r_hi ? (long)q_hi : (long)q_hi-1;
+      if(lo>hi) continue;
+      vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+      for(long k1=lo;k1<=hi;k1++){
+        const int e=eidx(&p->ea,(int)k1);
+        v_inter(scratch+2*((size_t)k1*uN2+base),RR[e],V_XOR(RI[e],sg));
+      }
+    }
+    corr_stream_copy(dst,scratch+2*blo,2*(end-blo));
+    return 0;
+  }
   for(int b=0;b<N2/AP_W;b++){
-    const long base=(long)AP_W*b;
-    long lo = (long)blo > base+(AP_W-1) ? (((long)blo-base-(AP_W-1)+N2-1)/N2) : 0;
-    long hi = (long)end-1 >= base ? (((long)end-1-base)/N2) : -1;
-    if(lo<0) lo=0;
-    if(hi>N1-1) hi=N1-1;
+    const size_t base=(size_t)AP_W*(size_t)b;
+    const long lo = base+(size_t)(AP_W-1) >= r_lo ? (long)q_lo : (long)q_lo+1;
+    const long hi = base <= r_hi ? (long)q_hi : (long)q_hi-1;
     if(lo>hi) continue;
     vf *RR,*RI; stageB(p,b,&RR,&RI,1);
-    long lo_in = (long)blo > base ? (((long)blo-base+N2-1)/N2) : 0;
-    long hi_in = (long)end >= base+AP_W ? (((long)end-base-AP_W)/N2) : -1;
-    if(lo_in<lo) lo_in=lo;
-    if(hi_in>hi) hi_in=hi;
+    const long lo_in = base >= r_lo ? (long)q_lo : (long)q_lo+1;
+    const long hi_in = base+(size_t)(AP_W-1) <= r_hi ? (long)q_hi : (long)q_hi-1;
     auto store_partial=[&](long k1){
-      float tmp[2*AP_W];
+      alignas(64) float tmp[2*AP_W];
       const int e=eidx(&p->ea,(int)k1);
-      const size_t k0=(size_t)k1*N2+(size_t)base;
+      const size_t k0=(size_t)k1*uN2+base;
       v_inter(tmp,RR[e],V_XOR(RI[e],sg));
       const size_t u0 = k0<blo ? blo-k0 : 0;
       const size_t u1 = k0+AP_W>end ? end-k0 : (size_t)AP_W;
-      if(u0<u1) memcpy(dst+2*(k0+u0-blo),tmp+2*u0,2*(u1-u0)*sizeof(float));
+      if(u0<u1){
+        if(stream) corr_stream_range(dst+2*(k0+u0-blo),tmp+2*u0,2*(u1-u0));
+        else memcpy(dst+2*(k0+u0-blo),tmp+2*u0,2*(u1-u0)*sizeof(float));
+      }
     };
     if(lo_in<=hi_in){
       for(long k1=lo;k1<lo_in;k1++) store_partial(k1);
-      for(long k1=lo_in;k1<=hi_in;k1++){
-        const int e=eidx(&p->ea,(int)k1);
-        const size_t k0=(size_t)k1*N2+(size_t)base;
-        v_inter(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
+      if(!stream){
+        for(long k1=lo_in;k1<=hi_in;k1++){
+          const int e=eidx(&p->ea,(int)k1);
+          const size_t k0=(size_t)k1*uN2+base;
+          v_inter(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
+        }
+      }else if(mis64==0){
+        for(long k1=lo_in;k1<=hi_in;k1++){
+          const int e=eidx(&p->ea,(int)k1);
+          const size_t k0=(size_t)k1*uN2+base;
+          corr_stream_inter<0>(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
+        }
+      }else{
+        for(long k1=lo_in;k1<=hi_in;k1++){
+          const int e=eidx(&p->ea,(int)k1);
+          const size_t k0=(size_t)k1*uN2+base;
+          corr_stream_inter<4>(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
+        }
       }
       for(long k1=hi_in+1;k1<=hi;k1++) store_partial(k1);
     }else{
