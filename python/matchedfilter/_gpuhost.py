@@ -21,14 +21,26 @@ def bin_shift(binsize):
     return binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
 
 
-def coarse_span(n, band, lo, hi):
+def coarse_span(n, band, lo, hi, lag_pad=0):
     """A gate tier's window in band samples, (start, end, span, shift): the caller's window
-    [lo, hi) at n, widened by one band sample at each end (as hmf.c), so a signal near either
-    end has coarse samples on both sides.
+    [lo, hi) at n, widened by one band sample (plus lag_pad when clustered) at each end (as
+    hmf.c), so a signal near either end has coarse samples on both sides.
     The tier reduces it to ONE bin, so the reported peak is the window's maximum -- all a
     gate needs. shift is bin_shift(span) (-1 when span is not a power of two)."""
     from ._windows import coarse_lags
-    cstart, cend = coarse_lags(n, band, lo, hi)
+    lp = int(lag_pad)
+    if lp > 0:
+        r = n // band
+        lo_i, hi_i = int(lo), int(hi)
+        if lo_i < lp * r or hi_i + lp * r > n:
+            cstart, cend = 0, band
+        else:
+            pad = 1 + lp
+            c0 = lo_i // r
+            cstart = c0 - pad if c0 > pad else 0
+            cend = max(cstart + 1, min(band, -(-hi_i // r) + pad))
+    else:
+        cstart, cend = coarse_lags(n, band, lo, hi)
     cspan = cend - cstart
     return cstart, cend, cspan, bin_shift(cspan)
 
@@ -182,21 +194,35 @@ ROWWIN_ON = 0xFFFFFFFF
 _BAND_WINDOWS = {}
 
 
-def band_windows(rowwin, n, band):
+def band_windows(rowwin, n, band, lag_pad=0):
     """Per-row windows [lo, hi) in samples of an n-point transform, mapped onto a coarse band
     as coarse_span maps one window: band samples [lo // R - 1, ceil(hi / R) + 1) with R = n // band,
-    clamped to the band, at least one sample. The coarse and listed tiers read these as they
-    are. Mapped in the kernel instead, the same arithmetic made the band-256 coarse kernel
-    1.47x slower at SIMD16 on an Iris Xe. Memoised per table (grouped_row_windows' tables
-    are memoised and read-only), as a call per segment maps the same few."""
+    widened by lag_pad when clustered (full [0, band) where cyclic wrap could clip a shifted
+    member peak, matching hmf.c), clamped to the band, at least one sample. The coarse and
+    listed tiers read these as they are. Mapped in the kernel instead, the same arithmetic
+    made the band-256 coarse kernel 1.47x slower at SIMD16 on an Iris Xe. Memoised per table
+    (grouped_row_windows' tables are memoised and read-only), as a call per segment maps the
+    same few."""
     import numpy as np
-    key = (id(rowwin), n, band)
+    lp = int(lag_pad)
+    key = (id(rowwin), n, band, lp) if lp else (id(rowwin), n, band)
     hit = _BAND_WINDOWS.get(key)
     if hit is not None and hit[0] is rowwin:
         return hit[1]
     from ._windows import coarse_lags
     w = np.asarray(rowwin, np.uint32).reshape(-1, 3)[:, :2].astype(np.int64)
-    cs, ce = coarse_lags(n, band, w[:, 0], w[:, 1])
+    if lp > 0:
+        r = n // band
+        pad = 1 + lp
+        lo, hi = w[:, 0], w[:, 1]
+        c0 = lo // r
+        cs = np.where(c0 > pad, c0 - pad, 0)
+        ce = np.maximum(cs + 1, np.minimum(band, -(-hi // r) + pad))
+        wrap = (lo < lp * r) | (hi + lp * r > n)
+        cs = np.where(wrap, 0, cs)
+        ce = np.where(wrap, band, ce)
+    else:
+        cs, ce = coarse_lags(n, band, w[:, 0], w[:, 1])
     # A coarse tier is one bin: its rows' bin phase is 0.
     out = np.ascontiguousarray(np.stack([cs, ce, np.zeros_like(cs)], 1).astype(np.uint32))
     if len(_BAND_WINDOWS) > 4096:
@@ -209,7 +235,7 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
                        upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
                        slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS,
                        handle_out=None, refine_reach=None, phase=None, band_offsets=None,
-                       direct=None):
+                       direct=None, tier0_cluster=None):
     """hier_peaks_grouped for any backend whose hier_peaks accepts row_windows: one
     recording, each tier a single dispatch over all rows, per-row windows in the kernels.
 
@@ -224,6 +250,8 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
     extra = {} if handle_out is None else {"handle_out": handle_out}
     if band_offsets is not None:
         extra["band_offsets"] = band_offsets
+    if tier0_cluster is not None:
+        extra["tier0_cluster"] = tier0_cluster
     return ctx.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=int(binsize),
                           threshold=threshold, window=window, upload_data=False, nbins=nb,
                           upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,

@@ -92,7 +92,7 @@ def test_forward_and_packing_kernels_ship(backend):
         forward = kernels["forward_%d" % n]
         flat = kernels.get("tierb_%d" % n) or kernels["tierb_%d_lds32" % n]
         assert forward["local_size"] == flat["local_size"]
-    for kernel in ("pack_coarse", "compact_peaks", "refine_td"):
+    for kernel in ("pack_coarse", "compact_peaks", "refine_td", "compact", "compactc", "compactl"):
         assert kernel in kernels
 
 
