@@ -1026,9 +1026,11 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   ap_plan *fb=ensure_fwd_batch(p,p->real_series);
   const int W_fb=fb?ap_plan_lanes(fb):0;
   const int use_fb=fb && W_fb>p->nd;
+  /* Keep each large block's spectrum (Dr, Di) in L2 across t = 0..nt-1 rather than
+     transforming p->nd blocks upfront and evicting earlier slots before correlation. */
+  const int max_g=use_fb ? W_fb : ((!W && 2*n*sizeof(float)>=65536) ? 1 : p->nd);
   for(int b0=0;b0<nblocks;){
-    const int g=use_fb ? (nblocks-b0<W_fb?nblocks-b0:W_fb)
-                       : (nblocks-b0<p->nd?nblocks-b0:p->nd);
+    const int g=nblocks-b0<max_g ? nblocks-b0 : max_g;
     if(use_fb){
       if(forward_series_batch(p,fb,series,nseries,starts+b0,g)<0) return -1;
     }else{

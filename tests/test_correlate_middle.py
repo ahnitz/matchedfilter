@@ -262,3 +262,136 @@ def test_hierarchical_search_cpu_multi_chunk_reuses_aligned_buffers():
             np.testing.assert_array_equal(multi_peaks[key][0], val[0])
             np.testing.assert_array_equal(multi_peaks[key][1], val[1])
             np.testing.assert_allclose(multi_peaks[key][2], val[2], rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("n", [8192, 16384, 32768])
+@pytest.mark.parametrize("real", [False, True])
+def test_large_balanced_carry_streaming_and_l2_blocking_bit_identical(monkeypatch, n, real):
+    """Large balanced transforms (n >= 8192, ndata > 1) exercise L2-aware g=1 series_spectra
+    blocking and 64B-misaligned carry-streaming across all SIMD targets and window shapes."""
+    llc = _llc_bytes()
+    if llc > (128 << 20):
+        pytest.skip("LLC size too large for quick streaming test")
+    rng = np.random.default_rng(500 + n + int(real))
+    nt = 6
+    lo, hi = 7, n - 9
+    span = hi - lo
+
+    n_test = 7
+    n_pad = int((5 * llc) // (2 * nt * span * 8)) + 2
+    L = (n_test + 2) * n
+    ser = rng.standard_normal(L).astype(np.float32)
+    if not real:
+        ser = (ser + 1j * rng.standard_normal(L)).astype(np.complex64)
+    h = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    spec = np.fft.fft(h, axis=1).astype(np.complex64)
+
+    st = np.array([0] * n_pad + [k * n for k in range(1, n_test + 1)], dtype=np.uintp)
+    bounds = np.empty((len(st), 2), dtype=np.uintp)
+    bounds[:n_pad] = (lo, hi)
+    bounds[n_pad + 0] = (lo, hi)                        # unaligned lo/hi
+    bounds[n_pad + 1] = (16, n - 16)                    # 64B-aligned lo/hi
+    bounds[n_pad + 2] = (18, n - 18)                    # +16B shifted
+    bounds[n_pad + 3] = (21, n - 23)                    # odd start and odd end (+8B)
+    bounds[n_pad + 4] = (256, 512)                      # single interior rowSpan
+    bounds[n_pad + 5] = (257, 263)                      # narrow (< 8 samples, k1_lo > k1_hi)
+    bounds[n_pad + 6] = (n // 2 - 5, n // 2 + 261)      # partial head + full row + partial tail
+
+    targets = list(mf.targets())
+    offs = (0, 4, 8, 16, 24, 32, 40, 48, 56) if n == 8192 else (0, 8, 16, 24, 32, 48, 56)
+    try:
+        for tgt in targets:
+            mf.set_target(tgt)
+            # ndata=4 > 1 exercises L2-aware g=1 blocking for 2*n*sizeof(float) >= 65536
+            cf = CorrelationFilter(n, ndata=4, ntemplates=nt, valid=(lo, hi), device="cpu")
+            cf.set_templates(spec)
+            ep = cf._execution_plan()
+            run = ep.correlate_series_continuous_real if real else ep.correlate_series_continuous
+
+            for base_off in offs:
+                sentinel = np.complex64(-31.25 + 17.5j)
+                monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
+                ref = _alloc_with_offset((nt, L), base_off, sentinel)
+                run(ser, st, lo, hi, 0, nt, ref, bounds)
+
+                monkeypatch.delenv("MF_CORR_NO_STREAM", raising=False)
+                got = _alloc_with_offset((nt, L), base_off, sentinel)
+                run(ser, st, lo, hi, 0, nt, got, bounds)
+
+                assert np.array_equal(
+                    got.view(np.uint32), ref.view(np.uint32)
+                ), f"mismatch target={tgt} n={n} real={real} off={base_off}"
+
+                inside = np.zeros(L, dtype=bool)
+                for s, (a, b) in zip(st, bounds):
+                    s_i = int(s)
+                    inside[s_i + int(a):min(s_i + int(b), L)] = True
+                assert np.all(got[:, ~inside] == sentinel)
+    finally:
+        mf.set_target(None)
+
+
+def test_correlate_series_out_none_modes_and_recycled_buffer_lifetime():
+    """CPU correlate_series(out=None) matches preallocated out across full, wide, multi-gap,
+    sparse, and empty windows, single/selected templates, scales, and view lifetimes."""
+    rng = np.random.default_rng(909)
+    S = 32768
+    # Interleaved short and long tap counts produce multiple groups in TimeDomainFilterBank
+    counts = np.array([65, 1025, 97, 1537, 129, 2047], dtype=np.int64)
+    nt = len(counts)
+    taps = np.zeros((nt, int(counts.max())), dtype=np.float32)
+    for i, c in enumerate(counts):
+        taps[i, :c] = rng.standard_normal(int(c)).astype(np.float32)
+
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="corr", device="cpu")
+    ser1 = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
+    ser2 = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
+    scales = rng.uniform(0.5, 2.0, size=nt).astype(np.float32)
+
+    # Exercise full, wide (> S//2), gapped wide (> S//2), sparse (<= S//2), and empty windows
+    window_cases = [
+        None,
+        [(1500, S - 1200)],
+        [(600, S // 2 - 200), (S // 2 + 200, S - 700)],
+        [(4000, 9000)],
+        [],
+    ]
+    for win in window_cases:
+        ref = np.full((nt, S), -77.0 + 55.0j, dtype=np.complex64)
+        bank.correlate_series(ser1, windows=win, scales=scales, out=ref)
+        # Pollute recycled pool slot first, then drop so the next wide call reuses dirty memory
+        tmp = bank.correlate_series(ser2)
+        tmp[:] = 12345.0 - 6789.0j
+        del tmp
+        got = bank.correlate_series(ser1, windows=win, scales=scales)
+        assert (got.ctypes.data & 16383) == 0
+        np.testing.assert_array_equal(got, ref)
+
+    # Single-template (returns 1D slice view over (1, S) buffer) and selected-templates modes
+    ref_1d = np.full(S, -11.0 + 22.0j, dtype=np.complex64)
+    bank.correlate_series(ser1, windows=[(1000, S - 1000)], template_index=3, scales=scales, out=ref_1d)
+    got_1d = bank.correlate_series(ser1, windows=[(1000, S - 1000)], template_index=3, scales=scales)
+    assert got_1d.shape == (S,)
+    np.testing.assert_array_equal(got_1d, ref_1d)
+    snap_1d = got_1d.copy()
+
+    # Holding got_1d (a view) while running another single-template call must not alias got_1d
+    other_1d = bank.correlate_series(ser2, windows=[(1000, S - 1000)], template_index=1)
+    np.testing.assert_array_equal(got_1d, snap_1d)
+    del got_1d, other_1d
+
+    sel = [4, 1, 5]
+    ref_sel = np.full((len(sel), S), -9.0 + 3.0j, dtype=np.complex64)
+    bank.correlate_series(ser1, windows=[(800, S - 800)], templates=sel, scales=scales, out=ref_sel)
+    got_sel = bank.correlate_series(ser1, windows=[(800, S - 800)], templates=sel, scales=scales)
+    np.testing.assert_array_equal(got_sel, ref_sel)
+
+    # Holding only a sub-slice / .real view after deleting the parent array must keep backing memory alive
+    r_parent = bank.correlate_series(ser1, windows=[(1000, S - 1000)])
+    sub_view = r_parent[2, 2000:2500]
+    expected_sub = sub_view.copy()
+    del r_parent
+    r_next = bank.correlate_series(ser2, windows=[(1000, S - 1000)])
+    np.testing.assert_array_equal(sub_view, expected_sub)
+    del sub_view, r_next
+
