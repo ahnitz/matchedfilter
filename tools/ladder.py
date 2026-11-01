@@ -333,6 +333,8 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
             mid_out = {ifo: mid.empty_shared((mid.n_templates, S)) for ifo in ("H1", "L1")}
             first.add("prep", time.perf_counter() - t0)
             fine_banks = [b for _, b in fine]
+            max_fine_block = max((int(b.max_block_length) for b in fine_banks), default=0)
+            mid_out_cleared = False
             rsnap = {}
 
             def roof_snap(key):
@@ -529,7 +531,7 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
             def seg_loop():
                 """The batched segment loop: each segment's middle stage, then its fine stage
                 as one filter_series_many call over every bank and both detectors."""
-                nonlocal next_ser
+                nonlocal next_ser, mid_out_cleared
                 bsampler = GpuSampler()                # device busy over the steady segments
                 bsampler.start()
                 for seg in range(args.segments):
@@ -553,32 +555,65 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
                     c_seg = time.thread_time()          # host CPU per segment, as --pipeline
                     ser = next_ser
                     next_ser = None
-                    mids = {}
-                    for ifo in ser:
-                        t = time.perf_counter()
-                        mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
-                                                                                 min(S, a1 + args.pad)),
-                                                         out=mid_out[ifo])
-                        mids[ifo] = lanes(mids[ifo])
-                        tm.add("middle", time.perf_counter() - t)
-                    # The fine stage of a segment: every bank on its middle series, both detectors.
-                    # Batched (default), the library sees the whole segment in one call.
-                    jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
-                            for row, (m, b) in enumerate(fine) for ifo in ser]
-                    t = time.perf_counter()
-                    if args.no_batch:
-                        fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
-                    elif args.overlap and seg + 1 < args.segments:
-                        # Submit, prepare the next segment's data on the host while the device works
-                        # (untimed, as data setup is), then collect: a busy device keeps its clock up.
-                        futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
-                        submit = time.perf_counter() - t
-                        next_ser = new_series()
-                        t = time.perf_counter() - submit
-                        fine_out = [f.result() for f in futures]
+                    if not args.no_batch and not args.overlap and mf.device.parse(device).kind == "cpu":
+                        mids = {ifo: lanes(mid_out[ifo]) for ifo in ser}
+                        mid_win = slice(max(0, a0 - args.pad), min(S, a1 + args.pad))
+                        sup_arg = mid_win if mid_out_cleared else None
+                        corr_jobs = [
+                            (mid, ser[ifo], dict(windows=mid_win, out=mid_out[ifo],
+                                                 out_support=sup_arg))
+                            for ifo in ser
+                        ]
+                        jobs = [
+                            (b, mids[ifo][row], dict(windows=slice(a0, a1)))
+                            for row, (m, b) in enumerate(fine) for ifo in ser
+                        ]
+                        t_info = {}
+                        t_b = os.environ.get("LADDER_TILE_BYTES")
+                        ret_rad = (
+                            None if os.environ.get("LADDER_RETAIN_ALL")
+                            else (half + max_fine_block if np.isfinite(args.asym_threshold) else 0)
+                        )
+                        fine_out = TimeDomainFilterBank.correlate_and_filter_many(
+                            corr_jobs, jobs, timings=t_info,
+                            tile_bytes=int(t_b) if t_b is not None else None,
+                            retain_radius=ret_rad,
+                            retain_threshold=args.asym_threshold,
+                        )
+                        if not t_info.get("ephemeral_used", False):
+                            mid_out_cleared = True
+                        for dt_m in t_info["correlate_per_job"]:
+                            tm.add("middle", dt_m)
+                        tm.add("fine", t_info["filter"])
                     else:
-                        fine_out = TimeDomainFilterBank.filter_series_many(jobs)
-                    tm.add("fine", time.perf_counter() - t)
+                        mids = {}
+                        for ifo in ser:
+                            t = time.perf_counter()
+                            mids[ifo] = mid.correlate_series(
+                                ser[ifo],
+                                windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
+                                out=mid_out[ifo],
+                            )
+                            mids[ifo] = lanes(mids[ifo])
+                            tm.add("middle", time.perf_counter() - t)
+                        # The fine stage of a segment: every bank on its middle series, both detectors.
+                        # Batched (default), the library sees the whole segment in one call.
+                        jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
+                                for row, (m, b) in enumerate(fine) for ifo in ser]
+                        t = time.perf_counter()
+                        if args.no_batch:
+                            fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
+                        elif args.overlap and seg + 1 < args.segments:
+                            # Submit, prepare the next segment's data on the host while the device works
+                            # (untimed, as data setup is), then collect: a busy device keeps its clock up.
+                            futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+                            submit = time.perf_counter() - t
+                            next_ser = new_series()
+                            t = time.perf_counter() - submit
+                            fine_out = [f.result() for f in futures]
+                        else:
+                            fine_out = TimeDomainFilterBank.filter_series_many(jobs)
+                        tm.add("fine", time.perf_counter() - t)
                     finish(seg, ser, mids, fine_out, tm)
                     tm.add("segment", time.perf_counter() - t_seg)
                     tm.add("wall", time.perf_counter() - t_seg, n=0)
