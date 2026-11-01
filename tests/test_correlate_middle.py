@@ -170,7 +170,8 @@ def test_mf_isa_env_subprocesses_agree():
     """Verify MF_ISA=AVX3, AVX2, AVX, SSE4 (whichever this CPU/build supports) agree to 1e-6."""
     avail = set(mf.targets())
     wanted = [t for t in ("AVX3", "AVX2", "AVX", "SSE4") if t in avail]
-    assert len(wanted) >= 2
+    if len(wanted) < 2:
+        pytest.skip("fewer than two x86 SIMD targets available")
     code = (
         "import numpy as np, matchedfilter as mf\n"
         "rng = np.random.default_rng(9)\n"

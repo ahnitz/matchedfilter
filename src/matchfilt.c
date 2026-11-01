@@ -826,7 +826,7 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
 
 static ap_plan *ensure_fwd_batch(ap_mf_plan *p,int real){
   const size_t m=real?p->n/2:p->n;
-  if(m<64||m>128) return NULL;
+  if(m<64||m>2048) return NULL;
   ap_plan **slot=real?&p->fwd_real_batch:&p->fwd_cplx_batch;
   if(!*slot) *slot=ap_create_pairbatch_like(p->fft,m);
   if(!*slot) return NULL;
