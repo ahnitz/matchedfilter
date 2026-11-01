@@ -8,11 +8,11 @@ struct EntryPointParams_0
 {
     uint pairs_0;
     float thr_0;
-    uint nbins_0;
+    uint packShift_0;
 };
 
 
-#line 1917 "mm_64_compactPairs.slang"
+#line 1954 "mm_64_compactPairs.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -22,43 +22,49 @@ struct KernelContext_0
 };
 
 
-#line 1917
+#line 1954
 [[kernel]] void compactPairs(uint3 gid_0 [[thread_position_in_grid]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_coarse_1 [[buffer(1)]], uint device* entryPointParams_survivors_1 [[buffer(2)]], uint device* entryPointParams_args_1 [[buffer(3)]])
 {
 
-#line 1917
+#line 1954
     thread KernelContext_0 kernelContext_0;
 
-#line 1917
+#line 1954
     (&kernelContext_0)->entryPointParams_0 = entryPointParams_1;
 
-#line 1917
+#line 1954
     (&kernelContext_0)->entryPointParams_coarse_0 = entryPointParams_coarse_1;
 
-#line 1917
+#line 1954
     (&kernelContext_0)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 1917
+#line 1954
     (&kernelContext_0)->entryPointParams_args_0 = entryPointParams_args_1;
 
-#line 1923
+#line 1960
     uint pair_0 = gid_0.x;
 
-#line 1941
+#line 1982
     if(pair_0 >= (entryPointParams_1->pairs_0))
     {
 
-#line 1941
+#line 1982
         return;
     }
     if(!((length(float2(*((&kernelContext_0)->entryPointParams_coarse_0+pair_0)) )) < ((&kernelContext_0)->entryPointParams_0->thr_0)))
     {
         uint slot_0 = atomic_fetch_add_explicit(((atomic_uint device*)((&kernelContext_0)->entryPointParams_args_0+int(0))), 1U, memory_order_relaxed);
         *((&kernelContext_0)->entryPointParams_survivors_0+slot_0) = pair_0;
+        if(((&kernelContext_0)->entryPointParams_0->packShift_0) > 0U)
+        {
+            uint _S1 = atomic_fetch_max_explicit(((atomic_uint device*)((&kernelContext_0)->entryPointParams_args_0+int(4))), (slot_0 + 1U + ((1U << ((&kernelContext_0)->entryPointParams_0->packShift_0)) - 1U)) >> ((&kernelContext_0)->entryPointParams_0->packShift_0), memory_order_relaxed);
 
-#line 1943
+#line 1988
+        }
+
+#line 1984
     }
 
-#line 1949
+#line 1994
     return;
 }

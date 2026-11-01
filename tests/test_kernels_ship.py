@@ -94,6 +94,9 @@ def test_forward_and_packing_kernels_ship(backend):
         assert forward["local_size"] == flat["local_size"]
     for kernel in ("pack_coarse", "compact_peaks", "refine_td", "compact", "compactc", "compactl"):
         assert kernel in kernels
+    for b in (64, 128, 256, 512):
+        rec = kernels["refine_%d_c16" % b]
+        assert rec["coarse16"] == 1 and rec["local_size"] == [64, 1, 1]
 
 
 @pytest.mark.parametrize("backend", sorted(_FOLDER))

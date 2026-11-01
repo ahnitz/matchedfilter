@@ -511,6 +511,8 @@ def _band_family(backend, n, add):
                 if entry == "refineListed" and n <= 1024:
                     add(_tierb(backend, n, entry, cap, "_onebin_gate", single_bin=1,
                                gate_only=1))
+        if n <= 512:
+            add(_tierb(backend, n, "refineListed", mcap, "_c16", coarse16=1, ppg=1024 // n))
         return
     if backend == "vulkan" and portable:
         add(_tierb(backend, n, "fusedTierB", PORTABLE_CAP, "_lds32"))
@@ -547,6 +549,9 @@ def _band_family(backend, n, add):
         if n <= 1024:
             add(_tierb(backend, n, "refineListed", suffix="_onebin_gate", single_bin=1,
                        gate_only=1))
+    if n <= 512:
+        add(_tierb(backend, n, "refineListed", suffix="_c16", coarse16=1, ppg=1024 // n,
+                   table=(backend != "cuda")))
     # Benchmarked one-bin specialization for the large full-precision kernels. Keep the
     # general kernels for multiple output bins.
     if n >= 4096:
@@ -733,10 +738,12 @@ def local_size(v):
 def _staging(v):
     """staging_bytes of a tierb.slang-family variant, from its build facts."""
     f = v.facts
-    # Tiled COARSE16 at WG <= mfSubgroupSize (32 build-time on Metal and CUDA) transposes and
-    # elects in registers via subgroup shuffles without touching stg, so Slang emits 0 bytes.
+    # Tiled or listed COARSE16 at WG <= mfSubgroupSize (32 build-time on Metal and CUDA)
+    # transposes and elects in registers via subgroup shuffles without touching stg, so Slang
+    # emits 0 bytes.
     if (v.backend in ("metal", "cuda") and f.get("coarse16")
-            and f.get("tile", 1) % 2 == 0 and f["n"] // radix(f["n"]) <= 32):
+            and (f.get("tile", 1) % 2 == 0 or v.entry == "refineListedBounded")
+            and f["n"] // radix(f["n"]) <= 32):
         return 0
     if f.get("coarse16") and v.backend != "metal":
         xs, slot = exchange_layout(f["n"], f["ppg"], f["cap"])

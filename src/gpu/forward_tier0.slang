@@ -8,7 +8,8 @@
 //          the fp16 tier's data scale, twiddle.slang mfDataScaleBits), packed as the fp16
 //          tier-0 gate reads them (one uint per bin: f32tof16(re) | f32tof16(im) << 16, the
 //          rounding the gate applies when it reads the spectra in place)
-//   band1  the first B1 bins in fp32 (the next tier's band; B1 = 0 writes none)
+//   band1  the first B1 bins (B1 = 0 writes none): packed fp16 scaled by asfloat(scaleBits1)
+//          when scaleBits1 != 0 (tier-1 COARSE16, 4 B/bin), else unscaled fp32 (two uints/bin)
 //
 // No full spectrum is written: it was ~430 MB per realistic M2 fine segment, read back only
 // for the few blocks with a refine survivor, which seriesForwardListed recomputes. Same
@@ -21,9 +22,10 @@ void forwardTier0(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                   StructuredBuffer<float2> series,
                   StructuredBuffer<uint> starts,
                   RWStructuredBuffer<uint> band0,
-                  RWStructuredBuffer<float2> band1,
+                  RWStructuredBuffer<uint> band1,
                   uniform uint seriesLength, uniform uint B0, uniform uint B1,
-                  uniform uint scaleBits, uniform uint k0_0, uniform uint k0_1 SERIES_LAYOUT)
+                  uniform uint scaleBits, uniform uint scaleBits1,
+                  uniform uint k0_0, uniform uint k0_1 SERIES_LAYOUT)
 {
     uint tid = lid.x;
     _tid = tid;
@@ -55,11 +57,30 @@ void forwardTier0(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
             band0[gid.x * B0 + (index & (B0 - 1))] = out0;
         }
         if (k0_1 == 0) {
-            if (index < B1)
-                band1[gid.x * B1 + index] = v;
+            if (index < B1) {
+                uint dst1 = gid.x * B1 + index;
+                if (scaleBits1 != 0u) {
+                    const float s1 = asfloat(scaleBits1);
+                    band1[dst1] = f32tof16(v.x * s1) | (f32tof16(v.y * s1) << 16);
+                } else {
+                    band1[2u * dst1] = asuint(v.x);
+                    band1[2u * dst1 + 1u] = asuint(v.y);
+                }
+            }
         } else if (B1 > 0 && index >= k0_1 && index < k0_1 + B1) {
-            band1[gid.x * B1 + (index & (B1 - 1))] =
-                (index < (N >> 1)) ? v : float2(0.0, 0.0);
+            uint dst1 = gid.x * B1 + (index & (B1 - 1));
+            if (scaleBits1 != 0u) {
+                uint out1 = 0u;
+                if (index < (N >> 1)) {
+                    const float s1 = asfloat(scaleBits1);
+                    out1 = f32tof16(v.x * s1) | (f32tof16(v.y * s1) << 16);
+                }
+                band1[dst1] = out1;
+            } else {
+                float2 v1 = (index < (N >> 1)) ? v : float2(0.0, 0.0);
+                band1[2u * dst1] = asuint(v1.x);
+                band1[2u * dst1 + 1u] = asuint(v1.y);
+            }
         }
     }
 }
