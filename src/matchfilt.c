@@ -527,6 +527,11 @@ static inline void gather_data_batch(float * restrict dsr, float * restrict dsi,
   ap_lanes_transpose_on(p->fft, dsi, dip, cnt, n, W);
 }
 
+int ap_binmax_prod_gather_lanes_peaks(ap_plan *p, const float *const *drp, const float *const *dip,
+                                      const float *const *trp, const float *const *tip, int nlane,
+                                      size_t binsize, float threshold, ap_peak *peaks,
+                                      int sign, size_t start, size_t end, const unsigned *ph);
+
 static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                         size_t binsize, float threshold,
                         ap_peak *peaks, int *counts, size_t start, size_t end){
@@ -1395,23 +1400,49 @@ static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
       same_data &= dsel[tt+l] == dsel[tt];
       packed_templates &= tsel[tt+l] == tsel[tt]+l;
     }
-    const float *Tr, *Ti;
-    if(packed_templates){
-      Tr = p->tre + (size_t)(base/W)*n*W;
-      Ti = p->tim + (size_t)(base/W)*n*W;
-    } else {
-      gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
-      Tr = p->tsr; Ti = p->tsi;
-    }
-    /* Survivors retain their data-major order. A batch from one block can
-       read that spectrum directly; aligned template runs are already packed. */
-    if(same_data){
+    /* Survivors retain their data-major order. A batch from one block with packed
+       templates reads both inputs directly; scattered pairs fuse gather + multiply. */
+    if(same_data && (packed_templates || n <= 64 || !p->tmre)){
+      const float *Tr, *Ti;
+      if(packed_templates){
+        Tr = p->tre + (size_t)(base/W)*n*W;
+        Ti = p->tim + (size_t)(base/W)*n*W;
+      } else {
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        Tr = p->tsr; Ti = p->tsi;
+      }
       const size_t off = (size_t)(d0+dsel[tt])*n;
       if(ap_binmax_prod_batch_peaks(p->fft, p->dre+off, p->dim+off, Tr, Ti, cnt,
                                     binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
                                     lane_phases(p, d0+dsel[tt], lph))<0)
         return -1;
+    } else if(p->tmre && (!packed_templates || n >= 128)){
+      const float *drp[AP_MAX_LANES], *dip[AP_MAX_LANES];
+      const float *trp[AP_MAX_LANES], *tip[AP_MAX_LANES];
+      for(int l = 0; l < cnt; l++){
+        const size_t doff = (size_t)(d0 + dsel[tt + l]) * n;
+        const size_t toff = (size_t)(t0 + tsel[tt + l]) * n;
+        drp[l] = p->dre + doff; dip[l] = p->dim + doff;
+        trp[l] = p->tmre + toff; tip[l] = p->tmim + toff;
+      }
+      const unsigned *ph = NULL;          /* lanes are pairs: each its own row's phase */
+      if(p->bph){
+        for(int l = 0; l < AP_MAX_LANES; l++) lph[l] = l < cnt ? p->bph[d0+dsel[tt+l]] : 0u;
+        ph = lph;
+      }
+      if(ap_binmax_prod_gather_lanes_peaks(p->fft, drp, dip, trp, tip, cnt,
+                                           binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
+                                           ph)<0)
+        return -1;
     } else {
+      const float *Tr, *Ti;
+      if(packed_templates){
+        Tr = p->tre + (size_t)(base/W)*n*W;
+        Ti = p->tim + (size_t)(base/W)*n*W;
+      } else {
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        Tr = p->tsr; Ti = p->tsi;
+      }
       gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
       const unsigned *ph = NULL;          /* lanes are pairs: each its own row's phase */
       if(p->bph){
@@ -1514,21 +1545,42 @@ int ap_mf_run_pairs_packed(ap_mf_plan *p, int d0,
       same_data &= dsel[tt + l] == dsel[tt];
       packed_templates &= tsel[tt + l] == tsel[tt] + l;
     }
-    const float *Tr, *Ti;
-    if(packed_templates){
-      Tr = p->tre + (size_t)(base / W) * n * W;
-      Ti = p->tim + (size_t)(base / W) * n * W;
-    } else {
-      gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
-      Tr = p->tsr; Ti = p->tsi;
-    }
-    if(same_data){
+    if(same_data && (packed_templates || n <= 64 || !p->tmre)){
+      const float *Tr, *Ti;
+      if(packed_templates){
+        Tr = p->tre + (size_t)(base / W) * n * W;
+        Ti = p->tim + (size_t)(base / W) * n * W;
+      } else {
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        Tr = p->tsr; Ti = p->tsi;
+      }
       const size_t off = (size_t)(d0 + dsel[tt]) * n;
       if(ap_binmax_prod_batch_peaks(p->fft, p->dre + off, p->dim + off, Tr, Ti, cnt,
                                     binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
                                     NULL) < 0)
         return -1;
+    } else if(p->tmre && (!packed_templates || n >= 128)){
+      const float *drp[AP_MAX_LANES], *dip[AP_MAX_LANES];
+      const float *trp[AP_MAX_LANES], *tip[AP_MAX_LANES];
+      for(int l = 0; l < cnt; l++){
+        const size_t doff = (size_t)(d0 + dsel[tt + l]) * n;
+        const size_t toff = (size_t)(t0 + tsel[tt + l]) * n;
+        drp[l] = p->dre + doff; dip[l] = p->dim + doff;
+        trp[l] = p->tmre + toff; tip[l] = p->tmim + toff;
+      }
+      if(ap_binmax_prod_gather_lanes_peaks(p->fft, drp, dip, trp, tip, cnt,
+                                           binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
+                                           NULL) < 0)
+        return -1;
     } else {
+      const float *Tr, *Ti;
+      if(packed_templates){
+        Tr = p->tre + (size_t)(base / W) * n * W;
+        Ti = p->tim + (size_t)(base / W) * n * W;
+      } else {
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        Tr = p->tsr; Ti = p->tsi;
+      }
       gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
       if(ap_binmax_prod_batch_lanes_peaks(p->fft, p->dsr, p->dsi, Tr, Ti, cnt,
                                           binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
