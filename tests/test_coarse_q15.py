@@ -88,20 +88,31 @@ def test_screen_subrange_rows():
     np.testing.assert_array_equal(ps.reshape(2, 21), fs.reshape(4, 50)[1:3, 13:34])
 
 
-def test_screen_window_maximum_matches_individual_samples():
-    # Pass 2 stores row k2's sample k1 at time k2 + 16*k1. Fusing the
-    # maximum must select the same samples, including partial rows and lanes.
-    n, nd, nt = 256, 2, 35
-    m = _screen_case(n, nd, nt, np.random.default_rng(8751))
+@pytest.mark.parametrize("n", [64, 128, 256, 512, 1024])
+def test_screen_window_maximum_matches_individual_samples(n):
+    # Pass 2 stores row k2's sample k1 at time k2 + M2*k1. Fusing the
+    # maximum must select the same samples across middle, wide, and edge windows.
+    nd, nt = 2, 35
+    m = _screen_case(n, nd, nt, np.random.default_rng(8751 + n))
     if m.q15_lanes() == 0:
         pytest.skip("no Q15 screen on this back end")
     ps = np.empty(nd * nt, np.uint8)
     samples = np.empty((n, nd * nt), np.float32)
     for k in range(n):
         m.q15_screen(0, nd, 0, nt, 0.0, k, k + 1, ps, samples[k])
-    for start, end in [(0, n), (64, n), (3, 254), (20, 236),
-                       (32, 224), (33, 223), (15, 33),
-                       (127, 129), (201, 202), (255, 256)]:
+    windows = [
+        (0, n),
+        (n // 4, n),
+        (3, n - 2),
+        (n // 8, n - n // 8),
+        (n // 8 + 1, n - n // 8 - 1),
+        (n // 4, n - n // 4),
+        (n // 4 + 1, n - n // 4 - 1),
+        (n // 16 - 1, n // 8 + 1),
+        (n // 2 - 1, n // 2 + 1),
+        (n - 1, n),
+    ]
+    for start, end in windows:
         stat = np.empty(nd * nt, np.float32)
         m.q15_screen(0, nd, 0, nt, 0.0, start, end, ps, stat)
         np.testing.assert_array_equal(stat, samples[start:end].max(axis=0))
@@ -205,3 +216,36 @@ def test_q15_nomargin_restores_bound_under_out_of_window_glitch(monkeypatch):
     res = hf.run(binsize=n // 2, threshold=7.5, window=(n // 4, 3 * n // 4))
     assert (res["index"][0, :, 0] == n // 2).all()
     np.testing.assert_allclose(np.abs(res["value"][0, :, 0]), 8.0, rtol=1e-3, atol=1e-2)
+
+
+@pytest.mark.parametrize("n", [64, 128, 256, 512, 1024])
+def test_screen_cross_target_agreement(n):
+    """Dense and tiled-tail Q15 screens agree across all available Q15 SIMD targets
+    (e.g. AVX3, AVX2, SSE4), up to 1-ULP float32 scale reduction differences in q15_sumsq."""
+    rng = np.random.default_rng(4200 + n)
+    nd, nt = 3, 37
+    d = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+    t = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    t /= np.linalg.norm(t, axis=1, keepdims=True)
+    mf.set_target(None)
+    results = []
+    try:
+        for tgt in list(mf.targets()):
+            mf.set_target(tgt)
+            m = _core.MF(n, nd, nt)
+            if m.q15_lanes() == 0:
+                continue
+            m.set_data_batch(0, d.view(np.float32).tobytes())
+            m.set_template_batch(0, t.view(np.float32).tobytes())
+            ps = np.zeros(nd * nt, np.uint8)
+            st = np.zeros(nd * nt, np.float32)
+            m.q15_screen(0, nd, 0, nt, 3.5, n // 8, n - n // 8, ps, st)
+            results.append((tgt, ps, st))
+    finally:
+        mf.set_target(None)
+    if len(results) < 2:
+        pytest.skip("fewer than two Q15 SIMD targets available")
+    _, ref_ps, ref_st = results[0]
+    for tgt, ps, st in results[1:]:
+        np.testing.assert_array_equal(ps, ref_ps, err_msg=tgt)
+        np.testing.assert_allclose(st, ref_st, rtol=1e-4, atol=1e-4, err_msg=tgt)
