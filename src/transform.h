@@ -51,6 +51,8 @@ int      ap_plan_split(const ap_plan *p, int *n1, int *n2);
 void ap_fft(ap_plan *p, const float *in, float *out, int sign);
 void ap_fft_forward_scaled(ap_plan *p, const float *in, size_t have_floats, size_t stride,
                            float scale, float *out);
+void ap_fft_forward_scaled_gm(ap_plan *p, const float *in, size_t have_floats, size_t stride,
+                              float scale, float *re, float *im, float *scratch);
 int  ap_fft_forward_batch(ap_plan *p, const float *const *srcs, const size_t *haves, int cnt,
                           float scale, float *const *outs);
 int  ap_fft_real_batch(ap_plan *p, const float *const *srcs, const size_t *haves, size_t stride,
@@ -159,6 +161,11 @@ int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
 int ap_corr_prod_window(ap_plan *p, const float *dr, const float *di,
                         const float *tr, const float *ti, size_t blo, size_t end, float *dst,
                         float *scratch, int stream);
+int ap_corr_prod_window_multi(ap_plan *p, const float *dr, const float *di,
+                              const float *tr, const float *ti, size_t t_stride, int nt,
+                              size_t blo, size_t end, float *dst, size_t dst_stride,
+                              float *scratch, int stream);
+int ap_corr_tile_slots(ap_plan *p, int want, float **dr_out, float **di_out);
 int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);
 int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
                        const float *tr, const float *ti, int nlane, float *out);

@@ -60,6 +60,9 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.fft_backward_batch = k::fft_backward_batch;
     be.fft_backward_padded = k::fft_backward_padded;
     be.binmax_prod_gather_lanes = k::binmax_prod_gather_lanes;
+    be.fft_forward_scaled_gm = k::fft_forward_scaled_gm;
+    be.corr_prod_window_multi = k::corr_prod_window_multi;
+    be.corr_tile_slots = k::corr_tile_slots;
     be.td_corr = k::td_corr;
     be.td_corr_ex = k::td_corr_ex;
     be.real_split = k::real_split;

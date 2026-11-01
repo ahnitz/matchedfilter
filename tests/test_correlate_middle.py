@@ -396,3 +396,84 @@ def test_correlate_series_out_none_modes_and_recycled_buffer_lifetime():
     np.testing.assert_array_equal(sub_view, expected_sub)
     del sub_view, r_next
 
+
+@pytest.mark.parametrize("n", [1024, 2048, 4096, 8192, 16384, 32768, 65536])
+@pytest.mark.parametrize("real", [False, True])
+def test_multi_template_continuous_bit_identical_to_single_template(monkeypatch, n, real):
+    """Multi-template continuous correlation (nt = 2, 3, 4, 5, 14) with Stage-A reuse,
+    fused group-major forward ingest, and L2 data-block tiling must be bit-for-bit identical
+    to single-template (nt = 1) execution across all SIMD targets, alignments, and stream modes."""
+    rng = np.random.default_rng(1400 + n + int(real))
+    nt_max = 14
+    lo, hi = 9, n - 11
+    n_active = 5
+    # Non-multiple-of-8 length shifts row alignment by +40B (mod 64) per template row
+    L = (n_active + 1) * n + 37
+
+    ser = rng.standard_normal(L).astype(np.float32)
+    if not real:
+        ser = (ser + 1j * rng.standard_normal(L)).astype(np.complex64)
+    h = (rng.standard_normal((nt_max, n)) + 1j * rng.standard_normal((nt_max, n))).astype(np.complex64)
+    spec = np.fft.fft(h, axis=1).astype(np.complex64)
+
+    # Disjoint active blocks exercising aligned, +16B, odd (+8B), narrow, and partial-tail windows
+    st_base = np.array([k * n for k in range(n_active)], dtype=np.uintp)
+    b_base = np.array([
+        (lo, hi),                       # odd lo/hi
+        (16, n - 16),                   # 64B-aligned lo/hi
+        (18, n - 22),                   # +16B shifted
+        (n // 4 + 3, n // 4 + 10),      # narrow (< 8 samples)
+        (n // 2 - 5, min(hi, n // 2 + 261)),  # partial head + full row + partial tail
+    ], dtype=np.uintp)
+
+    llc = _llc_bytes()
+    stream_modes = [False]
+    if llc <= (128 << 20) and n in (4096, 16384, 65536):
+        stream_modes.append(True)
+
+    try:
+        for tgt in mf.targets():
+            mf.set_target(tgt)
+            cf = CorrelationFilter(n, ndata=1, ntemplates=nt_max, valid=(lo, hi), device="cpu")
+            cf.set_templates(spec)
+            ep = cf._execution_plan()
+            run = ep.correlate_series_continuous_real if real else ep.correlate_series_continuous
+
+            sentinel = np.complex64(-23.75 + 41.5j)
+            # Single-template reference (nt = 1 per call) with non-streaming stores
+            monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
+            ref = _alloc_with_offset((nt_max, L), 8, sentinel)
+            for t in range(nt_max):
+                row = _alloc_with_offset((1, L), (8 + t * L * 8) & 63, sentinel)
+                run(ser, st_base, lo, hi, t, 1, row, b_base)
+                ref[t] = row[0]
+
+            for do_stream in stream_modes:
+                for nt in ((4, 14) if do_stream else (2, 3, 4, 5, 14)):
+                    if do_stream:
+                        monkeypatch.delenv("MF_CORR_NO_STREAM", raising=False)
+                        span = hi - lo
+                        n_pad = int((4 * llc) // (5 * nt * span * 8)) + 2
+                        st = np.concatenate([np.zeros(n_pad, dtype=np.uintp), st_base])
+                        bnds = np.vstack([
+                            np.tile(np.array([[lo, hi]], dtype=np.uintp), (n_pad, 1)),
+                            b_base,
+                        ])
+                    else:
+                        monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
+                        st, bnds = st_base, b_base
+
+                    for base_off in (0, 24):
+                        got = _alloc_with_offset((nt, L), base_off, sentinel)
+                        t0 = 1 if nt <= 5 else 0
+                        run(ser, st, lo, hi, t0, nt, got, bnds)
+                        assert np.array_equal(
+                            got.view(np.uint32), ref[t0:t0 + nt].view(np.uint32)
+                        ), (
+                            f"bit mismatch tgt={tgt} n={n} real={real} "
+                            f"stream={do_stream} nt={nt} off={base_off}"
+                        )
+    finally:
+        mf.set_target(None)
+
+
