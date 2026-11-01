@@ -2,10 +2,12 @@
  *
  * What it computes.  For QW (data, template) pairs at once -- lanes are
  * templates, twice as many as the float path's at the same vector width --
- * the same four-step transform of conj(d*t) the float pair path computes
- * (efft_prod, product-inl.h), then for every lane the largest |z|^2 over the
- * window, as round(re^2/2^15) + round(im^2/2^15), saturating.  It reports no peak: the caller compares
- * the maximum against the tier threshold LOWERED by an error margin and
+ * the conjugated four-step transform conj(Z_k) = sum_j (d_j * t_j) exp(+2*pi*i*j*k/N)
+ * (preserving every lag index k and magnitude |Z_k|^2 of the float pair path,
+ * while forming d*t directly from (dr, di) without a negated -di data stream),
+ * then for every lane the largest |z|^2 over the window, as
+ * round(re^2/2^15) + round(im^2/2^15), saturating.  It reports no peak: the caller
+ * compares the maximum against the tier threshold LOWERED by an error margin and
  * re-runs the float tier on every pair that clears it, so the screen decides
  * only which pairs need the float answer (matchfilt.c, hmf.c).
  *
@@ -24,10 +26,40 @@
  *
  * Error.  Each Q_MUL rounds to nearest; the error at the output is a sum of
  * those roundings over the transform -- the per-N margin in q15.h is set from
- * its measured distribution (tools/q15_error.py, docs/cpu-q15-gate.md).
+ * its measured distribution (docs/cpu-q15-gate.md).
  */
 #include "q15.h"
 #include "simd-inl.h"
+
+#ifndef AP_Q15_TW32_ONCE_
+#define AP_Q15_TW32_ONCE_
+namespace ap {
+/* Duplicated int16->int32 four-step twiddle table (w | (w << 16)): broadcasting 32-bit
+   dwords emits vpbroadcastd (one pure load uop on Haswell/Broadwell, zero Port-5 shuffle
+   uops) instead of vpbroadcastw (load + Port-5 shuffle). */
+struct q15_twiddles32 { int32_t re[1024], im[1024]; };
+static q15_twiddles32 q15_tw32_tab[5];
+static pthread_once_t q15_tw32_once = PTHREAD_ONCE_INIT;
+static int q15_tw32_ready = 0;
+
+static void q15_tw32_build(void){
+  (void)ap_q15_twiddle_table(64);
+  for(int i = 0; i < 5; i++){
+    for(int j = 0; j < 1024; j++){
+      const uint32_t r = (uint16_t)ap_q15_tw_tab[i].re[j];
+      const uint32_t m = (uint16_t)ap_q15_tw_tab[i].im[j];
+      q15_tw32_tab[i].re[j] = (int32_t)(r | (r << 16));
+      q15_tw32_tab[i].im[j] = (int32_t)(m | (m << 16));
+    }
+  }
+}
+
+static HWY_NOINLINE void q15_tw32_init_slow(void){
+  pthread_once(&q15_tw32_once, q15_tw32_build);
+  __atomic_store_n(&q15_tw32_ready, 1, __ATOMIC_RELEASE);
+}
+}  // namespace ap
+#endif
 
 #if defined(AP_Q15_INL_H_) == defined(HWY_TARGET_TOGGLE)
 #ifdef AP_Q15_INL_H_
@@ -41,16 +73,36 @@ namespace ap {
 namespace HWY_NAMESPACE {
 
 using ap_qtag = hn::CappedTag<int16_t, 2 * AP_W>;
+using ap_qditag = hn::Repartition<int32_t, ap_qtag>;
 constexpr ap_qtag AP_DQ{};
+constexpr ap_qditag AP_QDI{};
 constexpr int AP_QW = (int)HWY_MAX_LANES_D(ap_qtag);
 typedef hn::Vec<ap_qtag> vq;
 
+#undef Q_ZERO
+#undef Q_SET1
+#undef Q_DUP32
+#undef Q_TWLOAD
+#undef Q_LOADU
+#undef Q_ADD
+#undef Q_SUB
+#undef Q_MUL
 #define Q_ZERO()       hn::Zero(AP_DQ)
 #define Q_SET1(x)      hn::Set(AP_DQ, (int16_t)(x))
+#define Q_DUP32(x)     hn::BitCast(AP_DQ, hn::Set(AP_QDI, (int32_t)(x)))
 #define Q_LOADU(p)     hn::LoadU(AP_DQ, (const int16_t *)(p))
 #define Q_ADD(a, b)    hn::Add((a), (b))
 #define Q_SUB(a, b)    hn::Sub((a), (b))
 #define Q_MUL(a, b)    hn::MulFixedPoint15((a), (b))
+#if HWY_ARCH_X86 && HWY_MAX_BYTES == 32
+typedef int32_t qtw_elem;
+typedef q15_twiddles32 qtw_table;
+#define Q_TWLOAD(x)    Q_DUP32(x)
+#else
+typedef int16_t qtw_elem;
+typedef ap_q15_twiddles qtw_table;
+#define Q_TWLOAD(x)    Q_SET1(x)
+#endif
 
 /* Listed pairs (q15_screen_perm): each lane's operands are looked up in a vector of one element
    across QW data blocks (dix) and across two groups of QW templates (tix, the second group TW
@@ -115,13 +167,13 @@ typedef hn::IndicesFromD<ap_qtag> qidx;
 #define Q_DLOAD(p) hn::TableLookupLanes(Q_LOADU(p), dix)
 #define Q_TLOAD(p) hn::TwoTablesLookupLanes(AP_DQ, Q_LOADU(p), Q_LOADU((p) + TW), tix)
 #endif
+
 /* acc +- round(a*b / 2^15): AArch64 SQRDMLAH/SQRDMLSH (FEAT_RDM, every Apple core) in one
    instruction. acc is an integer, so rounding the sum rounds the product: Q_MLAH equals
    Q_ADD(acc, Q_MUL(a, b)) except where Q_MUL alone saturates (a = b = -32768, outside the
    screen's input range). Q_MLSH rounds -a*b/2^15 to nearest, so an exact tie goes the
    other way from Q_SUB(acc, Q_MUL(a, b)): still within 1/2 LSB, the per-multiply error the
-   screen's margin is built on (q15.h). tools/gate_margin.py --gate q15 on the M2, N=128..1024:
-   0 dismissals and the same worst margin use (0.310) as the separate form. */
+   screen's margin is built on (q15.h). */
 #undef AP_Q15_FUSED
 #undef Q_MLAH
 #undef Q_MLSH
@@ -139,7 +191,7 @@ static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int1
 
 /* Tail tiles retain each lane's arithmetic and quantised operands. Only the
    product loads change: T templates are repeated for QW/T independent blocks
-   (block b's data at dq + B b: B = 3 N, the next block's N x 3 entries). */
+   (block b's data at + B*b int16s: B = 3*N, even for every supported N). */
 #undef AP_Q15_TAIL
 #if HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
 /* AVX2, 16 lanes: T = 8 (two blocks) or 4 (four blocks). */
@@ -150,26 +202,38 @@ template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
   memcpy(&v, p, sizeof v);
   return vq{_mm256_set1_epi64x(v)};
 }
-template<int T, long B> static HWY_INLINE vq q15_tile_data(const int16_t *p){
+template<int T, long B> static HWY_INLINE vq q15_tile_data32(const int32_t *p){
+  constexpr long HB = B / 2;
+  if(T == 8) return vq{_mm256_set_m128i(_mm_set1_epi32(p[HB]), _mm_set1_epi32(p[0]))};
+  return vq{_mm256_setr_epi32(p[0], p[0], p[HB], p[HB],
+                              p[2 * HB], p[2 * HB], p[3 * HB], p[3 * HB])};
+}
+template<int T, long B> static HWY_INLINE vq q15_tile_data16(const int16_t *p){
   if(T == 8) return vq{_mm256_set_m128i(_mm_set1_epi16(p[B]), _mm_set1_epi16(p[0]))};
-  return vq{_mm256_setr_epi16(p[0], p[0], p[0], p[0], p[B], p[B], p[B], p[B],
-                              p[2 * B], p[2 * B], p[2 * B], p[2 * B],
-                              p[3 * B], p[3 * B], p[3 * B], p[3 * B])};
+  const int32_t d0 = (int32_t)((uint32_t)(uint16_t)p[0] * 0x00010001u);
+  const int32_t d1 = (int32_t)((uint32_t)(uint16_t)p[B] * 0x00010001u);
+  const int32_t d2 = (int32_t)((uint32_t)(uint16_t)p[2 * B] * 0x00010001u);
+  const int32_t d3 = (int32_t)((uint32_t)(uint16_t)p[3 * B] * 0x00010001u);
+  return vq{_mm256_setr_epi32(d0, d0, d1, d1, d2, d2, d3, d3)};
 }
 #elif HWY_ARCH_X86 && HWY_MAX_BYTES == 64
 #define AP_Q15_TAIL 1
 template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
   if(T == 8) return hn::LoadDup128(AP_DQ, p);
-  /* Combine(v,v) emitted two loads on GCC; make the half-vector broadcast
-     explicit in this AVX-512-only loader. */
   return vq{_mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)p))};
 }
-template<int T, long B> static HWY_INLINE vq q15_tile_data(const int16_t *p){
-  if(T == 16){
-    const __m256i lo = _mm256_set1_epi16(p[0]);
-    const __m256i hi = _mm256_set1_epi16(p[B]);
-    return vq{_mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1)};
-  }
+template<int T, long B> static HWY_INLINE vq q15_tile_data32(const int32_t *p){
+  constexpr long HB = B / 2;
+  if(T == 16) return vq{_mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi32(p[0])),
+                                           _mm256_set1_epi32(p[HB]), 1)};
+  __m512i v = _mm512_set1_epi32(p[0]);
+  v = _mm512_mask_set1_epi32(v, 0x00f0u, p[HB]);
+  v = _mm512_mask_set1_epi32(v, 0x0f00u, p[2 * HB]);
+  return vq{_mm512_mask_set1_epi32(v, 0xf000u, p[3 * HB])};
+}
+template<int T, long B> static HWY_INLINE vq q15_tile_data16(const int16_t *p){
+  if(T == 16) return vq{_mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16(p[0])),
+                                           _mm256_set1_epi16(p[B]), 1)};
   __m512i v = _mm512_set1_epi16(p[0]);
   v = _mm512_mask_set1_epi16(v, 0x0000ff00u, p[B]);
   v = _mm512_mask_set1_epi16(v, 0x00ff0000u, p[2 * B]);
@@ -189,13 +253,13 @@ HWY_BEFORE_NAMESPACE();
 namespace ap {
 namespace HWY_NAMESPACE {
 
-static HWY_INLINE void qcodelet_prod(int m, const int16_t *restrict dq, const int16_t *restrict tr,
-                                     const int16_t *restrict ti, vq *restrict ar, vq *restrict ai,
-                                     long S, long DS, long TS){
+static HWY_INLINE void qcodelet_prod(int m, const int32_t *restrict dr, const int16_t *restrict di,
+                                     const int16_t *restrict tr, const int16_t *restrict ti,
+                                     vq *restrict ar, vq *restrict ai, long S, long DS, long TS){
   switch(m){
-    case  8: qsr8_prod (dq,tr,ti,ar,ai,S,DS,TS); return;
-    case 16: qsr16_prod(dq,tr,ti,ar,ai,S,DS,TS); return;
-    default: qsr32_prod(dq,tr,ti,ar,ai,S,DS,TS); return;
+    case  8: qsr8_prod (dr,di,tr,ti,ar,ai,S,DS,TS); return;
+    case 16: qsr16_prod(dr,di,tr,ti,ar,ai,S,DS,TS); return;
+    default: qsr32_prod(dr,di,tr,ti,ar,ai,S,DS,TS); return;
   }
 }
 static HWY_INLINE void qcodelet_prod_perm(int m, const int16_t *restrict dr,
@@ -210,25 +274,15 @@ static HWY_INLINE void qcodelet_prod_perm(int m, const int16_t *restrict dr,
   }
 }
 static HWY_INLINE void qcodelet_tw(int m, vq *restrict ar, vq *restrict ai, long S,
-                                   const int16_t *restrict twr, const int16_t *restrict twi){
+                                   const qtw_elem *restrict twr, const qtw_elem *restrict twi){
   switch(m){
     case  8: qsr8_tw (ar,ai,S,twr,twi); return;
     case 16: qsr16_tw(ar,ai,S,twr,twi); return;
     default: qsr32_tw(ar,ai,S,twr,twi); return;
   }
 }
-
-/* Vector registers of this target: the fused maximum keeps two more vectors and their
-   squares live through the codelet, which a 16-register file spills. */
-#undef AP_Q15_VREGS32                     /* this header is included once per target */
-#if (HWY_ARCH_X86 && HWY_MAX_BYTES >= 64) || HWY_ARCH_ARM_A64
-#define AP_Q15_VREGS32 1
-#else
-#define AP_Q15_VREGS32 0
-#endif
-#if AP_Q15_VREGS32
 static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *restrict ai, long S,
-                                      const int16_t *restrict twr, const int16_t *restrict twi,
+                                      const qtw_elem *restrict twr, const qtw_elem *restrict twi,
                                       long lo, long hi, vq *restrict mx){
   switch(m){
     case  8: qsr8_twmax (ar,ai,S,twr,twi,lo,hi,mx); return;
@@ -236,125 +290,84 @@ static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *re
     default: qsr32_twmax(ar,ai,S,twr,twi,lo,hi,mx); return;
   }
 }
-#endif
 
-#if AP_Q15_VREGS32
-static HWY_NOINLINE size_t q15_l1d_init_slow(size_t *slot){
-  const size_t cur = ap_l1d_bytes();
-  __atomic_store_n(slot, cur, __ATOMIC_RELAXED);
-  return cur;
-}
-static HWY_INLINE size_t q15_l1d_cached(void){
-  static size_t v = ~(size_t)0;
-  const size_t cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
-  return __builtin_expect(cur == ~(size_t)0, 0) ? q15_l1d_init_slow(&v) : cur;
-}
-#endif
-
-static HWY_NOINLINE void q15_tw_init_slow(int *ready){
+#if !(HWY_ARCH_X86 && HWY_MAX_BYTES == 32)
+static HWY_NOINLINE void q15_tw16_init_slow(int *ready){
   (void)ap_q15_twiddle_table(64);
   __atomic_store_n(ready, 1, __ATOMIC_RELEASE);
 }
+#endif
 
 template<int IDX>
-static HWY_INLINE const ap_q15_twiddles *q15_tw_fast(void){
+static HWY_INLINE const qtw_table *q15_tw_fast(void){
+#if HWY_ARCH_X86 && HWY_MAX_BYTES == 32
+  if(__builtin_expect(!__atomic_load_n(&q15_tw32_ready, __ATOMIC_ACQUIRE), 0))
+    q15_tw32_init_slow();
+  return &q15_tw32_tab[IDX];
+#else
   static int ready = 0;
   if(__builtin_expect(!__atomic_load_n(&ready, __ATOMIC_ACQUIRE), 0))
-    q15_tw_init_slow(&ready);
+    q15_tw16_init_slow(&ready);
   return &ap_q15_tw_tab[IDX];
+#endif
 }
 
-#if AP_Q15_VREGS32
 template<int M1, int M2>
-static HWY_NOINLINE void q15_twmax_edge_n(const ap_q15_twiddles *tw, const vq *X, const vq *Xi,
+static HWY_NOINLINE void q15_twmax_edge_n(const qtw_table *tw, const vq *X, const vq *Xi,
                                           size_t ws, size_t we, vq *mm){
   constexpr size_t st = (size_t)(M1 + 1);
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
   for(size_t k2 = 0; k2 < (size_t)M2; k2++){
-    const long lo = ws > k2 ? (long)((ws - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
-    const long hi = we > k2 ? (long)((we - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
+    const long lo = (long)((wso - k2) / (size_t)M2);
+    const long hi = (long)((weo - k2) / (size_t)M2);
     if(lo >= hi) continue;
     qcodelet_twmax(M1, X + k2 * st, Xi + k2 * st, 1,
                    tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
   }
 }
-#endif
 
-#if AP_Q15_VREGS32
-#define AP_Q15_TW_INLINE HWY_NOINLINE
-#else
-#define AP_Q15_TW_INLINE HWY_INLINE
-#endif
-
-template<int M1, int M2, bool HAS_IDX>
-static AP_Q15_TW_INLINE int q15_finish_tw_n(const ap_q15_twiddles *tw, vq *X, vq *Xi,
-                                        size_t ws, size_t we, const int16_t *lanethr,
-                                        uint64_t *bits, int16_t *lanemax, int16_t *laneidx){
+template<int M1, int M2>
+static HWY_NOINLINE int q15_finish_lag_n(const qtw_table *tw, vq *X, vq *Xi,
+                                         size_t ws, size_t we, const int16_t *lanethr,
+                                         uint64_t *bits, int16_t *lanemax, int16_t *laneidx){
   constexpr size_t st = (size_t)(M1 + 1);
   for(size_t k2 = 0; k2 < (size_t)M2; k2++)
     qcodelet_tw(M1, X + k2 * st, Xi + k2 * st, 1,
                 tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1);
-  if(HAS_IDX && laneidx){
-    /* Elect each lane's argmax lag k = k2 + M2*k1 over [ws, we), breaking ties to earliest lag. */
-    vq m0 = Q_SET1(-1), m1 = Q_SET1(-1), ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
-    for(size_t k2 = 0; k2 < (size_t)M2; k2++){
-      const long lo = ws > k2 ? (long)((ws - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
-      const long hi = we > k2 ? (long)((we - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
-      const vq *xr = X + k2 * st, *xi = Xi + k2 * st;
-      long k1 = lo;
-      for(; k1 + 1 < hi; k1 += 2){
-        const vq a = xr[k1], b = xi[k1], c = xr[k1 + 1], d = xi[k1 + 1];
-        const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
-        const vq s1 = hn::SaturatedAdd(Q_MUL(c, c), Q_MUL(d, d));
-        const vq j0 = Q_SET1((int)k2 + M2 * (int)k1), j1 = Q_SET1((int)k2 + M2 * (int)(k1 + 1));
-        const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
-        const auto u1 = hn::Or(hn::Gt(s1, m1), hn::And(hn::Eq(s1, m1), hn::Lt(j1, ix1)));
-        m0 = hn::Max(m0, s0);
-        m1 = hn::Max(m1, s1);
-        ix0 = hn::IfThenElse(u0, j0, ix0);
-        ix1 = hn::IfThenElse(u1, j1, ix1);
-      }
-      if(k1 < hi){
-        const vq a = xr[k1], b = xi[k1];
-        const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
-        const vq j0 = Q_SET1((int)k2 + M2 * (int)k1);
-        const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
-        m0 = hn::Max(m0, s0);
-        ix0 = hn::IfThenElse(u0, j0, ix0);
-      }
-    }
-    const auto u1 = hn::Or(hn::Gt(m1, m0), hn::And(hn::Eq(m1, m0), hn::Lt(ix1, ix0)));
-    const vq mx_raw = hn::Max(m0, m1);
-    const vq ix = hn::IfThenElse(hn::Ge(mx_raw, Q_ZERO()), hn::IfThenElse(u1, ix1, ix0), Q_SET1(-1));
-    hn::StoreU(ix, AP_DQ, laneidx);
-    const vq mx = hn::Max(mx_raw, Q_ZERO());
-    if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
-    uint64_t b = 0;
-    hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&b);
-    *bits = b;
-    return 0;
-  }
-  /* Output k = k2 + M2*k1 sits at X[k2*st + k1]; the maximum does not care
-     about order, so walk memory and clip each row to the window. */
-  vq m0 = Q_ZERO(), m1 = Q_ZERO(), m2 = Q_ZERO(), m3 = Q_ZERO();
+  /* Elect each lane's argmax lag k = k2 + M2*k1 over [ws, we), breaking ties to earliest lag. */
+  vq m0 = Q_SET1(-1), m1 = Q_SET1(-1), ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
   for(size_t k2 = 0; k2 < (size_t)M2; k2++){
-    const long lo = ws > k2 ? (long)((ws - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
-    const long hi = we > k2 ? (long)((we - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
+    const long lo = (long)((wso - k2) / (size_t)M2);
+    const long hi = (long)((weo - k2) / (size_t)M2);
     const vq *xr = X + k2 * st, *xi = Xi + k2 * st;
     long k1 = lo;
-    for(; k1 + 3 < hi; k1 += 4){
-      const vq a0 = xr[k1], b0 = xi[k1], a1 = xr[k1 + 1], b1 = xi[k1 + 1];
-      const vq a2 = xr[k1 + 2], b2 = xi[k1 + 2], a3 = xr[k1 + 3], b3 = xi[k1 + 3];
-      m0 = hn::Max(m0, hn::SaturatedAdd(Q_MUL(a0, a0), Q_MUL(b0, b0)));
-      m1 = hn::Max(m1, hn::SaturatedAdd(Q_MUL(a1, a1), Q_MUL(b1, b1)));
-      m2 = hn::Max(m2, hn::SaturatedAdd(Q_MUL(a2, a2), Q_MUL(b2, b2)));
-      m3 = hn::Max(m3, hn::SaturatedAdd(Q_MUL(a3, a3), Q_MUL(b3, b3)));
+    for(; k1 + 1 < hi; k1 += 2){
+      const vq a = xr[k1], b = xi[k1], c = xr[k1 + 1], d = xi[k1 + 1];
+      const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
+      const vq s1 = hn::SaturatedAdd(Q_MUL(c, c), Q_MUL(d, d));
+      const vq j0 = Q_SET1((int)k2 + M2 * (int)k1), j1 = Q_SET1((int)k2 + M2 * (int)(k1 + 1));
+      const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
+      const auto u1 = hn::Or(hn::Gt(s1, m1), hn::And(hn::Eq(s1, m1), hn::Lt(j1, ix1)));
+      m0 = hn::Max(m0, s0);
+      m1 = hn::Max(m1, s1);
+      ix0 = hn::IfThenElse(u0, j0, ix0);
+      ix1 = hn::IfThenElse(u1, j1, ix1);
     }
-    for(; k1 < hi; k1++){
+    if(k1 < hi){
       const vq a = xr[k1], b = xi[k1];
-      m0 = hn::Max(m0, hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b)));
+      const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
+      const vq j0 = Q_SET1((int)k2 + M2 * (int)k1);
+      const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
+      m0 = hn::Max(m0, s0);
+      ix0 = hn::IfThenElse(u0, j0, ix0);
     }
   }
-  const vq mx = hn::Max(hn::Max(m0, m1), hn::Max(m2, m3));
+  const auto u1 = hn::Or(hn::Gt(m1, m0), hn::And(hn::Eq(m1, m0), hn::Lt(ix1, ix0)));
+  const vq mx_raw = hn::Max(m0, m1);
+  const vq ix = hn::IfThenElse(hn::Ge(mx_raw, Q_ZERO()), hn::IfThenElse(u1, ix1, ix0), Q_SET1(-1));
+  hn::StoreU(ix, AP_DQ, laneidx);
+  const vq mx = hn::Max(mx_raw, Q_ZERO());
   if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
   uint64_t b = 0;
   hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&b);
@@ -362,73 +375,108 @@ static AP_Q15_TW_INLINE int q15_finish_tw_n(const ap_q15_twiddles *tw, vq *X, vq
   return 0;
 }
 
-/* Pass 2 and the maximum are identical for ordinary, permuted, and tiled products.
-   Templated on M1, M2 so every row stride is an immediate and every / M2 window clip
-   compiles to a single unsigned shift rather than a hardware integer divide. */
+template<int M1, int M2>
+static HWY_NOINLINE void q15_twmax_wide_n(const qtw_table *tw, const vq *X, const vq *Xi,
+                                          size_t ws, size_t we, vq *mm){
+  constexpr size_t st = (size_t)(M1 + 1);
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
+  for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+    const long lo = (long)((wso - k2) / (size_t)M2);
+    const long hi = (long)((weo - k2) / (size_t)M2);
+    if constexpr (M1 == 16)
+      qsr16_twmax_wide(X + k2 * st, Xi + k2 * st, 1,
+                       tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
+    else
+      qsr32_twmax_wide(X + k2 * st, Xi + k2 * st, 1,
+                       tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
+  }
+}
+
+/* Pass 2 and the fused window maximum are shared across ordinary, permuted, and tiled products.
+   Outlining the wide/edge fallbacks keeps q15_screen_n compact (Pass 1 + one middle loop, with
+   branchless (ws + M2 - 1 - k2) / M2 row bounds so the compiler never unswitches the k2 loop);
+   with the streaming codelet schedule and lazy M0, M1 initialisation, the fused pass stays within
+   budget even on 16-register targets (AVX2, SSE4), eliminating the second scratch writeback and
+   separate magnitude-squared scan. */
 template<int M1, int M2, bool HAS_IDX>
-static HWY_INLINE int q15_finish_n(const ap_q15_twiddles *tw, vq *X, vq *Xi,
+static HWY_INLINE int q15_finish_n(const qtw_table *tw, vq *X, vq *Xi,
                                    size_t ws, size_t we, const int16_t *lanethr,
                                    uint64_t *bits, int16_t *lanemax, int16_t *laneidx){
   constexpr size_t N = (size_t)M1 * (size_t)M2;
-  if(we > N) we = N;
-#if AP_Q15_VREGS32
   constexpr size_t st = (size_t)(M1 + 1);
-  if(!HAS_IDX || !laneidx){
-    const size_t l1d = q15_l1d_cached();
-    const int fuse = l1d ? ap_q15_batch_bytes(N, AP_QW) > l1d : HWY_MAX_BYTES >= 64;
-    if(fuse){
-      vq mm[2] = {Q_ZERO(), Q_ZERO()};
-      if(M1 == 16 && ws <= 2 * (size_t)M2 && we >= 14 * (size_t)M2){
-        for(size_t k2 = 0; k2 < (size_t)M2; k2++){
-          const long lo = ws > k2 ? (long)((ws - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
-          const long hi = (long)((we - k2 + (size_t)(M2 - 1)) / (size_t)M2);
-          qsr16_twmax_middle(X + k2 * st, Xi + k2 * st, 1,
-                             tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
-        }
-      } else if(M1 == 32 && ws <= 4 * (size_t)M2 && we >= 28 * (size_t)M2){
-        for(size_t k2 = 0; k2 < (size_t)M2; k2++){
-          const long lo = ws > k2 ? (long)((ws - k2 + (size_t)(M2 - 1)) / (size_t)M2) : 0;
-          const long hi = (long)((we - k2 + (size_t)(M2 - 1)) / (size_t)M2);
-          qsr32_twmax_middle(X + k2 * st, Xi + k2 * st, 1,
-                             tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
-        }
-      } else {
-        q15_twmax_edge_n<M1, M2>(tw, X, Xi, ws, we, mm);
+  if(we > N) we = N;
+  if constexpr (HAS_IDX) {
+    if(laneidx) return q15_finish_lag_n<M1, M2>(tw, X, Xi, ws, we, lanethr, bits, lanemax, laneidx);
+  }
+  vq mm[2] = {Q_ZERO(), Q_ZERO()};
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
+  if constexpr (M1 == 8) {
+    if(ws <= 2 * (size_t)M2 && we >= 6 * (size_t)M2){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        qsr8_twmax_middle(X + k2 * st, Xi + k2 * st, 1,
+                          tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
       }
-      const vq mx = hn::Max(mm[0], mm[1]);
-      if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
-      uint64_t bits_ = 0;
-      hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&bits_);
-      *bits = bits_;
-      return 0;
+    } else {
+      q15_twmax_edge_n<M1, M2>(tw, X, Xi, ws, we, mm);
+    }
+  } else if constexpr (M1 == 16) {
+    if(ws <= 2 * (size_t)M2 && we >= 14 * (size_t)M2){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        qsr16_twmax_middle(X + k2 * st, Xi + k2 * st, 1,
+                           tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
+      }
+    } else if(ws <= 4 * (size_t)M2 && we >= 12 * (size_t)M2){
+      q15_twmax_wide_n<M1, M2>(tw, X, Xi, ws, we, mm);
+    } else {
+      q15_twmax_edge_n<M1, M2>(tw, X, Xi, ws, we, mm);
+    }
+  } else {
+    if(ws <= 4 * (size_t)M2 && we >= 28 * (size_t)M2){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        qsr32_twmax_middle(X + k2 * st, Xi + k2 * st, 1,
+                           tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1, lo, hi, mm);
+      }
+    } else if(ws <= 8 * (size_t)M2 && we >= 24 * (size_t)M2){
+      q15_twmax_wide_n<M1, M2>(tw, X, Xi, ws, we, mm);
+    } else {
+      q15_twmax_edge_n<M1, M2>(tw, X, Xi, ws, we, mm);
     }
   }
-#endif
-  return q15_finish_tw_n<M1, M2, HAS_IDX>(tw, X, Xi, ws, we, lanethr, bits, lanemax, laneidx);
+  const vq mx = hn::Max(mm[0], mm[1]);
+  if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
+  uint64_t bits_ = 0;
+  hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&bits_);
+  *bits = bits_;
+  return 0;
 }
 
-/* N x QW pairs: pass 1 forms the product as it loads (M2-point codelets down
-   the columns), pass 2 applies the four-step twiddle as it loads (M1-point
-   codelets along the rows), then the window's maximum per lane.
-   dq is [N][3] = (dr, di, -di); tr/ti are [N][QW].  Bit l of *bits is set
-   when lane l's maximum reaches lanethr[l]; lanemax, if not NULL, gets the
-   QW maxima. */
-/* Pass 1 of an N = M1 x M2 screen: the strides are constants, so every element's address is
-   an immediate offset rather than a multiply-add per element (a runtime-stride call spent ~60
-   integer adds per codelet on addressing). One instance per factorisation (ap_q15_factor). */
+/* N x QW pairs: pass 1 forms d*t as it loads (M2-point codelets down the columns),
+   pass 2 applies the conjugated four-step twiddle and fused window maximum (M1-point
+   codelets along the rows).  dq is [N] int32 duplicated dr followed by [N] int16 di
+   (3*N int16 total); tr/ti are [N][QW].  Bit l of *bits is set when lane l's maximum
+   reaches lanethr[l]; lanemax, if not NULL, gets the QW maxima. */
 template<int M1, int M2>
 static HWY_INLINE void q15_prod_n(const int16_t *dq, const int16_t *tr, const int16_t *ti,
                                   vq *X, vq *Xi){
+  constexpr size_t N = (size_t)M1 * (size_t)M2;
+  const int32_t *dr = (const int32_t *)dq;
+  const int16_t *di = dq + 2 * N;
   for(int e1 = 0; e1 < M1; e1++)
-    qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
-                  X + e1, Xi + e1, M1 + 1, 3L * M1, (long)M1 * AP_QW);
+    qcodelet_prod(M2, dr + e1, di + e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
+                  X + e1, Xi + e1, M1 + 1, M1, (long)M1 * AP_QW);
 }
 
 template<int IDX, int M1, int M2>
 static HWY_NOINLINE int q15_screen_n(const int16_t *dq, const int16_t *tr, const int16_t *ti,
                                      size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
                                      int16_t *lanemax, void *scratch){
-  const ap_q15_twiddles *tw = q15_tw_fast<IDX>();
+  const qtw_table *tw = q15_tw_fast<IDX>();
   vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
   q15_prod_n<M1, M2>(dq, tr, ti, X, Xi);
   return q15_finish_n<M1, M2, false>(tw, X, Xi, ws, we, lanethr, bits, lanemax, nullptr);
@@ -468,7 +516,7 @@ static HWY_NOINLINE int q15_screen_perm_n(const int16_t *dr, const int16_t *di, 
                                           const int16_t *tsel, size_t ws, size_t we,
                                           const int16_t *lanethr, uint64_t *bits,
                                           int16_t *lanemax, int16_t *laneidx, void *scratch){
-  const ap_q15_twiddles *tw = q15_tw_fast<IDX>();
+  const qtw_table *tw = q15_tw_fast<IDX>();
 #if HWY_TARGET == HWY_AVX2
   ap_qidx_avx2 dix_s, tix_s;
   q15_make_dix_avx2(&dix_s, dsel);
@@ -502,13 +550,16 @@ static HWY_NOINLINE int q15_screen_tile_n(const int16_t *dq, const int16_t *tr, 
                                           size_t ws, size_t we, const int16_t *lanethr,
                                           uint64_t *bits, int16_t *lanemax, void *scratch){
   constexpr long N = (long)M1 * M2;
-  const ap_q15_twiddles *tw = q15_tw_fast<IDX>();
+  const qtw_table *tw = q15_tw_fast<IDX>();
   vq *X = (vq *)scratch, *Xi = X + (M1 + 1) * M2;
+  const int32_t *dr0 = (const int32_t *)dq;
+  const int16_t *di0 = dq + 2 * N;
   for(int e1 = 0; e1 < M1; e1++){
-    const int16_t *d = dq + 3 * e1, *r = tr + e1 * AP_QW, *i = ti + e1 * AP_QW;
-    if(M2 == 8) qsr8_prod_tile<T, 3 * N>(d, r, i, X + e1, Xi + e1, M1 + 1, 3L * M1, (long)M1 * AP_QW);
-    else if(M2 == 16) qsr16_prod_tile<T, 3 * N>(d, r, i, X + e1, Xi + e1, M1 + 1, 3L * M1, (long)M1 * AP_QW);
-    else qsr32_prod_tile<T, 3 * N>(d, r, i, X + e1, Xi + e1, M1 + 1, 3L * M1, (long)M1 * AP_QW);
+    const int32_t *dr = dr0 + e1;
+    const int16_t *di = di0 + e1, *r = tr + e1 * AP_QW, *i = ti + e1 * AP_QW;
+    if(M2 == 8) qsr8_prod_tile<T, 3 * N>(dr, di, r, i, X + e1, Xi + e1, M1 + 1, M1, (long)M1 * AP_QW);
+    else if(M2 == 16) qsr16_prod_tile<T, 3 * N>(dr, di, r, i, X + e1, Xi + e1, M1 + 1, M1, (long)M1 * AP_QW);
+    else qsr32_prod_tile<T, 3 * N>(dr, di, r, i, X + e1, Xi + e1, M1 + 1, M1, (long)M1 * AP_QW);
   }
   return q15_finish_n<M1, M2, false>(tw, X, Xi, ws, we, lanethr, bits, lanemax, nullptr);
 }
@@ -607,8 +658,9 @@ static HWY_NOINLINE MF_Q15PREP_SECTION double q15_sumsq(size_t N, const float *r
   return ss;
 }
 
-/* Quantise one data block's split spectrum into [N][3] = (dr, di, -di) int16 triples,
-   handling both natural order (n1 <= 0) and group-major order ([n1/w][n2][w]). */
+/* Quantise one data block's split spectrum into [N] int32 duplicated dr followed by
+   [N] int16 di (3*N int16 total, matching p->qd's allocation), handling both natural
+   order (n1 <= 0) and group-major order ([n1/w][n2][w]). */
 static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, const float *im,
                                                      int n1, int n2, int w, int16_t *qd,
                                                      float *scale_out){
@@ -622,17 +674,23 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, 
   }
   const float scf = (float)sc;
   const vf vs = V_SET1(scf);
-  const vq qz = Q_ZERO();
+  const vi vmin32 = hn::Set(AP_DI, -32767), vmax32 = hn::Set(AP_DI, 32767);
+  const vi vmask16 = hn::Set(AP_DI, 0xFFFF);
+  int32_t *qd_re = (int32_t *)qd;
+  int16_t *qd_im = qd + 2 * N;
   if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) &&
      N % (size_t)AP_QW == 0){
     for(size_t k = 0; k < N; k += (size_t)AP_QW){
-      const vi r0 = hn::NearestInt(V_MUL(V_LOADU(re + k), vs));
-      const vi r1 = hn::NearestInt(V_MUL(V_LOADU(re + k + AP_W), vs));
-      const vi i0 = hn::NearestInt(V_MUL(V_LOADU(im + k), vs));
-      const vi i1 = hn::NearestInt(V_MUL(V_LOADU(im + k + AP_W), vs));
-      const vq qr = hn::OrderedDemote2To(AP_DQ, r0, r1);
+      const vi r0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + k), vs)), vmin32), vmax32);
+      const vi r1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + k + AP_W), vs)), vmin32), vmax32);
+      const vi i0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + k), vs)), vmin32), vmax32);
+      const vi i1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + k + AP_W), vs)), vmin32), vmax32);
+      const vi d0 = hn::Or(hn::And(r0, vmask16), hn::ShiftLeft<16>(r0));
+      const vi d1 = hn::Or(hn::And(r1, vmask16), hn::ShiftLeft<16>(r1));
       const vq qi = hn::OrderedDemote2To(AP_DQ, i0, i1);
-      hn::StoreInterleaved3(qr, qi, Q_SUB(qz, qi), AP_DQ, qd + 3 * k);
+      hn::StoreU(d0, AP_DI, qd_re + k);
+      hn::StoreU(d1, AP_DI, qd_re + k + AP_W);
+      hn::StoreU(qi, AP_DQ, qd_im + k);
     }
     return;
   }
@@ -643,13 +701,16 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, 
         const size_t j0 = ((size_t)g * (size_t)n2 + (size_t)b) * (size_t)AP_W;
         const size_t j1 = ((size_t)(g + 1) * (size_t)n2 + (size_t)b) * (size_t)AP_W;
         const size_t k = (size_t)b * (size_t)n1 + (size_t)g * (size_t)AP_W;
-        const vi r0 = hn::NearestInt(V_MUL(V_LOADU(re + j0), vs));
-        const vi r1 = hn::NearestInt(V_MUL(V_LOADU(re + j1), vs));
-        const vi i0 = hn::NearestInt(V_MUL(V_LOADU(im + j0), vs));
-        const vi i1 = hn::NearestInt(V_MUL(V_LOADU(im + j1), vs));
-        const vq qr = hn::OrderedDemote2To(AP_DQ, r0, r1);
+        const vi r0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + j0), vs)), vmin32), vmax32);
+        const vi r1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + j1), vs)), vmin32), vmax32);
+        const vi i0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + j0), vs)), vmin32), vmax32);
+        const vi i1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + j1), vs)), vmin32), vmax32);
+        const vi d0 = hn::Or(hn::And(r0, vmask16), hn::ShiftLeft<16>(r0));
+        const vi d1 = hn::Or(hn::And(r1, vmask16), hn::ShiftLeft<16>(r1));
         const vq qi = hn::OrderedDemote2To(AP_DQ, i0, i1);
-        hn::StoreInterleaved3(qr, qi, Q_SUB(qz, qi), AP_DQ, qd + 3 * k);
+        hn::StoreU(d0, AP_DI, qd_re + k);
+        hn::StoreU(d1, AP_DI, qd_re + k + AP_W);
+        hn::StoreU(qi, AP_DQ, qd_im + k);
       }
     }
     return;
@@ -663,14 +724,17 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, 
     int r = (int)lrintf(re[j] * scf), i = (int)lrintf(im[j] * scf);
     if(r > 32767) r = 32767; else if(r < -32767) r = -32767;
     if(i > 32767) i = 32767; else if(i < -32767) i = -32767;
-    qd[3 * k] = (int16_t)r; qd[3 * k + 1] = (int16_t)i; qd[3 * k + 2] = (int16_t)-i;
+    const uint32_t ur = (uint16_t)(int16_t)r;
+    qd_re[k] = (int32_t)(ur | (ur << 16));
+    qd_im[k] = (int16_t)i;
   }
 }
 
-/* Vectorised int16 lane thresholds across AP_QW lanes (qds_stride == 0 broadcasts qds[0]). */
-static HWY_NOINLINE MF_Q15PREP_SECTION void q15_lanethr(float threshold, const float *qds,
-                                                        int qds_stride, const float *qts,
-                                                        float margin, int nomargin, int16_t *out){
+/* Vectorised int16 lane thresholds across AP_QW lanes (qds_stride == 0 broadcasts qds[0]).
+   Kept in the hot text section alongside q15_screen because matchfilt.c invokes it per batch. */
+static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
+                                     int qds_stride, const float *qts,
+                                     float margin, int nomargin, int16_t *out){
   if(!qds_stride && qds[0] < 0.f){
     hn::StoreU(Q_SET1(-32768), AP_DQ, out);
     return;
@@ -703,7 +767,6 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_lanethr(float threshold, const f
   hn::StoreU(hn::OrderedDemote2To(AP_DQ, parts[0], parts[1]), AP_DQ, out);
 }
 
-#undef AP_Q15_TW_INLINE
 #undef MF_Q15PREP_SECTION
 
 }  // namespace HWY_NAMESPACE
