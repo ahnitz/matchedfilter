@@ -1447,11 +1447,10 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     } else {
       if(tr->q15){
         const int ql = ap_mf_q15_lanes(tr->mf);
-        const long nslabs = ql>0 ? ((long)nd+ql-1)/ql : 1;
-        /* Intermediate tiers gate in listed Q15 down to ~0.25 survivors per (slab, template);
-           the final tier also elects coarse lags and only switches to Q15 above ~2 per group. */
-        const long min_q15 = (i+1<p->ntiers) ? ((nslabs*(long)nt)>>2) : (2L*nslabs*(long)nt);
-        use_q15 = nfire >= min_q15;
+        /* Arbitrary-pair Q15 gather pools survivors directly across SIMD lanes without
+           slab or template-group bucketing; switch once nfire exceeds one FP32 vector (ql/2). */
+        const long min_q15 = ql > 1 ? ql / 2 + 1 : 1;
+        use_q15 = ql > 0 && nfire >= min_q15;
       }
       qlag = (use_q15 && i==p->ntiers-1 && p->direct && p->taps) ? p->qidx : NULL;
       if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end,use_q15,qlag)<0) return -1;
