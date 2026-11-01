@@ -2488,8 +2488,11 @@ class TimeDomainFilterBank:
             ``"filter"`` (total leaf-filtering wall seconds), and ``"ephemeral_used"``
             (True when ``retain_radius == 0`` skipped writing ``out``).
         tile_bytes : int, optional
-            Target byte footprint per L3-resident middle-row chunk (default ``_TILE_BYTES``).
-            Passing ``0`` disables tiling and runs untiled ``correlate_series`` followed by
+            Target byte footprint per L3-resident middle-row chunk (default ``None``, which
+            uses ``_TILE_BYTES`` when the cohort's active middle output fits within the L3
+            budget and falls back to untiled non-temporal streaming on oversized full-segment
+            cohorts). Passing a positive integer forces tiled execution at that chunk budget;
+            passing ``0`` disables tiling and runs untiled ``correlate_series`` followed by
             ``filter_series_many``.
         retain_radius : int, optional
             Controls how much of each ``kwargs["out"]`` array is materialized in DRAM:
@@ -2695,12 +2698,24 @@ class TimeDomainFilterBank:
                 addr_spans.append((lo_b, hi_b))
             cohorts.append(members)
 
-        # Execute each multi-detector cohort in L3-resident chunks.
+        # Execute each multi-detector cohort in L3-resident chunks when its active output
+        # fits within the automatic L3 residency budget (or when tile_bytes is explicit).
+        auto_cohort_cap = max(eff_tile_bytes, 4 << 20) if tile_bytes is None else None
         used_nt_stream = False
         for members in cohorts:
             D = len(members)
             corr_bank, _, S, W_corr, _, first_out, sel_arr, _, _, _ = members[0][1]
             n_out_rows = first_out.shape[0]
+            w_corr_samples = int((W_corr[:, 1] - W_corr[:, 0]).sum())
+            if auto_cohort_cap is not None and D * n_out_rows * w_corr_samples * 8 > auto_cohort_cap:
+                all_ephemeral = False
+                for ci, _ in members:
+                    c_bank, c_ser, c_kw = corr_jobs[ci]
+                    t_c0 = time.perf_counter()
+                    c_bank.correlate_series(c_ser, **(c_kw or {}))
+                    corr_times[ci] = time.perf_counter() - t_c0
+                    fallback_leaves.extend(leaf_by_corr[ci])
+                continue
 
             # Partition each group's template rows into contiguous-template batches so small-N
             # SIMD correlation groups (n <= 4096 or n == 8192) fill SIMD lanes without wasted work.
@@ -3059,7 +3074,7 @@ class TimeDomainFilterBank:
                         grp_min_col = 0
                     else:
                         grp_min_col = int(col0.min())
-                        batch_span_bytes = int(col1.max() - grp_min_col) * 8 * max_batch_kr
+                        batch_span_bytes = D * int(col1.max() - grp_min_col) * 8 * max_batch_kr
                         kt = min(M, max(1, int(math.ceil(batch_span_bytes / eff_tile_bytes))))
                         if kt <= 1:
                             raw_chunks = [(0, M, S)]
@@ -3542,8 +3557,10 @@ class TimeDomainFilterBank:
         if used_nt_stream and stream_fn is not None:
             stream_fn()
 
-        # Execute any independent or fallback leaf jobs now that all correlation outputs exist.
+        # Execute any independent or fallback leaf jobs in original leaf_jobs order so
+        # bank-grouped multi-detector pairs stay adjacent in cache.
         if fallback_leaves:
+            fallback_leaves.sort()
             t_f0 = time.perf_counter()
             fb_res = TimeDomainFilterBank.filter_series_many(
                 [leaf_jobs[j] for j in fallback_leaves], wait=True)
