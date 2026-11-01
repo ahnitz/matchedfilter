@@ -188,10 +188,12 @@ class HierarchicalFilter(MatchedFilter):
         self._mf = None
         self._q15 = False
         self._tier0_clusters = {}
+        self._tier0_cand_cache = {}
         self._clusters_allowed = False
         self._live_templates = None
         self._chosen_csig = ()
         self._synced_t0 = None
+        self._gt0_checked = 0
         # The joint-trial arm this plan runs (_trial): DEFAULT, a lock, or a trial's arm. A plan
         # inside a bank is governed by the bank's trial and runs none of its own.
         self._arm, self._governed, self._forced = _trial.DEFAULT, False, False
@@ -296,58 +298,118 @@ class HierarchicalFilter(MatchedFilter):
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         chain = ",".join(str(int(b)) for b in self._chain)
         cl = self._active_tier0_cluster(self._chain)
-        ctag = "|t0=%.1f" % round(cl.ratio, 1) if cl is not None else ""
+        ctag = "|t0=%g" % round(cl.ratio, 2) if cl is not None else ""
         return "plan|%d|%g|%g|%d|%s|%s%s%s" % (self.n, float(self._fs_snr or self.snr), float(self.fd),
                                                tiers, self.device, chain,
                                                "" if self._direct_key() is None else "|direct", ctag)
 
     def _tier0_cluster_eligible(self):
-        """Return True when CPU Tier-0 pair-centroid clustering applies to this plan."""
+        """Return True when Tier-0 coarse centroid clustering applies to this plan."""
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+        dev_ok = (
+            (self.device.kind == "cpu" and self._gpu is None)
+            or (
+                self.device.kind == "gpu"
+                and self._gpu is not None
+                and self._gpu._shipped("compactc", self.n)
+            )
+        )
         return (self._clusters_allowed and tiers >= 2 and self.ntemplates >= 4
                 and self._pinned is None and self._cal_thr is None
                 and self._pending_ref is not None and len(self._pending_ref) == self.n
-                and self.device.kind == "cpu" and self._gpu is None
-                and not self._hermitian and _tier0_centroid_enabled())
+                and dev_ok and not self._hermitian and _tier0_centroid_enabled())
 
     def _templates_for_clustering(self):
         """Return current template spectra array without regenerating if already in memory."""
-        t = self._live_templates
-        if isinstance(t, np.ndarray):
-            return t
-        t = self._held_templates
-        if isinstance(t, np.ndarray):
-            return t
+        for t in (self._live_templates, self._held_templates, getattr(self, "_gtmpl", None)):
+            if isinstance(t, np.ndarray):
+                return t
         src = getattr(self, "_template_source", None)
         if src is not None and (self._template_ready is None or self._template_ready):
             return np.ascontiguousarray(src(), dtype=np.complex64)
         return None
 
-    def _tier0_cluster_for_band(self, band, templates=None):
+    def _tier0_candidates_for_band(self, band, templates=None):
+        """Lazily build `(cl_k2, cl_k4)` candidate Tier-0 clusters for `band`."""
+        if not self._tier0_cluster_eligible():
+            return None, None
+        b = int(band)
+        if b in self._tier0_cand_cache:
+            return self._tier0_cand_cache[b]
+        usable = _gatechain.usable_bands(self._pending_ref, self.n)
+        if len(usable) < 2 or b not in usable[:-1]:
+            self._tier0_cand_cache[b] = (None, None)
+            return None, None
+        tmpl = self._templates_for_clustering() if templates is None else templates
+        if tmpl is None:
+            return None, None
+        k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
+        cands = _gatechain.cluster_tier0_candidates(
+            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=4
+        )
+        self._tier0_cand_cache[b] = cands
+        return cands
+
+    def _tier0_cluster_for_band(self, band, templates=None, forced_chain=None):
         """Lazily compute and memoize `Tier0Cluster` (or `None`) for `band` under `_pending_ref`."""
         if not self._tier0_cluster_eligible():
             return None
         b = int(band)
         if b in self._tier0_clusters:
             return self._tier0_clusters[b]
-        usable = _gatechain.usable_bands(self._pending_ref, self.n)
-        if len(usable) < 2 or b not in usable[:-1]:
+        cl_k2, cl_k4 = self._tier0_candidates_for_band(b, templates=templates)
+        cands = []
+        if cl_k2 is not None:
+            cands.append(cl_k2)
+        if cl_k4 is not None and (cl_k2 is None or cl_k4.ratio <= cl_k2.ratio - 0.05 + 1e-9):
+            cands.append(cl_k4)
+        if not cands:
             self._tier0_clusters[b] = None
             return None
-        tmpl = self._templates_for_clustering() if templates is None else templates
-        if tmpl is None:
-            return None
-        k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
-        cl = _gatechain.cluster_tier0_templates(tmpl, self._pending_ref, self.n, b, k0=k0)
-        self._tier0_clusters[b] = cl
-        return cl
+        if len(cands) == 1:
+            self._tier0_clusters[b] = cands[0]
+            return cands[0]
+        # Compare k<=2 vs k<=4 on forced_chain (or across chains starting at b) under the cost model
+        snr = self._fs_snr or self.snr
+        base_cm = self._cost_model(cluster_ratios={})
+        best_cl = cands[0]
+        best_cost = float("inf")
+        for cand in cands:
+            cm_cand = base_cm.with_tier0_cluster({b: cand.ratio})
+            if forced_chain is not None and len(forced_chain) >= 2 and forced_chain[0] == b:
+                pl = _gatechain.chain_thresholds(
+                    self._pending_ref, self.n, snr, self.fd, forced_chain,
+                    cost=cm_cand, window=self.search_window, tier0_cluster=cand
+                )
+                c_val = float("inf") if pl is None else (
+                    pl["cost"] + cm_cand.feed_delta(
+                        forced_chain, pl["reach"], self.ntemplates, pl.get("halfwidth")
+                    )
+                )
+            else:
+                tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+                a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
+                _, plans = _gatechain.choose_chain(
+                    self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                    cost=cm_cand, max_tiers=tiers, window=self.search_window,
+                    tier0_clusters={b: (a_q, cand.lag_pad)}
+                )
+                c_val = min(
+                    (q["cost"] for q in plans if len(q["chain"]) >= 2 and q["chain"][0] == b),
+                    default=float("inf"),
+                )
+            if c_val < best_cost:
+                best_cost = c_val
+                best_cl = cand
+        self._tier0_clusters[b] = best_cl
+        return best_cl
 
     def _clusters_sig(self):
         """Hashable summary of materialized candidate Tier-0 clusters for chain choice caching."""
         if not self._tier0_clusters or not _tier0_centroid_enabled():
             return ()
         return tuple(
-            (b, round(cl.ratio, 1), math.floor(cl.alpha * 50.0 + 1e-9) / 50.0, cl.lag_pad)
+            (b, round(cl.ratio, 2), math.floor(cl.alpha * 50.0 + 1e-9) / 50.0, cl.lag_pad)
             for b, cl in sorted(self._tier0_clusters.items())
             if cl is not None
         )
@@ -670,9 +732,12 @@ class HierarchicalFilter(MatchedFilter):
         self._resolved = None
         if self._gpu is not None:
             self._tdirty = True
+            self._ckey = None
+            self.__dict__.pop("_call_plans", None)
         if power is None:
             self._pending_ref = None
             self._tier0_clusters = {}
+            self._tier0_cand_cache = {}
             self._synced_t0 = None
             if self._mf is not None:
                 if hasattr(self._mf, "set_band_offsets"):
@@ -682,7 +747,11 @@ class HierarchicalFilter(MatchedFilter):
             return
         self._pending_ref = p.copy()
         self._tier0_clusters = {}
+        self._tier0_cand_cache = {}
         self._synced_t0 = None
+        if self._pinned is None and self._chain is not None and (self._chosen_csig or self._tier0_cluster_eligible()):
+            self._chain = None
+            self._mf = None
         if self._mf is not None:
             if hasattr(self._mf, "set_band_offsets"):
                 self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
@@ -702,18 +771,19 @@ class HierarchicalFilter(MatchedFilter):
         if self.device.kind == "gpu":
             cm = _calibration.calibrate_costs_gpu(self.n, str(self.device))
             price = self._direct_price(cm)
-            return (cm.with_direct(price, single_tier=True,
-                                   fraction=getattr(self, "_one_bin_frac", 1.0))
-                    if price is not None else cm)
-        policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
-        cm = _calibration.calibrate_costs(self.n, self.ntemplates,
-                                        group=policy.get('series_group', _gatechain.default_series_group(self.n)))
-        price = self._direct_price()
-        if price is not None:
-            mfrac = max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0)))
-            cm = cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
-                                fraction=getattr(self, "_one_bin_frac", 1.0),
-                                base=0.25 * cm.refine(0.1), multi_frac=mfrac)
+            cm = (cm.with_direct(price, single_tier=True,
+                                 fraction=getattr(self, "_one_bin_frac", 1.0))
+                  if price is not None else cm)
+        else:
+            policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
+            cm = _calibration.calibrate_costs(self.n, self.ntemplates,
+                                            group=policy.get('series_group', _gatechain.default_series_group(self.n)))
+            price = self._direct_price()
+            if price is not None:
+                mfrac = max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0)))
+                cm = cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
+                                    fraction=getattr(self, "_one_bin_frac", 1.0),
+                                    base=0.25 * cm.refine(0.1), multi_frac=mfrac)
         if cluster_ratios is None:
             csig = self._clusters_sig()
             if csig and self._cal_thr is None:
@@ -779,15 +849,17 @@ class HierarchicalFilter(MatchedFilter):
             if tmpl is not None:
                 if forced_want is not None:
                     if len(forced_want) >= 2 and forced_want[0] in cand_bands:
-                        self._tier0_cluster_for_band(forced_want[0], templates=tmpl)
+                        self._tier0_cluster_for_band(
+                            forced_want[0], templates=tmpl, forced_chain=forced_want
+                        )
                 else:
                     base_cm = self._cost_model(cluster_ratios={})
-                    opt_cm = base_cm.with_tier0_cluster({int(b): 0.50 for b in cand_bands})
+                    opt_cm = base_cm.with_tier0_cluster({int(b): 0.25 for b in cand_bands})
                     _, lb_plans = _gatechain.choose_chain(
                         self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                         cost=opt_cm, max_tiers=tiers, window=self.search_window
                     )
-                    best_uncl, _ = _gatechain.choose_chain(
+                    best_uncl, uncl_plans = _gatechain.choose_chain(
                         self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                         cost=base_cm, max_tiers=tiers, window=self.search_window
                     )
@@ -800,25 +872,53 @@ class HierarchicalFilter(MatchedFilter):
                         )
                         for b0 in cand_bands
                     }
+                    uncl_by_b0 = {
+                        int(b0): min(
+                            (q["cost"] for q in uncl_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
+                            default=float("inf"),
+                        )
+                        for b0 in cand_bands
+                    }
                     ordered_b0 = sorted((int(b) for b in cand_bands), key=lambda b: (lb_by_b0[b], b))
                     tie_slack = 1.0 + _gatechain.TIE
                     for b0 in ordered_b0:
                         limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
-                        if lb_by_b0[b0] >= limit:
+                        if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
                             continue
-                        cl = self._tier0_cluster_for_band(b0, templates=tmpl)
-                        if cl is not None and math.isfinite(lb_by_b0[b0]):
+                        cl_k2, cl_k4 = self._tier0_candidates_for_band(b0, templates=tmpl)
+                        cands = []
+                        if cl_k2 is not None:
+                            cands.append(cl_k2)
+                        if cl_k4 is not None and (
+                            cl_k2 is None or cl_k4.ratio <= cl_k2.ratio - 0.05 + 1e-9
+                        ):
+                            cands.append(cl_k4)
+                        best_cand = None
+                        best_cand_b0_cost = uncl_by_b0[b0]
+                        best_cand_overall = None
+                        for cand in cands:
+                            self._tier0_clusters[b0] = cand
                             csig_now = self._clusters_sig()
                             t0_now = {b: (a, lp) for b, _, a, lp in csig_now}
                             cm_now = base_cm.with_tier0_cluster({b: r for b, r, _, _ in csig_now})
-                            cur_best, _ = _gatechain.choose_chain(
+                            cur_best, cur_plans = _gatechain.choose_chain(
                                 self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                 cost=cm_now, max_tiers=tiers, window=self.search_window,
                                 tier0_clusters=t0_now
                             )
-                            if cur_best is not None and cur_best["cost"] < best_upper:
-                                best_upper = cur_best["cost"]
-                                best_b0 = int(cur_best["chain"][0])
+                            cand_b0_cost = min(
+                                (q["cost"] for q in cur_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
+                                default=float("inf"),
+                            )
+                            if cand_b0_cost < best_cand_b0_cost:
+                                best_cand_b0_cost = cand_b0_cost
+                                best_cand = cand
+                                best_cand_overall = cur_best
+                        self._tier0_clusters[b0] = best_cand
+                        if best_cand is not None and best_cand_overall is not None:
+                            if best_cand_overall["cost"] < best_upper:
+                                best_upper = best_cand_overall["cost"]
+                                best_b0 = int(best_cand_overall["chain"][0])
 
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
@@ -891,18 +991,38 @@ class HierarchicalFilter(MatchedFilter):
         return res
 
     def set_templates(self, spectra, index=None):
-        if self._gpu is not None or index is not None:
-            if index is not None and self._gpu is None:
-                self._clusters_allowed = False
-                if self._tier0_clusters:
-                    self._tier0_clusters = {}
-                    self._synced_t0 = None
-                    self._resolved = None
-                    if self._mf is not None:
-                        self._mf.clear_tier0_clusters()
-                if self._pinned is None and self._chain is not None and self._chosen_csig:
-                    self._chain, self._mf, self._resolved = None, None, None
+        if index is not None:
+            self._clusters_allowed = False
+            if self._tier0_clusters or self._tier0_cand_cache:
+                self._tier0_clusters = {}
+                self._tier0_cand_cache = {}
+                self._synced_t0 = None
+                self._resolved = None
+                self._ckey = None
+                self.__dict__.pop("_call_plans", None)
+                if self._mf is not None:
+                    self._mf.clear_tier0_clusters()
+            if self._pinned is None and self._chain is not None and self._chosen_csig:
+                self._chain, self._mf, self._resolved = None, None, None
+                self._ckey = None
+                self.__dict__.pop("_call_plans", None)
             return super().set_templates(spectra, index=index)
+        if self._gpu is not None:
+            super().set_templates(spectra, index=None)
+            self._clusters_allowed = True
+            self._tier0_clusters = {}
+            self._tier0_cand_cache = {}
+            self._synced_t0 = None
+            self._ckey = None
+            self.__dict__.pop("_call_plans", None)
+            if self._cal_thr is None:
+                self._resolved = None
+            if self._pinned is None and self._chain is not None and (
+                self._chosen_csig or self._tier0_cluster_eligible()
+            ):
+                self._chain = None
+                self._mf = None
+            return
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
         if a.ndim != 2:
             raise ValueError(f"expected 2D array of spectra, got {a.shape}")
@@ -918,6 +1038,7 @@ class HierarchicalFilter(MatchedFilter):
         self._held_templates = self._hold(a)
         self._clusters_allowed = True
         self._tier0_clusters = {}
+        self._tier0_cand_cache = {}
         self._synced_t0 = None
         if self._cal_thr is None:
             self._resolved = None
@@ -982,9 +1103,12 @@ class HierarchicalFilter(MatchedFilter):
         if h != self._hermitian:
             self._hermitian = h
             self._resolved = None
-            if h and self._tier0_clusters:
+            if h and (self._tier0_clusters or self._tier0_cand_cache):
                 self._tier0_clusters = {}
+                self._tier0_cand_cache = {}
                 self._synced_t0 = None
+                self._ckey = None
+                self.__dict__.pop("_call_plans", None)
                 if self._pinned is None and self._chain is not None and self._chosen_csig:
                     self._chain, self._mf = None, None
         if self._mf is not None:
@@ -1056,13 +1180,27 @@ class HierarchicalFilter(MatchedFilter):
             # The kernels take a first (cascade) band and a last band; every chain a GPU plan
             # is given is bounded by _MAX_TIERS["gpu"].
             raise RuntimeError("a GPU chain has at most two tiers; got %s" % (chain,))
-        ck = (chain, offsets, f, H.ctypes.data, H.shape)
+        cl = (
+            self._active_tier0_cluster(chain)
+            if (len(chain) == 2 and H.shape[0] == self.ntemplates
+                and (self._gtmpl is None or H.ctypes.data == self._gtmpl.ctypes.data))
+            else None
+        )
+        ck = (chain, offsets, f, H.ctypes.data, H.shape, None if cl is None else id(cl))
         if getattr(self, "_ckey", None) != ck or self._tdirty:
-            self._ct = self._coarse_templates(H, chain, f, offsets)
+            if cl is not None:
+                ct1 = self._coarse_templates(
+                    H, chain[1:], None if f is None else f[1:], offsets[1:]
+                )[0]
+                self._ct = [cl.specs, ct1]
+            else:
+                self._ct = self._coarse_templates(H, chain, f, offsets)
             self._ckey = ck
             self._tdirty = True
         ct = self._ct
         extra = {} if len(chain) == 1 else dict(cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1])
+        if cl is not None:
+            extra["tier0_cluster"] = cl
         if any(offsets):
             extra["band_offsets"] = offsets
         return chain, ct, thr, extra
@@ -1158,6 +1296,14 @@ class HierarchicalFilter(MatchedFilter):
             return lambda: self._account(res())
         return self._account(res)
 
+    def _account(self, r):
+        pairs_before = self._gpairs
+        r = super()._account(r)
+        batch_pairs = self._gpairs - pairs_before
+        t0_checked = getattr(self._gpu, "last_tier0_checked", 0) or batch_pairs
+        self._gt0_checked += int(t0_checked)
+        return r
+
     # ---- reporting -----------------------------------------------------------
     @property
     def config(self):
@@ -1191,8 +1337,14 @@ class HierarchicalFilter(MatchedFilter):
         chain = tuple(self._chain) if self._chain else ()
         if self._gpu is not None:
             passed = ([self._gt1] if len(chain) == 2 else []) + [self._gtrig]
+            checked = (
+                [self._gt0_checked, self._gt1]
+                if len(chain) == 2
+                else ([self._gt0_checked] if len(chain) == 1 else [])
+            )
             return dict(backend="gpu", chain=chain, pairs=self._gpairs, passed=passed,
-                        refined=self._gtrig, q15=None, ticks=None, ident=id(self))
+                        checked=checked, refined=self._gtrig, q15=None, ticks=None,
+                        ident=id(self))
         mf = getattr(self, "_mf", None)
         if mf is None:
             return dict(backend="cpu", chain=chain, pairs=0, passed=[0] * len(chain),

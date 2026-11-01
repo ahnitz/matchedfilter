@@ -1939,6 +1939,54 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
 #endif
 }
 
+//: Clustered Tier-0 compaction: each coarse pair (d, c) in [0, pairs0) that passes
+//: expands to its disjoint member templates clusterMembers[m0 .. m0 + cnt) as fine
+//: pair indices d * nt + t in `survivors`, with the expanded total in args[0].
+[shader("compute")][numthreads(256,1,1)]
+void compactPairsClustered(uint3 gid: SV_DispatchThreadID,
+                           StructuredBuffer<float2> coarse,
+                           StructuredBuffer<uint> clusterOffsets,
+                           StructuredBuffer<uint> clusterMembers,
+                           RWStructuredBuffer<uint> survivors,
+                           RWStructuredBuffer<uint> args,
+                           uniform uint pairs0, uniform uint nc, uniform uint nt, uniform float thr)
+{
+    uint pair0 = gid.x;
+    // !(x < thr): a NaN coarse value (an overflowed narrow tier) passes (fails open).
+    bool active = (pair0 < pairs0) && !(length(coarse[pair0]) < thr);
+    uint d = 0u;
+    uint m0 = 0u;
+    uint cnt = 0u;
+    if (active) {
+        d = pair0 / nc;
+        uint c = pair0 % nc;
+        m0 = clusterOffsets[c];
+        cnt = clusterOffsets[c + 1u] - m0;
+    }
+#if defined(MF_VULKAN) || defined(MF_CUDA)
+    uint waveTotal = WaveActiveSum(cnt);
+    uint waveOff = WavePrefixSum(cnt);
+    uint baseSlot = 0u;
+    if (WaveIsFirstLane()) {
+        if (waveTotal > 0u) {
+            InterlockedAdd(args[0], waveTotal, baseSlot);
+        }
+    }
+    baseSlot = WaveReadLaneFirst(baseSlot);
+    for (uint j = 0u; j < cnt; ++j) {
+        survivors[baseSlot + waveOff + j] = d * nt + clusterMembers[m0 + j];
+    }
+#else
+    if (cnt > 0u) {
+        uint slot;
+        InterlockedAdd(args[0], cnt, slot);
+        for (uint j = 0u; j < cnt; ++j) {
+            survivors[slot + j] = d * nt + clusterMembers[m0 + j];
+        }
+    }
+#endif
+}
+
 //: Compaction over a LIST: the second tier's gate. Tier 1 ran only on the
 //: pairs in `list` (the tier-0 survivors, count in listArgs[0]), so only those
 //: pairs have a tier-1 value. Walking every pair, as compactPairs does, read
