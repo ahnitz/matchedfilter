@@ -88,6 +88,13 @@ typedef struct {
   /* 1 when N is below AP_W^2 and the plan runs the pair-batched path instead
      of the balanced split.  See create_small(). */
   int small;
+  size_t s1_pad;           /* padded column-block stride (ESTRIDE(a1)*a2 or n1) */
+  size_t inter_elems;      /* s1_pad * N2 floats per padded intermediate buffer */
+  float *ire_ext,*iim_ext; /* lazy extra intermediates for multi-template corr_prod_window */
+  vf *twg_r,*twg_i;        /* per-group twiddle cache [N2] when !twfr */
+  int k_ext;               /* extra template slots allocated in ire_ext/iim_ext */
+  float *tile_dr,*tile_di; /* lazy data-spectrum tile for multi-block L2 template reuse */
+  int tile_cap;            /* N-float slots allocated in tile_dr/tile_di */
 } BP;
 
 /* Which lengths take the pair-batched path.
@@ -256,6 +263,7 @@ void *create(size_t N){
   size_t s1=(a2==1)?(size_t)n1:(size_t)ESTRIDE(a1)*a2;
   size_t s2=(b2==1)?(size_t)n2:(size_t)ESTRIDE(b1)*b2;
   size_t me=s1>s2?s1:s2;
+  p->s1_pad=s1; p->inter_elems=s1*(size_t)n2;
   /* Quantising trades arithmetic for bytes moved.  It is now OFF at every size.
      It was enabled above 2^17 on the argument that the intermediate no longer fits
      cache, and that held while stage A read the input one group at a time.  Once
@@ -282,8 +290,8 @@ void *create(size_t N){
      choice needs. Zen 3 had it slower at every length (2026-10-22), so it was
      removed. The one recorded exception is an Apple M2, where it was 4-9% faster
      at n >= 2^18 (2026-10-22). */
-  p->ire=ap_alloc64(N*sizeof(float));
-  p->iim=ap_alloc64(N*sizeof(float));
+  p->ire=ap_alloc64(p->inter_elems*sizeof(float));
+  p->iim=ap_alloc64(p->inter_elems*sizeof(float));
   /* Stage A walks the input with stride N1*8 bytes and, one group at a time, uses
      only 2*AP_W floats of each row.  Measured on this machine, touching 128 bytes
      per 8 KiB row sustains 7.6 GB/s where a sequential read gets 43.9.  Loading G
@@ -389,6 +397,11 @@ void *create(size_t N){
           p->twfi[idx]=V_FMADD(SR,p->TLi[k2],V_MUL(SI,p->TLr[k2]));
         }
       } else { free(p->twfr); free(p->twfi); p->twfr=p->twfi=NULL; }
+    }
+    if(!p->twfr){
+      p->twg_r=(vf*)ap_alloc64((size_t)n2*sizeof(vf));
+      p->twg_i=(vf*)ap_alloc64((size_t)n2*sizeof(vf));
+      if(!p->twg_r || !p->twg_i){ free(p->twg_r); free(p->twg_i); p->twg_r=p->twg_i=NULL; }
     } }
   if constexpr (AP_W==8) {
     if(n1==32 && n2==32){
@@ -411,6 +424,8 @@ void destroy(void *vp){
   BP *p=(BP*)vp; if(!p) return;
   free(p->bmx);free(p->bre);free(p->bim);free(p->bix);
   free(p->ire);free(p->iim);free(p->bR);free(p->bI);free(p->sR);free(p->sI);
+  free(p->ire_ext);free(p->iim_ext);free(p->twg_r);free(p->twg_i);
+  free(p->tile_dr);free(p->tile_di);
   free(p->TLr);free(p->TLi);free(p->w1r);free(p->w1i);free(p->w2r);free(p->w2i);
   free(p->hr);free(p->hi);free(p->lr);free(p->li);
   free(p->scg);free(p->tw32r);free(p->tw32i);free(p->twfr);free(p->twfi);free(p);
@@ -1260,6 +1275,46 @@ static HWY_NOINLINE MF_FWD_SECTION void fft_forward_scaled(void *vp,const float*
     vf *RR,*RI; stageB(p,b,&RR,&RI,1);
     for(int k1=0;k1<N1;k1++){ int e=eidx(&p->ea,k1);
       v_inter(out+2*((size_t)k1*N2+AP_W*b),RR[e],RI[e]); }
+  }
+}
+
+/* Fused scaled forward transform storing split group-major (re, im) directly from stage B:
+   when N1 >= N2 and N2 divides N1 (all balanced plans except N = 512), row k1 = row*R + r
+   of column block b maps lane-for-lane to group g = r*(N2/AP_W) + b with zero interleave,
+   zero scratch round-trip, and unit-stride vector stores. */
+static HWY_NOINLINE MF_FWD_SECTION void fft_forward_scaled_gm(
+    void *vp, const float *in, size_t have_floats, size_t stride, float scale,
+    float *HWY_RESTRICT re, float *HWY_RESTRICT im, float *scratch) {
+  BP *p = (BP *)vp;
+  if (p->small || !p->gmajor || p->N1 < p->N2 || (p->N1 % p->N2) != 0) {
+    fft_forward_scaled(vp, in, have_floats, stride, scale, scratch);
+    split_store(scratch, re, im, p->N, 0, (!p->small && p->gmajor) ? p->N1 : 0, p->N2, AP_W);
+    return;
+  }
+  const int N1 = p->N1, N2 = p->N2, NB = N2 / AP_W, R = N1 / N2;
+  const emap ea = p->ea;
+  stageA_scaled(p, in, have_floats, stride, scale);
+  for (int b = 0; b < NB; b++) {
+    vf *RR, *RI;
+    stageB(p, b, &RR, &RI, 1);
+    for (int r = 0; r < R; r++) {
+      const size_t g = (size_t)r * (size_t)NB + (size_t)b;
+      float *HWY_RESTRICT dr = re + g * (size_t)N2 * AP_W;
+      float *HWY_RESTRICT di = im + g * (size_t)N2 * AP_W;
+      if (ea.single) {
+        for (int row = 0; row < N2; row++) {
+          const int e = row * R + r;
+          V_STOREU(dr + (size_t)row * AP_W, RR[e]);
+          V_STOREU(di + (size_t)row * AP_W, RI[e]);
+        }
+      } else {
+        for (int row = 0; row < N2; row++) {
+          const int e = eidx(&ea, row * R + r);
+          V_STOREU(dr + (size_t)row * AP_W, RR[e]);
+          V_STOREU(di + (size_t)row * AP_W, RI[e]);
+        }
+      }
+    }
   }
 }
 
@@ -2761,15 +2816,30 @@ static HWY_ATTR HWY_INLINE void corr_stream_inter(float *p,vf re,vf im){
 #endif
 }
 
-static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,const float*di,
-                                                        const float*tr,const float*ti,
-                                                        size_t blo,size_t end,float*dst,
-                                                        float*scratch,int stream){
-  BP *p=(BP*)vp;
-  if(p->small || blo>end || end>p->N) return -1;
-  if(blo==end) return 0;
-  stageA_prod_gm(p,dr,di,tr,ti);
+static HWY_NOINLINE MF_FWD_SECTION void stageB_from(BP *p,float *ire,float *iim,
+                                                    int b,vf **RR,vf **RI){
+  if constexpr (AP_W==8) {
+    if(p->fuse==2){
+      float *ar=ire+(size_t)b*32*AP_W;
+      float *ai=iim+(size_t)b*32*AP_W;
+      fftsr32_unit_inplace(ar,ai,p->sR,p->sI,1);
+      *RR=(vf*)ar; *RI=(vf*)ai;
+      return;
+    }
+  }
+  vf *ar=(vf*)(ire+(size_t)b*p->s1_pad*AP_W);
+  vf *ai=(vf*)(iim+(size_t)b*p->s1_pad*AP_W);
+  efft(p->N1,ar,ai,p->sR,p->sI,p->w1r,p->w1i);
+  *RR=ar; *RI=ai;
+}
+
+static HWY_NOINLINE MF_FWD_SECTION int corr_window_stageB(BP *p,float *ire,float *iim,
+                                                          size_t blo,size_t end,
+                                                          float *HWY_RESTRICT dst,
+                                                          float *HWY_RESTRICT scratch,
+                                                          int stream){
   const int N2=p->N2, NB=N2/AP_W;
+  const emap ea=p->ea;
   const size_t uN2=(size_t)N2, em1=end-1;
   const size_t q_lo=blo/uN2, r_lo=blo%uN2;
   const size_t q_hi=em1/uN2, r_hi=em1%uN2;
@@ -2781,23 +2851,23 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
     const long k1_lo=(long)((blo+uN2-1)/uN2), k1_hi=(long)(end/uN2)-1;
     if(k1_lo<=k1_hi){
       const size_t tail=(size_t)((mis64&60u)>>2), rem=(16u-tail)&15u;
-      float *cbuf=scratch, *hbuf=cbuf+16*(size_t)p->N1;
-      float *elo=hbuf+16*(size_t)p->N1, *ehi=elo+2*uN2+16;
+      float *HWY_RESTRICT cbuf=scratch, *HWY_RESTRICT hbuf=cbuf+16*(size_t)p->N1;
+      float *HWY_RESTRICT elo=hbuf+16*(size_t)p->N1, *HWY_RESTRICT ehi=elo+2*uN2+16;
       const __m512i idx=_mm512_add_epi32(_mm512_set1_epi32((int)rem),
                                          _mm512_setr_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15));
       for(int b=0;b<NB;b++){
         const size_t base=(size_t)AP_W*(size_t)b;
-        vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+        vf *RR,*RI; stageB_from(p,ire,iim,b,&RR,&RI);
         if((long)q_lo<k1_lo && base+(size_t)(AP_W-1)>=r_lo){
           alignas(64) float tmp[32];
-          const int e=eidx(&p->ea,(int)q_lo);
+          const int e=eidx(&ea,(int)q_lo);
           const size_t k0=q_lo*uN2+base, u0=k0<blo?blo-k0:0;
           v_inter(tmp,RR[e],V_XOR(RI[e],sg));
           memcpy(elo+2*(k0+u0-blo),tmp+2*u0,2*(AP_W-u0)*sizeof(float));
         }
         if(b==0){
           for(long k1=k1_lo;k1<=k1_hi;k1++){
-            const int e=eidx(&p->ea,(int)k1);
+            const int e=eidx(&ea,(int)k1);
             const vf re=RR[e], im=V_XOR(RI[e],sg);
             const __m512 c0=hn::InterleaveWholeLower(AP_D,re,im).raw;
             const __m512 c1=hn::InterleaveWholeUpper(AP_D,re,im).raw;
@@ -2813,7 +2883,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
           }
         }else if(b<NB-1){
           for(long k1=k1_lo;k1<=k1_hi;k1++){
-            const int e=eidx(&p->ea,(int)k1);
+            const int e=eidx(&ea,(int)k1);
             const vf re=RR[e], im=V_XOR(RI[e],sg);
             const __m512 c0=hn::InterleaveWholeLower(AP_D,re,im).raw;
             const __m512 c1=hn::InterleaveWholeUpper(AP_D,re,im).raw;
@@ -2825,7 +2895,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
           }
         }else{
           for(long k1=k1_lo;k1<=k1_hi;k1++){
-            const int e=eidx(&p->ea,(int)k1);
+            const int e=eidx(&ea,(int)k1);
             const vf re=RR[e], im=V_XOR(RI[e],sg);
             const __m512 c0=hn::InterleaveWholeLower(AP_D,re,im).raw;
             const __m512 c1=hn::InterleaveWholeUpper(AP_D,re,im).raw;
@@ -2845,7 +2915,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
         }
         if((size_t)(k1_hi+1)*uN2<end && base<=r_hi){
           alignas(64) float tmp[32];
-          const int e=eidx(&p->ea,(int)q_hi);
+          const int e=eidx(&ea,(int)q_hi);
           const size_t k0=q_hi*uN2+base, u1=k0+AP_W>end?end-k0:(size_t)AP_W;
           v_inter(tmp,RR[e],V_XOR(RI[e],sg));
           memcpy(ehi+tail+2*base,tmp,2*u1*sizeof(float));
@@ -2862,16 +2932,17 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
      && 48*(size_t)p->N1+4*uN2+32<=2*p->N){
     const long k1_lo=(long)((blo+uN2-1)/uN2), k1_hi=(long)(end/uN2)-1;
     if(k1_lo<=k1_hi){
-      float *sbuf=scratch, *cbuf=sbuf+16*(size_t)p->N1, *hbuf=cbuf+16*(size_t)p->N1;
-      float *elo=hbuf+16*(size_t)p->N1, *ehi=elo+2*uN2+16;
+      float *HWY_RESTRICT sbuf=scratch, *HWY_RESTRICT cbuf=sbuf+16*(size_t)p->N1;
+      float *HWY_RESTRICT hbuf=cbuf+16*(size_t)p->N1;
+      float *HWY_RESTRICT elo=hbuf+16*(size_t)p->N1, *HWY_RESTRICT ehi=elo+2*uN2+16;
       const size_t tail=(size_t)((mis64&56u)>>2), rem=mis64?((16u-tail)&14u):0u;
       const int ge8=rem>=8u;
       for(int b=0;b<NB;b++){
         const size_t base=(size_t)AP_W*(size_t)b;
-        vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+        vf *RR,*RI; stageB_from(p,ire,iim,b,&RR,&RI);
         if((long)q_lo<k1_lo && base+(size_t)(AP_W-1)>=r_lo){
           alignas(64) float tmp[16];
-          const int e=eidx(&p->ea,(int)q_lo);
+          const int e=eidx(&ea,(int)q_lo);
           const size_t k0=q_lo*uN2+base, u0=k0<blo?blo-k0:0;
           v_inter(tmp,RR[e],V_XOR(RI[e],sg));
           memcpy(elo+2*(k0+u0-blo),tmp+2*u0,2*(AP_W-u0)*sizeof(float));
@@ -2879,7 +2950,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
         if((b&1)==0){
           if(b==0 && mis64!=0){
             for(long k1=k1_lo;k1<=k1_hi;k1++){
-              const int e=eidx(&p->ea,(int)k1);
+              const int e=eidx(&ea,(int)k1);
               __m256 c0,c1; corr_inter_256(RR[e],V_XOR(RI[e],sg),&c0,&c1);
               _mm256_store_ps(sbuf+16*(size_t)k1,c0);
               _mm256_store_ps(sbuf+16*(size_t)k1+8,c1);
@@ -2894,7 +2965,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
             }
           }else{
             for(long k1=k1_lo;k1<=k1_hi;k1++){
-              const int e=eidx(&p->ea,(int)k1);
+              const int e=eidx(&ea,(int)k1);
               __m256 c0,c1; corr_inter_256(RR[e],V_XOR(RI[e],sg),&c0,&c1);
               _mm256_store_ps(sbuf+16*(size_t)k1,c0);
               _mm256_store_ps(sbuf+16*(size_t)k1+8,c1);
@@ -2902,7 +2973,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
           }
         }else if(mis64==0){
           for(long k1=k1_lo;k1<=k1_hi;k1++){
-            const int e=eidx(&p->ea,(int)k1);
+            const int e=eidx(&ea,(int)k1);
             __m256 c0,c1; corr_inter_256(RR[e],V_XOR(RI[e],sg),&c0,&c1);
             const float *sp=sbuf+16*(size_t)k1;
             const __m256 e0=_mm256_load_ps(sp), e1=_mm256_load_ps(sp+8);
@@ -2915,7 +2986,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
             constexpr int R=decltype(rtag)::v;
             if(b==1){
               for(long k1=k1_lo;k1<=k1_hi;k1++){
-                const int e=eidx(&p->ea,(int)k1);
+                const int e=eidx(&ea,(int)k1);
                 __m256 c0,c1; corr_inter_256(RR[e],V_XOR(RI[e],sg),&c0,&c1);
                 const float *sp=sbuf+16*(size_t)k1;
                 const __m256 e0=ge8?c0:_mm256_load_ps(sp), e1=_mm256_load_ps(sp+8);
@@ -2926,7 +2997,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
               }
             }else if(b<NB-1){
               for(long k1=k1_lo;k1<=k1_hi;k1++){
-                const int e=eidx(&p->ea,(int)k1);
+                const int e=eidx(&ea,(int)k1);
                 __m256 c0,c1; corr_inter_256(RR[e],V_XOR(RI[e],sg),&c0,&c1);
                 const float *sp=sbuf+16*(size_t)k1;
                 const __m256 e0=_mm256_load_ps(sp), e1=_mm256_load_ps(sp+8);
@@ -2940,7 +3011,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
               }
             }else{
               for(long k1=k1_lo;k1<=k1_hi;k1++){
-                const int e=eidx(&p->ea,(int)k1);
+                const int e=eidx(&ea,(int)k1);
                 __m256 c0,c1; corr_inter_256(RR[e],V_XOR(RI[e],sg),&c0,&c1);
                 const float *sp=sbuf+16*(size_t)k1;
                 const __m256 e0=_mm256_load_ps(sp), e1=_mm256_load_ps(sp+8);
@@ -2970,7 +3041,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
         }
         if((size_t)(k1_hi+1)*uN2<end && base<=r_hi){
           alignas(64) float tmp[16];
-          const int e=eidx(&p->ea,(int)q_hi);
+          const int e=eidx(&ea,(int)q_hi);
           const size_t k0=q_hi*uN2+base, u1=k0+AP_W>end?end-k0:(size_t)AP_W;
           v_inter(tmp,RR[e],V_XOR(RI[e],sg));
           memcpy(ehi+tail+2*base,tmp,2*u1*sizeof(float));
@@ -2994,9 +3065,9 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
       const long lo = base+(size_t)(AP_W-1) >= r_lo ? (long)q_lo : (long)q_lo+1;
       const long hi = base <= r_hi ? (long)q_hi : (long)q_hi-1;
       if(lo>hi) continue;
-      vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+      vf *RR,*RI; stageB_from(p,ire,iim,b,&RR,&RI);
       for(long k1=lo;k1<=hi;k1++){
-        const int e=eidx(&p->ea,(int)k1);
+        const int e=eidx(&ea,(int)k1);
         v_inter(scratch+2*((size_t)k1*uN2+base),RR[e],V_XOR(RI[e],sg));
       }
     }
@@ -3008,12 +3079,12 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
     const long lo = base+(size_t)(AP_W-1) >= r_lo ? (long)q_lo : (long)q_lo+1;
     const long hi = base <= r_hi ? (long)q_hi : (long)q_hi-1;
     if(lo>hi) continue;
-    vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+    vf *RR,*RI; stageB_from(p,ire,iim,b,&RR,&RI);
     const long lo_in = base >= r_lo ? (long)q_lo : (long)q_lo+1;
     const long hi_in = base+(size_t)(AP_W-1) <= r_hi ? (long)q_hi : (long)q_hi-1;
     auto store_partial=[&](long k1){
       alignas(64) float tmp[2*AP_W];
-      const int e=eidx(&p->ea,(int)k1);
+      const int e=eidx(&ea,(int)k1);
       const size_t k0=(size_t)k1*uN2+base;
       v_inter(tmp,RR[e],V_XOR(RI[e],sg));
       const size_t u0 = k0<blo ? blo-k0 : 0;
@@ -3027,19 +3098,19 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
       for(long k1=lo;k1<lo_in;k1++) store_partial(k1);
       if(!stream){
         for(long k1=lo_in;k1<=hi_in;k1++){
-          const int e=eidx(&p->ea,(int)k1);
+          const int e=eidx(&ea,(int)k1);
           const size_t k0=(size_t)k1*uN2+base;
           v_inter(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
         }
       }else if(mis64==0){
         for(long k1=lo_in;k1<=hi_in;k1++){
-          const int e=eidx(&p->ea,(int)k1);
+          const int e=eidx(&ea,(int)k1);
           const size_t k0=(size_t)k1*uN2+base;
           corr_stream_inter<0>(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
         }
       }else{
         for(long k1=lo_in;k1<=hi_in;k1++){
-          const int e=eidx(&p->ea,(int)k1);
+          const int e=eidx(&ea,(int)k1);
           const size_t k0=(size_t)k1*uN2+base;
           corr_stream_inter<4>(dst+2*(k0-blo),RR[e],V_XOR(RI[e],sg));
         }
@@ -3050,6 +3121,247 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
     }
   }
   return 0;
+}
+
+/* Stage-A tail writing directly into the ESTRIDE(a1)-padded intermediate layout so
+   stageB_from transforms every column block in place without a staging copy. */
+template<bool TWF>
+static AP_ALWAYS_INLINE void stageA_tail_pad(BP *p,int g,const vf *restrict twfr,const vf *restrict twfi,
+                                             vf *restrict TR,vf *restrict TI,vf *restrict OR,vf *restrict OI,
+                                             vf *restrict RR,vf *restrict RI,
+                                             float *restrict ire,float *restrict iim){
+  const int N2=p->N2;
+  const size_t s1=p->s1_pad;
+  const size_t col=(size_t)einp(&p->ea,g*AP_W)*AP_W;
+  for(int b=0;b<N2/AP_W;b++){
+    const float *sc=p->scg+2*((size_t)g*N2+AP_W*b);
+    for(int t=0;t+1<AP_W;t+=2){
+      const int k2_0=AP_W*b+t, k2_1=AP_W*b+t+1;
+      vf tr0,ti0,tr1,ti1;
+      if constexpr (TWF) {
+        tr0=twfr[k2_0]; ti0=twfi[k2_0]; tr1=twfr[k2_1]; ti1=twfi[k2_1];
+      } else {
+        const vf SR0=V_SET1(sc[2*t]),   SI0=V_SET1(sc[2*t+1]);
+        const vf SR1=V_SET1(sc[2*t+2]), SI1=V_SET1(sc[2*t+3]);
+        tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
+        ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
+        tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
+        ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
+      }
+      const int eb0=eidx(&p->eb,k2_0), eb1=eidx(&p->eb,k2_1);
+      const vf xr0=RR[eb0], xi0=RI[eb0], xr1=RR[eb1], xi1=RI[eb1];
+      TR[t]  =V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
+      TI[t]  =V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
+      TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
+      TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
+    }
+#if AP_NOXPOSE
+    for(int i=0;i<AP_W;i++){ OR[i]=TR[i]; OI[i]=TI[i]; }
+#else
+    V_TRANSPOSE(TR,OR); V_TRANSPOSE(TI,OI);
+#endif
+    float *er=ire+(size_t)b*s1*AP_W+col;
+    float *ei=iim+(size_t)b*s1*AP_W+col;
+    for(int i=0;i<AP_W;i++){
+      V_STOREU(er+(size_t)i*AP_W,OR[i]);
+      V_STOREU(ei+(size_t)i*AP_W,OI[i]);
+    }
+  }
+}
+
+static AP_ALWAYS_INLINE void stageA_prod_group(BP *p,int fuse_gm,
+                                               const float *dr_g,const float *di_g,
+                                               const float *tr_g,const float *ti_g){
+  if constexpr (AP_W==8) {
+    if(p->fuse==2){
+      fftsr32_prod_unit(dr_g,di_g,tr_g,ti_g,p->bR,p->bI,p->sR,p->sI,1,8);
+      return;
+    }
+  }
+  const int N2=p->N2;
+  if(fuse_gm){
+    efft_prod(N2,dr_g,di_g,tr_g,ti_g,p->bR,p->bI,p->sR,p->sI,p->w2r,p->w2i);
+    return;
+  }
+  const int M1=p->eb.single?N2:p->b1, M2=p->eb.single?1:p->b2, st=p->eb.st;
+  for(int e2=0;e2<M2;e2++){
+    const size_t o0=(size_t)e2*M1*AP_W;
+    const float *ar=dr_g+o0,*ai=di_g+o0,*br=tr_g+o0,*bi=ti_g+o0;
+    vf *dR=p->bR+(size_t)e2*st, *dI=p->bI+(size_t)e2*st;
+    int e1=0;
+    for(;e1+1<M1;e1+=2){
+      vf x0=V_LOADU(ar), y0=V_LOADU(ai), u0=V_LOADU(br), v0=V_LOADU(bi);
+      vf x1=V_LOADU(ar+AP_W), y1=V_LOADU(ai+AP_W), u1=V_LOADU(br+AP_W), v1=V_LOADU(bi+AP_W);
+      dR[e1]=V_FMSUB(x0,u0,V_MUL(y0,v0));
+      dI[e1]=V_FNMSUB(x0,v0,V_MUL(y0,u0));
+      dR[e1+1]=V_FMSUB(x1,u1,V_MUL(y1,v1));
+      dI[e1+1]=V_FNMSUB(x1,v1,V_MUL(y1,u1));
+      ar+=2*AP_W; ai+=2*AP_W; br+=2*AP_W; bi+=2*AP_W;
+    }
+    for(;e1<M1;e1++){
+      vf x=V_LOADU(ar), y=V_LOADU(ai), u=V_LOADU(br), v=V_LOADU(bi);
+      dR[e1]=V_FMSUB(x,u,V_MUL(y,v));
+      dI[e1]=V_FNMSUB(x,v,V_MUL(y,u));
+      ar+=AP_W; ai+=AP_W; br+=AP_W; bi+=AP_W;
+    }
+  }
+  efft(N2,p->bR,p->bI,p->sR,p->sI,p->w2r,p->w2i);
+}
+
+static HWY_NOINLINE MF_FWD_SECTION void stageA_prod_gm_pad(
+    BP *p,const float *dr,const float *di,const float *tr,const float *ti){
+  if constexpr (AP_W==8) {
+    if(p->fuse==2){ stageA_prod_32(p,dr,di,tr,ti); return; }
+  }
+  const int N1=p->N1, N2=p->N2, NG=N1/AP_W;
+  const int fuse_gm = p->fuse;
+  vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
+  for(int g=0;g<NG;g++){
+    const size_t gb=(size_t)g*N2*AP_W;
+    stageA_prod_group(p,fuse_gm,dr+gb,di+gb,tr+gb,ti+gb);
+    if(p->twfr)
+      stageA_tail_pad<true>(p,g,p->twfr+(size_t)g*N2,p->twfi+(size_t)g*N2,
+                            TR,TI,OR,OI,p->bR,p->bI,p->ire,p->iim);
+    else
+      stageA_tail_pad<false>(p,g,nullptr,nullptr,
+                             TR,TI,OR,OI,p->bR,p->bI,p->ire,p->iim);
+  }
+}
+
+static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,const float*di,
+                                                        const float*tr,const float*ti,
+                                                        size_t blo,size_t end,float*dst,
+                                                        float*scratch,int stream){
+  BP *p=(BP*)vp;
+  if(p->small || blo>end || end>p->N) return -1;
+  if(blo==end) return 0;
+  stageA_prod_gm_pad(p,dr,di,tr,ti);
+  return corr_window_stageB(p,p->ire,p->iim,blo,end,dst,scratch,stream);
+}
+
+/* Multi-template Stage A over group-major spectra: within each L1D-sized group g,
+   (dr+gb, di+gb) stays L1D-resident across kt templates, p->bR/p->bI is reused in L1D,
+   and group g's four-step twiddle vectors are formed once into p->twg_r/twg_i. */
+static HWY_NOINLINE MF_FWD_SECTION void stageA_prod_gm_multi(
+    BP *p,const float *HWY_RESTRICT dr,const float *HWY_RESTRICT di,
+    const float *const *tr,const float *const *ti,int kt,
+    float *const *ire,float *const *iim){
+  if constexpr (AP_W==8) {
+    if(p->fuse==2 && __builtin_expect(p->tw32r && p->tw32i != nullptr, 1)){
+      for(int g=0;g<4;g++){
+        const size_t gb=(size_t)g*32*8;
+        const vf *restrict twr=p->tw32r+((size_t)g*32);
+        const vf *restrict twi=p->tw32i+((size_t)g*32);
+        for(int k=0;k<kt;k++){
+          fftsr32_prod_unit_tw(dr+gb,di+gb,tr[k]+gb,ti[k]+gb,p->bR,p->bI,p->sR,p->sI,1,8,twr,twi);
+          for(int b=0;b<4;b++){
+            const size_t off=(size_t)b*32*8+(size_t)8*g*8;
+            v_transpose_store(p->bR+(size_t)b*8,ire[k]+off);
+            v_transpose_store(p->bI+(size_t)b*8,iim[k]+off);
+          }
+        }
+      }
+      return;
+    }
+  }
+  const int N1=p->N1, N2=p->N2, NG=N1/AP_W;
+  const int fuse_gm = p->fuse;
+  const bool have_twg = (p->twfr != nullptr) || (p->twg_r != nullptr && p->twg_i != nullptr);
+  vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
+  for(int g=0;g<NG;g++){
+    const size_t gb=(size_t)g*N2*AP_W;
+    const vf *twr=nullptr, *twi=nullptr;
+    if(p->twfr){
+      twr=p->twfr+(size_t)g*N2;
+      twi=p->twfi+(size_t)g*N2;
+    }else if(have_twg){
+      const float *HWY_RESTRICT sc=p->scg+2*(size_t)g*N2;
+      vf *HWY_RESTRICT twgr=p->twg_r, *HWY_RESTRICT twgi=p->twg_i;
+      for(int k2=0;k2<N2;k2+=2){
+        const vf SR0=V_SET1(sc[2*k2]),     SI0=V_SET1(sc[2*k2+1]);
+        const vf SR1=V_SET1(sc[2*(k2+1)]), SI1=V_SET1(sc[2*(k2+1)+1]);
+        twgr[k2]  =V_FMSUB(SR0,p->TLr[k2],  V_MUL(SI0,p->TLi[k2]));
+        twgi[k2]  =V_FMADD(SR0,p->TLi[k2],  V_MUL(SI0,p->TLr[k2]));
+        twgr[k2+1]=V_FMSUB(SR1,p->TLr[k2+1],V_MUL(SI1,p->TLi[k2+1]));
+        twgi[k2+1]=V_FMADD(SR1,p->TLi[k2+1],V_MUL(SI1,p->TLr[k2+1]));
+      }
+      twr=twgr;
+      twi=twgi;
+    }
+    for(int k=0;k<kt;k++){
+      stageA_prod_group(p,fuse_gm,dr+gb,di+gb,tr[k]+gb,ti[k]+gb);
+      if(have_twg)
+        stageA_tail_pad<true>(p,g,twr,twi,TR,TI,OR,OI,p->bR,p->bI,ire[k],iim[k]);
+      else
+        stageA_tail_pad<false>(p,g,nullptr,nullptr,TR,TI,OR,OI,p->bR,p->bI,ire[k],iim[k]);
+    }
+  }
+}
+
+static int ensure_corr_multi(BP *p,int need_ext){
+  if(p->k_ext>=need_ext) return 0;
+  float *ir=ap_alloc64((size_t)need_ext*p->inter_elems*sizeof(float));
+  float *ii=ap_alloc64((size_t)need_ext*p->inter_elems*sizeof(float));
+  if(!ir||!ii){ free(ir); free(ii); return -1; }
+  free(p->ire_ext); free(p->iim_ext);
+  p->ire_ext=ir; p->iim_ext=ii;
+  p->k_ext=need_ext;
+  return 0;
+}
+
+static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window_multi(
+    void *vp,const float *dr,const float *di,const float *tr,const float *ti,
+    size_t t_stride,int nt,size_t blo,size_t end,float *dst,size_t dst_stride,
+    float *scratch,int stream){
+  BP *p=(BP*)vp;
+  if(p->small || nt<1 || blo>end || end>p->N) return -1;
+  if(blo==end) return 0;
+  const int max_k = (p->N<=8192) ? 4 : 2;
+  int t=0;
+  while(nt-t>=2){
+    int kt = nt-t < max_k ? nt-t : max_k;
+    if(ensure_corr_multi(p,kt-1)!=0) break;
+    const float *trp[4], *tip[4];
+    float *ire[4], *iim[4];
+    trp[0]=tr+(size_t)t*t_stride; tip[0]=ti+(size_t)t*t_stride;
+    ire[0]=p->ire; iim[0]=p->iim;
+    for(int k=1;k<kt;k++){
+      trp[k]=tr+(size_t)(t+k)*t_stride;
+      tip[k]=ti+(size_t)(t+k)*t_stride;
+      ire[k]=p->ire_ext+(size_t)(k-1)*p->inter_elems;
+      iim[k]=p->iim_ext+(size_t)(k-1)*p->inter_elems;
+    }
+    stageA_prod_gm_multi(p,dr,di,trp,tip,kt,ire,iim);
+    for(int k=0;k<kt;k++)
+      if(corr_window_stageB(p,ire[k],iim[k],blo,end,dst+(size_t)(t+k)*dst_stride,scratch,stream))
+        return -1;
+    t+=kt;
+  }
+  for(;t<nt;t++){
+    if(corr_prod_window(vp,dr,di,tr+(size_t)t*t_stride,ti+(size_t)t*t_stride,
+                        blo,end,dst+(size_t)t*dst_stride,scratch,stream))
+      return -1;
+  }
+  return 0;
+}
+
+static int corr_tile_slots(void *vp,int want,float **dr_out,float **di_out){
+  BP *p=(BP*)vp;
+  if(!p || p->small || want<1) return 0;
+  if(want>p->tile_cap){
+    float *dr=ap_alloc64((size_t)want*p->N*sizeof(float));
+    float *di=ap_alloc64((size_t)want*p->N*sizeof(float));
+    if(!dr||!di){
+      free(dr); free(di);
+      if(p->tile_cap>0){ *dr_out=p->tile_dr; *di_out=p->tile_di; }
+      return p->tile_cap;
+    }
+    free(p->tile_dr); free(p->tile_di);
+    p->tile_dr=dr; p->tile_di=di;
+    p->tile_cap=want;
+  }
+  *dr_out=p->tile_dr; *di_out=p->tile_di;
+  return p->tile_cap;
 }
 
 int corr_split(void *vp,const float *re,const float *im,float *out){
@@ -3095,7 +3407,8 @@ const ap_backend *Backend(void){
     q15_screen_perm, q15_slab8, split_store, scale_load, lanes_transpose,
     fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window,
     q15_sumsq, q15_data, q15_lanethr,
-    fft_backward_batch, fft_backward_padded, binmax_prod_gather_lanes
+    fft_backward_batch, fft_backward_padded, binmax_prod_gather_lanes,
+    fft_forward_scaled_gm, corr_prod_window_multi, corr_tile_slots
   };
   return &be;
 }
