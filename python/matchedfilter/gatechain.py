@@ -169,7 +169,7 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     W = p_band / np.maximum(m_bin, 1e-6 * m_max)
     sqrt_W = np.sqrt(W)
     c_pow = C.real * C.real + C.imag * C.imag
-    v = c_pow @ W
+    v = np.sum(c_pow * W[None, :], axis=1)
     valid = v > 0.0
     valid_idx = np.flatnonzero(valid)
     if valid_idx.size < 2:
@@ -181,15 +181,18 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     U64 = (C * (inv_sqrt_v[:, None] * sqrt_W[None, :])).astype(np.complex64)
     u_pow = U64.real * U64.real + U64.imag * U64.imag
     k_idx = np.arange(k_lo, k_hi, dtype=np.float64)
-    f_mean = u_pow[valid_idx] @ k_idx.astype(np.float32)
+    k_f32 = k_idx.astype(np.float32)
+    f_mean = np.sum(u_pow[valid_idx] * k_f32[None, :], axis=1)
     perm = valid_idx[np.argsort(f_mean, kind="stable")]
 
-    # Search coarse shifts in [-R, +R] via a single packed float32 sgemm per chunk
+    # Search coarse shifts in [-R, +R] via a single-core C inner-product pass per chunk
     R = n // b0
     s_step = max(1, R // 8)
-    dls = np.arange(-R, R + 1, s_step, dtype=np.int64)
+    all_dls = np.arange(-R, R + 1, dtype=np.int64)
+    exp_all = np.exp((-2j * np.pi / n) * (all_dls[:, None] * k_idx[None, :]))
+    dls = all_dls[::s_step]
     zero_pos = int(np.argmin(np.abs(dls)))
-    shifts64 = np.exp((-2j * np.pi / n) * np.outer(dls, k_idx)).astype(np.complex64)
+    shifts64 = exp_all[::s_step].astype(np.complex64)
     shift_order = [zero_pos]
     for s in range(1, len(dls)):
         if zero_pos - s >= 0:
@@ -198,36 +201,24 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
             shift_order.append(zero_pos + s)
     shifts_ord = shifts64[shift_order]
     dls_ord = dls[shift_order]
-    ns = len(shift_order)
+    Sr = np.ascontiguousarray(shifts_ord.real, dtype=np.float32)
+    Si = np.ascontiguousarray(shifts_ord.imag, dtype=np.float32)
     coarse_rho_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
     floor2 = coarse_rho_floor * coarse_rho_floor
 
     def _match_subset(sub_idx):
+        from . import _core
         m_c = int(sub_idx.size)
         if m_c < 2:
             return [], [], []
         U_c = U64[sub_idx]
-        v_c = v[sub_idx]
-        Ur = np.ascontiguousarray(U_c.real)
-        Ui = np.ascontiguousarray(U_c.imag)
-        A2 = np.empty((2 * m_c, 2 * length), dtype=np.float32)
-        A2[0::2, :length] = Ur
-        A2[0::2, length:] = Ui
-        A2[1::2, :length] = Ui
-        A2[1::2, length:] = -Ur
-        Us = shifts_ord[:, None, :] * U_c[None, :, :]
-        B2 = np.empty((ns * m_c, 2 * length), dtype=np.float32)
-        B2[:, :length] = Us.real.reshape(ns * m_c, length)
-        B2[:, length:] = Us.imag.reshape(ns * m_c, length)
-        P = (A2 @ B2.T).reshape(m_c, 2, ns, m_c)
-        rho2 = P[:, 0, :, :] * P[:, 0, :, :] + P[:, 1, :, :] * P[:, 1, :, :]
-        best_s = np.argmax(rho2, axis=1)
+        v_c = np.ascontiguousarray(v[sub_idx], dtype=np.float64)
+        Ur = np.ascontiguousarray(U_c.real, dtype=np.float32)
+        Ui = np.ascontiguousarray(U_c.imag, dtype=np.float32)
+        best_rho2 = np.empty((m_c, m_c), dtype=np.float32)
+        best_s = np.empty((m_c, m_c), dtype=np.int32)
+        _core.tier0_pair_scores(Ur, Ui, Sr, Si, v_c, best_rho2, best_s)
         ri = np.arange(m_c)[:, None]
-        ci_grid = np.arange(m_c)[None, :]
-        best_rho2 = rho2[ri, best_s, ci_grid]
-
-        v_ok = np.minimum(v_c[:, None], v_c[None, :]) >= 0.85 * np.maximum(v_c[:, None], v_c[None, :])
-        best_rho2 = np.where((ci_grid > ri) & v_ok, best_rho2, 0.0)
         if m_c > 9:
             top_cols = np.argpartition(-best_rho2, kth=7, axis=1)[:, :8]
             top_vals = best_rho2[ri, top_cols]
@@ -241,7 +232,7 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
             return [], [], []
         order = np.argsort(-cand_r2, kind="stable")
         used = np.zeros(m_c, dtype=bool)
-        out_a, out_b, out_dl = [], [], []
+        local_pairs = []
         for idx in order:
             a_l = int(ia_loc[idx])
             b_l = int(ib_loc[idx])
@@ -249,6 +240,53 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
                 continue
             used[a_l] = True
             used[b_l] = True
+            local_pairs.append((a_l, b_l) if a_l < b_l else (b_l, a_l))
+        # Resolve 3-edge augmenting swaps (u - w - z - v) when greedy matching strands two nodes
+        if m_c - 2 * len(local_pairs) >= 2 and local_pairs:
+            sym_r2 = best_rho2 + best_rho2.T
+            free_nodes = [i for i in range(m_c) if not used[i]]
+            i_u = 0
+            while i_u < len(free_nodes):
+                node_u = free_nodes[i_u]
+                if used[node_u]:
+                    i_u += 1
+                    continue
+                best_gain = -1.0
+                best_swap = None
+                for i_v in range(i_u + 1, len(free_nodes)):
+                    node_v = free_nodes[i_v]
+                    if used[node_v]:
+                        continue
+                    for e_idx, (w, z) in enumerate(local_pairs):
+                        if sym_r2[node_u, w] >= floor2 and sym_r2[node_v, z] >= floor2:
+                            sc = float(sym_r2[node_u, w] + sym_r2[node_v, z])
+                            if sc > best_gain:
+                                best_gain = sc
+                                best_swap = (
+                                    e_idx,
+                                    node_v,
+                                    (node_u, w) if node_u < w else (w, node_u),
+                                    (node_v, z) if node_v < z else (z, node_v),
+                                )
+                        if sym_r2[node_u, z] >= floor2 and sym_r2[node_v, w] >= floor2:
+                            sc = float(sym_r2[node_u, z] + sym_r2[node_v, w])
+                            if sc > best_gain:
+                                best_gain = sc
+                                best_swap = (
+                                    e_idx,
+                                    node_v,
+                                    (node_u, z) if node_u < z else (z, node_u),
+                                    (node_v, w) if node_v < w else (w, node_v),
+                                )
+                if best_swap is not None:
+                    e_idx, node_v, e1, e2 = best_swap
+                    used[node_u] = True
+                    used[node_v] = True
+                    local_pairs[e_idx] = e1
+                    local_pairs.append(e2)
+                i_u += 1
+        out_a, out_b, out_dl = [], [], []
+        for a_l, b_l in local_pairs:
             ta = int(sub_idx[a_l])
             tb = int(sub_idx[b_l])
             dl_ab = int(dls_ord[best_s[a_l, b_l]])
@@ -295,20 +333,19 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     pdl = np.asarray(pair_dl_list, dtype=np.int64)
     Ca_u = C[pa] * inv_sqrt_v[pa, None]
     Cb_u = C[pb] * inv_sqrt_v[pb, None]
-    WC_a_conj = W[None, :] * Ca_u.conj()
+    prod_ab = (W[None, :] * Ca_u.conj()) * Cb_u
 
     if s_step > 1:
         sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64)
         cand_dls = np.clip(pdl[:, None] + sub_offs[None, :], -R, R)
-        phases_sub = np.exp((-2j * np.pi / n) * (cand_dls[:, :, None] * k_idx[None, None, :]))
-        g_sub = np.einsum("pk,psk->ps", WC_a_conj, Cb_u[:, None, :] * phases_sub)
+        phases_sub = exp_all[cand_dls + R]
+        g_sub = np.sum(prod_ab[:, None, :] * phases_sub, axis=2)
         best_sub = np.argmax(np.abs(g_sub), axis=1)
         row_idx = np.arange(npairs)
         pdl = cand_dls[row_idx, best_sub]
         g_vec = g_sub[row_idx, best_sub]
     else:
-        phases_1 = np.exp((-2j * np.pi / n) * (pdl[:, None] * k_idx[None, :]))
-        g_vec = np.sum(WC_a_conj * (Cb_u * phases_1), axis=1)
+        g_vec = np.sum(prod_ab * exp_all[pdl + R], axis=1)
 
     rho_vec = np.abs(g_vec)
     keep_mask = rho_vec >= float(rho_min)
@@ -324,8 +361,7 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
         if npairs == 0 or (nt - npairs) > max_nc:
             return None
 
-    phases_best = np.exp((-2j * np.pi / n) * (pdl[:, None] * k_idx[None, :]))
-    Cb_u_s = Cb_u * phases_best
+    Cb_u_s = Cb_u * exp_all[pdl + R]
     u_psi = g_vec.conj() / rho_vec
     target_v = 0.5 * (v[pa] + v[pb])
     pair_vecs = (
@@ -690,6 +726,13 @@ def _arrivals(seed, R, row0, rows):
     return (np.concatenate(ts)[s:s + rows].astype(np.int64), np.concatenate(us)[s:s + rows])
 
 
+def _prefix_record(rec, m_rows):
+    pos, val, off = rec
+    if off.size - 1 == m_rows:
+        return rec
+    return pos[:off[m_rows]], val[:off[m_rows]], off[:m_rows + 1]
+
+
 def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _exact=False):
     """signal_draws' simulation, with at least `kept` draws kept: a dict holding the profile
     it simulates and, per kept draw, the signal's integer arrival t in [0, R_max), a uniform u
@@ -699,6 +742,8 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _ex
     row, so the draws are those of one simulation run at once."""
     k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
     al = tuple(float(a) for a in alphas) if (alphas is not None and any(a < 1.0 for a in alphas)) else None
+    sub_idx = [i for i, a in enumerate(al) if a < 1.0] if al is not None else []
+    use_base = 0 < len(sub_idx) < len(bands)
     extra = (k0s, al) if al is not None else ((k0s,) if any(k0s) else ())
     key = _key(p, n, bands, snr, seed, _NF, *extra)
     sim = _SIGNAL_RECORDS.get(key)
@@ -711,10 +756,17 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _ex
         params = (n, tuple(bands), snr, seed, _NF) + extra
         unit, sim = (None, None) if _exact else _similar_get("signal-records", p, params)
         if sim is None:
-            sim = dict(p=p, Fb=Fb, k0s=k0s, alphas=al, rows=0,
-                       t=np.empty(0, np.int64), u=np.empty(0), recs=None, tab=None)
+            if use_base:
+                base0 = _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=k0s, alphas=None,
+                                        _exact=_exact)
+                p_sim, Fb_sim = base0["p"], base0["Fb"]
+            else:
+                p_sim, Fb_sim = p, Fb
+            sim = dict(p=p_sim, Fb=Fb_sim, k0s=k0s, alphas=al, rows=0,
+                       t=np.empty(0, np.int64), u=np.empty(0),
+                       keep_mask=np.empty(0, np.uint8), recs=None, sub_recs=None, tab=None)
             if unit is None:
-                unit = ((p / np.linalg.norm(p)).astype(np.float32), _gate_features(p, n))
+                unit = ((p_sim / np.linalg.norm(p_sim)).astype(np.float32), _gate_features(p_sim, n))
             _similar_put("signal-records", unit, params, sim, keep=_RECORDS_MAX)
         _SIGNAL_RECORDS[key] = sim
         while len(_SIGNAL_RECORDS) > _RECORDS_MAX:
@@ -733,6 +785,57 @@ def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None, alphas=None):
         k0s = tuple(int(x) for x in k0s)
     if alphas is None:
         alphas = sim.get("alphas")
+    sub_idx = [i for i, a in enumerate(alphas) if a < 1.0] if alphas is not None else []
+    if 0 < len(sub_idx) < len(bands):
+        base = _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=k0s, alphas=None, _exact=True)
+        target_rows = base["rows"]
+        have_rows = sim["rows"]
+        if have_rows < target_rows:
+            sub_bands = [bands[i] for i in sub_idx]
+            sub_k0s = tuple(k0s[i] for i in sub_idx)
+            sub_al = tuple(alphas[i] for i in sub_idx)
+            if sim["tab"] is None:
+                sub_tab = np.zeros((_NF, 1 + len(sub_idx), n), np.complex64)
+                for j, i in enumerate(sub_idx):
+                    sub_tab[:, 1 + j] = base["tab"][:, 1 + i] * np.float32(alphas[i])
+                sim["tab"] = sub_tab
+            km_all = base["keep_mask"][:target_rows]
+            n_kept_all = int(km_all.sum())
+            t_all = np.zeros(target_rows, np.int64)
+            t_all[km_all.astype(bool)] = base["t"][:n_kept_all]
+            sub_nkey = _key(p, n, sub_bands, seed, sub_k0s, sub_al)
+            sub_parts = [] if sim.get("sub_recs") is None else [sim["sub_recs"]]
+            cur = have_rows
+            while cur < target_rows:
+                held = _NOISE_RECORDS.get(sub_nkey)
+                noise_flag = (held[0] if held is not None else 0) == cur < _NOISE_BLOCKS
+                end_r = min(target_rows, _NOISE_BLOCKS) if noise_flag else target_rows
+                step = end_r - cur
+                t_step = np.ascontiguousarray(t_all[cur:end_r])
+                km_step = np.ascontiguousarray(km_all[cur:end_r])
+                fi_step = ((cur + np.arange(step)) % _NF).astype(np.int32)
+                srecs, nrec = _simulate(p, n, sub_bands, step, cur, seed,
+                                        (sim["tab"], t_step, fi_step), noise_flag,
+                                        keep_at=snr, k0s=sub_k0s, alphas=sub_al,
+                                        kept_mask=km_step)
+                if nrec is not None:
+                    _add_noise_records(sub_nkey, cur, step, nrec)
+                keep_b = km_step.astype(bool)
+                sub_parts.append(tuple(_rows(r, keep_b) for r in srecs[2:]))
+                cur = end_r
+            sub_joined = tuple(_join_records([pt[q] for pt in sub_parts])
+                               for q in range(2 * len(sub_idx)))
+            sim["sub_recs"] = sub_joined
+            merged = [_prefix_record(r, n_kept_all) for r in base["recs"]]
+            for j, i in enumerate(sub_idx):
+                merged[2 + 2 * i] = sub_joined[2 * j]
+                merged[3 + 2 * i] = sub_joined[2 * j + 1]
+            sim["recs"] = tuple(merged)
+            sim["t"] = base["t"][:n_kept_all]
+            sim["u"] = base["u"][:n_kept_all]
+            sim["keep_mask"] = km_all
+            sim["rows"] = target_rows
+        return
     if sim["tab"] is None:
         k = np.arange(n)
         # the signal's response, per arrival fraction, for the fine statistic then each band
@@ -771,6 +874,8 @@ def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None, alphas=None):
     # are left to noise_block_maxima, which simulates them should a request read that far.
     extra = (k0s, alphas) if alphas is not None else ((k0s,) if any(k0s) else ())
     nkey = _key(p, n, bands, seed, *extra)
+    km_cur = sim.get("keep_mask")
+    kms = [np.empty(0, np.uint8) if km_cur is None else km_cur]
     ts, us, parts = [sim["t"]], [sim["u"]], [] if sim["recs"] is None else [sim["recs"]]
     rows, have = sim["rows"], sim["t"].size
     while have < kept:
@@ -787,10 +892,12 @@ def _extend_signal(sim, n, bands, snr, kept, seed, k0s=None, alphas=None):
         if nrec is not None:
             _add_noise_records(nkey, rows, step, nrec)
         keep = np.diff(recs[0][2]) > 0          # a kept draw's fine maximum has a record
+        kms.append(keep.astype(np.uint8))
         ts.append(t[keep]); us.append(u[keep])
         parts.append(tuple(_rows(r, keep) for r in recs))
         rows += step
         have += int(keep.sum())
+    sim["keep_mask"] = np.concatenate(kms)
     sim["t"], sim["u"] = np.concatenate(ts), np.concatenate(us)
     sim["recs"] = tuple(_join_records([pt[q] for pt in parts]) for q in range(len(parts[0])))
     sim["rows"] = rows
@@ -876,7 +983,7 @@ def _rows(rec, keep):
 #: window's block maxima come from them (noise_block_maxima), so the windows of a profile's
 #: template groups share one simulation. ~6 MB each at n = 4096.
 _NOISE_RECORDS = OrderedDict()
-_RECORDS_MAX = 16
+_RECORDS_MAX = 32
 #: Records a row the simulation's first call has room for, in units of ln L + 3 for a running
 #: maximum over L lags (_simulate); every later call's room is measured.
 _ROOM = 2.0
@@ -895,7 +1002,7 @@ def _grown(a, keep, size):
 
 
 def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.0, k0s=None,
-              alphas=None):
+              alphas=None, kept_mask=None):
     """Rows row0 .. row0 + rows of the gate model's one simulation (_core.simulate): with
     signal = (tab, t, fi) its records outward from the signal (none for a draw whose fine
     statistic is below keep_at at every lag), and with noise each band's records of the noise
@@ -905,10 +1012,15 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     val may be views of arrays a few percent longer."""
     from . import _core
     k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
-    if alphas is not None and any(float(a) < 1.0 for a in alphas):
-        sim_extra = (k0s, tuple(float(a) for a in alphas))
+    al_arg = (tuple(float(a) for a in alphas)
+              if (alphas is not None and any(float(a) < 1.0 for a in alphas)) else None)
+    if kept_mask is None:
+        if al_arg is not None:
+            sim_extra = (k0s, al_arg)
+        else:
+            sim_extra = (k0s,) if any(k0s) else ()
     else:
-        sim_extra = (k0s,) if any(k0s) else ()
+        sim_extra = None
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kmax = int(np.flatnonzero(p)[-1]) + 1
     bscale = tuple(float(_SIG / np.sqrt(p[slice(*_band_slice(n, b, k0))].sum()))
@@ -926,7 +1038,12 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     # statistic's records go into one array, grown (its records so far copied) only when a call
     # needs more room than is left.
     ns = 2 * (1 + len(bands)) if signal is not None else 0
-    first = [math.log(m) + 3 for m in [n] + list(bands) for _ in (0, 1)] if signal is not None else []
+    if signal is None:
+        first = []
+    elif kept_mask is not None:
+        first = [0.0, 0.0] + [math.log(m) + 3 for m in bands for _ in (0, 1)]
+    else:
+        first = [math.log(m) + 3 for m in [n] + list(bands) for _ in (0, 1)]
     first = [_ROOM * c for c in first + ([math.log(b) + 3 for b in bands] if noise else [])]
     nq = len(first)
     off = [np.empty(rows + 1, np.int64) for _ in range(nq)]
@@ -955,11 +1072,13 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
         co = [off[q][done:done + todo + 1] for q in range(nq)]
         sig = [tuple(x[:ns]) if signal is not None else None for x in (cp, cv, co)]
         noi = [tuple(x[ns:]) if noise else None for x in (cp, cv, co)]
+        tail = (sim_extra if kept_mask is None
+                else (k0s if any(k0s) else None, al_arg, kept_mask[done:done + todo]))
         sk, nk, got = _core.simulate(scale, stream, int(row0 + done), int(todo), kmax,
                                      tuple(int(b) for b in bands), bscale, float(_SIG), tab,
                                      None if t is None else t[done:done + todo],
                                      None if fi is None else fi[done:done + todo],
-                                     *sig, *noi, float(keep_at), *sim_extra)
+                                     *sig, *noi, float(keep_at), *tail)
         counts = list(sk or ()) + list(nk or ())
         for q in range(nq):
             co[q][:got + 1] += have[q]
@@ -1012,6 +1131,7 @@ def _noise_records(p, n, bands, nsim, seed, k0s=None, alphas=None):
     else:
         k0s = tuple(int(x) for x in k0s)
     al = tuple(float(a) for a in alphas) if (alphas is not None and any(a < 1.0 for a in alphas)) else None
+    sub_idx = [i for i, a in enumerate(al) if a < 1.0] if al is not None else []
     extra = (k0s, al) if al is not None else ((k0s,) if any(k0s) else ())
     key = _key(p, n, bands, seed, *extra)
     hit = _NOISE_RECORDS.get(key)
@@ -1022,6 +1142,21 @@ def _noise_records(p, n, bands, nsim, seed, k0s=None, alphas=None):
             return tuple((pos[:off[nsim]], val[:off[nsim]], off[:nsim + 1]) for pos, val, off in recs)
     else:
         have, recs = 0, None
+    if 0 < len(sub_idx) < len(bands):
+        base_recs = _noise_records(p, n, bands, nsim, seed, k0s=k0s, alphas=None)
+        sub_bands = [bands[i] for i in sub_idx]
+        sub_k0s = tuple(k0s[i] for i in sub_idx)
+        sub_al = tuple(al[i] for i in sub_idx)
+        sub_recs = _noise_records(p, n, sub_bands, nsim, seed, k0s=sub_k0s, alphas=sub_al)
+        merged = [_prefix_record(r, nsim) for r in base_recs]
+        for j, i in enumerate(sub_idx):
+            merged[i] = _prefix_record(sub_recs[j], nsim)
+        merged_t = tuple(merged)
+        _NOISE_RECORDS[key] = (nsim, merged_t)
+        _NOISE_RECORDS.move_to_end(key)
+        while len(_NOISE_RECORDS) > _RECORDS_MAX:
+            _NOISE_RECORDS.popitem(last=False)
+        return merged_t
     _, new = _simulate(p, n, bands, nsim - have, have, seed, k0s=k0s, alphas=al)
     _add_noise_records(key, have, nsim - have, new)
     return _NOISE_RECORDS[key][1]
