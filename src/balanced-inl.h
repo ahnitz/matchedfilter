@@ -2283,6 +2283,73 @@ int binmax_prod_batch_lanes(void *vp, const float *dr, const float *di,
   return 0;
 }
 
+int binmax_prod_gather_lanes(void *vp, const float *const *drp, const float *const *dip,
+                             const float *const *trp, const float *const *tip,
+                             int nlane, size_t binsize, float thr, ap_peak *out,
+                             int conj, size_t ws, size_t we, const unsigned *ph){
+  BP *p = (BP*)vp;
+  if(!p->small || nlane < 1 || nlane > AP_W) return -1;
+  const size_t N = p->N, W = (size_t)AP_W;
+  const size_t nb = (we - (ws - (ph ? ph[0] : 0u)) + binsize - 1) / binsize;
+  if(bins_reserve(p, nb)) return -1;
+
+  const float *dr_l[AP_W], *di_l[AP_W], *tr_l[AP_W], *ti_l[AP_W];
+  int one_d = 1;
+  for(int l = 0; l < AP_W; l++){
+    const int s = l < nlane ? l : 0;
+    dr_l[l] = drp[s]; di_l[l] = dip[s];
+    tr_l[l] = trp[s]; ti_l[l] = tip[s];
+    if(dr_l[l] != dr_l[0] || di_l[l] != di_l[0]) one_d = 0;
+  }
+
+  if(__builtin_expect(N >= W && (N & (W - 1)) == 0 && (p->ea.single || p->a1 >= AP_W), 1)){
+    if(one_d){
+      const float *HWY_RESTRICT dr0 = dr_l[0], *HWY_RESTRICT di0 = di_l[0];
+      for(size_t k0 = 0; k0 < N; k0 += W){
+        vf pr_in[AP_W], pi_in[AP_W];
+        const vf dR = V_LOADU(dr0 + k0), dI = V_LOADU(di0 + k0);
+        for(int l = 0; l < AP_W; l++){
+          const vf tR = V_LOADU(tr_l[l] + k0), tI = V_LOADU(ti_l[l] + k0);
+          pr_in[l] = V_FMSUB(dR, tR, V_MUL(dI, tI));
+          pi_in[l] = V_FNMSUB(dR, tI, V_MUL(dI, tR));
+        }
+        const int slot0 = einp(&p->ea, (int)k0);
+        v_transpose_store(pr_in, (float *)(p->bR + slot0));
+        v_transpose_store(pi_in, (float *)(p->bI + slot0));
+      }
+    } else {
+      for(size_t k0 = 0; k0 < N; k0 += W){
+        vf pr_in[AP_W], pi_in[AP_W];
+        for(int l = 0; l < AP_W; l++){
+          const vf dR = V_LOADU(dr_l[l] + k0), dI = V_LOADU(di_l[l] + k0);
+          const vf tR = V_LOADU(tr_l[l] + k0), tI = V_LOADU(ti_l[l] + k0);
+          pr_in[l] = V_FMSUB(dR, tR, V_MUL(dI, tI));
+          pi_in[l] = V_FNMSUB(dR, tI, V_MUL(dI, tR));
+        }
+        const int slot0 = einp(&p->ea, (int)k0);
+        v_transpose_store(pr_in, (float *)(p->bR + slot0));
+        v_transpose_store(pi_in, (float *)(p->bI + slot0));
+      }
+    }
+  } else {
+    for(size_t k = 0; k < N; k++){
+      float dr_s[AP_W], di_s[AP_W], tr_s[AP_W], ti_s[AP_W];
+      for(int l = 0; l < AP_W; l++){
+        dr_s[l] = dr_l[l][k]; di_s[l] = di_l[l][k];
+        tr_s[l] = tr_l[l][k]; ti_s[l] = ti_l[l][k];
+      }
+      const vf dR = V_LOADU(dr_s), dI = V_LOADU(di_s);
+      const vf tR = V_LOADU(tr_s), tI = V_LOADU(ti_s);
+      const int slot = einp(&p->ea, (int)k);
+      p->bR[slot] = V_FMSUB(dR, tR, V_MUL(dI, tI));
+      p->bI[slot] = V_FNMSUB(dR, tI, V_MUL(dI, tR));
+    }
+  }
+  small_efft(p);
+  small_scan(p, binsize, thr, out, nb, conj, ws, we, nlane, ph);
+  return 0;
+}
+
 int corr_prod_batch(void *vp,const float *dr,const float *di,
                     const float *tr,const float *ti,int nlane,float *out){
   BP *p=(BP*)vp;
@@ -2897,7 +2964,7 @@ const ap_backend *Backend(void){
     q15_screen_perm, q15_slab8, split_store, scale_load, lanes_transpose,
     fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window,
     q15_sumsq, q15_data, q15_lanethr,
-    fft_backward_batch, fft_backward_padded
+    fft_backward_batch, fft_backward_padded, binmax_prod_gather_lanes
   };
   return &be;
 }

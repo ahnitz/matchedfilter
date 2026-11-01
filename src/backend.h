@@ -130,6 +130,11 @@ typedef struct {
                             float *const *outs);
   /* Backward transform zero-padded past have_bins complex bins into stage A. */
   void (*fft_backward_padded)(void *, const float *in, size_t have_bins, float *out);
+  /* Fused gather-transpose-multiply-IFFT-scan for scattered small-N pair batches. */
+  int (*binmax_prod_gather_lanes)(void *, const float *const *drp, const float *const *dip,
+                                  const float *const *trp, const float *const *tip, int nlane,
+                                  size_t binsize, float thr, ap_peak *out, int conj,
+                                  size_t start, size_t end, const unsigned *ph);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
