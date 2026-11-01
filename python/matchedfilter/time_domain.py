@@ -38,6 +38,36 @@ def reference_profile(template, psd, f_low, f_high, delta_f) -> np.ndarray:
     return w
 
 
+def _rebin_psd(fine_psd: np.ndarray, delta_f: float, data_rate: float, n: int) -> np.ndarray:
+    """Rebin a one-sided fine-grid noise PSD onto block size ``n``'s non-negative bins.
+
+    Parameters
+    ----------
+    fine_psd : numpy.ndarray
+        One-sided input noise PSD sampled at spacing ``delta_f``.
+    delta_f : float
+        Frequency spacing of ``fine_psd`` in Hz.
+    data_rate : float
+        Data sample rate in Hz.
+    n : int
+        FFT block length in samples.
+
+    Returns
+    -------
+    numpy.ndarray
+        Length-``n`` float32 PSD array populated on ``0 .. n // 2`` (matching
+        ``gatechain.rebin_profile``'s analytic positive-frequency convention).
+    """
+    fine = np.asarray(fine_psd, dtype=np.float64)
+    ratio = max(int(round((data_rate / n) / float(delta_f))), 1)
+    keep = (len(fine) // ratio) * ratio
+    binned = fine[:keep].reshape(-1, ratio).mean(axis=1) if keep > 0 else fine
+    out = np.zeros(n, dtype=np.float32)
+    k = min(len(binned), n // 2 + 1)
+    out[:k] = binned[:k].astype(np.float32)
+    return out
+
+
 def _settle_device_writes():
     """Wait for GPU writes left in flight (correlate_series(wait=False)) before a host
     read. Device consumers are ordered on the GPU, so only host readers wait."""
@@ -888,6 +918,8 @@ class TimeDomainFilterBank:
         max_batch_size: Optional[int] = None,
         fft_lengths: Optional[Sequence[int]] = None,
         reference: Optional[Any] = None,
+        input_psd: Optional[Any] = None,
+        input_delta_f: Optional[float] = None,
         analytic: bool = False,
         bandlimited: bool = False,
         pack_templates: bool = False,
@@ -991,6 +1023,7 @@ class TimeDomainFilterBank:
         if self.engine == 'corr' and fft_lengths is None:
             self._legacy_layout = _corr_partition(self.effective_data_counts, candidate_ns,
                                                   self.max_batch_size, self.device)
+        self._input_psd_spec = None
         if not self._choose_n:
             self._build(*self._legacy_layout)
         if reference is not None:
@@ -999,6 +1032,8 @@ class TimeDomainFilterBank:
                 if g.is_hier and not g.templates_loaded:
                     g.load_templates(g.plan)
                     g.templates_loaded = True
+        if input_psd is not None:
+            self.set_input_psd(input_psd, delta_f=input_delta_f)
         if not self._choose_n:
             self._taps_list = None
             self._raw_taps = None
@@ -1342,6 +1377,108 @@ class TimeDomainFilterBank:
         self._current_ref_key = ref_key
         self._state_version = getattr(self, '_state_version', 0) + 1
 
+    def set_input_psd(
+        self,
+        psd: Optional[Any] = None,
+        delta_f: Optional[float] = None,
+    ) -> None:
+        """Set the input noise PSD across all hierarchical groups for per-template normalization.
+
+        When enabled, each template's coarse-band power fraction is weighted by the input
+        noise PSD and normalized individually by ``1 / sqrt(f_{t,i})`` so every template
+        has unit coarse noise variance, and bank-mean output profiles are derived
+        automatically when :meth:`set_reference` was not called.
+
+        Parameters
+        ----------
+        psd : array_like, dict, str, bool, or None, optional
+            Input noise PSD specification:
+            - ``None`` or ``"white"`` (default) for flat white input noise,
+            - ``False`` to disable per-template PSD normalization,
+            - ``dict`` mapping hierarchical block length ``n`` to a per-bin PSD array,
+            - 1-D fine-grid PSD array together with ``delta_f``, or
+            - 1-D PSD array of length ``n`` or ``n // 2 + 1`` when all groups share ``n``.
+        delta_f : float, optional
+            Frequency resolution in Hz when ``psd`` is a fine-grid 1-D PSD array.
+
+        Returns
+        -------
+        None
+        """
+        if self._choose_n and not getattr(self, '_n_chosen', False):
+            self._groups
+            self._n_chosen = True
+            self._taps_list = None
+            self._raw_taps = None
+
+        hier_ns = sorted({g.n for g in self._groups if g.is_hier})
+        if psd is False:
+            self._input_psd_spec = None
+            for g in self._groups:
+                if g.is_hier:
+                    g.plan.set_input_psd(False)
+            self._state_version = getattr(self, '_state_version', 0) + 1
+            return
+
+        # Build per-block-size length-n PSD arrays matching the bank's frequency convention
+        psds: Dict[int, np.ndarray] = {}
+        if psd is None or (isinstance(psd, str) and psd.lower() == "white"):
+            for n in hier_ns:
+                if self.analytic and self.rate_ratio > 1.0:
+                    arr_n = np.ones(n, dtype=np.float32)
+                else:
+                    arr_n = np.zeros(n, dtype=np.float32)
+                    arr_n[:n // 2 + 1] = 1.0
+                psds[n] = arr_n
+        elif isinstance(psd, dict):
+            missing = [n for n in hier_ns if n not in psd]
+            if missing:
+                raise ValueError(f"input_psd dict has no PSD for hierarchical block size(s) "
+                                 f"{missing} (bank block sizes: {hier_ns})")
+            for n in hier_ns:
+                val = psd[n]
+                if val is None or (isinstance(val, str) and val.lower() == "white"):
+                    arr_n = np.zeros(n, dtype=np.float32)
+                    arr_n[:n // 2 + 1] = 1.0
+                else:
+                    raw = np.asarray(val, dtype=np.float32)
+                    if raw.shape == (n,):
+                        arr_n = np.ascontiguousarray(raw, dtype=np.float32)
+                    elif raw.shape == (n // 2 + 1,):
+                        arr_n = np.zeros(n, dtype=np.float32)
+                        arr_n[:n // 2 + 1] = raw
+                    else:
+                        raise ValueError(f"input_psd[{n}] must have length {n} or {n // 2 + 1}, got {raw.shape}")
+                psds[n] = arr_n
+        else:
+            psd_arr = np.asarray(psd, dtype=np.float64)
+            if psd_arr.ndim != 1:
+                raise ValueError("input_psd must be a 1-D array, dict, 'white', None, or False")
+            if delta_f is not None and float(delta_f) > 0:
+                fine_df = float(delta_f)
+                for n in hier_ns:
+                    psds[n] = _rebin_psd(psd_arr, fine_df, self.data_sample_rate, n)
+            else:
+                for n in hier_ns:
+                    if len(psd_arr) == n:
+                        psds[n] = np.ascontiguousarray(psd_arr, dtype=np.float32)
+                    elif len(psd_arr) == n // 2 + 1:
+                        arr_n = np.zeros(n, dtype=np.float32)
+                        arr_n[:n // 2 + 1] = psd_arr.astype(np.float32)
+                        psds[n] = arr_n
+                    else:
+                        raise ValueError(
+                            f"1-D input_psd of length {len(psd_arr)} does not match hierarchical "
+                            f"block size {n} (pass length {n}, {n // 2 + 1}, or provide delta_f)"
+                        )
+
+        self._input_psd_spec = (psd, delta_f)
+        for g in self._groups:
+            if g.is_hier:
+                g.plan.set_input_psd(psds[g.n])
+        self._load_templates()
+        self._state_version = getattr(self, '_state_version', 0) + 1
+
     _LAYOUT_ATTRS = ('_built', '_built_layout', '_filters_f_list', '_block_lengths_arr',
                      '_template_map')
 
@@ -1368,6 +1505,9 @@ class TimeDomainFilterBank:
         ref, df = self._layout_ref
         self._current_ref_key = None
         self.set_reference(ref, delta_f=df)          # this layout's groups get it, and templates
+        if getattr(self, '_input_psd_spec', None) is not None:
+            psd_arg, psd_df = self._input_psd_spec
+            self.set_input_psd(psd_arg, delta_f=psd_df)
         self._state_version = getattr(self, '_state_version', 0) + 1
 
     def _lock_layout(self, rank: int) -> None:

@@ -673,6 +673,34 @@ static PyObject *HMF_set_reference(HMFObject *self,PyObject *args){
   if(r<0){ PyErr_SetString(PyExc_ValueError,"matchedfilter: bad reference"); return NULL; }
   Py_RETURN_NONE;
 }
+static PyObject *HMF_set_input_psd(HMFObject *self,PyObject *args){
+  Py_buffer b;
+  if(!PyArg_ParseTuple(args,"z*",&b)) return NULL;
+  int r;
+  if(!b.buf){ r=ap_hmf_set_input_psd(self->p,NULL); }
+  else {
+    if(b.len >= self->n*(Py_ssize_t)sizeof(float)){
+      r=ap_hmf_set_input_psd(self->p,(const float*)b.buf);
+    } else if(self->k < self->n && b.len >= self->k*(Py_ssize_t)sizeof(float)){
+      float *tmp=(float*)PyMem_Malloc((size_t)self->n*sizeof(float));
+      if(!tmp){ PyBuffer_Release(&b); return PyErr_NoMemory(); }
+      const float *src=(const float*)b.buf;
+      Py_ssize_t h=self->k;
+      memcpy(tmp,src,(size_t)h*sizeof(float));
+      tmp[h]=src[h-1];
+      for(Py_ssize_t j=1;j<h;j++) tmp[self->n-j]=src[j];
+      r=ap_hmf_set_input_psd(self->p,tmp);
+      PyMem_Free(tmp);
+    } else {
+      PyBuffer_Release(&b);
+      return PyErr_Format(PyExc_ValueError,
+                          "input_psd must hold %zd float32 values",self->n);
+    }
+  }
+  PyBuffer_Release(&b);
+  if(r<0){ PyErr_SetString(PyExc_ValueError,"matchedfilter: bad input_psd"); return NULL; }
+  Py_RETURN_NONE;
+}
 static PyObject *HMF_set_data(HMFObject *s,PyObject *a){ return bind_set(hmf_view(s),a,1); }
 static PyObject *HMF_set_template(HMFObject *s,PyObject *a){ return bind_set(hmf_view(s),a,0); }
 static PyObject *HMF_set_data_batch(HMFObject *s,PyObject *a){ return bind_set_batch(hmf_view(s),a,1); }
@@ -1077,6 +1105,7 @@ GUARDED(HMFObject,HMF_set_template)
 GUARDED(HMFObject,HMF_set_data_batch)
 GUARDED(HMFObject,HMF_set_template_batch)
 GUARDED(HMFObject,HMF_set_reference)
+GUARDED(HMFObject,HMF_set_input_psd)
 GUARDED(HMFObject,HMF_set_thresholds)
 GUARDED(HMFObject,HMF_set_hermitian)
 GUARDED(HMFObject,HMF_run)
@@ -1110,6 +1139,7 @@ static PyMethodDef HMF_methods[]={
   {"set_data_batch",(PyCFunction)HMF_set_data_batch_g,METH_VARARGS,"set_data_batch(i0, buffer)"},
   {"set_template_batch",(PyCFunction)HMF_set_template_batch_g,METH_VARARGS,"set_template_batch(i0, buffer)"},
   {"set_reference",(PyCFunction)HMF_set_reference_g,METH_VARARGS,"set_reference(buffer|None)"},
+  {"set_input_psd",(PyCFunction)HMF_set_input_psd_g,METH_VARARGS,"set_input_psd(buffer|None)"},
   {"set_thresholds",(PyCFunction)HMF_set_thresholds_g,METH_VARARGS,"set_thresholds([t per tier]); negative = unconfigured"},
   {"set_hermitian",(PyCFunction)HMF_set_hermitian_g,METH_VARARGS,"set_hermitian(bool)"},
   {"run",(PyCFunction)HMF_run_g,METH_VARARGS,"run(...) -> total crossings"},
@@ -1250,10 +1280,17 @@ static int sr_take(PyObject *po,PyObject *vo,PyObject *oo,Py_ssize_t want,long l
   }
   return got;
 }
+static inline Py_ssize_t sim_row_template(long long g_row, Py_ssize_t nt_al){
+  uint64_t z = ((uint64_t)g_row + 1ULL) * 0x9E3779B97F4A7C15ULL;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  z = z ^ (z >> 31);
+  return (Py_ssize_t)(z % (uint64_t)nt_al);
+}
 /* Emit running-maximum records for one active row r at stage s (0 = fine, 1..nb = coarse bands)
    from its transformed time series Yr (m complex samples). Returns -1 if a record array fills. */
 static int sim_emit_row(long long r, Py_ssize_t s, long long n, Py_ssize_t nb, long long m,
-                        float g, float keep2, int has_sig, int has_noise, int *kept_r,
+                        float g, float sig_scale, float keep2, int has_sig, int has_noise, int *kept_r,
                         const float *Yr, float *A, const float *tab, const long long *tv,
                         const int *fi, Py_buffer *spb, Py_buffer *svb, Py_buffer *sob,
                         long long *ks, Py_buffer *npb, Py_buffer *nvb, Py_buffer *nob,
@@ -1277,7 +1314,22 @@ static int sim_emit_row(long long r, Py_ssize_t s, long long n, Py_ssize_t nb, l
      per phase rho = t - js R, its values in that order (tab[f, s, rho m + e]) */
   const long long R = n/m, t=tv[r], js = t/R;
   const float *D = tab+(size_t)2*fi[r]*(1+nb)*n + (size_t)2*s*n + (size_t)2*(t - js*R)*m;
-  const float m1=ap_sim_power(Yr+2*js,D,g,m-js,A), m2=ap_sim_power(Yr,D+2*(m-js),g,js,A+(m-js));
+  float m1, m2;
+  int rescale_val = 0;
+  if(s > 0 && sig_scale != 1.f){
+    if(sig_scale <= 0.f){
+      m1 = ap_sim_power(Yr+2*js, NULL, g, m-js, A);
+      m2 = ap_sim_power(Yr, NULL, g, js, A+(m-js));
+    } else {
+      const float g_eff = g / sig_scale;
+      m1 = ap_sim_power(Yr+2*js, D, g_eff, m-js, A);
+      m2 = ap_sim_power(Yr, D+2*(m-js), g_eff, js, A+(m-js));
+      rescale_val = 1;
+    }
+  } else {
+    m1 = ap_sim_power(Yr+2*js, D, g, m-js, A);
+    m2 = ap_sim_power(Yr, D+2*(m-js), g, js, A+(m-js));
+  }
   if(s==0 && keep2>0.f){
     const float mx = m1>m2 ? m1 : m2;
     if(mx<keep2){
@@ -1289,11 +1341,16 @@ static int sim_emit_row(long long r, Py_ssize_t s, long long n, Py_ssize_t nb, l
   }
   for(int side=0;side<2;side++){
     const int q=(int)(2*s+side);
-    ((long long*)sob[q].buf)[r]=ks[q];
+    const long long ks_prev=ks[q];
+    ((long long*)sob[q].buf)[r]=ks_prev;
     /* right: distances 0 .. m-1 forward; left: lag js - e is A[m - e], e = 1 .. m-1 */
     if(ap_sim_records(A, side ? m-1 : 0, side ? -1 : 1, side ? m-1 : m, side ? 1 : 0,
                       (int32_t*)spb[q].buf, (float*)svb[q].buf, &ks[q], svb[q].len/4)<0)
       return -1;
+    if(rescale_val){
+      float *vout=(float*)svb[q].buf;
+      for(long long idx=ks_prev;idx<ks[q];idx++) vout[idx]*=sig_scale;
+    }
   }
   return 0;
 }
@@ -1355,7 +1412,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   if(nb<1||nb>31||PyTuple_GET_SIZE(bso)!=nb||nrows<1||row0<0||!(has_sig||has_noise)||(skip_fine&&!has_sig)){
     PyErr_SetString(PyExc_ValueError,"simulate: one bscale per band, 1..31 bands, nrows >= 1, row0 >= 0, signal or noise outputs"); return NULL;
   }
-  long long b[32], k0[32]={0}, khi[32]={0}; float bs[32], al[32], be[32]; int any_k0=0, any_alpha=0;
+  long long b[32], k0[32]={0}, khi[32]={0}; float bs[32], al[32], be[32]; int col_sub1[32]={0}, any_k0=0, any_alpha=0;
   for(Py_ssize_t i=0;i<32;i++){ al[i]=1.f; be[i]=0.f; }
   for(Py_ssize_t i=0;i<nb;i++){ b[i]=PyLong_AsLongLong(PyTuple_GET_ITEM(bo,i)); bs[i]=(float)PyFloat_AsDouble(PyTuple_GET_ITEM(bso,i)); }
   if(k0o!=Py_None){
@@ -1366,21 +1423,50 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
       if(k0[i]>0) any_k0=1;
     }
   }
+  Py_buffer alb={0}; int got_al=0; const float *sig_al_mat=NULL, *noise_al_mat=NULL; Py_ssize_t nt_al=0;
   if(alo!=Py_None){
-    if(!PyTuple_Check(alo)){ PyErr_SetString(PyExc_TypeError,"simulate: alphas must be a tuple"); return NULL; }
-    if(PyTuple_GET_SIZE(alo)!=nb){ PyErr_SetString(PyExc_ValueError,"simulate: one alpha per band"); return NULL; }
-    for(Py_ssize_t i=0;i<nb;i++){
-      double av=PyFloat_AsDouble(PyTuple_GET_ITEM(alo,i));
-      if(!(av>0.0 && av<=1.0)){
-        if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"simulate: alphas must lie in (0, 1]");
+    if(PyTuple_Check(alo)){
+      if(PyTuple_GET_SIZE(alo)!=nb){ PyErr_SetString(PyExc_ValueError,"simulate: one alpha per band"); return NULL; }
+      for(Py_ssize_t i=0;i<nb;i++){
+        double av=PyFloat_AsDouble(PyTuple_GET_ITEM(alo,i));
+        if(!(av>0.0 && av<=1.0)){
+          if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"simulate: alphas must lie in (0, 1]");
+          return NULL;
+        }
+        al[i]=(float)av;
+        be[i]=av<1.0 ? (float)sqrt(1.0 - av*av) : 0.f;
+        if(al[i]<1.f){ col_sub1[i]=1; any_alpha=1; }
+      }
+    } else {
+      if(PyObject_GetBuffer(alo,&alb,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|PyBUF_ND)<0) return NULL;
+      got_al=1;
+      if(alb.itemsize==4 && strcmp(alb.format,"f")==0 && alb.ndim==2 && alb.shape[0]>=1 && alb.shape[1]==nb){
+        sig_al_mat = noise_al_mat = (const float*)alb.buf;
+        nt_al = alb.shape[0];
+      } else if(alb.itemsize==4 && strcmp(alb.format,"f")==0 && alb.ndim==3 && alb.shape[0]==2 && alb.shape[1]>=1 && alb.shape[2]==nb){
+        nt_al = alb.shape[1];
+        sig_al_mat = (const float*)alb.buf;
+        noise_al_mat = sig_al_mat + (size_t)nt_al * (size_t)nb;
+      } else {
+        PyBuffer_Release(&alb);
+        PyErr_SetString(PyExc_ValueError,"simulate: alphas must be a tuple of length nb or a float32 (nt, nb) or (2, nt, nb) array");
         return NULL;
       }
-      al[i]=(float)av;
-      be[i]=av<1.0 ? (float)sqrt(1.0 - av*av) : 0.f;
-      if(al[i]<1.f) any_alpha=1;
+      for(Py_ssize_t u=0;u<nt_al;u++){
+        for(Py_ssize_t i=0;i<nb;i++){
+          float sv=sig_al_mat[(size_t)u*(size_t)nb+(size_t)i];
+          float nv=noise_al_mat[(size_t)u*(size_t)nb+(size_t)i];
+          if(!(isfinite(sv) && sv>=0.f && isfinite(nv) && nv>=0.f)){
+            PyBuffer_Release(&alb);
+            PyErr_SetString(PyExc_ValueError,"simulate: per-template alphas must be finite and >= 0");
+            return NULL;
+          }
+          if(nv<1.f){ col_sub1[i]=1; any_alpha=1; }
+        }
+      }
     }
   }
-  if(PyErr_Occurred()) return NULL;
+  if(PyErr_Occurred()){ if(got_al) PyBuffer_Release(&alb); return NULL; }
   Py_buffer sc,tb={0},tt={0},fib={0},kmb={0}; int gin=0, got_km=0, ok=1;
   Py_buffer *in[4]={&sc,&tb,&tt,&fib}; PyObject *io[4]={sco,tbo,to,fio};
   for(;gin<(has_sig?4:1);gin++) if(PyObject_GetBuffer(io[gin],in[gin],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ ok=0; break; }
@@ -1417,6 +1503,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     for(int s=0;s<sgot;s++){ PyBuffer_Release(&spb[s]); PyBuffer_Release(&svb[s]); PyBuffer_Release(&sob[s]); } \
     for(int s=0;s<ngot;s++){ PyBuffer_Release(&npb[s]); PyBuffer_Release(&nvb[s]); PyBuffer_Release(&nob[s]); } \
     if(got_km) PyBuffer_Release(&kmb); \
+    if(got_al) PyBuffer_Release(&alb); \
     for(int i=0;i<gin;i++) PyBuffer_Release(in[i]); }while(0)
   if(!ok){
     SIM_RELEASE();
@@ -1428,7 +1515,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   long long max_alpha_hi = 0;
   if(any_alpha){
     for(Py_ssize_t i=0;i<nb;i++){
-      if(al[i] < 1.f){
+      if(col_sub1[i]){
         const long long hi_i = khi[i] < kfill ? khi[i] : kfill;
         if(hi_i > max_alpha_hi) max_alpha_hi = hi_i;
       }
@@ -1441,7 +1528,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
      lags are the n/2-point transform of X[k] * exp(+2 pi i k / n). */
   const int half_split = has_sig && !skip_fine && n >= 128 && (n & (n - 1)) == 0 && kfill <= n / 2;
   const long long nh = n / 2;
-  const int share_widest = half_split && b[nb - 1] == nh && k0[nb - 1] == 0 && al[nb - 1] >= 1.f;
+  const int share_widest = half_split && b[nb - 1] == nh && k0[nb - 1] == 0 && !col_sub1[nb - 1];
   ap_plan *pf = NULL, *ph_own = NULL, *ph = NULL, *pl[32] = {0};
   for(Py_ssize_t i=0;i<nb && ok;i++){
     pl[i] = ap_create((size_t)b[i]);
@@ -1516,7 +1603,11 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
                            (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
       }
       int kept[SIM_ROWS];
-      for(int bi=0;bi<B;bi++) kept[bi] = km ? (km[r0+bi]!=0) : 1;
+      Py_ssize_t u_batch[SIM_ROWS];
+      for(int bi=0;bi<B;bi++){
+        kept[bi] = km ? (km[r0+bi]!=0) : 1;
+        u_batch[bi] = sig_al_mat ? sim_row_template(row0+r0+bi, nt_al) : 0;
+      }
       if(skip_fine){
         for(int bi=0;bi<B;bi++){
           ((long long*)sob[0].buf)[r0+bi]=0;
@@ -1563,7 +1654,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
               for(int l=0;l<cnt;l++){
                 const int bi = a0+l;
                 ap_sim_interleave_complex(Yhalf+(size_t)bi*yhfloats,outs[l],(size_t)nh,Y);
-                if(sim_emit_row(r0+bi,0,n,nb,n,g,keep2,has_sig,has_noise,&kept[bi],
+                if(sim_emit_row(r0+bi,0,n,nb,n,g,1.f,keep2,has_sig,has_noise,&kept[bi],
                                 Y,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
                   batch_full=1;
                   break;
@@ -1575,7 +1666,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
               ap_sim_twiddle(X+(size_t)bi*xfloats,tw,hv_h,Xtw);
               ap_fft_backward_padded(ph,Xtw,hv_h,Yodd);
               ap_sim_interleave_complex(Yhalf+(size_t)bi*yhfloats,Yodd,(size_t)nh,Y);
-              if(sim_emit_row(r0+bi,0,n,nb,n,g,keep2,has_sig,has_noise,&kept[bi],
+              if(sim_emit_row(r0+bi,0,n,nb,n,g,1.f,keep2,has_sig,has_noise,&kept[bi],
                               Y,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
                 batch_full=1;
                 break;
@@ -1591,7 +1682,8 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
               for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
               continue;
             }
-            if(sim_emit_row(r0+bi,s,n,nb,m,g,keep2,has_sig,has_noise,&kept[bi],
+            const float sig_sc = sig_al_mat ? sig_al_mat[(size_t)u_batch[bi]*(size_t)nb+(size_t)(nb-1)] : 1.f;
+            if(sim_emit_row(r0+bi,s,n,nb,m,g,sig_sc,keep2,has_sig,has_noise,&kept[bi],
                             Yhalf+(size_t)bi*yhfloats,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
               batch_full=1;
               break;
@@ -1601,7 +1693,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
         }
         ap_plan *ps = s==0 ? pf : pl[s-1];
         const int wrap_band = s>0 && k0[s-1]>0;
-        const int prep_band = s>0 && (k0[s-1]>0 || al[s-1]<1.f);
+        const int prep_band = s>0 && (k0[s-1]>0 || col_sub1[s-1]);
         const size_t hv = wrap_band ? (size_t)m : (size_t)(kfill < m ? kfill : m);
         const int w = ap_plan_pairbatch(ps);
         if(w > 0){
@@ -1614,7 +1706,13 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
               if(prep_band){
                 const float *Xo = Xorth ? Xorth+(size_t)bi*xorth_floats : NULL;
                 float *dst = Xw + (size_t)nact * xwfloats;
-                sim_prep_band(Xr, Xo, kfill, m, k0[s-1], khi[s-1], al[s-1], be[s-1], dst);
+                float al_r = al[s-1], be_r = be[s-1];
+                if(noise_al_mat){
+                  const float av = noise_al_mat[(size_t)u_batch[bi]*(size_t)nb+(size_t)(s-1)];
+                  al_r = av < 1.f ? av : 1.f;
+                  be_r = av < 1.f ? sqrtf(1.f - av*av) : 0.f;
+                }
+                sim_prep_band(Xr, Xo, kfill, m, k0[s-1], khi[s-1], al_r, be_r, dst);
                 srcs[nact] = dst;
               } else {
                 srcs[nact] = Xr;
@@ -1634,7 +1732,8 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
                 const long long r=r0+next_bi++;
                 for(int side=0;side<2;side++) ((long long*)sob[2*s+side].buf)[r]=ks[2*s+side];
               }
-              if(sim_emit_row(r0+target,s,n,nb,m,g,keep2,has_sig,has_noise,&kept[target],
+              const float sig_sc = (s>0 && sig_al_mat) ? sig_al_mat[(size_t)u_batch[target]*(size_t)nb+(size_t)(s-1)] : 1.f;
+              if(sim_emit_row(r0+target,s,n,nb,m,g,sig_sc,keep2,has_sig,has_noise,&kept[target],
                               outs[l],A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
                 batch_full=1;
                 break;
@@ -1656,11 +1755,18 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
             const float *Xin = X+(size_t)bi*xfloats;
             if(prep_band){
               const float *Xo = Xorth ? Xorth+(size_t)bi*xorth_floats : NULL;
-              sim_prep_band(Xin, Xo, kfill, m, k0[s-1], khi[s-1], al[s-1], be[s-1], Xw);
+              float al_r = al[s-1], be_r = be[s-1];
+              if(noise_al_mat){
+                const float av = noise_al_mat[(size_t)u_batch[bi]*(size_t)nb+(size_t)(s-1)];
+                al_r = av < 1.f ? av : 1.f;
+                be_r = av < 1.f ? sqrtf(1.f - av*av) : 0.f;
+              }
+              sim_prep_band(Xin, Xo, kfill, m, k0[s-1], khi[s-1], al_r, be_r, Xw);
               Xin = Xw;
             }
             ap_fft_backward_padded(ps,Xin,hv,Y);
-            if(sim_emit_row(r0+bi,s,n,nb,m,g,keep2,has_sig,has_noise,&kept[bi],
+            const float sig_sc = (s>0 && sig_al_mat) ? sig_al_mat[(size_t)u_batch[bi]*(size_t)nb+(size_t)(s-1)] : 1.f;
+            if(sim_emit_row(r0+bi,s,n,nb,m,g,sig_sc,keep2,has_sig,has_noise,&kept[bi],
                             Y,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
               batch_full=1;
               break;
@@ -1703,17 +1809,24 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
             } else {
               ap_plan *ps = s==0 ? pf : pl[s-1];
               const int wrap_band = s>0 && k0[s-1]>0;
-              const int prep_band = s>0 && (k0[s-1]>0 || al[s-1]<1.f);
+              const int prep_band = s>0 && (k0[s-1]>0 || col_sub1[s-1]);
               const float *Xin = Xr;
               if(prep_band){
-                sim_prep_band(Xr, Xo, kfill, m, k0[s-1], khi[s-1], al[s-1], be[s-1], Xw);
+                float al_r = al[s-1], be_r = be[s-1];
+                if(noise_al_mat){
+                  const float av = noise_al_mat[(size_t)u_batch[bi]*(size_t)nb+(size_t)(s-1)];
+                  al_r = av < 1.f ? av : 1.f;
+                  be_r = av < 1.f ? sqrtf(1.f - av*av) : 0.f;
+                }
+                sim_prep_band(Xr, Xo, kfill, m, k0[s-1], khi[s-1], al_r, be_r, Xw);
                 Xin = Xw;
               }
               const size_t hv = wrap_band ? (size_t)m : (size_t)(kfill < m ? kfill : m);
               if(ap_plan_pairbatch(ps) > 0) ap_fft_backward_batch(ps,&Xin,hv,1,&Y);
               else ap_fft_backward_padded(ps,Xin,hv,Y);
             }
-            if(sim_emit_row(r,s,n,nb,m,g,keep2,has_sig,has_noise,&kept1,
+            const float sig_sc = (s>0 && sig_al_mat) ? sig_al_mat[(size_t)u_batch[bi]*(size_t)nb+(size_t)(s-1)] : 1.f;
+            if(sim_emit_row(r,s,n,nb,m,g,sig_sc,keep2,has_sig,has_noise,&kept1,
                             Yr_row,A,tab,tv,fi,spb,svb,sob,ks,npb,nvb,nob,kn)<0){
               full=1;
               break;
