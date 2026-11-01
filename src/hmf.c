@@ -118,13 +118,16 @@ struct ap_hmf_plan {
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
-/* The series group a plan of size n runs when asked for `requested`: MF_DGROUP overrides
-   it (for measurement), and it is halved until the held spectra fit 4 MB. Calibrations key
-   their models by this, the group that ran, not the one asked for. */
+/* The series group a plan of size n runs when asked for `requested`: halved until the held
+   spectra fit 512 KB (256 KB of active positive-frequency bins under real_series, keeping the
+   slab L2-resident per core without thrashing shared L3 under multi-core load). MF_DGROUP
+   overrides it for measurement up to the 4 MB safety ceiling. Calibrations key their models by
+   this, the group that ran, not the one asked for. */
 int ap_hmf_effective_group(size_t n,int requested){
-  int grp = requested;
-  { long v=ap_env_int("MF_DGROUP",0); if(v>0) grp=(int)v; }
-  while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;
+  const long v=ap_env_int("MF_DGROUP",0);
+  int grp = v>0 ? (int)v : requested;
+  const size_t cap = v>0 ? (size_t)4*1024*1024 : (size_t)512*1024;
+  while(grp>1 && (size_t)grp*2*n*sizeof(float) > cap) grp>>=1;
   return grp;
 }
 
@@ -194,7 +197,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
   p->accel=ap_accel_create(n);           /* NULL where the platform has none */
-  p->spec=ap_alloc64((size_t)grp*2*n*sizeof(float));
+  p->spec=ap_alloc64((size_t)grp*(2*n+16)*sizeof(float));
   p->dspec=calloc((size_t)p->nd,sizeof(*p->dspec));
   p->dtime=calloc((size_t)p->nd,sizeof(*p->dtime));
   p->dhave=calloc((size_t)p->nd,sizeof(*p->dhave));
@@ -753,7 +756,7 @@ int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
       const double a=2.0*3.14159265358979323846*(double)k/(double)p->n;
       p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
     }
-    if(h>=64 && h<=128)
+    if(h>=64 && h<=2048)
       p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,h);
   }
   p->real_series=on?1:0;
@@ -800,12 +803,17 @@ int ap_hmf_run_series(ap_hmf_plan *p,
   /* Filter several blocks together where they share a window.  Blocks differ
      only at a segment's edges, so runs of equal windows are long. */
   for(int b0=0;b0<nblocks;){
+    const size_t sstride=2*n+16;
     int g=1;
     while(g<p->dgroup && b0+g<nblocks
           && win_start[b0+g]==win_start[b0] && win_end[b0+g]==win_end[b0]) g++;
-    if(p->real_series && p->fwd_real_batch){
-      const int W = ap_plan_lanes(p->fwd_real_batch);
-      const size_t st = p->real_stride ? p->real_stride : 1;
+    const size_t st_real = p->real_stride ? p->real_stride : 1;
+    const int w_real = p->fwd_real_batch ? ap_plan_lanes(p->fwd_real_batch) : 0;
+    const int use_real_batch = (w_real<=4) || (st_real==1 && n!=2048)
+                               || (w_real<=8 ? n<=2048 : n<=1024);
+    if(p->real_series && p->fwd_real_batch && use_real_batch){
+      const int W = w_real;
+      const size_t st = st_real;
       const float inv = 1.0f/(float)n;
       for(int j=0; j<g; j+=W){
         const int cnt = g-j<W ? g-j : W;
@@ -818,7 +826,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
           if(have>n) have=n;
           srcs[l]=have ? series+s0*st : series;
           haves[l]=have;
-          outs[l]=p->spec+(size_t)(j+l)*2*n;
+          outs[l]=p->spec+(size_t)(j+l)*sstride;
         }
         if(ap_fft_real_batch(p->fwd_real_batch,srcs,haves,st,cnt,inv,p->rtw,0,outs)<0) return -1;
         for(int l=0; l<cnt; l++){
@@ -841,7 +849,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
           if(have>n) have=n;
           srcs[l]=have ? series+2*s0 : series;
           haves[l]=have;
-          outs[l]=p->spec+(size_t)(j+l)*2*n;
+          outs[l]=p->spec+(size_t)(j+l)*sstride;
         }
         if(ap_fft_forward_batch(p->fwd_cplx_batch,srcs,haves,cnt,inv,outs)<0) return -1;
         for(int l=0; l<cnt; l++){
@@ -858,7 +866,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
         /* A real series: the half-size transform (half-spectrum; negative bins mirrored lazily
            on transform refine), with real block samples kept for direct refine. */
         const size_t st=p->real_stride ? p->real_stride : 1;
-        float *sp=p->spec+(size_t)j*2*n;
+        float *sp=p->spec+(size_t)j*sstride;
         hmf_forward_real(p,series,s0,have,sp);
         p->dmirrored[j]=0;
         if(set_data_tiers(p,j,sp,1)) return -1;
@@ -873,7 +881,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
          templates.  n is a power of two, so 1/n is exact and the transform is
          linear: scaling before is bit-for-bit the same as scaling after, which
          the fixtures check by reproducing pycbc's SNRs to 0.0e+00. */
-      float *const sp=p->spec+(size_t)j*2*n;
+      float *const sp=p->spec+(size_t)j*sstride;
       if(p->use_accel){
         ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
       } else {
@@ -1329,6 +1337,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   for(int i=0;i<p->ntiers;i++)
     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
 
+  const int fast_sparse = p->sparse && counts && !p->prof;
+  if(fast_sparse) memset(counts, 0, (size_t)nd * (size_t)nt * sizeof(int));
+
   const int *fire_d=NULL,*fire_t=NULL;
   int nfire=0;
   for(int i=0;i<p->ntiers;i++){
@@ -1357,6 +1368,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     float *qstat=NULL;               /* set: the screen decided, and this is its maximum */
     int16_t *qlag=NULL;
     int use_q15=0;
+    int q15_direct_fire=0;
     if(i==0 && p->q15){
       /* The screen is the first tier: a pair passes when its int16 maximum reaches the
          tier's threshold, and no float run of the tier follows.  Like every tier it answers
@@ -1369,10 +1381,37 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                               (p->dump||p->trace) ? qstat : NULL);
       if(ns<0) return -1;
       int k=0;
-      for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
-        const size_t row=(size_t)d*nt+t;
-        if(p->qpass[row]){ p->qd[k]=d; p->qt[k]=t; k++; }
-        else reject_row(p,peaks,counts,row,nb);
+      if(fast_sparse && !p->dump && !p->trace){
+        int * restrict dst_d = tr->fire_d;
+        int * restrict dst_t = tr->fire_t;
+        for(int d=0;d<nd;d++){
+          const unsigned char *qp = p->qpass + (size_t)d*nt;
+          int t=0;
+          for(; t+8<=nt; t+=8){
+            uint64_t w;
+            memcpy(&w, qp+t, sizeof w);
+            if(!w) continue;
+            uint64_t m = (w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
+                         & 0x8080808080808080ULL;
+            while(m){
+              const int off = __builtin_ctzll(m) >> 3;
+              dst_d[k] = d;
+              dst_t[k] = t + off;
+              k++;
+              m &= m - 1;
+            }
+          }
+          for(; t<nt; t++){
+            if(qp[t]){ dst_d[k]=d; dst_t[k]=t; k++; }
+          }
+        }
+        q15_direct_fire = 1;
+      } else {
+        for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
+          const size_t row=(size_t)d*nt+t;
+          if(p->qpass[row]){ p->qd[k]=d; p->qt[k]=t; k++; }
+          else if(!fast_sparse) reject_row(p,peaks,counts,row,nb);
+        }
       }
       /* Rejected rows are finished; the next tier sees only the compacted survivors,
          without another scan of the full data/template grid. */
@@ -1405,7 +1444,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     int nnext=0;
     const long first_pair=p->pairs;
     if(i==0) p->pairs+=(long)nd*nt;
-    for(int j=0;j<nchecked;j++){
+    if(q15_direct_fire){
+      nnext = nchecked;
+    } else for(int j=0;j<nchecked;j++){
       const int d = checked_d ? checked_d[j] : j/nt;
       const int t = checked_t ? checked_t[j] : j%nt;
       const size_t row=(size_t)d*nt+t;
@@ -1426,7 +1467,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       if(fire){
         if(qlag) tr->cebuf[row].index = qlag[j];
         tr->fire_d[nnext]=d; tr->fire_t[nnext]=t; nnext++;
-      } else {
+      } else if(!fast_sparse){
         reject_row(p,peaks,counts,row,nb);
       }
     }
