@@ -86,7 +86,7 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
     # A model made without the Q15 screen's prices (an older build, or a back end without
     # it) must not be reused by one that has it, or the screen is never priced. The default
     # calls' key is the one their models have always been stored under.
-    skey = ("%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15" if not g16 and _gc._q15_band(64) else "")
+    skey = ("%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15s" if not g16 and _gc._q15_band(64) else "")
             + ("" if how == (_CAL_BLOCKS, _CAL_REPS, _CAL_SEED) else ",b%d,r%d,s%d" % how))
     if path is not None:
         cm = _gc._stored_cost_model(path, skey)
@@ -183,11 +183,14 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
     need = [b for b in bands if shared is None or b not in shared["dense"]]
     jobs = {("dense", b): ((b,), (big,), False) for b in need}
     jobs[("dense", b0)] = ((b0,), (big,), False)       # its call also gives the per-block work
+    qsparse_bands = [b for b in bands[1:] if b in need and b in qbands and b0 in qbands]
     for f in dens:
         jobs[("refine", f)] = ((b0,), (g0[f],), False)
         for b in bands[1:]:
             if b in need:
                 jobs[("sparse", b, f)] = ((b0, b), (g0[f], big), False)
+        for b in qsparse_bands:
+            jobs[("qsparse", b, f)] = ((b0, b), (g0[f], big), True)
     for b in qbands:
         if b in need:
             jobs[("screen", b)] = ((b,), (big,), True)
@@ -238,7 +241,20 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
     # the first band can only be a first tier; give it the next band's sparse curve for completeness
     if bands[1:]:
         sparse[b0] = list(sparse.get(bands[1], []))
-    screen = {b: dict(v) for b, v in (shared["screen"].items() if shared else ()) if b in bands}
+    qsparse = {}
+    for f in dens:
+        for b in qsparse_bands:
+            tt = got[("qsparse", b, f)][0][0]
+            if tt[0][0]:
+                qsparse.setdefault(b, []).append(
+                    (tt[0][0] / pairs, least(("qsparse", b, f), lambda x: x[0][1][1]) / tt[0][0])
+                )
+    if qbands and b0 in qbands and b0 in need and bands[1:] and bands[1] in qsparse:
+        qsparse[b0] = list(qsparse[bands[1]])
+    screen = {
+        b: {k: list(val) if isinstance(val, list) else val for k, val in v.items()}
+        for b, v in (shared["screen"].items() if shared else ()) if b in bands
+    }
     for b in qbands:
         if b not in need:
             continue
@@ -252,9 +268,17 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
         ent = {"dense": least(("screen", b), lambda x: x[0][0][1]) / pairs,
                "excess": [(tt[0][0] / pairs, q[0] / pairs)],
                "recheck": max(least(("recheck",), lambda x: x[0][0][1] - x[1][1]) / q[0], 0.0)}
+        if b in qsparse:
+            ent["sparse"] = list(qsparse[b])
         screen[b] = ent
-    _gc._COSTS[bkey] = {"dense": dict(dense), "sparse": {b: list(v) for b, v in sparse.items()},
-                         "screen": {b: dict(v) for b, v in screen.items()}}
+    _gc._COSTS[bkey] = {
+        "dense": dict(dense),
+        "sparse": {b: list(v) for b, v in sparse.items()},
+        "screen": {
+            b: {k: list(val) if isinstance(val, list) else val for k, val in v.items()}
+            for b, v in screen.items()
+        },
+    }
     plans.clear()
     cm = _gc.CostModel(n, dense, sparse, refine, block=float(np.median(block)), screen=screen)
     if path is not None:          # another process's model, stored first, is the one used

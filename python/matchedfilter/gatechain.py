@@ -1778,9 +1778,13 @@ class CostModel:
         self.feed = None if not feed else {
             "band": {int(b): float(v) for b, v in feed["band"].items()},
             "full": float(feed["full"])}
-        self.screen = {int(b): {"dense": float(v["dense"]), "recheck": float(v["recheck"]),
-                                "excess": sorted((float(a), float(c)) for a, c in v["excess"])}
-                       for b, v in (screen or {}).items()}
+        self.screen = {}
+        for b, v in (screen or {}).items():
+            ent = {"dense": float(v["dense"]), "recheck": float(v["recheck"]),
+                   "excess": sorted((float(a), float(c)) for a, c in v["excess"])}
+            if v.get("sparse"):
+                ent["sparse"] = sorted((float(f), float(c)) for f, c in v["sparse"])
+            self.screen[int(b)] = ent
         self.block = float(block)          # fixed work per block: forward transform, ingest
         self.dense = {int(b): float(v) for b, v in dense.items()}
         self._sparse = {int(b): sorted((float(f), float(v)) for f, v in rows) for b, rows in sparse.items()}
@@ -1799,6 +1803,16 @@ class CostModel:
     def sparse(self, b, f):
         return self._interp(self._sparse[int(b)], f)
 
+    def sparse_for(self, b, f, screened=False):
+        """Ticks per survivor at later-tier band `b` and reach `f`, using Q15 sparse pricing
+        when `screened` is True and `b` has a measured Q15 sparse curve."""
+        b = int(b)
+        if screened:
+            sc = self.screen.get(b)
+            if sc is not None and sc.get("sparse"):
+                return self._interp(sc["sparse"], f)
+        return self._interp(self._sparse[b], f)
+
     def signature(self):
         """A hashable summary of the model's content, for cache keys (an object's id can be
         reused once it is collected, which would hand a new model an old model's results)."""
@@ -1809,6 +1823,7 @@ class CostModel:
                    tuple((b, tuple(r)) for b, r in sorted(self._sparse.items())),
                    tuple(self._refine),
                    tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
+                         + ((tuple(v["sparse"]),) if "sparse" in v else ())
                          for b, v in sorted(self.screen.items())),
                    getattr(self, "direct_lag", None), getattr(self, "direct_single", True),
                    getattr(self, "direct_frac", 1.0),
@@ -1970,7 +1985,7 @@ class CostModel:
         hw the direct refine's half-width (refine_for)."""
         c, screened = self.first_tier_for(chain, reach[1] if len(reach) > 1 else 1.0)
         for i in range(1, len(chain)):
-            c += reach[i] * self.sparse(chain[i], reach[i])
+            c += reach[i] * self.sparse_for(chain[i], reach[i], screened)
         # A one-tier chain behind the Q15 screen has no coarse lag to refine around (hmf.c: the
         # screen reports none), so its survivors refine by transform, as the engine runs them.
         f = reach[len(chain)]
@@ -2403,10 +2418,10 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         has_last_sparse = bool(prices_dir and dmfrac > 0.0 and b_last in cost._sparse)
         R = n // b_last if prices_dir else 0
         for pth, preach, lasts in cands:
-            c_prefix, _ = cost.first_tier_for(chain, preach[1])
+            c_prefix, screened = cost.first_tier_for(chain, preach[1])
             for idx_t, bt in enumerate(later, 1):
                 ri = preach[idx_t]
-                c_prefix += ri * cost.sparse(bt, ri)
+                c_prefix += ri * cost.sparse_for(bt, ri, screened)
             for hw, last in zip(hws, lasts):
                 if last is None:
                     continue
@@ -2878,7 +2893,9 @@ def _cost_model_nonneg(cost):
         return False
     if any(v < 0.0 for rows in cost._sparse.values() for _, v in rows):
         return False
-    if any(sc["dense"] < 0.0 or sc["recheck"] < 0.0 for sc in cost.screen.values()):
+    if any(sc["dense"] < 0.0 or sc["recheck"] < 0.0
+           or any(v < 0.0 for _, v in sc.get("sparse", ()))
+           for sc in cost.screen.values()):
         return False
     t0r = getattr(cost, "tier0_ratios", None)
     if t0r and any(not (0.0 < r <= 1.0) for r in t0r.values()):
@@ -2974,6 +2991,8 @@ def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND,
             base_knots.add(float(f_k))
     for sc in cost.screen.values():
         for f_k, _ in sc["excess"]:
+            base_knots.add(float(f_k))
+        for f_k, _ in sc.get("sparse", ()):
             base_knots.add(float(f_k))
     knots_tup = tuple(sorted(f_k for f_k in base_knots if 0.0 <= f_k <= 1.0))
 
