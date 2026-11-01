@@ -212,9 +212,10 @@ int ap_corr_prod(ap_plan *p,const float *dr,const float *di,
   return p->be->corr_prod(p->h,dr,di,tr,ti,out);
 }
 int ap_corr_prod_window(ap_plan *p,const float *dr,const float *di,
-                        const float *tr,const float *ti,size_t blo,size_t end,float *dst){
+                        const float *tr,const float *ti,size_t blo,size_t end,float *dst,
+                        float *scratch,int stream){
   if(!p||!p->be->corr_prod_window) return -1;
-  return p->be->corr_prod_window(p->h,dr,di,tr,ti,blo,end,dst);
+  return p->be->corr_prod_window(p->h,dr,di,tr,ti,blo,end,dst,scratch,stream);
 }
 int ap_corr_split(ap_plan *p,const float *re,const float *im,float *out){
   if(!p||!p->be->corr_split) return -1;

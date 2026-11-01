@@ -16,7 +16,8 @@ import numpy as np
 
 from . import _core
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
-                          _normalize_windows, _settle_device_writes)
+                          _aligned_zeros, _normalize_windows, _page_aligned_empty,
+                          _settle_device_writes)
 from .device import parse as _parse_device
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
@@ -272,7 +273,7 @@ class _InnerBatch:
         k = len(rows)
         if state["slots"] is None or state["slots"].shape[0] < k:
             if self._alloc is None:
-                state["slots"] = np.zeros((k, self.length), dtype=np.complex64)
+                state["slots"] = _aligned_zeros((k, self.length), dtype=np.complex64)
             else:
                 state["slots"] = self._alloc((k, self.length))
                 state["slots"][:] = 0
@@ -281,7 +282,8 @@ class _InnerBatch:
         # On a device the rows are left in flight: the leaves' forwards are ordered after them
         # on the GPU, and a host reader settles them first (HierarchicalSearch._settle).
         on_device = self._alloc is not None
-        self.bank.correlate_series(state["series"], windows=state["regions"], templates=rows,
+        sel = None if k == self.n_rows else rows
+        self.bank.correlate_series(state["series"], windows=state["regions"], templates=sel,
                                    out=state["slots"][:k], wait=not on_device,
                                    out_support=_merge([w for j in range(k) for w in support[j]]))
         self.in_flight = self.in_flight or on_device
@@ -442,12 +444,13 @@ class HierarchicalSearch:
         leaves -- ordered after everything that read it -- have been collected. Elsewhere a
         new host array."""
         bank = self.leaf_bank(root, next(self._leaves_below(root)))
-        if getattr(bank, "device", None) is None or _parse_device(bank.device).kind != "gpu":
-            return np.empty(n, dtype=np.float32)
+        on_gpu = (getattr(bank, "device", None) is not None
+                  and _parse_device(bank.device).kind == "gpu")
         key = (id(root), channel, n, chunk % 2)
         out = self._root_outs.get(key)
         if out is None:
-            out = self._root_outs[key] = bank.empty_shared((n,), np.float32)
+            out = self._root_outs[key] = (bank.empty_shared((n,), np.float32) if on_gpu
+                                          else _page_aligned_empty((n,), np.float32))
         return out
 
     def _real_output(self, node):
