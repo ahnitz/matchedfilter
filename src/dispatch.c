@@ -73,6 +73,17 @@ void ap_fft_forward_scaled(ap_plan *p,const float *in,size_t have_floats,size_t 
                            float scale,float *out){
   p->be->fft_forward_scaled(p->h,in,have_floats,stride,scale,out);
 }
+void ap_fft_forward_scaled_gm(ap_plan *p,const float *in,size_t have_floats,size_t stride,
+                              float scale,float *re,float *im,float *scratch){
+  if(p->be->fft_forward_scaled_gm){
+    p->be->fft_forward_scaled_gm(p->h,in,have_floats,stride,scale,re,im,scratch);
+    return;
+  }
+  p->be->fft_forward_scaled(p->h,in,have_floats,stride,scale,scratch);
+  int n1=0,n2=0;
+  const int gm=ap_plan_split(p,&n1,&n2) && ap_has_fused_prod(p);
+  p->be->split_store(scratch,re,im,p->n,0,gm?n1:0,n2,p->be->lanes);
+}
 int ap_fft_forward_batch(ap_plan *p,const float *const *srcs,const size_t *haves,int cnt,
                          float scale,float *const *outs){
   if(!p || !p->be->fft_forward_batch) return -1;
@@ -232,6 +243,26 @@ int ap_corr_prod_window(ap_plan *p,const float *dr,const float *di,
                         float *scratch,int stream){
   if(!p||!p->be->corr_prod_window) return -1;
   return p->be->corr_prod_window(p->h,dr,di,tr,ti,blo,end,dst,scratch,stream);
+}
+int ap_corr_prod_window_multi(ap_plan *p,const float *dr,const float *di,
+                              const float *tr,const float *ti,size_t t_stride,int nt,
+                              size_t blo,size_t end,float *dst,size_t dst_stride,
+                              float *scratch,int stream){
+  if(!p||nt<1) return -1;
+  if(nt>1 && p->be->corr_prod_window_multi)
+    return p->be->corr_prod_window_multi(p->h,dr,di,tr,ti,t_stride,nt,blo,end,
+                                         dst,dst_stride,scratch,stream);
+  if(!p->be->corr_prod_window) return -1;
+  for(int k=0;k<nt;k++){
+    if(p->be->corr_prod_window(p->h,dr,di,tr+(size_t)k*t_stride,ti+(size_t)k*t_stride,
+                               blo,end,dst+(size_t)k*dst_stride,scratch,stream))
+      return -1;
+  }
+  return 0;
+}
+int ap_corr_tile_slots(ap_plan *p,int want,float **dr_out,float **di_out){
+  if(!p||!p->be->corr_tile_slots||want<1) return 0;
+  return p->be->corr_tile_slots(p->h,want,dr_out,di_out);
 }
 int ap_corr_split(ap_plan *p,const float *re,const float *im,float *out){
   if(!p||!p->be->corr_split) return -1;

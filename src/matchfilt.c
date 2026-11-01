@@ -891,8 +891,15 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     size_t start=starts[j];
     size_t have=start<nseries?nseries-start:0;
     if(have>n) have=n;
-    ap_fft_forward_scaled(p->fft,have ? series+2*start : series,2*have,1,inv,p->scratch);
-    if(ap_mf_set_data(p,j,p->scratch)) return -1;
+    if(p->gmajor && !p->pair_alt){
+      if(p->qdok) p->qdok[j]=0;
+      if(p->qdxok) p->qdxok[j]=0;
+      ap_fft_forward_scaled_gm(p->fft,have ? series+2*start : series,2*have,1,inv,
+                               p->dre+(size_t)j*n,p->dim+(size_t)j*n,p->scratch);
+    }else{
+      ap_fft_forward_scaled(p->fft,have ? series+2*start : series,2*have,1,inv,p->scratch);
+      if(ap_mf_set_data(p,j,p->scratch)) return -1;
+    }
   }
   return 0;
 }
@@ -952,6 +959,35 @@ static size_t llc_bytes(void){
               else if(!sysctlbyname("hw.l2cachesize",&b,&len,NULL,0) && b) r=(long)b; }
 #endif
     v = r>0 ? (size_t)r : 0;
+  }
+  return v;
+}
+static size_t l2_bytes(void){
+  static size_t v=(size_t)-1;
+  if(v==(size_t)-1){
+    long r=-1;
+#ifdef _SC_LEVEL2_CACHE_SIZE
+    r=sysconf(_SC_LEVEL2_CACHE_SIZE);
+#endif
+    for(int idx=0; r<=0 && idx<5; idx++){
+      char path[96]; int lvl=0;
+      snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/level",idx);
+      FILE *f=fopen(path,"r");
+      if(!f) break;
+      if(fscanf(f,"%d",&lvl)!=1) lvl=0;
+      fclose(f);
+      if(lvl!=2) continue;
+      snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/size",idx);
+      f=fopen(path,"r");
+      if(f){ unsigned long kb=0; char unit=0;
+             if(fscanf(f,"%lu%c",&kb,&unit)>=1) r=(long)kb*(unit=='M'?1024L*1024:1024L);
+             fclose(f); }
+    }
+#if defined(__APPLE__)
+    if(r<=0){ unsigned long long b=0; size_t len=sizeof b;
+              if(!sysctlbyname("hw.l2cachesize",&b,&len,NULL,0) && b) r=(long)b; }
+#endif
+    v = r>0 ? (size_t)r : (256u<<10);
   }
   return v;
 }
@@ -1032,6 +1068,104 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   ap_plan *fb=ensure_fwd_batch(p,p->real_series);
   const int W_fb=fb?ap_plan_lanes(fb):0;
   const int use_fb=fb && W_fb>p->nd;
+  if(!W && p->gmajor){
+    const size_t spec_bytes=2*n*sizeof(float);
+    const size_t l1d=ap_l1d_bytes();
+    const size_t l2=l2_bytes();
+    const size_t l2_fit=(l2*7)/8, l2_tile=(l2*3)/4;
+    const int kt_step=(spec_bytes>l1d && 9u*spec_bytes<=l2_fit) ? 4 : 1;
+    const size_t out_per_blk=(nblocks>0 ? (span_sum/(size_t)nblocks)*8u : spec_bytes);
+    int b_tile=1;
+    if(!use_fb && spec_bytes>32768u && spec_bytes<=65536u && nt>kt_step && nblocks>1){
+      const size_t untiled=((size_t)nt+1u+(size_t)kt_step)*spec_bytes
+                           + (stream ? 0u : (size_t)nt*out_per_blk);
+      if(untiled>l2){
+        const size_t used=(size_t)(2*kt_step)*spec_bytes;
+        const size_t per_blk=spec_bytes+(stream ? 0u : (size_t)kt_step*out_per_blk);
+        if(l2_tile>used+per_blk){
+          size_t fit=(l2_tile-used)/per_blk;
+          if(fit>8) fit=8;
+          if((int)fit>nblocks) fit=(size_t)nblocks;
+          if(fit>=2) b_tile=(int)fit;
+        }
+      }
+    }
+    float *tdr=NULL,*tdi=NULL;
+    const int cap_slots=(!use_fb && b_tile>1) ? ap_corr_tile_slots(p->fft,b_tile,&tdr,&tdi) : 0;
+    const int step_g=use_fb ? W_fb : (cap_slots>=2 ? (cap_slots<b_tile ? cap_slots : b_tile) : 1);
+    const float inv=1.0f/(float)n;
+    if(!use_fb && p->real_series && alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float)))
+      return -1;
+    for(int b0=0;b0<nblocks;){
+      const int g=nblocks-b0<step_g ? nblocks-b0 : step_g;
+      if(use_fb && forward_series_batch(p,fb,series,nseries,starts+b0,g)<0) return -1;
+      size_t d_start[AP_MAX_LANES],d_blo[AP_MAX_LANES],d_end[AP_MAX_LANES];
+      int scnt=0;
+      const int use_tile=(!use_fb && cap_slots>=g && g>1);
+      for(int d=0;d<g;d++){
+        const size_t start=starts[b0+d];
+        const size_t blo=bounds?bounds[2*(b0+d)]:lo, bhi=bounds?bounds[2*(b0+d)+1]:hi;
+        if(start>=nseries||blo>=nseries-start) continue;
+        float *dr_s=use_tile ? (tdr+(size_t)scnt*n) : p->dre;
+        float *di_s=use_tile ? (tdi+(size_t)scnt*n) : p->dim;
+        if(!use_tile){
+          if(p->qdok) p->qdok[0]=0;
+          if(p->qdxok) p->qdxok[0]=0;
+          if(p->alt_dready) p->alt_dready[0]=0;
+        }
+        if(use_fb){
+          ap_split_store_on(p->fft,p->bspec+(size_t)d*2*n,dr_s,di_s,n,0,p->n1,p->n2,p->w);
+        }else if(p->real_series){
+          size_t have=nseries-start; if(have>n) have=n;
+          ap_fft_forward_scaled(p->half_fft,series+start,have,1,inv,p->sfwd);
+          ap_real_split_on(p->fft,p->sfwd,p->rtw,n,p->sspec);
+          ap_split_store_on(p->fft,p->sspec,dr_s,di_s,n,0,p->n1,p->n2,p->w);
+        }else{
+          size_t have=nseries-start; if(have>n) have=n;
+          ap_fft_forward_scaled_gm(p->fft,series+2*start,2*have,1,inv,dr_s,di_s,p->scratch);
+        }
+        if(!use_tile){
+          const size_t end=bhi<nseries-start?bhi:nseries-start;
+          for(int t=0;t<nt;){
+            int kt=nt-t;
+            if(kt>kt_step) kt=kt_step;
+            if(ap_corr_prod_window_multi(p->fft,dr_s,di_s,
+                                         p->tre+(size_t)(t0+t)*n,p->tim+(size_t)(t0+t)*n,
+                                         n,kt,blo,end,
+                                         out+2*((size_t)t*nseries+start+blo),
+                                         2*nseries,p->scratch,stream))
+              return -1;
+            t+=kt;
+          }
+        }else{
+          d_start[scnt]=start;
+          d_blo[scnt]=blo;
+          d_end[scnt]=bhi<nseries-start?bhi:nseries-start;
+          scnt++;
+        }
+      }
+      if(use_tile && scnt>0){
+        for(int t=0;t<nt;){
+          int kt=nt-t;
+          if(kt>kt_step) kt=kt_step;
+          for(int s=0;s<scnt;s++){
+            if(ap_corr_prod_window_multi(p->fft,tdr+(size_t)s*n,tdi+(size_t)s*n,
+                                         p->tre+(size_t)(t0+t)*n,p->tim+(size_t)(t0+t)*n,
+                                         n,kt,d_blo[s],d_end[s],
+                                         out+2*((size_t)t*nseries+d_start[s]+d_blo[s]),
+                                         2*nseries,p->scratch,stream))
+              return -1;
+          }
+          t+=kt;
+        }
+      }
+      b0+=g;
+    }
+#if defined(__x86_64__) || defined(__i386__)
+    if(stream) _mm_sfence();
+#endif
+    return 0;
+  }
   /* Keep each large block's spectrum (Dr, Di) in L2 across t = 0..nt-1 rather than
      transforming p->nd blocks upfront and evicting earlier slots before correlation. */
   const int max_g=use_fb ? W_fb : ((!W && 2*n*sizeof(float)>=65536) ? 1 : p->nd);
