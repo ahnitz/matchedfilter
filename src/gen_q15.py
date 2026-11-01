@@ -22,7 +22,55 @@ def q15(v):
     return max(-32767, min(32767, int(round(v * 32768.0))))
 
 
-class QGen(SRGen):
+class QScheduleMixin:
+    """Register-conscious split-radix schedule: evaluate U(n/2) first while 0 outer vectors
+    are live (so n=8 fits in 16 registers and n=16 fits in 32 registers), then Zc(n/4) -> t1,
+    then Zp(n/4), draining live vectors monotonically during the butterfly combine. At the
+    root (sink_fn != None), emit each output store or window-maximum reduction immediately
+    instead of holding all 2*n output vectors live until the end."""
+    def rec(s, idxs, sink_fn=None):
+        n = len(idxs)
+        if n == 1:
+            return [s.load(idxs[0])]
+        if n == 2:
+            a = s.load(idxs[0])
+            b = s.load(idxs[1])
+            out = [s.add(a, b), s.sub(a, b)]
+            if sink_fn is not None:
+                sink_fn(0, out[0])
+                sink_fn(1, out[1])
+                return None
+            return out
+        q = n // 4
+        U = s.rec(idxs[0::2])
+        Zc = s.rec(idxs[1::4])
+        t1 = [s.twmul(Zc[k], k, n) for k in range(q)]
+        Zp = s.rec(idxs[3::4])
+        if sink_fn is not None:
+            for k in range(q):
+                t2 = s.twmul(Zp[k], 3 * k, n)
+                su = s.add(t1[k], t2)
+                df = s.sub(t1[k], t2)
+                sink_fn(k, s.add(U[k], su))
+                sink_fn(k + 2 * q, s.sub(U[k], su))
+                mdf = s.mi(df)
+                sink_fn(k + q, s.add(U[k + q], mdf))
+                sink_fn(k + 3 * q, s.sub(U[k + q], mdf))
+            return None
+        X = [None] * n
+        for k in range(q):
+            t2 = s.twmul(Zp[k], 3 * k, n)
+            su = s.add(t1[k], t2)
+            df = s.sub(t1[k], t2)
+            X[k] = s.add(U[k], su)
+            X[k + 2 * q] = s.sub(U[k], su)
+            mdf = s.mi(df)
+            X[k + q] = s.add(U[k + q], mdf)
+            X[k + 3 * q] = s.sub(U[k + q], mdf)
+        return X
+
+
+class QGen(QScheduleMixin, SRGen):
     def const(s, c, v):
         key = "%d" % q15(v)
         if key not in s.consts:
@@ -86,7 +134,7 @@ class QGen(SRGen):
         return o
 
 
-class QGenClassic(SRGen):
+class QGenClassic(QScheduleMixin, SRGen):
     """The separate-multiply form (Q_ADD/Q_SUB of Q_MULs), emitted for every target
     without a fused rounding multiply-accumulate: its text, and so its code, is unchanged."""
     def const(s, c, v):
@@ -166,15 +214,20 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
     the templates' layout and stride) through Q_DLOAD, templates from two template groups
     (the second TW further) through Q_TLOAD, with index vectors dix/tix (q15-inl.h)."""
     g = (QGen if fused else QGenClassic)(n, name, tw, False, prod)
-    X = g.rec(list(range(n)))
-    for k in range(n):
+    acc_toggle = [0]
+
+    def emit_sink(k, xk):
         if maxout:
+            acc = acc_toggle[0]
+            acc_toggle[0] ^= 1
             condition = "" if max_interior and max_interior[0] <= k < max_interior[1] else (
                 "if(%d>=lo && %d<hi) " % (k, k))
             g.emit(condition + "M%d=hn::Max(M%d,hn::SaturatedAdd(Q_MUL(%s,%s),Q_MUL(%s,%s)));"
-                   % (k & 1, k & 1, X[k][0], X[k][0], X[k][1], X[k][1]))
+                   % (acc, acc, xk[0], xk[0], xk[1], xk[1]))
         else:
-            g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, X[k][0], k, X[k][1]))
+            g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, xk[0], k, xk[1]))
+
+    g.rec(list(range(n)), sink_fn=emit_sink)
     if maxout:
         g.emit("mx[0]=M0; mx[1]=M1;")
     body = fold_negations("\n".join(g.L))
@@ -187,7 +240,7 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
     if perm:
         body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\]\)", r"Q_DLOAD(dr+TS*\1)", body)
         body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\+1\]\)", r"Q_DLOAD(di+TS*\1)", body)
-        body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\+2\]\)", r"Q_SUB(Z,Q_DLOAD(di+TS*\1))", body)
+        body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\+2\]\)", r"Q_SUB(Z,dI\1)", body)
         body = re.sub(r"Q_LOADU\((t[ri]\+TS\*\d+)\)", r"Q_TLOAD(\1)", body)
         assert "dq[" not in body and "Q_LOADU(t" not in body
     cdefs = "\n".join("  const vq %s=Q_SET1(%s);" % (v, k) for k, v in g.consts.items())
@@ -233,6 +286,9 @@ if __name__ == "__main__":
         if nn == 16:
             out.append(build_q(nn, "qsr16_twmax_middle", tw=True, maxout=True,
                                max_interior=(2, 14)))
+        if nn == 32:
+            out.append(build_q(nn, "qsr32_twmax_middle", tw=True, maxout=True,
+                               max_interior=(4, 28)))
     out.append("#else")
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=False))
@@ -242,6 +298,9 @@ if __name__ == "__main__":
         if nn == 16:
             out.append(build_q(nn, "qsr16_twmax_middle", tw=True, fused=False,
                                maxout=True, max_interior=(2, 14)))
+        if nn == 32:
+            out.append(build_q(nn, "qsr32_twmax_middle", tw=True, fused=False,
+                               maxout=True, max_interior=(4, 28)))
     out.append("#endif")
     out.append("#if AP_Q15_TAIL")
     for nn in (8, 16, 32):

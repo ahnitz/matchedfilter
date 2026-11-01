@@ -1547,10 +1547,13 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_real_batch(void *vp, const float *con
         v_deint(srcs[l] + 2 * j0, &a, &b);
         rr[l] = V_MUL(a, vs);
         ri[l] = V_MUL(b, vs);
-      } else if (st == 2 && 2 * (j0 + W) < hv) {
+      } else if (st == 2 && 2 * (j0 + W) <= hv) {
         vf a0, b0, a1, b1;
         v_deint(srcs[l] + 4 * j0, &a0, &b0);
-        v_deint(srcs[l] + 4 * j0 + 2 * W, &a1, &b1);
+        if (__builtin_expect(2 * (j0 + W) < hv, 1))
+          v_deint(srcs[l] + 4 * j0 + 2 * W, &a1, &b1);
+        else
+          v_deint(srcs[l] + 4 * j0 + 2 * W - 1, &b1, &a1);
         v_deint_vec(V_MUL(a0, vs), V_MUL(a1, vs), &rr[l], &ri[l]);
       } else if (2 * j0 >= hv) {
         rr[l] = vz;
@@ -1580,8 +1583,97 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_real_batch(void *vp, const float *con
     }
   }
   small_efft(p);
-  /* Vertical real_split across AP_W blocks: k = 0 (DC & Nyquist), k = 1 .. q - 1 paired with
-     r = h - k, and k = q. */
+  /* Vertical real_split across AP_W blocks: when h >= 2*W, fuse split + transpose in paired
+     W-bin chunks (k0 and r0 = h - k0 - W) so the h-vector sR/sI round-trip stays in L1D/regs. */
+  if (h >= 2 * W) {
+    vf carry_r, carry_i, nyq_v;
+    {
+      const int e0 = eidx(&p->ea, 0);
+      const vf z0r = p->bR[e0], z0i = p->bI[e0];
+      carry_r = V_ADD(z0r, z0i);
+      carry_i = vz;
+      nyq_v = V_SUB(z0r, z0i);
+    }
+    for (size_t k0 = 0; k0 < q; k0 += W) {
+      const size_t r0 = h - k0 - W;
+      vf loR[AP_W], loI[AP_W], hiR[AP_W], hiI[AP_W], or_[AP_W], oi[AP_W];
+      loR[0] = carry_r;
+      loI[0] = carry_i;
+      for (size_t u = 1; u < W; u++) {
+        const size_t k = k0 + u, r = h - k;
+        const int ek = eidx(&p->ea, (int)k), er_idx = eidx(&p->ea, (int)r);
+        const vf zr = p->bR[ek], zi = p->bI[ek];
+        const vf rr = p->bR[er_idx], ri = p->bI[er_idx];
+        const vf er = V_MUL(half, V_ADD(zr, rr));
+        const vf ei = V_MUL(half, V_SUB(zi, ri));
+        const vf orr = V_MUL(half, V_ADD(zi, ri));
+        const vf oii = V_MUL(half, V_SUB(rr, zr));
+        const vf ck = V_SET1(rtw[2 * k]), sk = V_SET1(rtw[2 * k + 1]);
+        loR[u] = V_ADD(er, V_FMADD(orr, ck, V_MUL(oii, sk)));
+        loI[u] = V_ADD(ei, V_FMSUB(oii, ck, V_MUL(orr, sk)));
+        const vf n_ei = V_MUL(half, V_SUB(ri, zi));
+        const vf n_oi = V_MUL(half, V_SUB(zr, rr));
+        const vf cr = V_SET1(rtw[2 * r]), sr = V_SET1(rtw[2 * r + 1]);
+        hiR[W - u] = V_ADD(er, V_FMADD(orr, cr, V_MUL(n_oi, sr)));
+        hiI[W - u] = V_ADD(n_ei, V_FMSUB(n_oi, cr, V_MUL(orr, sr)));
+      }
+      if (k0 + W < q) {
+        const size_t k = k0 + W, r = r0;
+        const int ek = eidx(&p->ea, (int)k), er_idx = eidx(&p->ea, (int)r);
+        const vf zr = p->bR[ek], zi = p->bI[ek];
+        const vf rr = p->bR[er_idx], ri = p->bI[er_idx];
+        const vf er = V_MUL(half, V_ADD(zr, rr));
+        const vf ei = V_MUL(half, V_SUB(zi, ri));
+        const vf orr = V_MUL(half, V_ADD(zi, ri));
+        const vf oii = V_MUL(half, V_SUB(rr, zr));
+        const vf ck = V_SET1(rtw[2 * k]), sk = V_SET1(rtw[2 * k + 1]);
+        carry_r = V_ADD(er, V_FMADD(orr, ck, V_MUL(oii, sk)));
+        carry_i = V_ADD(ei, V_FMSUB(oii, ck, V_MUL(orr, sk)));
+        const vf n_ei = V_MUL(half, V_SUB(ri, zi));
+        const vf n_oi = V_MUL(half, V_SUB(zr, rr));
+        const vf cr = V_SET1(rtw[2 * r]), sr = V_SET1(rtw[2 * r + 1]);
+        hiR[0] = V_ADD(er, V_FMADD(orr, cr, V_MUL(n_oi, sr)));
+        hiI[0] = V_ADD(n_ei, V_FMSUB(n_oi, cr, V_MUL(orr, sr)));
+      } else {
+        const int eq = eidx(&p->ea, (int)q);
+        const vf zr = p->bR[eq], zi = p->bI[eq];
+        const vf er = V_MUL(half, V_ADD(zr, zr));
+        const vf orr = V_MUL(half, V_ADD(zi, zi));
+        const vf cq = V_SET1(rtw[2 * q]), sq = V_SET1(rtw[2 * q + 1]);
+        hiR[0] = V_ADD(er, V_FMADD(orr, cq, V_MUL(vz, sq)));
+        hiI[0] = V_ADD(vz, V_FMSUB(vz, cq, V_MUL(orr, sq)));
+      }
+      V_TRANSPOSE(loR, or_);
+      V_TRANSPOSE(loI, oi);
+      for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
+      if (mirror) {
+        if (k0 > 0) {
+          for (int l = 0; l < cnt; l++)
+            v_inter(outs[l] + 2 * (n - k0 - W + 1), v_reverse(or_[l]), V_XOR(v_reverse(oi[l]), sg));
+        } else {
+          for (int l = 0; l < cnt; l++)
+            for (size_t u = 1; u < W; u++) {
+              outs[l][2 * (n - u)] = outs[l][2 * u];
+              outs[l][2 * (n - u) + 1] = -outs[l][2 * u + 1];
+            }
+        }
+      }
+      V_TRANSPOSE(hiR, or_);
+      V_TRANSPOSE(hiI, oi);
+      for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * r0, or_[l], oi[l]);
+      if (mirror) {
+        for (int l = 0; l < cnt; l++)
+          v_inter(outs[l] + 2 * (n - r0 - W + 1), v_reverse(or_[l]), V_XOR(v_reverse(oi[l]), sg));
+      }
+    }
+    float nyq[AP_W];
+    V_STOREU(nyq, nyq_v);
+    for (int l = 0; l < cnt; l++) {
+      outs[l][2 * h] = nyq[l];
+      outs[l][2 * h + 1] = 0.0f;
+    }
+    return 0;
+  }
   {
     const int e0 = eidx(&p->ea, 0);
     const vf z0r = p->bR[e0], z0i = p->bI[e0];
