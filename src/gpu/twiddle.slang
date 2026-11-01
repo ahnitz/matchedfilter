@@ -24,12 +24,14 @@
 [[vk::constant_id(80)]] const uint mfCoarseTwt = 1;
 #elif defined(MF_CUDA)
 static const uint mfCoarseTwt = 1;
-// The data stride and data scale stay build-time (Vulkan's constants 75 and 79): read from a
-// module __constant__ instead, the refine and tier kernels ran 12-39% slower on an L40S (the
-// row-index arithmetic of the unrolled loops is no longer a compile-time power of two). A
-// CUDA host therefore feeds the tiers packed bands (pack_coarse), not the spectra in place.
-static const uint mfDataStride = 0;
-static const uint mfDataScaleBits = 0x3f800000u;
+// Row stride and fp16 coarse data scale (Vulkan's constants 75 and 79): passed as uniform
+// entry parameters on fusedTierB and refineListedBounded so CUDA reads spectra and band
+// buffers in place (inplace_feed) while keeping per-shape CUDA graphs immutable. Entries
+// that never assign them fold these thread-local defaults to constants.
+static uint _cudaDataStride = 0u;
+static uint _cudaDataScaleBits = 0x3f800000u;
+#define mfDataStride _cudaDataStride
+#define mfDataScaleBits _cudaDataScaleBits
 // Accurate trig stays a build-time 0: CUDA builds without fast math, so its sin/cos are
 // already the accurate ones (a runtime switch changed how NVRTC compiled them, and the
 // two-stage transform's results with it).

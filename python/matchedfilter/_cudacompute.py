@@ -539,9 +539,10 @@ class _CudaList:
     built when it is recorded; an Arg is a parameter whose value _x_run sets (cuLaunchKernel
     copies them at launch, so the next run may change it while this one is in flight).
 
-    A kernel is (function, threads, leading buffers, trailing buffers): its first buffers,
-    then its uniforms, then -- the per-row window table (tierb.slang ROWWIN_PARAM) -- the
-    trailing ones, null where the caller binds none."""
+    A kernel is (function, threads, leading buffers, trailing buffers[, extra words]): its
+    first buffers, then its uniforms, then -- the per-row window table (tierb.slang
+    ROWWIN_PARAM) -- the trailing ones, null where the caller binds none, and any trailing
+    per-kernel specialization words (CUDA data stride and fp16 scale)."""
 
     def __init__(self, ctx, label):
         self.ctx, self.label, self.ops, self.args = ctx, label, [], []
@@ -554,6 +555,7 @@ class _CudaList:
         fn, wg = kernel[0], kernel[1]
         lead = kernel[2] if len(kernel) > 2 else len(buffers)
         trail = kernel[3] if len(kernel) > 3 else 0
+        extra = kernel[4] if len(kernel) > 4 else ()
         offs = offsets or [0] * len(buffers)
         fields = []                # (struct format, values, Arg slot or None, parameters)
 
@@ -576,6 +578,8 @@ class _CudaList:
         for b, o in rest:
             pointer(b, o)
         fields += [("Q", (0,), None, 1)] * max(0, trail - len(rest))   # no row-window table
+        for x in extra:
+            fields.append(("I", (int(x) & 0xFFFFFFFF,), None, 1))
         places, params, end = [], [], 0
         for fmt, _, _, count in fields:
             size = struct.calcsize(fmt)
@@ -1020,10 +1024,10 @@ class Context(Executor, InputUploads):
     storage_offset_alignment = 16
     #: Shared allocations are managed memory, which migrates between host and device.
     stage_host_inputs = True
-    #: Kernels are prebuilt PTX with their row length fixed: a stride read from a module
-    #: constant made the refine and tier kernels 12-39% slower on an L40S (twiddle.slang), so
-    #: the tiers read packed bands (_gpuhier "pack" feed) rather than the spectra in place.
-    inplace_feed = False
+    #: Tiers read full or band-only fp32 spectra directly in place via per-launch data stride
+    #: and fp16 scale entry parameters (twiddle.slang), matching Vulkan and Metal without
+    #: packCoarse or intermediate band allocations.
+    inplace_feed = True
     #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
     kernel_family = "cuda"
     #: The warp.
@@ -1031,19 +1035,20 @@ class Context(Executor, InputUploads):
 
     def _x_kernel(self, name, n, consts=None):
         c = consts or {}
-        if c.get("stride"):
-            raise UnsupportedSize("CUDA kernels read their own row length (inplace_feed)")
+        stride = int(c.get("stride") or 0)
+        scale = (int(np.float32(2.0 ** int(c["scale"])).view(np.uint32))
+                 if c.get("scale") else 0x3F800000)
         if name in ("peaks", "peaks1", "gate"):
             fn, wg = self.pipeline(n, "fusedTierB", one_bin=(name == "peaks1"))
-            return fn, wg, 4, 1
+            return fn, wg, 4, 1, (stride, scale)
         if name == "coarse":
             fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
                                    twt=bool(c.get("twt")))
-            return fn, wg, 4, 1
+            return fn, wg, 4, 1, (stride, scale)
         if name in ("tier", "tier1", "refine", "refine1"):
             fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"),
                                    gate=bool(c.get("gate")))
-            return fn, wg, 6, 1
+            return fn, wg, 6, 1, (stride, scale)
         if name == "refine_td":
             fn, wg = self.pipeline(n, "refineDirect")
             return fn, wg, 11, 1
