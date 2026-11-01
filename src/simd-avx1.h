@@ -4,9 +4,9 @@
  * Highway has no AVX1 target (its x86 targets go SSE4 -> AVX2), so these CPUs ran the 4-lane
  * SSE4 kernels. The float kernels (balanced-inl.h, elemfft-inl.h, product-inl.h and the
  * generated codelets) speak only through the macros below, so this header gives them 8 lanes
- * without Highway; kernel_avx1.cc compiles them with it (AP_SIMD_AVX1). The integer kernels
- * (Q15 screen) and the hn::-based helpers (td, rsplit) stay with the SSE4 backend: AVX1 has no
- * 256-bit integer arithmetic to give them.
+ * without Highway; kernel_avx1.cc compiles them with it (AP_SIMD_AVX1), alongside VEX-encoded
+ * 128-bit integer Q15 screen kernels (q15-inl.h) so AVX1 screens without AVX<->SSE transition
+ * penalties. The hn::-based float helpers (td, rsplit) stay with the SSE4 backend.
  *
  * Arithmetic is the SSE4 path's, operation for operation: MulAdd is a multiply then an add,
  * as Highway's non-FMA targets do it (mul * x + add, add - mul * x, mul * x - sub,

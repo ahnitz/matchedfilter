@@ -1,7 +1,8 @@
 /* Q15 coarse screen: the pair-batched coarse transform in int16 fixed point.
  *
  * What it computes.  For QW (data, template) pairs at once -- lanes are
- * templates, twice as many as the float path's at the same vector width --
+ * templates, twice as many as the float path's at the same vector width (or 8 / 16
+ * VEX-encoded int16 lanes on AVX1, which has no 256-bit integer ALU) --
  * the conjugated four-step transform conj(Z_k) = sum_j (d_j * t_j) exp(+2*pi*i*j*k/N)
  * (preserving every lag index k and magnitude |Z_k|^2 of the float pair path,
  * while forming d*t directly from (dr, di) without a negated -di data stream),
@@ -35,8 +36,8 @@
 #define AP_Q15_TW32_ONCE_
 namespace ap {
 /* Duplicated int16->int32 four-step twiddle table (w | (w << 16)): broadcasting 32-bit
-   dwords emits vpbroadcastd (one pure load uop on Haswell/Broadwell, zero Port-5 shuffle
-   uops) instead of vpbroadcastw (load + Port-5 shuffle). */
+   dwords emits vpbroadcastd on AVX2 or vbroadcastss on AVX1 (one pure load uop on Sandy/Ivy
+   Bridge and Haswell/Broadwell, zero Port-5 shuffle uops) instead of multi-uop word shuffles. */
 struct q15_twiddles32 { int32_t re[1024], im[1024]; };
 static q15_twiddles32 q15_tw32_tab[5];
 static pthread_once_t q15_tw32_once = PTHREAD_ONCE_INIT;
@@ -72,44 +73,315 @@ HWY_BEFORE_NAMESPACE();
 namespace ap {
 namespace HWY_NAMESPACE {
 
+#undef Q_ZERO
+#undef Q_SET1
+#undef Q_DUP32
+#undef Q_TWLOAD
+#undef Q_LOADU
+#undef Q_STOREU
+#undef Q_ADD
+#undef Q_SUB
+#undef Q_ADDS
+#undef Q_MUL
+#undef Q_MAX
+#undef Q_GT
+#undef Q_LT
+#undef Q_EQ
+#undef Q_GE
+#undef Q_MASK_OR
+#undef Q_MASK_AND
+#undef Q_SEL
+#undef Q_DLOAD
+#undef Q_TLOAD
+#undef AP_Q15_USE_TW32
+#undef AP_Q15_FUSED
+#undef Q_MLAH
+#undef Q_MLSH
+#undef AP_Q15_TAIL
+
+#if defined(AP_SIMD_AVX1)
+/* VEX-encoded 128-bit integer SIMD for Sandy/Ivy Bridge (-mavx): 3-operand VEX instructions
+   with zero AVX<->SSE transition penalties and single-uop vbroadcastss 32-bit loads.
+   AP_AVX1_QW selects 8 lanes (single __m128i; measured faster across b=512, 1024 and sparse
+   gather due to ~3x lower xmm stack spills per pair) or 16 lanes (paired __m128i lo, hi). */
+#ifndef AP_AVX1_QW
+#define AP_AVX1_QW 8
+#endif
+static_assert(AP_AVX1_QW == 8 || AP_AVX1_QW == 16, "AP_AVX1_QW must be 8 or 16");
+constexpr int AP_QW = AP_AVX1_QW;
+#define AP_Q15_USE_TW32 1
+typedef int32_t qtw_elem;
+typedef q15_twiddles32 qtw_table;
+
+static HWY_INLINE __m128i avx1_bcast32(const int32_t &x){
+  return _mm_castps_si128(_mm_broadcast_ss((const float *)&x));
+}
+
+#if AP_AVX1_QW == 8
+struct vq { __m128i raw; };
+typedef vq qmask;
+#define Q_ZERO()         vq{_mm_setzero_si128()}
+#define Q_SET1(x)        vq{_mm_set1_epi16((int16_t)(x))}
+#define Q_DUP32(x)       vq{avx1_bcast32(x)}
+#define Q_TWLOAD(x)      Q_DUP32(x)
+#define Q_LOADU(p)       vq{_mm_loadu_si128((const __m128i *)(p))}
+#define Q_STOREU(p, v)   _mm_storeu_si128((__m128i *)(p), (v).raw)
+#define Q_ADD(a, b)      vq{_mm_add_epi16((a).raw, (b).raw)}
+#define Q_SUB(a, b)      vq{_mm_sub_epi16((a).raw, (b).raw)}
+#define Q_ADDS(a, b)     vq{_mm_adds_epi16((a).raw, (b).raw)}
+#define Q_MUL(a, b)      vq{_mm_mulhrs_epi16((a).raw, (b).raw)}
+#define Q_MAX(a, b)      vq{_mm_max_epi16((a).raw, (b).raw)}
+#define Q_GT(a, b)       qmask{_mm_cmpgt_epi16((a).raw, (b).raw)}
+#define Q_LT(a, b)       qmask{_mm_cmpgt_epi16((b).raw, (a).raw)}
+#define Q_EQ(a, b)       qmask{_mm_cmpeq_epi16((a).raw, (b).raw)}
+static HWY_INLINE qmask q15_ge_avx1(vq a, vq b){
+  return qmask{_mm_cmpeq_epi16(_mm_max_epi16(a.raw, b.raw), a.raw)};
+}
+#define Q_GE(a, b)       q15_ge_avx1((a), (b))
+#define Q_MASK_OR(a, b)  qmask{_mm_or_si128((a).raw, (b).raw)}
+#define Q_MASK_AND(a, b) qmask{_mm_and_si128((a).raw, (b).raw)}
+#define Q_SEL(m, t, f)   vq{_mm_blendv_epi8((f).raw, (t).raw, (m).raw)}
+static HWY_INLINE uint64_t q15_mask_bits(qmask m){
+  return (uint64_t)(unsigned)_mm_movemask_epi8(_mm_packs_epi16(m.raw, _mm_setzero_si128()));
+}
+
+struct ap_qidx_avx1 { __m128i s0, s1; };
+typedef const ap_qidx_avx1 *qidx;
+static HWY_INLINE void q15_make_dix_avx1(ap_qidx_avx1 *out, const int16_t *dsel){
+  alignas(16) uint8_t b0[16];
+  for(int l = 0; l < 8; l++){
+    const uint8_t lo = (uint8_t)(2 * (dsel[l] & 7));
+    b0[2 * l] = lo; b0[2 * l + 1] = (uint8_t)(lo + 1);
+  }
+  out->s0 = _mm_load_si128((const __m128i *)b0);
+  out->s1 = _mm_setzero_si128();
+}
+static HWY_INLINE void q15_make_tix_avx1(ap_qidx_avx1 *out, const int16_t *tsel, long TW){
+  alignas(16) uint8_t b0[16], b1[16];
+  memset(b0, 0x80, 16); memset(b1, 0x80, 16);
+  for(int l = 0; l < 8; l++){
+    const int raw = tsel[l] & 15;
+    const int idx = TW ? raw : (raw & 7);
+    const uint8_t lo = (uint8_t)(2 * (idx & 7)), hi = (uint8_t)(lo + 1);
+    if((idx >> 3) == 0){ b0[2 * l] = lo; b0[2 * l + 1] = hi; }
+    else               { b1[2 * l] = lo; b1[2 * l + 1] = hi; }
+  }
+  out->s0 = _mm_load_si128((const __m128i *)b0);
+  out->s1 = _mm_load_si128((const __m128i *)b1);
+}
+static HWY_INLINE vq q15_dload_avx1(const int16_t *p, const ap_qidx_avx1 *ix){
+  return vq{_mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)p), ix->s0)};
+}
+static HWY_INLINE vq q15_tload_avx1(const int16_t *p, long TW, const ap_qidx_avx1 *ix){
+  const __m128i v0 = _mm_loadu_si128((const __m128i *)p);
+  const __m128i v1 = _mm_loadu_si128((const __m128i *)(p + TW));
+  return vq{_mm_or_si128(_mm_shuffle_epi8(v0, ix->s0), _mm_shuffle_epi8(v1, ix->s1))};
+}
+#define Q_DLOAD(p) q15_dload_avx1((p), dix)
+#define Q_TLOAD(p) q15_tload_avx1((p), TW, tix)
+
+#define AP_Q15_TAIL 1
+template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
+  if(T == 4) return vq{_mm_castpd_si128(_mm_loaddup_pd((const double *)p))};
+  return vq{_mm_castps_si128(_mm_broadcast_ss((const float *)p))};
+}
+template<int T, long B> static HWY_INLINE vq q15_tile_data32(const int32_t *p){
+  constexpr long HB = B / 2;
+  if(T == 4) return vq{_mm_unpacklo_epi64(avx1_bcast32(p[0]), avx1_bcast32(p[HB]))};
+  return vq{_mm_setr_epi32(p[0], p[HB], p[2 * HB], p[3 * HB])};
+}
+template<int T, long B> static HWY_INLINE vq q15_tile_data16(const int16_t *p){
+  if(T == 4) return vq{_mm_unpacklo_epi64(_mm_set1_epi16(p[0]), _mm_set1_epi16(p[B]))};
+  const int32_t d0 = (int32_t)((uint32_t)(uint16_t)p[0] * 0x00010001u);
+  const int32_t d1 = (int32_t)((uint32_t)(uint16_t)p[B] * 0x00010001u);
+  const int32_t d2 = (int32_t)((uint32_t)(uint16_t)p[2 * B] * 0x00010001u);
+  const int32_t d3 = (int32_t)((uint32_t)(uint16_t)p[3 * B] * 0x00010001u);
+  return vq{_mm_setr_epi32(d0, d1, d2, d3)};
+}
+
+#else /* AP_AVX1_QW == 16 */
+struct vq { __m128i lo, hi; };
+typedef vq qmask;
+static HWY_INLINE vq avx1_dup32_16(const int32_t &x){
+  const __m128i b = avx1_bcast32(x);
+  return vq{b, b};
+}
+static HWY_INLINE vq avx1_set1_16(int16_t x){
+  const __m128i b = _mm_set1_epi16(x);
+  return vq{b, b};
+}
+static HWY_INLINE vq avx1_loadu_16(const int16_t *p){
+  return vq{_mm_loadu_si128((const __m128i *)p), _mm_loadu_si128((const __m128i *)(p + 8))};
+}
+static HWY_INLINE void avx1_storeu_16(int16_t *p, vq v){
+  _mm_storeu_si128((__m128i *)p, v.lo);
+  _mm_storeu_si128((__m128i *)(p + 8), v.hi);
+}
+static HWY_INLINE vq avx1_add_16(vq a, vq b){ return vq{_mm_add_epi16(a.lo, b.lo), _mm_add_epi16(a.hi, b.hi)}; }
+static HWY_INLINE vq avx1_sub_16(vq a, vq b){ return vq{_mm_sub_epi16(a.lo, b.lo), _mm_sub_epi16(a.hi, b.hi)}; }
+static HWY_INLINE vq avx1_adds_16(vq a, vq b){ return vq{_mm_adds_epi16(a.lo, b.lo), _mm_adds_epi16(a.hi, b.hi)}; }
+static HWY_INLINE vq avx1_mul_16(vq a, vq b){ return vq{_mm_mulhrs_epi16(a.lo, b.lo), _mm_mulhrs_epi16(a.hi, b.hi)}; }
+static HWY_INLINE vq avx1_max_16(vq a, vq b){ return vq{_mm_max_epi16(a.lo, b.lo), _mm_max_epi16(a.hi, b.hi)}; }
+static HWY_INLINE qmask avx1_gt_16(vq a, vq b){ return qmask{_mm_cmpgt_epi16(a.lo, b.lo), _mm_cmpgt_epi16(a.hi, b.hi)}; }
+static HWY_INLINE qmask avx1_eq_16(vq a, vq b){ return qmask{_mm_cmpeq_epi16(a.lo, b.lo), _mm_cmpeq_epi16(a.hi, b.hi)}; }
+static HWY_INLINE qmask avx1_ge_16(vq a, vq b){
+  return qmask{_mm_cmpeq_epi16(_mm_max_epi16(a.lo, b.lo), a.lo),
+               _mm_cmpeq_epi16(_mm_max_epi16(a.hi, b.hi), a.hi)};
+}
+static HWY_INLINE qmask avx1_or_16(qmask a, qmask b){ return qmask{_mm_or_si128(a.lo, b.lo), _mm_or_si128(a.hi, b.hi)}; }
+static HWY_INLINE qmask avx1_and_16(qmask a, qmask b){ return qmask{_mm_and_si128(a.lo, b.lo), _mm_and_si128(a.hi, b.hi)}; }
+static HWY_INLINE vq avx1_sel_16(qmask m, vq t, vq f){
+  return vq{_mm_blendv_epi8(f.lo, t.lo, m.lo), _mm_blendv_epi8(f.hi, t.hi, m.hi)};
+}
+static HWY_INLINE uint64_t q15_mask_bits(qmask m){
+  return (uint64_t)(unsigned)_mm_movemask_epi8(_mm_packs_epi16(m.lo, m.hi));
+}
+#define Q_ZERO()         vq{_mm_setzero_si128(), _mm_setzero_si128()}
+#define Q_SET1(x)        avx1_set1_16((int16_t)(x))
+#define Q_DUP32(x)       avx1_dup32_16(x)
+#define Q_TWLOAD(x)      Q_DUP32(x)
+#define Q_LOADU(p)       avx1_loadu_16((const int16_t *)(p))
+#define Q_STOREU(p, v)   avx1_storeu_16((int16_t *)(p), (v))
+#define Q_ADD(a, b)      avx1_add_16((a), (b))
+#define Q_SUB(a, b)      avx1_sub_16((a), (b))
+#define Q_ADDS(a, b)     avx1_adds_16((a), (b))
+#define Q_MUL(a, b)      avx1_mul_16((a), (b))
+#define Q_MAX(a, b)      avx1_max_16((a), (b))
+#define Q_GT(a, b)       avx1_gt_16((a), (b))
+#define Q_LT(a, b)       avx1_gt_16((b), (a))
+#define Q_EQ(a, b)       avx1_eq_16((a), (b))
+#define Q_GE(a, b)       avx1_ge_16((a), (b))
+#define Q_MASK_OR(a, b)  avx1_or_16((a), (b))
+#define Q_MASK_AND(a, b) avx1_and_16((a), (b))
+#define Q_SEL(m, t, f)   avx1_sel_16((m), (t), (f))
+
+struct ap_qidx_avx1 { __m128i lo[4], hi[4]; };
+typedef const ap_qidx_avx1 *qidx;
+static HWY_INLINE void q15_make_dix_avx1(ap_qidx_avx1 *out, const int16_t *dsel){
+  for(int h = 0; h < 2; h++){
+    alignas(16) uint8_t b0[16], b1[16];
+    memset(b0, 0x80, 16); memset(b1, 0x80, 16);
+    for(int l = 0; l < 8; l++){
+      const int idx = dsel[8 * h + l] & 15;
+      const uint8_t lo = (uint8_t)(2 * (idx & 7)), hi = (uint8_t)(lo + 1);
+      if((idx >> 3) == 0){ b0[2 * l] = lo; b0[2 * l + 1] = hi; }
+      else               { b1[2 * l] = lo; b1[2 * l + 1] = hi; }
+    }
+    if(h == 0){ out->lo[0] = _mm_load_si128((const __m128i *)b0); out->lo[1] = _mm_load_si128((const __m128i *)b1); }
+    else      { out->hi[0] = _mm_load_si128((const __m128i *)b0); out->hi[1] = _mm_load_si128((const __m128i *)b1); }
+  }
+}
+static HWY_INLINE void q15_make_tix_avx1(ap_qidx_avx1 *out, const int16_t *tsel, long TW){
+  for(int h = 0; h < 2; h++){
+    alignas(16) uint8_t b[4][16];
+    memset(b, 0x80, sizeof b);
+    for(int l = 0; l < 8; l++){
+      const int raw = tsel[8 * h + l] & 31;
+      const int idx = TW ? raw : (raw & 15);
+      const uint8_t lo = (uint8_t)(2 * (idx & 7)), hi = (uint8_t)(lo + 1);
+      b[idx >> 3][2 * l] = lo; b[idx >> 3][2 * l + 1] = hi;
+    }
+    for(int c = 0; c < 4; c++){
+      const __m128i m = _mm_load_si128((const __m128i *)b[c]);
+      if(h == 0) out->lo[c] = m; else out->hi[c] = m;
+    }
+  }
+}
+static HWY_INLINE vq q15_dload_avx1(const int16_t *p, const ap_qidx_avx1 *ix){
+  const __m128i v0 = _mm_loadu_si128((const __m128i *)p);
+  const __m128i v1 = _mm_loadu_si128((const __m128i *)(p + 8));
+  return vq{_mm_or_si128(_mm_shuffle_epi8(v0, ix->lo[0]), _mm_shuffle_epi8(v1, ix->lo[1])),
+            _mm_or_si128(_mm_shuffle_epi8(v0, ix->hi[0]), _mm_shuffle_epi8(v1, ix->hi[1]))};
+}
+static HWY_INLINE vq q15_tload_avx1(const int16_t *p, long TW, const ap_qidx_avx1 *ix){
+  const __m128i v0 = _mm_loadu_si128((const __m128i *)p);
+  const __m128i v1 = _mm_loadu_si128((const __m128i *)(p + 8));
+  const __m128i v2 = _mm_loadu_si128((const __m128i *)(p + TW));
+  const __m128i v3 = _mm_loadu_si128((const __m128i *)(p + TW + 8));
+  const __m128i lo = _mm_or_si128(_mm_or_si128(_mm_shuffle_epi8(v0, ix->lo[0]), _mm_shuffle_epi8(v1, ix->lo[1])),
+                                  _mm_or_si128(_mm_shuffle_epi8(v2, ix->lo[2]), _mm_shuffle_epi8(v3, ix->lo[3])));
+  const __m128i hi = _mm_or_si128(_mm_or_si128(_mm_shuffle_epi8(v0, ix->hi[0]), _mm_shuffle_epi8(v1, ix->hi[1])),
+                                  _mm_or_si128(_mm_shuffle_epi8(v2, ix->hi[2]), _mm_shuffle_epi8(v3, ix->hi[3])));
+  return vq{lo, hi};
+}
+#define Q_DLOAD(p) q15_dload_avx1((p), dix)
+#define Q_TLOAD(p) q15_tload_avx1((p), TW, tix)
+
+#define AP_Q15_TAIL 1
+template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
+  if(T == 8){
+    const __m128i v = _mm_loadu_si128((const __m128i *)p);
+    return vq{v, v};
+  }
+  const __m128i v = _mm_castpd_si128(_mm_loaddup_pd((const double *)p));
+  return vq{v, v};
+}
+template<int T, long B> static HWY_INLINE vq q15_tile_data32(const int32_t *p){
+  constexpr long HB = B / 2;
+  if(T == 8) return vq{avx1_bcast32(p[0]), avx1_bcast32(p[HB])};
+  return vq{_mm_unpacklo_epi64(avx1_bcast32(p[0]), avx1_bcast32(p[HB])),
+            _mm_unpacklo_epi64(avx1_bcast32(p[2 * HB]), avx1_bcast32(p[3 * HB]))};
+}
+template<int T, long B> static HWY_INLINE vq q15_tile_data16(const int16_t *p){
+  if(T == 8) return vq{_mm_set1_epi16(p[0]), _mm_set1_epi16(p[B])};
+  return vq{_mm_unpacklo_epi64(_mm_set1_epi16(p[0]), _mm_set1_epi16(p[B])),
+            _mm_unpacklo_epi64(_mm_set1_epi16(p[2 * B]), _mm_set1_epi16(p[3 * B]))};
+}
+#endif /* AP_AVX1_QW */
+
+#define AP_Q15_FUSED 0
+#define Q_MLAH(acc, a, b) Q_ADD((acc), Q_MUL((a), (b)))
+#define Q_MLSH(acc, a, b) Q_SUB((acc), Q_MUL((a), (b)))
+
+#else /* Highway targets */
+
 using ap_qtag = hn::CappedTag<int16_t, 2 * AP_W>;
 using ap_qditag = hn::Repartition<int32_t, ap_qtag>;
 constexpr ap_qtag AP_DQ{};
 constexpr ap_qditag AP_QDI{};
 constexpr int AP_QW = (int)HWY_MAX_LANES_D(ap_qtag);
 typedef hn::Vec<ap_qtag> vq;
+typedef hn::Mask<ap_qtag> qmask;
 
-#undef Q_ZERO
-#undef Q_SET1
-#undef Q_DUP32
-#undef Q_TWLOAD
-#undef Q_LOADU
-#undef Q_ADD
-#undef Q_SUB
-#undef Q_MUL
-#define Q_ZERO()       hn::Zero(AP_DQ)
-#define Q_SET1(x)      hn::Set(AP_DQ, (int16_t)(x))
-#define Q_DUP32(x)     hn::BitCast(AP_DQ, hn::Set(AP_QDI, (int32_t)(x)))
-#define Q_LOADU(p)     hn::LoadU(AP_DQ, (const int16_t *)(p))
-#define Q_ADD(a, b)    hn::Add((a), (b))
-#define Q_SUB(a, b)    hn::Sub((a), (b))
-#define Q_MUL(a, b)    hn::MulFixedPoint15((a), (b))
+#define Q_ZERO()         hn::Zero(AP_DQ)
+#define Q_SET1(x)        hn::Set(AP_DQ, (int16_t)(x))
+#define Q_DUP32(x)       hn::BitCast(AP_DQ, hn::Set(AP_QDI, (int32_t)(x)))
+#define Q_LOADU(p)       hn::LoadU(AP_DQ, (const int16_t *)(p))
+#define Q_STOREU(p, v)   hn::StoreU((v), AP_DQ, (int16_t *)(p))
+#define Q_ADD(a, b)      hn::Add((a), (b))
+#define Q_SUB(a, b)      hn::Sub((a), (b))
+#define Q_ADDS(a, b)     hn::SaturatedAdd((a), (b))
+#define Q_MUL(a, b)      hn::MulFixedPoint15((a), (b))
+#define Q_MAX(a, b)      hn::Max((a), (b))
+#define Q_GT(a, b)       hn::Gt((a), (b))
+#define Q_LT(a, b)       hn::Lt((a), (b))
+#define Q_EQ(a, b)       hn::Eq((a), (b))
+#define Q_GE(a, b)       hn::Ge((a), (b))
+#define Q_MASK_OR(a, b)  hn::Or((a), (b))
+#define Q_MASK_AND(a, b) hn::And((a), (b))
+#define Q_SEL(m, t, f)   hn::IfThenElse((m), (t), (f))
+static HWY_INLINE uint64_t q15_mask_bits(qmask m){
+  uint64_t b = 0;
+  hn::StoreMaskBits(AP_DQ, m, (uint8_t *)&b);
+  return b;
+}
+
 #if HWY_ARCH_X86 && HWY_MAX_BYTES == 32
+#define AP_Q15_USE_TW32 1
 typedef int32_t qtw_elem;
 typedef q15_twiddles32 qtw_table;
-#define Q_TWLOAD(x)    Q_DUP32(x)
+#define Q_TWLOAD(x)      Q_DUP32(x)
 #else
+#define AP_Q15_USE_TW32 0
 typedef int16_t qtw_elem;
 typedef ap_q15_twiddles qtw_table;
-#define Q_TWLOAD(x)    Q_SET1(x)
+#define Q_TWLOAD(x)      Q_SET1(x)
 #endif
 
 /* Listed pairs (q15_screen_perm): each lane's operands are looked up in a vector of one element
    across QW data blocks (dix) and across two groups of QW templates (tix, the second group TW
    further on). On AVX2, precomputed vpshufb byte masks replace Highway's multi-instruction
    cross-lane int16 table lookup inside every codelet load. */
-#undef Q_DLOAD
-#undef Q_TLOAD
 #if HWY_TARGET == HWY_AVX2
 struct ap_qidx_avx2 { __m256i s0, s1, s2, s3; };
 typedef const ap_qidx_avx2 *qidx;
@@ -174,9 +446,6 @@ typedef hn::IndicesFromD<ap_qtag> qidx;
    screen's input range). Q_MLSH rounds -a*b/2^15 to nearest, so an exact tie goes the
    other way from Q_SUB(acc, Q_MUL(a, b)): still within 1/2 LSB, the per-multiply error the
    screen's margin is built on (q15.h). */
-#undef AP_Q15_FUSED
-#undef Q_MLAH
-#undef Q_MLSH
 #if HWY_ARCH_ARM_A64 && defined(__ARM_FEATURE_QRDMX) && \
     (HWY_TARGET == HWY_NEON || HWY_TARGET == HWY_NEON_BF16 || HWY_TARGET == HWY_NEON_WITHOUT_AES)
 static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int16 vector");
@@ -192,7 +461,6 @@ static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int1
 /* Tail tiles retain each lane's arithmetic and quantised operands. Only the
    product loads change: T templates are repeated for QW/T independent blocks
    (block b's data at + B*b int16s: B = 3*N, even for every supported N). */
-#undef AP_Q15_TAIL
 #if HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
 /* AVX2, 16 lanes: T = 8 (two blocks) or 4 (four blocks). */
 #define AP_Q15_TAIL 1
@@ -242,6 +510,8 @@ template<int T, long B> static HWY_INLINE vq q15_tile_data16(const int16_t *p){
 #else
 #define AP_Q15_TAIL 0
 #endif
+
+#endif /* AP_SIMD_AVX1 */
 
 }  // namespace HWY_NAMESPACE
 }  // namespace ap
@@ -298,7 +568,7 @@ static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *re
   }
 }
 
-#if !(HWY_ARCH_X86 && HWY_MAX_BYTES == 32)
+#if !AP_Q15_USE_TW32
 static HWY_NOINLINE void q15_tw16_init_slow(int *ready){
   (void)ap_q15_twiddle_table(64);
   __atomic_store_n(ready, 1, __ATOMIC_RELEASE);
@@ -307,7 +577,7 @@ static HWY_NOINLINE void q15_tw16_init_slow(int *ready){
 
 template<int IDX>
 static HWY_INLINE const qtw_table *q15_tw_fast(void){
-#if HWY_ARCH_X86 && HWY_MAX_BYTES == 32
+#if AP_Q15_USE_TW32
   if(__builtin_expect(!__atomic_load_n(&q15_tw32_ready, __ATOMIC_ACQUIRE), 0))
     q15_tw32_init_slow();
   return &q15_tw32_tab[IDX];
@@ -340,7 +610,8 @@ static HWY_NOINLINE int q15_finish_lag_n(const qtw_table *tw, vq *X, vq *Xi,
   constexpr size_t st = (size_t)(M1 + 1);
   /* Elect each lane's argmax lag k = k2 + M2*k1 over [ws, we), breaking ties to earliest lag.
      Fusing Pass 2's row transform with the row scan skips empty rows and reads xr/xi L1D-hot. */
-  vq m0 = Q_SET1(-1), m1 = Q_SET1(-1), ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
+  const vq vneg1 = Q_SET1(-1), vstep = Q_SET1(2 * M2);
+  vq m0 = vneg1, m1 = vneg1, ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
   const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
   for(size_t k2 = 0; k2 < (size_t)M2; k2++){
     const long lo = (long)((wso - k2) / (size_t)M2);
@@ -349,36 +620,36 @@ static HWY_NOINLINE int q15_finish_lag_n(const qtw_table *tw, vq *X, vq *Xi,
     vq *xr = X + k2 * st, *xi = Xi + k2 * st;
     qcodelet_tw(M1, xr, xi, 1, tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1);
     long k1 = lo;
+    vq j0 = Q_SET1((int)k2 + M2 * (int)lo);
+    vq j1 = Q_SET1((int)k2 + M2 * (int)(lo + 1));
     for(; k1 + 1 < hi; k1 += 2){
       const vq a = xr[k1], b = xi[k1], c = xr[k1 + 1], d = xi[k1 + 1];
-      const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
-      const vq s1 = hn::SaturatedAdd(Q_MUL(c, c), Q_MUL(d, d));
-      const vq j0 = Q_SET1((int)k2 + M2 * (int)k1), j1 = Q_SET1((int)k2 + M2 * (int)(k1 + 1));
-      const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
-      const auto u1 = hn::Or(hn::Gt(s1, m1), hn::And(hn::Eq(s1, m1), hn::Lt(j1, ix1)));
-      m0 = hn::Max(m0, s0);
-      m1 = hn::Max(m1, s1);
-      ix0 = hn::IfThenElse(u0, j0, ix0);
-      ix1 = hn::IfThenElse(u1, j1, ix1);
+      const vq s0 = Q_ADDS(Q_MUL(a, a), Q_MUL(b, b));
+      const vq s1 = Q_ADDS(Q_MUL(c, c), Q_MUL(d, d));
+      const qmask u0 = Q_MASK_OR(Q_GT(s0, m0), Q_MASK_AND(Q_EQ(s0, m0), Q_LT(j0, ix0)));
+      const qmask u1 = Q_MASK_OR(Q_GT(s1, m1), Q_MASK_AND(Q_EQ(s1, m1), Q_LT(j1, ix1)));
+      m0 = Q_MAX(m0, s0);
+      m1 = Q_MAX(m1, s1);
+      ix0 = Q_SEL(u0, j0, ix0);
+      ix1 = Q_SEL(u1, j1, ix1);
+      j0 = Q_ADD(j0, vstep);
+      j1 = Q_ADD(j1, vstep);
     }
     if(k1 < hi){
       const vq a = xr[k1], b = xi[k1];
-      const vq s0 = hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b));
-      const vq j0 = Q_SET1((int)k2 + M2 * (int)k1);
-      const auto u0 = hn::Or(hn::Gt(s0, m0), hn::And(hn::Eq(s0, m0), hn::Lt(j0, ix0)));
-      m0 = hn::Max(m0, s0);
-      ix0 = hn::IfThenElse(u0, j0, ix0);
+      const vq s0 = Q_ADDS(Q_MUL(a, a), Q_MUL(b, b));
+      const qmask u0 = Q_MASK_OR(Q_GT(s0, m0), Q_MASK_AND(Q_EQ(s0, m0), Q_LT(j0, ix0)));
+      m0 = Q_MAX(m0, s0);
+      ix0 = Q_SEL(u0, j0, ix0);
     }
   }
-  const auto u1 = hn::Or(hn::Gt(m1, m0), hn::And(hn::Eq(m1, m0), hn::Lt(ix1, ix0)));
-  const vq mx_raw = hn::Max(m0, m1);
-  const vq ix = hn::IfThenElse(hn::Ge(mx_raw, Q_ZERO()), hn::IfThenElse(u1, ix1, ix0), Q_SET1(-1));
-  hn::StoreU(ix, AP_DQ, laneidx);
-  const vq mx = hn::Max(mx_raw, Q_ZERO());
-  if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
-  uint64_t b = 0;
-  hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&b);
-  *bits = b;
+  const qmask u1 = Q_MASK_OR(Q_GT(m1, m0), Q_MASK_AND(Q_EQ(m1, m0), Q_LT(ix1, ix0)));
+  const vq mx_raw = Q_MAX(m0, m1);
+  const vq ix = Q_SEL(Q_GT(mx_raw, vneg1), Q_SEL(u1, ix1, ix0), vneg1);
+  Q_STOREU(laneidx, ix);
+  const vq mx = Q_MAX(mx_raw, Q_ZERO());
+  if(lanemax) Q_STOREU(lanemax, mx);
+  *bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
   return 0;
 }
 
@@ -455,11 +726,9 @@ static HWY_INLINE int q15_finish_n(const qtw_table *tw, vq *X, vq *Xi,
       q15_twmax_edge_n<M1, M2>(tw, X, Xi, ws, we, mm);
     }
   }
-  const vq mx = hn::Max(mm[0], mm[1]);
-  if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
-  uint64_t bits_ = 0;
-  hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&bits_);
-  *bits = bits_;
+  const vq mx = Q_MAX(mm[0], mm[1]);
+  if(lanemax) Q_STOREU(lanemax, mx);
+  *bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
   return 0;
 }
 
@@ -483,9 +752,9 @@ template<int IDX, int M1, int M2>
 static HWY_NOINLINE int q15_screen_n(const int16_t *dq, const int16_t *tr, const int16_t *ti,
                                      size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
                                      int16_t *lanemax, void *scratch){
-  const qtw_table *tw = q15_tw_fast<IDX>();
   vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
   q15_prod_n<M1, M2>(dq, tr, ti, X, Xi);
+  const qtw_table *tw = q15_tw_fast<IDX>();
   return q15_finish_n<M1, M2, false>(tw, X, Xi, ws, we, lanethr, bits, lanemax, nullptr);
 }
 
@@ -523,8 +792,12 @@ static HWY_NOINLINE int q15_screen_perm_n(const int16_t *dr, const int16_t *di, 
                                           const int16_t *tsel, size_t ws, size_t we,
                                           const int16_t *lanethr, uint64_t *bits,
                                           int16_t *lanemax, int16_t *laneidx, void *scratch){
-  const qtw_table *tw = q15_tw_fast<IDX>();
-#if HWY_TARGET == HWY_AVX2
+#if defined(AP_SIMD_AVX1)
+  ap_qidx_avx1 dix_s, tix_s;
+  q15_make_dix_avx1(&dix_s, dsel);
+  q15_make_tix_avx1(&tix_s, tsel, TW);
+  const qidx dix = &dix_s, tix = &tix_s;
+#elif HWY_TARGET == HWY_AVX2
   ap_qidx_avx2 dix_s, tix_s;
   q15_make_dix_avx2(&dix_s, dsel);
   q15_make_tix_avx2(&tix_s, tsel, TW);
@@ -534,6 +807,7 @@ static HWY_NOINLINE int q15_screen_perm_n(const int16_t *dr, const int16_t *di, 
 #endif
   vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
   q15_prod_perm_n<M1, M2>(dr, di, tr, ti, TW, dix, tix, X, Xi);
+  const qtw_table *tw = q15_tw_fast<IDX>();
   return q15_finish_n<M1, M2, true>(tw, X, Xi, ws, we, lanethr, bits, lanemax, laneidx);
 }
 
@@ -557,6 +831,27 @@ static int q15_screen_perm(size_t N, const int16_t *dr, const int16_t *di, const
    registers across consecutive pairs that share a data block), transposed AP_QW x AP_QW into
    four-step columns X[e1 + (M1 + 1)*e2], and transformed in place with qsr{8,16,32} + Pass 2.
    Every multiply and rounding matches q15_screen bit-for-bit. */
+#if defined(AP_SIMD_AVX1) || (HWY_ARCH_X86 && HWY_MAX_BYTES >= 32)
+static HWY_INLINE void q15_transpose8_128(__m128i r[8]){
+  __m128i t[8], u[8];
+  for(int j = 0; j < 4; j++){
+    t[2 * j]     = _mm_unpacklo_epi16(r[2 * j], r[2 * j + 1]);
+    t[2 * j + 1] = _mm_unpackhi_epi16(r[2 * j], r[2 * j + 1]);
+  }
+  for(int h = 0; h < 2; h++){
+    for(int j = 0; j < 2; j++){
+      u[4 * h + 2 * j]     = _mm_unpacklo_epi32(t[4 * h + j], t[4 * h + j + 2]);
+      u[4 * h + 2 * j + 1] = _mm_unpackhi_epi32(t[4 * h + j], t[4 * h + j + 2]);
+    }
+  }
+  for(int j = 0; j < 4; j++){
+    r[2 * j]     = _mm_unpacklo_epi64(u[j], u[4 + j]);
+    r[2 * j + 1] = _mm_unpackhi_epi64(u[j], u[4 + j]);
+  }
+}
+#endif
+
+#if !defined(AP_SIMD_AVX1)
 static HWY_INLINE void q15_transpose8_inlane(vq r[8]){
   const hn::Repartition<int32_t, ap_qtag> d32;
   const hn::Repartition<int64_t, ap_qtag> d64;
@@ -580,18 +875,44 @@ static HWY_INLINE void q15_transpose8_inlane(vq r[8]){
     r[2 * j + 1] = hn::BitCast(AP_DQ, hn::InterleaveUpper(d64, a, c));
   }
 }
+#endif
 
 template<int M1>
 static HWY_INLINE void q15_store_block_col(const vq *pbuf, int pstride, int dv,
                                            size_t k_base, vq *X){
   constexpr size_t st = (size_t)(M1 + 1);
-#if HWY_ARCH_X86 && HWY_MAX_BYTES == 64
+  /* k_base is a multiple of AP_QW (hence of 8), and M1 >= 8 is a power of two, so each
+     8-element group lands in one contiguous slice of row (k / M1) without crossing M1. */
+#if defined(AP_SIMD_AVX1)
+#if AP_AVX1_QW == 8
+  __m128i u[8];
+  for(int l = 0; l < 8; l++)
+    u[l] = pbuf[(size_t)l * (size_t)pstride + (size_t)dv].raw;
+  q15_transpose8_128(u);
+  vq *dst0 = X + (k_base & (size_t)(M1 - 1)) + st * (k_base / (size_t)M1);
+  for(int m = 0; m < 8; m++) dst0[m] = vq{u[m]};
+#else
+  __m128i q0[8], q1[8];
+  for(int l = 0; l < 8; l++) q0[l] = pbuf[(size_t)l * (size_t)pstride + (size_t)dv].lo;
+  q15_transpose8_128(q0);
+  for(int l = 0; l < 8; l++) q1[l] = pbuf[(size_t)(8 + l) * (size_t)pstride + (size_t)dv].lo;
+  q15_transpose8_128(q1);
+  vq *dst0 = X + (k_base & (size_t)(M1 - 1)) + st * (k_base / (size_t)M1);
+  for(int m = 0; m < 8; m++) dst0[m] = vq{q0[m], q1[m]};
+
+  for(int l = 0; l < 8; l++) q0[l] = pbuf[(size_t)l * (size_t)pstride + (size_t)dv].hi;
+  q15_transpose8_128(q0);
+  for(int l = 0; l < 8; l++) q1[l] = pbuf[(size_t)(8 + l) * (size_t)pstride + (size_t)dv].hi;
+  q15_transpose8_128(q1);
+  const size_t k1 = k_base + 8;
+  vq *dst1 = X + (k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1);
+  for(int m = 0; m < 8; m++) dst1[m] = vq{q0[m], q1[m]};
+#endif
+#elif HWY_ARCH_X86 && HWY_MAX_BYTES == 64
   vq u0[8], u1[8];
-  for(int j = 0; j < 8; j++){
-    u0[j] = pbuf[(size_t)j * (size_t)pstride + (size_t)dv];
-    u1[j] = pbuf[(size_t)(8 + j) * (size_t)pstride + (size_t)dv];
-  }
+  for(int j = 0; j < 8; j++) u0[j] = pbuf[(size_t)j * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u0);
+  for(int j = 0; j < 8; j++) u1[j] = pbuf[(size_t)(8 + j) * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u1);
   __m512i ab_01[8], ab_23[8];
   for(int m = 0; m < 8; m++){
@@ -599,47 +920,45 @@ static HWY_INLINE void q15_store_block_col(const vq *pbuf, int pstride, int dv,
     ab_23[m] = _mm512_shuffle_i32x4(u0[m].raw, u1[m].raw, 0xEE);
   }
   vq u2[8], u3[8];
-  for(int j = 0; j < 8; j++){
-    u2[j] = pbuf[(size_t)(16 + j) * (size_t)pstride + (size_t)dv];
-    u3[j] = pbuf[(size_t)(24 + j) * (size_t)pstride + (size_t)dv];
-  }
+  for(int j = 0; j < 8; j++) u2[j] = pbuf[(size_t)(16 + j) * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u2);
+  for(int j = 0; j < 8; j++) u3[j] = pbuf[(size_t)(24 + j) * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u3);
+  const size_t k1 = k_base + 8, k2 = k_base + 16, k3 = k_base + 24;
+  vq *dst0 = X + (k_base & (size_t)(M1 - 1)) + st * (k_base / (size_t)M1);
+  vq *dst1 = X + (k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1);
+  vq *dst2 = X + (k2 & (size_t)(M1 - 1)) + st * (k2 / (size_t)M1);
+  vq *dst3 = X + (k3 & (size_t)(M1 - 1)) + st * (k3 / (size_t)M1);
   for(int m = 0; m < 8; m++){
     const __m512i cd_01 = _mm512_shuffle_i32x4(u2[m].raw, u3[m].raw, 0x44);
     const __m512i cd_23 = _mm512_shuffle_i32x4(u2[m].raw, u3[m].raw, 0xEE);
-    const size_t k0 = k_base + (size_t)m;
-    const size_t k1 = k_base + 8 + (size_t)m;
-    const size_t k2 = k_base + 16 + (size_t)m;
-    const size_t k3 = k_base + 24 + (size_t)m;
-    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_01[m], cd_01, 0x88)};
-    X[(k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_01[m], cd_01, 0xDD)};
-    X[(k2 & (size_t)(M1 - 1)) + st * (k2 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_23[m], cd_23, 0x88)};
-    X[(k3 & (size_t)(M1 - 1)) + st * (k3 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_23[m], cd_23, 0xDD)};
+    dst0[m] = vq{_mm512_shuffle_i32x4(ab_01[m], cd_01, 0x88)};
+    dst1[m] = vq{_mm512_shuffle_i32x4(ab_01[m], cd_01, 0xDD)};
+    dst2[m] = vq{_mm512_shuffle_i32x4(ab_23[m], cd_23, 0x88)};
+    dst3[m] = vq{_mm512_shuffle_i32x4(ab_23[m], cd_23, 0xDD)};
   }
 #elif HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
+  /* Transpose u0 before loading u1 so u1[0..7] never occupies 8 of AVX2's 16 ymm registers
+     across u0's in-lane transpose. */
   vq u0[8], u1[8];
-  for(int j = 0; j < 8; j++){
-    u0[j] = pbuf[(size_t)j * (size_t)pstride + (size_t)dv];
-    u1[j] = pbuf[(size_t)(8 + j) * (size_t)pstride + (size_t)dv];
-  }
+  for(int j = 0; j < 8; j++) u0[j] = pbuf[(size_t)j * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u0);
+  for(int j = 0; j < 8; j++) u1[j] = pbuf[(size_t)(8 + j) * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u1);
+  const size_t k1 = k_base + 8;
+  vq *dst0 = X + (k_base & (size_t)(M1 - 1)) + st * (k_base / (size_t)M1);
+  vq *dst1 = X + (k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1);
   for(int m = 0; m < 8; m++){
-    const size_t k0 = k_base + (size_t)m;
-    const size_t k1 = k_base + 8 + (size_t)m;
-    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = vq{_mm256_permute2x128_si256(u0[m].raw, u1[m].raw, 0x20)};
-    X[(k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1)] = vq{_mm256_permute2x128_si256(u0[m].raw, u1[m].raw, 0x31)};
+    dst0[m] = vq{_mm256_permute2x128_si256(u0[m].raw, u1[m].raw, 0x20)};
+    dst1[m] = vq{_mm256_permute2x128_si256(u0[m].raw, u1[m].raw, 0x31)};
   }
 #elif AP_QW == 8
   vq u[8];
   for(int l = 0; l < 8; l++)
     u[l] = pbuf[(size_t)l * (size_t)pstride + (size_t)dv];
   q15_transpose8_inlane(u);
-  for(int m = 0; m < 8; m++){
-    const size_t k0 = k_base + (size_t)m;
-    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = u[m];
-  }
+  vq *dst0 = X + (k_base & (size_t)(M1 - 1)) + st * (k_base / (size_t)M1);
+  for(int m = 0; m < 8; m++) dst0[m] = u[m];
 #else
   alignas(64) int16_t tmp[AP_QW][AP_QW];
   for(int l = 0; l < AP_QW; l++){
@@ -669,7 +988,9 @@ static HWY_INLINE void q15_prod_gather_n(const int16_t *const *drp, const int16_
     const int16_t *cur_dr = nullptr;
     vq dR[VB], dI[VB];
     for(int l = 0; l < AP_QW; l++){
-      if(drp[l] != cur_dr){
+      /* Explicit l == 0 proves dR/dI are unconditionally written on the first lane, preventing
+         GCC from spilling dead dR[0..VB-1]/dI[0..VB-1] across the v0 loop backedge. */
+      if(l == 0 || drp[l] != cur_dr){
         cur_dr = drp[l];
         const int16_t *drl = cur_dr + k_tile;
         const int16_t *dil = dip[l] + k_tile;
@@ -705,9 +1026,9 @@ static HWY_NOINLINE int q15_screen_gather_n(const int16_t *const *drp, const int
                                             int cnt, size_t ws, size_t we, const int16_t *lanethr,
                                             uint64_t *bits, int16_t *lanemax, int16_t *laneidx,
                                             void *scratch){
-  const qtw_table *tw = q15_tw_fast<IDX>();
   vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
   q15_prod_gather_n<M1, M2>(drp, dip, trp, tip, X, Xi);
+  const qtw_table *tw = q15_tw_fast<IDX>();
   const int r = q15_finish_n<M1, M2, true>(tw, X, Xi, ws, we, lanethr, bits, lanemax, laneidx);
   if(cnt < 64) *bits &= (((uint64_t)1 << cnt) - 1u);
   return r;
@@ -746,7 +1067,6 @@ static HWY_NOINLINE int q15_screen_tile_n(const int16_t *dq, const int16_t *tr, 
                                           size_t ws, size_t we, const int16_t *lanethr,
                                           uint64_t *bits, int16_t *lanemax, void *scratch){
   constexpr long N = (long)M1 * M2;
-  const qtw_table *tw = q15_tw_fast<IDX>();
   vq *X = (vq *)scratch, *Xi = X + (M1 + 1) * M2;
   const int32_t *dr0 = (const int32_t *)dq;
   const int16_t *di0 = dq + 2 * N;
@@ -757,6 +1077,7 @@ static HWY_NOINLINE int q15_screen_tile_n(const int16_t *dq, const int16_t *tr, 
     else if(M2 == 16) qsr16_prod_tile<T, 3 * N>(dr, di, r, i, X + e1, Xi + e1, M1 + 1, M1, (long)M1 * AP_QW);
     else qsr32_prod_tile<T, 3 * N>(dr, di, r, i, X + e1, Xi + e1, M1 + 1, M1, (long)M1 * AP_QW);
   }
+  const qtw_table *tw = q15_tw_fast<IDX>();
   return q15_finish_n<M1, M2, false>(tw, X, Xi, ws, we, lanethr, bits, lanemax, nullptr);
 }
 template<int T>
@@ -773,7 +1094,7 @@ static int q15_screen_tile_t(size_t N, const int16_t *dq, const int16_t *tr, con
   return -1;
 }
 /* An N-point screen of T templates per block: the target's tile widths, QW/4 and QW/2 (8 and 16
-   on AVX-512, 4 and 8 on AVX2); any other T or N is refused. */
+   on AVX-512, 4 and 8 on AVX2, 2 and 4 on 8-lane AVX1); any other T or N is refused. */
 static int q15_screen_tile(size_t N, int T, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                            size_t ws, size_t we, const int16_t *lanethr,
                            uint64_t *bits, int16_t *lanemax, void *scratch){
@@ -791,20 +1112,40 @@ static int q15_screen_tile(size_t N, int T, const int16_t *dq, const int16_t *tr
    eight lanes go out in one store. */
 static void q15_slab8(size_t N, const float *const *rr, const float *const *ri, const float *sc,
                       int16_t *xr, int16_t *xi){
+#if defined(AP_SIMD_AVX1) || (HWY_ARCH_X86 && HWY_MAX_BYTES >= 32)
+  __m256 vs[8];
+  for(int b = 0; b < 8; b++) vs[b] = _mm256_set1_ps(sc[b]);
+  for(int part = 0; part < 2; part++){
+    const float *const *rows = part ? ri : rr;
+    int16_t *out = part ? xi : xr;
+    for(size_t k = 0; k < N; k += 8){
+      __m128i r[8];
+      for(int b = 0; b < 8; b++){
+        const __m256i vi8 = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(rows[b] + k), vs[b]));
+        r[b] = _mm_packs_epi32(_mm256_castsi256_si128(vi8), _mm256_extractf128_si256(vi8, 1));
+      }
+      q15_transpose8_128(r);
+      for(int m = 0; m < 8; m++)
+        _mm_storeu_si128((__m128i *)(out + (k + (size_t)m) * (size_t)AP_QW), r[m]);
+    }
+  }
+#else
   const hn::FixedTag<float, 4> df;
   const hn::FixedTag<int32_t, 4> di;
   const hn::FixedTag<int16_t, 8> dh;
   const hn::FixedTag<int64_t, 2> dl;
   using V16 = hn::Vec<decltype(dh)>;
+  using VF4 = hn::Vec<decltype(df)>;
+  VF4 vs[8];
+  for(int b = 0; b < 8; b++) vs[b] = hn::Set(df, sc[b]);
   for(int part = 0; part < 2; part++){
     const float *const *rows = part ? ri : rr;
     int16_t *out = part ? xi : xr;
     for(size_t k = 0; k < N; k += 8){
       V16 r[8];
       for(int b = 0; b < 8; b++){
-        const auto s = hn::Set(df, sc[b]);
-        const auto a = hn::NearestInt(hn::Mul(hn::LoadU(df, rows[b] + k), s));
-        const auto c = hn::NearestInt(hn::Mul(hn::LoadU(df, rows[b] + k + 4), s));
+        const auto a = hn::NearestInt(hn::Mul(hn::LoadU(df, rows[b] + k), vs[b]));
+        const auto c = hn::NearestInt(hn::Mul(hn::LoadU(df, rows[b] + k + 4), vs[b]));
         r[b] = hn::OrderedDemote2To(dh, a, c);
       }
       V16 t[8], u[8];
@@ -825,6 +1166,7 @@ static void q15_slab8(size_t N, const float *const *rr, const float *const *ri, 
       }
     }
   }
+#endif
 }
 
 static int q15_lanes(void){ return AP_QW; }
@@ -849,10 +1191,32 @@ static HWY_NOINLINE MF_Q15PREP_SECTION double q15_sumsq(size_t N, const float *r
     const vf r0 = V_LOADU(re + k), i0 = V_LOADU(im + k);
     s0 = V_FMADD(r0, r0, V_FMADD(i0, i0, s0));
   }
+#if defined(AP_SIMD_AVX1)
+  const vf sv = V_ADD(s0, s1);
+  __m128 u = _mm_add_ps(_mm256_castps256_ps128(sv), _mm256_extractf128_ps(sv, 1));
+  u = _mm_hadd_ps(u, u);
+  u = _mm_hadd_ps(u, u);
+  double ss = (double)_mm_cvtss_f32(u);
+#else
   double ss = (double)hn::ReduceSum(AP_D, V_ADD(s0, s1));
+#endif
   for(; k < N; k++) ss += (double)re[k] * re[k] + (double)im[k] * im[k];
   return ss;
 }
+
+#if defined(AP_SIMD_AVX1)
+static HWY_INLINE void avx1_quant8_split(vf r_f, vf i_f, vf vs, __m128i vmin32, __m128i vmax32,
+                                         __m128i *qr_out, __m128i *qi_out){
+  const __m256i r8 = _mm256_cvtps_epi32(_mm256_mul_ps(r_f, vs));
+  const __m256i i8 = _mm256_cvtps_epi32(_mm256_mul_ps(i_f, vs));
+  const __m128i r0 = _mm_min_epi32(_mm_max_epi32(_mm256_castsi256_si128(r8), vmin32), vmax32);
+  const __m128i r1 = _mm_min_epi32(_mm_max_epi32(_mm256_extractf128_si256(r8, 1), vmin32), vmax32);
+  const __m128i i0 = _mm_min_epi32(_mm_max_epi32(_mm256_castsi256_si128(i8), vmin32), vmax32);
+  const __m128i i1 = _mm_min_epi32(_mm_max_epi32(_mm256_extractf128_si256(i8, 1), vmin32), vmax32);
+  *qr_out = _mm_packs_epi32(r0, r1);
+  *qi_out = _mm_packs_epi32(i0, i1);
+}
+#endif
 
 /* Quantise one data block's split spectrum into [N] int32 duplicated dr followed by
    [N] int16 di (3*N int16 total, matching p->qd's allocation), handling both natural
@@ -870,10 +1234,38 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, 
   }
   const float scf = (float)sc;
   const vf vs = V_SET1(scf);
-  const vi vmin32 = hn::Set(AP_DI, -32767), vmax32 = hn::Set(AP_DI, 32767);
-  const vi vmask16 = hn::Set(AP_DI, 0xFFFF);
   int32_t *qd_re = (int32_t *)qd;
   int16_t *qd_im = qd + 2 * N;
+#if defined(AP_SIMD_AVX1)
+  const __m128i vmin32 = _mm_set1_epi32(-32767), vmax32 = _mm_set1_epi32(32767);
+  if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) && N % 8 == 0){
+    for(size_t k = 0; k < N; k += 8){
+      __m128i qr, qi;
+      avx1_quant8_split(V_LOADU(re + k), V_LOADU(im + k), vs, vmin32, vmax32, &qr, &qi);
+      _mm_storeu_si128((__m128i *)(qd_re + k), _mm_unpacklo_epi16(qr, qr));
+      _mm_storeu_si128((__m128i *)(qd_re + k + 4), _mm_unpackhi_epi16(qr, qr));
+      _mm_storeu_si128((__m128i *)(qd_im + k), qi);
+    }
+    return;
+  }
+  if(w == AP_W && n1 > 0 && n1 % AP_W == 0 && (size_t)n1 * (size_t)n2 == N){
+    const int ng = n1 / AP_W;
+    for(int b = 0; b < n2; b++){
+      for(int g = 0; g < ng; g++){
+        const size_t j0 = ((size_t)g * (size_t)n2 + (size_t)b) * (size_t)AP_W;
+        const size_t k = (size_t)b * (size_t)n1 + (size_t)g * (size_t)AP_W;
+        __m128i qr, qi;
+        avx1_quant8_split(V_LOADU(re + j0), V_LOADU(im + j0), vs, vmin32, vmax32, &qr, &qi);
+        _mm_storeu_si128((__m128i *)(qd_re + k), _mm_unpacklo_epi16(qr, qr));
+        _mm_storeu_si128((__m128i *)(qd_re + k + 4), _mm_unpackhi_epi16(qr, qr));
+        _mm_storeu_si128((__m128i *)(qd_im + k), qi);
+      }
+    }
+    return;
+  }
+#else
+  const vi vmin32 = hn::Set(AP_DI, -32767), vmax32 = hn::Set(AP_DI, 32767);
+  const vi vmask16 = hn::Set(AP_DI, 0xFFFF);
   if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) &&
      N % (size_t)AP_QW == 0){
     for(size_t k = 0; k < N; k += (size_t)AP_QW){
@@ -911,6 +1303,7 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, 
     }
     return;
   }
+#endif
   for(size_t k = 0; k < N; k++){
     size_t j = k;
     if(n1 > 0 && w > 0){
@@ -942,6 +1335,32 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data_contig(
   }
   const float scf = (float)sc;
   const vf vs = V_SET1(scf);
+#if defined(AP_SIMD_AVX1)
+  const __m128i vmin32 = _mm_set1_epi32(-32767), vmax32 = _mm_set1_epi32(32767);
+  if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) && N % 8 == 0){
+    for(size_t k = 0; k < N; k += 8){
+      __m128i qr, qi;
+      avx1_quant8_split(V_LOADU(re + k), V_LOADU(im + k), vs, vmin32, vmax32, &qr, &qi);
+      _mm_storeu_si128((__m128i *)(qdr + k), qr);
+      _mm_storeu_si128((__m128i *)(qdi + k), qi);
+    }
+    return;
+  }
+  if(w == AP_W && n1 > 0 && n1 % AP_W == 0 && (size_t)n1 * (size_t)n2 == N){
+    const int ng = n1 / AP_W;
+    for(int b = 0; b < n2; b++){
+      for(int g = 0; g < ng; g++){
+        const size_t j0 = ((size_t)g * (size_t)n2 + (size_t)b) * (size_t)AP_W;
+        const size_t k = (size_t)b * (size_t)n1 + (size_t)g * (size_t)AP_W;
+        __m128i qr, qi;
+        avx1_quant8_split(V_LOADU(re + j0), V_LOADU(im + j0), vs, vmin32, vmax32, &qr, &qi);
+        _mm_storeu_si128((__m128i *)(qdr + k), qr);
+        _mm_storeu_si128((__m128i *)(qdi + k), qi);
+      }
+    }
+    return;
+  }
+#else
   const vi vmin32 = hn::Set(AP_DI, -32767), vmax32 = hn::Set(AP_DI, 32767);
   if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) &&
      N % (size_t)AP_QW == 0){
@@ -972,6 +1391,7 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data_contig(
     }
     return;
   }
+#endif
   for(size_t k = 0; k < N; k++){
     size_t j = k;
     if(n1 > 0 && w > 0){
@@ -992,7 +1412,7 @@ static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
                                      int qds_stride, const float *qts,
                                      float margin, int nomargin, int16_t *out){
   if(!qds_stride && qds[0] < 0.f){
-    hn::StoreU(Q_SET1(-32768), AP_DQ, out);
+    Q_STOREU(out, Q_SET1(-32768));
     return;
   }
   const vf vthr = V_SET1(threshold);
@@ -1005,6 +1425,24 @@ static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
   const vf vmin = V_SET1(-32768.0f);
   const vf vmax = V_SET1(32767.0f);
   const vf vz_out = !(threshold > 0.f) ? vmin : vmax;
+#if defined(AP_SIMD_AVX1)
+  for(int h = 0; h < AP_QW / 8; h++){
+    const int u = h * 8;
+    const vf vd = qds_stride ? V_LOADU(qds + u) : V_SET1(qds[0]);
+    const vf vt = V_LOADU(qts + u);
+    const vf ds = V_MUL(vd, vinv);
+    const vf eq = nomargin ? _mm256_blendv_ps(vz, vmarg, _mm256_cmp_ps(V_MUL(ds, vt), v2m, _CMP_LT_OQ)) : vmarg;
+    const vf q = V_SUB(V_MUL(V_MUL(V_MUL(vthr, ds), vadj), vt), eq);
+    const vf T = V_SUB(V_MUL(V_MUL(q, q), vinv), vone);
+    vf r = _mm256_blendv_ps(_mm256_ceil_ps(T), vmax, _mm256_cmp_ps(T, vmax, _CMP_GE_OQ));
+    r = _mm256_blendv_ps(vmin, r, _mm256_cmp_ps(q, vz, _CMP_GT_OQ));
+    r = _mm256_blendv_ps(r, vz_out, _mm256_or_ps(_mm256_cmp_ps(vd, vz, _CMP_EQ_OQ), _mm256_cmp_ps(vt, vz, _CMP_EQ_OQ)));
+    r = _mm256_blendv_ps(r, vmin, _mm256_or_ps(_mm256_cmp_ps(vd, vz, _CMP_LT_OQ), _mm256_cmp_ps(vt, vz, _CMP_LT_OQ)));
+    const __m256i ri = _mm256_cvttps_epi32(r);
+    _mm_storeu_si128((__m128i *)(out + u),
+                     _mm_packs_epi32(_mm256_castsi256_si128(ri), _mm256_extractf128_si256(ri, 1)));
+  }
+#else
   vi parts[2];
   for(int h = 0; h < 2; h++){
     const int u = h * AP_W;
@@ -1021,6 +1459,7 @@ static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
     parts[h] = hn::ConvertTo(AP_DI, r);
   }
   hn::StoreU(hn::OrderedDemote2To(AP_DQ, parts[0], parts[1]), AP_DQ, out);
+#endif
 }
 
 #undef MF_Q15PREP_SECTION
