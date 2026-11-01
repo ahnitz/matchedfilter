@@ -1,4 +1,4 @@
-"""Unit tests for L2-adaptive series slab sizing (ap_hmf_effective_group), 16-lane AVX-512
+"""Unit tests for series slab sizing (ap_hmf_effective_group), 16-lane AVX-512
 tier-1024 pair-batch parity, and per-block unpacked sample caching (p->dx) in direct refinement."""
 import ctypes
 
