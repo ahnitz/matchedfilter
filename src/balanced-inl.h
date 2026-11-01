@@ -3408,7 +3408,8 @@ const ap_backend *Backend(void){
     fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window,
     q15_sumsq, q15_data, q15_lanethr,
     fft_backward_batch, fft_backward_padded, binmax_prod_gather_lanes,
-    fft_forward_scaled_gm, corr_prod_window_multi, corr_tile_slots
+    fft_forward_scaled_gm, corr_prod_window_multi, corr_tile_slots,
+    q15_data_contig, q15_screen_gather
   };
   return &be;
 }

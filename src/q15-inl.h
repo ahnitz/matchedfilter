@@ -253,6 +253,13 @@ HWY_BEFORE_NAMESPACE();
 namespace ap {
 namespace HWY_NAMESPACE {
 
+static HWY_INLINE void qcodelet(int m, vq *restrict ar, vq *restrict ai, long S){
+  switch(m){
+    case  8: qsr8 (ar,ai,S); return;
+    case 16: qsr16(ar,ai,S); return;
+    default: qsr32(ar,ai,S); return;
+  }
+}
 static HWY_INLINE void qcodelet_prod(int m, const int32_t *restrict dr, const int16_t *restrict di,
                                      const int16_t *restrict tr, const int16_t *restrict ti,
                                      vq *restrict ar, vq *restrict ai, long S, long DS, long TS){
@@ -331,16 +338,16 @@ static HWY_NOINLINE int q15_finish_lag_n(const qtw_table *tw, vq *X, vq *Xi,
                                          size_t ws, size_t we, const int16_t *lanethr,
                                          uint64_t *bits, int16_t *lanemax, int16_t *laneidx){
   constexpr size_t st = (size_t)(M1 + 1);
-  for(size_t k2 = 0; k2 < (size_t)M2; k2++)
-    qcodelet_tw(M1, X + k2 * st, Xi + k2 * st, 1,
-                tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1);
-  /* Elect each lane's argmax lag k = k2 + M2*k1 over [ws, we), breaking ties to earliest lag. */
+  /* Elect each lane's argmax lag k = k2 + M2*k1 over [ws, we), breaking ties to earliest lag.
+     Fusing Pass 2's row transform with the row scan skips empty rows and reads xr/xi L1D-hot. */
   vq m0 = Q_SET1(-1), m1 = Q_SET1(-1), ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
   const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
   for(size_t k2 = 0; k2 < (size_t)M2; k2++){
     const long lo = (long)((wso - k2) / (size_t)M2);
     const long hi = (long)((weo - k2) / (size_t)M2);
-    const vq *xr = X + k2 * st, *xi = Xi + k2 * st;
+    if(lo >= hi) continue;
+    vq *xr = X + k2 * st, *xi = Xi + k2 * st;
+    qcodelet_tw(M1, xr, xi, 1, tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1);
     long k1 = lo;
     for(; k1 + 1 < hi; k1 += 2){
       const vq a = xr[k1], b = xi[k1], c = xr[k1 + 1], d = xi[k1 + 1];
@@ -544,6 +551,195 @@ static int q15_screen_perm(size_t N, const int16_t *dr, const int16_t *di, const
   }
 }
 
+/* Arbitrary-pair Q15 gather screen: up to AP_QW (data, template) pairs at 100% SIMD occupancy
+   from contiguous [N] int16 rows without slab or template-group bucketing.  Each pair's complex
+   product is streamed sequentially into an L1D-resident padded buffer (reusing dR/dI in vector
+   registers across consecutive pairs that share a data block), transposed AP_QW x AP_QW into
+   four-step columns X[e1 + (M1 + 1)*e2], and transformed in place with qsr{8,16,32} + Pass 2.
+   Every multiply and rounding matches q15_screen bit-for-bit. */
+static HWY_INLINE void q15_transpose8_inlane(vq r[8]){
+  const hn::Repartition<int32_t, ap_qtag> d32;
+  const hn::Repartition<int64_t, ap_qtag> d64;
+  vq t[8], u[8];
+  for(int j = 0; j < 4; j++){
+    t[2 * j]     = hn::InterleaveLower(AP_DQ, r[2 * j], r[2 * j + 1]);
+    t[2 * j + 1] = hn::InterleaveUpper(AP_DQ, r[2 * j], r[2 * j + 1]);
+  }
+  for(int h = 0; h < 2; h++){
+    for(int j = 0; j < 2; j++){
+      const auto a = hn::BitCast(d32, t[4 * h + j]);
+      const auto c = hn::BitCast(d32, t[4 * h + j + 2]);
+      u[4 * h + 2 * j]     = hn::BitCast(AP_DQ, hn::InterleaveLower(d32, a, c));
+      u[4 * h + 2 * j + 1] = hn::BitCast(AP_DQ, hn::InterleaveUpper(d32, a, c));
+    }
+  }
+  for(int j = 0; j < 4; j++){
+    const auto a = hn::BitCast(d64, u[j]);
+    const auto c = hn::BitCast(d64, u[4 + j]);
+    r[2 * j]     = hn::BitCast(AP_DQ, hn::InterleaveLower(d64, a, c));
+    r[2 * j + 1] = hn::BitCast(AP_DQ, hn::InterleaveUpper(d64, a, c));
+  }
+}
+
+template<int M1>
+static HWY_INLINE void q15_store_block_col(const vq *pbuf, int pstride, int dv,
+                                           size_t k_base, vq *X){
+  constexpr size_t st = (size_t)(M1 + 1);
+#if HWY_ARCH_X86 && HWY_MAX_BYTES == 64
+  vq u0[8], u1[8];
+  for(int j = 0; j < 8; j++){
+    u0[j] = pbuf[(size_t)j * (size_t)pstride + (size_t)dv];
+    u1[j] = pbuf[(size_t)(8 + j) * (size_t)pstride + (size_t)dv];
+  }
+  q15_transpose8_inlane(u0);
+  q15_transpose8_inlane(u1);
+  __m512i ab_01[8], ab_23[8];
+  for(int m = 0; m < 8; m++){
+    ab_01[m] = _mm512_shuffle_i32x4(u0[m].raw, u1[m].raw, 0x44);
+    ab_23[m] = _mm512_shuffle_i32x4(u0[m].raw, u1[m].raw, 0xEE);
+  }
+  vq u2[8], u3[8];
+  for(int j = 0; j < 8; j++){
+    u2[j] = pbuf[(size_t)(16 + j) * (size_t)pstride + (size_t)dv];
+    u3[j] = pbuf[(size_t)(24 + j) * (size_t)pstride + (size_t)dv];
+  }
+  q15_transpose8_inlane(u2);
+  q15_transpose8_inlane(u3);
+  for(int m = 0; m < 8; m++){
+    const __m512i cd_01 = _mm512_shuffle_i32x4(u2[m].raw, u3[m].raw, 0x44);
+    const __m512i cd_23 = _mm512_shuffle_i32x4(u2[m].raw, u3[m].raw, 0xEE);
+    const size_t k0 = k_base + (size_t)m;
+    const size_t k1 = k_base + 8 + (size_t)m;
+    const size_t k2 = k_base + 16 + (size_t)m;
+    const size_t k3 = k_base + 24 + (size_t)m;
+    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_01[m], cd_01, 0x88)};
+    X[(k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_01[m], cd_01, 0xDD)};
+    X[(k2 & (size_t)(M1 - 1)) + st * (k2 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_23[m], cd_23, 0x88)};
+    X[(k3 & (size_t)(M1 - 1)) + st * (k3 / (size_t)M1)] = vq{_mm512_shuffle_i32x4(ab_23[m], cd_23, 0xDD)};
+  }
+#elif HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
+  vq u0[8], u1[8];
+  for(int j = 0; j < 8; j++){
+    u0[j] = pbuf[(size_t)j * (size_t)pstride + (size_t)dv];
+    u1[j] = pbuf[(size_t)(8 + j) * (size_t)pstride + (size_t)dv];
+  }
+  q15_transpose8_inlane(u0);
+  q15_transpose8_inlane(u1);
+  for(int m = 0; m < 8; m++){
+    const size_t k0 = k_base + (size_t)m;
+    const size_t k1 = k_base + 8 + (size_t)m;
+    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = vq{_mm256_permute2x128_si256(u0[m].raw, u1[m].raw, 0x20)};
+    X[(k1 & (size_t)(M1 - 1)) + st * (k1 / (size_t)M1)] = vq{_mm256_permute2x128_si256(u0[m].raw, u1[m].raw, 0x31)};
+  }
+#elif AP_QW == 8
+  vq u[8];
+  for(int l = 0; l < 8; l++)
+    u[l] = pbuf[(size_t)l * (size_t)pstride + (size_t)dv];
+  q15_transpose8_inlane(u);
+  for(int m = 0; m < 8; m++){
+    const size_t k0 = k_base + (size_t)m;
+    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = u[m];
+  }
+#else
+  alignas(64) int16_t tmp[AP_QW][AP_QW];
+  for(int l = 0; l < AP_QW; l++){
+    alignas(64) int16_t row[AP_QW];
+    hn::Store(pbuf[(size_t)l * (size_t)pstride + (size_t)dv], AP_DQ, row);
+    for(int m = 0; m < AP_QW; m++) tmp[m][l] = row[m];
+  }
+  for(int m = 0; m < AP_QW; m++){
+    const size_t k0 = k_base + (size_t)m;
+    X[(k0 & (size_t)(M1 - 1)) + st * (k0 / (size_t)M1)] = hn::Load(AP_DQ, tmp[m]);
+  }
+#endif
+}
+
+template<int M1, int M2>
+static HWY_INLINE void q15_prod_gather_n(const int16_t *const *drp, const int16_t *const *dip,
+                                         const int16_t *const *trp, const int16_t *const *tip,
+                                         vq *X, vq *Xi){
+  constexpr int NV = (M1 * M2) / AP_QW;
+  constexpr int VB = NV < 4 ? NV : 4;
+  static_assert(NV % VB == 0, "NV must be divisible by VB");
+  constexpr int PSTRIDE = VB + 1;
+  alignas(64) vq pbuf_r[AP_QW * PSTRIDE];
+  alignas(64) vq pbuf_i[AP_QW * PSTRIDE];
+  for(int v0 = 0; v0 < NV; v0 += VB){
+    const size_t k_tile = (size_t)v0 * (size_t)AP_QW;
+    const int16_t *cur_dr = nullptr;
+    vq dR[VB], dI[VB];
+    for(int l = 0; l < AP_QW; l++){
+      if(drp[l] != cur_dr){
+        cur_dr = drp[l];
+        const int16_t *drl = cur_dr + k_tile;
+        const int16_t *dil = dip[l] + k_tile;
+        for(int dv = 0; dv < VB; dv++){
+          dR[dv] = Q_LOADU(drl + (size_t)dv * (size_t)AP_QW);
+          dI[dv] = Q_LOADU(dil + (size_t)dv * (size_t)AP_QW);
+        }
+      }
+      const int16_t *trl = trp[l] + k_tile;
+      const int16_t *til = tip[l] + k_tile;
+      vq *pr = pbuf_r + (size_t)l * (size_t)PSTRIDE;
+      vq *pi = pbuf_i + (size_t)l * (size_t)PSTRIDE;
+      for(int dv = 0; dv < VB; dv++){
+        const vq tR = Q_LOADU(trl + (size_t)dv * (size_t)AP_QW);
+        const vq tI = Q_LOADU(til + (size_t)dv * (size_t)AP_QW);
+        pr[dv] = Q_MLSH(Q_MUL(dR[dv], tR), dI[dv], tI);
+        pi[dv] = Q_MLAH(Q_MUL(dR[dv], tI), dI[dv], tR);
+      }
+    }
+    for(int dv = 0; dv < VB; dv++){
+      const size_t k_base = k_tile + (size_t)dv * (size_t)AP_QW;
+      q15_store_block_col<M1>(pbuf_r, PSTRIDE, dv, k_base, X);
+      q15_store_block_col<M1>(pbuf_i, PSTRIDE, dv, k_base, Xi);
+    }
+  }
+  for(int e1 = 0; e1 < M1; e1++)
+    qcodelet(M2, X + e1, Xi + e1, M1 + 1);
+}
+
+template<int IDX, int M1, int M2>
+static HWY_NOINLINE int q15_screen_gather_n(const int16_t *const *drp, const int16_t *const *dip,
+                                            const int16_t *const *trp, const int16_t *const *tip,
+                                            int cnt, size_t ws, size_t we, const int16_t *lanethr,
+                                            uint64_t *bits, int16_t *lanemax, int16_t *laneidx,
+                                            void *scratch){
+  const qtw_table *tw = q15_tw_fast<IDX>();
+  vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
+  q15_prod_gather_n<M1, M2>(drp, dip, trp, tip, X, Xi);
+  const int r = q15_finish_n<M1, M2, true>(tw, X, Xi, ws, we, lanethr, bits, lanemax, laneidx);
+  if(cnt < 64) *bits &= (((uint64_t)1 << cnt) - 1u);
+  return r;
+}
+
+static int q15_screen_gather(size_t N, const int16_t *const *drp, const int16_t *const *dip,
+                             const int16_t *const *trp, const int16_t *const *tip, int cnt,
+                             size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
+                             int16_t *lanemax, int16_t *laneidx, void *scratch){
+  if(cnt < 1 || cnt > AP_QW) return -1;
+  const int16_t *dr_pad[AP_QW], *di_pad[AP_QW], *tr_pad[AP_QW], *ti_pad[AP_QW];
+  if(cnt < AP_QW){
+    for(int l = 0; l < cnt; l++){
+      dr_pad[l] = drp[l]; di_pad[l] = dip[l];
+      tr_pad[l] = trp[l]; ti_pad[l] = tip[l];
+    }
+    for(int l = cnt; l < AP_QW; l++){
+      dr_pad[l] = drp[cnt - 1]; di_pad[l] = dip[cnt - 1];
+      tr_pad[l] = trp[cnt - 1]; ti_pad[l] = tip[cnt - 1];
+    }
+    drp = dr_pad; dip = di_pad; trp = tr_pad; tip = ti_pad;
+  }
+  switch(N){
+    case   64: return q15_screen_gather_n<0,  8,  8>(drp, dip, trp, tip, cnt, ws, we, lanethr, bits, lanemax, laneidx, scratch);
+    case  128: return q15_screen_gather_n<1, 16,  8>(drp, dip, trp, tip, cnt, ws, we, lanethr, bits, lanemax, laneidx, scratch);
+    case  256: return q15_screen_gather_n<2, 16, 16>(drp, dip, trp, tip, cnt, ws, we, lanethr, bits, lanemax, laneidx, scratch);
+    case  512: return q15_screen_gather_n<3, 32, 16>(drp, dip, trp, tip, cnt, ws, we, lanethr, bits, lanemax, laneidx, scratch);
+    case 1024: return q15_screen_gather_n<4, 32, 32>(drp, dip, trp, tip, cnt, ws, we, lanethr, bits, lanemax, laneidx, scratch);
+    default: return -1;
+  }
+}
+
 #if AP_Q15_TAIL
 template<int T, int IDX, int M1, int M2>
 static HWY_NOINLINE int q15_screen_tile_n(const int16_t *dq, const int16_t *tr, const int16_t *ti,
@@ -727,6 +923,66 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data(size_t N, const float *re, 
     const uint32_t ur = (uint16_t)(int16_t)r;
     qd_re[k] = (int32_t)(ur | (ur << 16));
     qd_im[k] = (int16_t)i;
+  }
+}
+
+/* Quantise one data block's split spectrum into contiguous natural-order [N] qdr and [N] qdi
+   rows for q15_screen_gather, with the identical scale and rounding as q15_data. */
+static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data_contig(
+    size_t N, const float *re, const float *im, int n1, int n2, int w,
+    int16_t *qdr, int16_t *qdi, float *scale_out){
+  const double ss = q15_sumsq(N, re, im);
+  const double D = (AP_Q15_L1 - 1.5 * (double)N) * 32768.0 / AP_Q15_TNORM(N) - sqrt((double)N);
+  const double sc = !isfinite(ss) ? -1.0 : ss > 0.0 ? 0.999 * D / sqrt(ss) : 0.0;
+  *scale_out = (float)sc;
+  if(!(sc > 0.0)){
+    memset(qdr, 0, N * sizeof(int16_t));
+    memset(qdi, 0, N * sizeof(int16_t));
+    return;
+  }
+  const float scf = (float)sc;
+  const vf vs = V_SET1(scf);
+  const vi vmin32 = hn::Set(AP_DI, -32767), vmax32 = hn::Set(AP_DI, 32767);
+  if((n1 <= 0 || (w == AP_W && n1 == AP_W && (size_t)n1 * (size_t)n2 == N)) &&
+     N % (size_t)AP_QW == 0){
+    for(size_t k = 0; k < N; k += (size_t)AP_QW){
+      const vi r0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + k), vs)), vmin32), vmax32);
+      const vi r1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + k + AP_W), vs)), vmin32), vmax32);
+      const vi i0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + k), vs)), vmin32), vmax32);
+      const vi i1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + k + AP_W), vs)), vmin32), vmax32);
+      hn::StoreU(hn::OrderedDemote2To(AP_DQ, r0, r1), AP_DQ, qdr + k);
+      hn::StoreU(hn::OrderedDemote2To(AP_DQ, i0, i1), AP_DQ, qdi + k);
+    }
+    return;
+  }
+  if(w == AP_W && n1 > 0 && n1 % AP_QW == 0 && (size_t)n1 * (size_t)n2 == N){
+    const int ng = n1 / AP_W;
+    for(int b = 0; b < n2; b++){
+      for(int g = 0; g < ng; g += 2){
+        const size_t j0 = ((size_t)g * (size_t)n2 + (size_t)b) * (size_t)AP_W;
+        const size_t j1 = ((size_t)(g + 1) * (size_t)n2 + (size_t)b) * (size_t)AP_W;
+        const size_t k = (size_t)b * (size_t)n1 + (size_t)g * (size_t)AP_W;
+        const vi r0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + j0), vs)), vmin32), vmax32);
+        const vi r1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(re + j1), vs)), vmin32), vmax32);
+        const vi i0 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + j0), vs)), vmin32), vmax32);
+        const vi i1 = hn::Min(hn::Max(hn::NearestInt(V_MUL(V_LOADU(im + j1), vs)), vmin32), vmax32);
+        hn::StoreU(hn::OrderedDemote2To(AP_DQ, r0, r1), AP_DQ, qdr + k);
+        hn::StoreU(hn::OrderedDemote2To(AP_DQ, i0, i1), AP_DQ, qdi + k);
+      }
+    }
+    return;
+  }
+  for(size_t k = 0; k < N; k++){
+    size_t j = k;
+    if(n1 > 0 && w > 0){
+      const size_t a = k % (size_t)n1, b = k / (size_t)n1;
+      j = (a / (size_t)w) * (size_t)n2 * (size_t)w + b * (size_t)w + a % (size_t)w;
+    }
+    int r = (int)lrintf(re[j] * scf), i = (int)lrintf(im[j] * scf);
+    if(r > 32767) r = 32767; else if(r < -32767) r = -32767;
+    if(i > 32767) i = 32767; else if(i < -32767) i = -32767;
+    qdr[k] = (int16_t)r;
+    qdi[k] = (int16_t)i;
   }
 }
 

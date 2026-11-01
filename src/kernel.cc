@@ -104,7 +104,8 @@ static bool env_applied(void) {
 static const ap_backend *active(void) {
   const ap_backend *b = HWY_DYNAMIC_DISPATCH(Backend)();
 #if AP_HAVE_AVX1
-  if (avx1_now && b && avx1_cpu() && !strcmp(b->name, "SSE4")) return ap_avx1_backend(b);
+  if (avx1_now && b && avx1_cpu() && !strcmp(b->name, "SSE4"))
+    return ap_avx1_backend(b);
 #endif
   return b;
 }

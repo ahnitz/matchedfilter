@@ -43,10 +43,11 @@ X86_ONLY = all(a in _X86 for a in target_arches())
 #   SVE and RVV have sizeless vectors, which cannot be members of the
 #     vf TR[AP_W] arrays the transpose and both stages are built from;
 #   SCALAR is one lane, below the four the kernel's layout assumes;
-#   the AVX-512 variants beyond AVX3 are code paths nothing has measured a
-#     reason for.
+#   HWY_AVX3_DL (VNNI/VBMI/VBMI2) is enabled as the modern x86-64 AVX-512
+#     target (Ice Lake+, Zen 4/5); narrower sub-variants beyond AVX3_DL stay
+#     disabled unless measured to beat it.
 DISABLED = ["HWY_SCALAR", "HWY_SVE", "HWY_SVE2", "HWY_SVE_256", "HWY_SVE2_128",
-            "HWY_RVV", "HWY_AVX3_DL", "HWY_AVX3_ZEN4", "HWY_AVX3_SPR",
+            "HWY_RVV", "HWY_AVX3_ZEN4", "HWY_AVX3_SPR",
             "HWY_AVX10_2"]
 
 # SSE4.2 as the floor on x86 rather than SSE2: every wider target is reached
