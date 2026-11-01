@@ -849,6 +849,7 @@ class _Device:
         self.subgroup_size = 32
         self.subgroup_range = None          # (min, max) when the size can be required
         self.max_workgroup_subgroups = 0    # maxComputeWorkgroupSubgroups (0: unknown)
+        self.full_subgroups = getattr(self, "full_subgroups", False)
         try:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
                 ssc_props = _SSCProperties(1000225000, None, 0, 0, 0, 0)
@@ -910,7 +911,7 @@ class _Device:
             vk.vkGetPhysicalDeviceFeatures2(self.physical, ctypes.byref(f2))
             names, chain = [], []
             if _SSC_EXT in have and ssc.subgroupSizeControl:
-                ssc.computeFullSubgroups = 0
+                self.full_subgroups = bool(ssc.computeFullSubgroups)
                 names.append(_SSC_EXT); chain.append(ssc)
             if _HQR_EXT in have and hqr.hostQueryReset:
                 names.append(_HQR_EXT); chain.append(hqr)
@@ -1174,7 +1175,8 @@ class Context(Executor, InputUploads):
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "device_name", "max_shared_memory", "max_invocations", "max_dispatch_x",
-               "subgroup_size", "subgroup_range", "max_workgroup_subgroups", "mem_props", "command_pool", "_ts_period",
+               "subgroup_size", "subgroup_range", "max_workgroup_subgroups", "full_subgroups",
+               "mem_props", "command_pool", "_ts_period",
                "_reset_query",
                "storage_offset_alignment", "max_workgroup_size", "timestamp_bits",
                "max_binding_bytes")
@@ -1460,11 +1462,17 @@ class Context(Executor, InputUploads):
                                         ctypes.cast(ctypes.pointer(c_data), _vp))
         special = ctypes.cast(ctypes.pointer(spec_info), _vp)
         req = None
+        stage_flags = 0
         if getattr(self, "subgroup_range", None):
-            # The size the kernels are specialized on (constant 74), required, not hoped for.
+            # The size the kernels are specialized on (constant 74), required, not hoped for;
+            # REQUIRE_FULL_SUBGROUPS (bit 1) guarantees consecutive full subgroups whenever the
+            # workgroup is a multiple of sg.
             req = _StageRequiredSize(1000225001, None, sg)
+            inv = self._invocations(filename)
+            if getattr(self, "full_subgroups", False) and inv and inv % sg == 0:
+                stage_flags = 2
         stage = _StageCreate(18, ctypes.cast(ctypes.pointer(req), _vp) if req else None,
-                             0, _STAGE_COMPUTE, module,
+                             stage_flags, _STAGE_COMPUTE, module,
                              b"main", special)
         cp_info = _ComputePipelineCreate(29, None, 0, stage, layout, None, 0)
         pipe = _vp()
