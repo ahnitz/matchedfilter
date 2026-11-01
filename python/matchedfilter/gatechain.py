@@ -171,13 +171,22 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     c_pow = C.real * C.real + C.imag * C.imag
     v = c_pow @ W
     valid = v > 0.0
-    if int(np.count_nonzero(valid)) < 2:
+    valid_idx = np.flatnonzero(valid)
+    if valid_idx.size < 2:
         return None
 
-    # Search integer fine shifts in [-R, +R] via coarse-to-fine complex64 BLAS matmul
-    R = n // b0
-    s_step = max(1, R // 16)
+    # Order valid templates by mean in-band frequency so neighbors fall in one L1/L2 chunk
+    inv_sqrt_v = np.zeros(nt, dtype=np.float64)
+    inv_sqrt_v[valid] = 1.0 / np.sqrt(v[valid])
+    U64 = (C * (inv_sqrt_v[:, None] * sqrt_W[None, :])).astype(np.complex64)
+    u_pow = U64.real * U64.real + U64.imag * U64.imag
     k_idx = np.arange(k_lo, k_hi, dtype=np.float64)
+    f_mean = u_pow[valid_idx] @ k_idx.astype(np.float32)
+    perm = valid_idx[np.argsort(f_mean, kind="stable")]
+
+    # Search coarse shifts in [-R, +R] via a single packed float32 sgemm per chunk
+    R = n // b0
+    s_step = max(1, R // 8)
     dls = np.arange(-R, R + 1, s_step, dtype=np.int64)
     zero_pos = int(np.argmin(np.abs(dls)))
     shifts64 = np.exp((-2j * np.pi / n) * np.outer(dls, k_idx)).astype(np.complex64)
@@ -187,58 +196,93 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
             shift_order.append(zero_pos - s)
         if zero_pos + s < len(dls):
             shift_order.append(zero_pos + s)
+    shifts_ord = shifts64[shift_order]
+    dls_ord = dls[shift_order]
+    ns = len(shift_order)
+    coarse_rho_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
+    floor2 = coarse_rho_floor * coarse_rho_floor
 
-    inv_sqrt_v = np.zeros(nt, dtype=np.float64)
-    inv_sqrt_v[valid] = 1.0 / np.sqrt(v[valid])
-    U64 = (C * (inv_sqrt_v[:, None] * sqrt_W[None, :])).astype(np.complex64)
-    coarse_rho_floor = float(rho_min) * (0.992 if s_step > 1 else 1.0)
+    def _match_subset(sub_idx):
+        m_c = int(sub_idx.size)
+        if m_c < 2:
+            return [], [], []
+        U_c = U64[sub_idx]
+        v_c = v[sub_idx]
+        Ur = np.ascontiguousarray(U_c.real)
+        Ui = np.ascontiguousarray(U_c.imag)
+        A2 = np.empty((2 * m_c, 2 * length), dtype=np.float32)
+        A2[0::2, :length] = Ur
+        A2[0::2, length:] = Ui
+        A2[1::2, :length] = Ui
+        A2[1::2, length:] = -Ur
+        Us = shifts_ord[:, None, :] * U_c[None, :, :]
+        B2 = np.empty((ns * m_c, 2 * length), dtype=np.float32)
+        B2[:, :length] = Us.real.reshape(ns * m_c, length)
+        B2[:, length:] = Us.imag.reshape(ns * m_c, length)
+        P = (A2 @ B2.T).reshape(m_c, 2, ns, m_c)
+        rho2 = P[:, 0, :, :] * P[:, 0, :, :] + P[:, 1, :, :] * P[:, 1, :, :]
+        best_s = np.argmax(rho2, axis=1)
+        ri = np.arange(m_c)[:, None]
+        ci_grid = np.arange(m_c)[None, :]
+        best_rho2 = rho2[ri, best_s, ci_grid]
+
+        v_ok = np.minimum(v_c[:, None], v_c[None, :]) >= 0.85 * np.maximum(v_c[:, None], v_c[None, :])
+        best_rho2 = np.where((ci_grid > ri) & v_ok, best_rho2, 0.0)
+        if m_c > 9:
+            top_cols = np.argpartition(-best_rho2, kth=7, axis=1)[:, :8]
+            top_vals = best_rho2[ri, top_cols]
+            ia_loc, kb_loc = np.nonzero(top_vals >= floor2)
+            ib_loc = top_cols[ia_loc, kb_loc]
+            cand_r2 = top_vals[ia_loc, kb_loc]
+        else:
+            ia_loc, ib_loc = np.nonzero(best_rho2 >= floor2)
+            cand_r2 = best_rho2[ia_loc, ib_loc]
+        if ia_loc.size == 0:
+            return [], [], []
+        order = np.argsort(-cand_r2, kind="stable")
+        used = np.zeros(m_c, dtype=bool)
+        out_a, out_b, out_dl = [], [], []
+        for idx in order:
+            a_l = int(ia_loc[idx])
+            b_l = int(ib_loc[idx])
+            if used[a_l] or used[b_l]:
+                continue
+            used[a_l] = True
+            used[b_l] = True
+            ta = int(sub_idx[a_l])
+            tb = int(sub_idx[b_l])
+            dl_ab = int(dls_ord[best_s[a_l, b_l]])
+            if ta < tb:
+                out_a.append(ta)
+                out_b.append(tb)
+                out_dl.append(dl_ab)
+            else:
+                out_a.append(tb)
+                out_b.append(ta)
+                out_dl.append(-dl_ab)
+        return out_a, out_b, out_dl
 
     pair_a_list = []
     pair_b_list = []
     pair_dl_list = []
-    chunk_size = 512
-    for c_start in range(0, nt, chunk_size):
-        c_end = min(c_start + chunk_size, nt)
-        m_c = c_end - c_start
-        if m_c < 2:
-            continue
-        U_c = U64[c_start:c_end]
-        U_conj = U_c.conj()
-        v_c = v[c_start:c_end]
-        val_c = valid[c_start:c_end]
-        best_rho = np.zeros((m_c, m_c), dtype=np.float32)
-        best_dl_idx = np.full((m_c, m_c), zero_pos, dtype=np.int32)
-        for j_idx, s_idx in enumerate(shift_order):
-            G = U_conj @ (U_c * shifts64[s_idx]).T
-            cur_rho = np.abs(G)
-            if j_idx == 0:
-                best_rho[:] = cur_rho
-            else:
-                upd = cur_rho > best_rho + 1e-4
-                best_rho[upd] = cur_rho[upd]
-                best_dl_idx[upd] = s_idx
-        v_min = np.minimum(v_c[:, None], v_c[None, :])
-        v_max = np.maximum(v_c[:, None], v_c[None, :])
-        ok_pair = (np.triu(np.ones((m_c, m_c), dtype=bool), k=1)
-                   & val_c[:, None] & val_c[None, :]
-                   & (v_min >= 0.85 * v_max)
-                   & (best_rho >= coarse_rho_floor))
-        ia, ib = np.nonzero(ok_pair)
-        if ia.size == 0:
-            continue
-        cand_rhos = best_rho[ia, ib]
-        order = np.argsort(-cand_rhos, kind="stable")
-        used = np.zeros(m_c, dtype=bool)
-        for idx in order:
-            a_loc = int(ia[idx])
-            b_loc = int(ib[idx])
-            if used[a_loc] or used[b_loc]:
-                continue
-            used[a_loc] = True
-            used[b_loc] = True
-            pair_a_list.append(c_start + a_loc)
-            pair_b_list.append(c_start + b_loc)
-            pair_dl_list.append(int(dls[best_dl_idx[a_loc, b_loc]]))
+    paired_global = np.zeros(nt, dtype=bool)
+    chunk_size = 48
+    for c_start in range(0, perm.size, chunk_size):
+        ca, cb, cdl = _match_subset(perm[c_start:c_start + chunk_size])
+        if ca:
+            paired_global[ca] = True
+            paired_global[cb] = True
+            pair_a_list.extend(ca)
+            pair_b_list.extend(cb)
+            pair_dl_list.extend(cdl)
+    unpaired = perm[~paired_global[perm]]
+    if unpaired.size >= 2:
+        for c_start in range(0, unpaired.size, chunk_size):
+            ca, cb, cdl = _match_subset(unpaired[c_start:c_start + chunk_size])
+            if ca:
+                pair_a_list.extend(ca)
+                pair_b_list.extend(cb)
+                pair_dl_list.extend(cdl)
 
     max_nc = int(0.85 * nt)
     npairs = len(pair_a_list)
@@ -338,7 +382,7 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     lag_pad = int((max_abs_dl + R - 1) // R) if max_abs_dl > 0 else 0
     ratio = round((nc / float(nt)) * 20.0) / 20.0
     raw_alpha = float(np.mean(alphas) - 0.5 * np.std(alphas))
-    eff_alpha = max(0.5, min(1.0, math.floor(raw_alpha * 100.0 + 1e-9) / 100.0))
+    eff_alpha = max(0.5, min(1.0, math.floor(raw_alpha * 50.0 + 1e-9) / 50.0))
     return Tier0Cluster(specs=specs, offsets=offsets, members=members,
                         lag_pad=lag_pad, ratio=ratio, alpha=eff_alpha)
 
@@ -2055,20 +2099,33 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
                   nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None):
+    p = _norm_profile(power, n)
     if bands is None:
-        bands = usable_bands(power, n, floor)
+        bands = usable_bands(p, n, floor)
+    else:
+        bands = sorted(int(b) for b in bands)
     if not bands:
         return None, []
+    win = None if window is None else (int(window[0]), int(window[1]))
     nsamp = _gm._nsamp_for(fd) if nsamp is None else int(nsamp)
-    drawn = signal_draws(power, n, bands, snr, nsamp, window=window, lags_too=True)
+    if offsets_by_band is None:
+        offsets_by_band = {b: band_offset(p, n, b) for b in bands}
+    k0s = tuple(offsets_by_band[b] for b in bands)
+    Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
+    if np.any(Fb <= 0):
+        return None, []
+    # Resolve the canonical profile in _SIGNAL_RECORDS so base and clustered draws share one realization
+    sr_kw = {"k0s": k0s} if any(k0s) else {}
+    p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
+    drawn = signal_draws(p_base, n, bands, snr, nsamp, window=win, lags_too=True)
     if drawn is None:
         return None, []
     sig, lags = drawn
-    noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
-    memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), window,
+    noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=win)
+    memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
             int(nsim), int(nsamp))
 
-    # Build joint multi-tier signal & noise matrices per clustered Tier-0 band (k >= 2 only)
+    # Build joint multi-tier signal & noise matrices per clustered Tier-0 band (matching chain_thresholds)
     t0_draws = {}
     if tier0_clusters and int(max_tiers) >= 2 and len(bands) >= 2:
         t0_map = {}
@@ -2076,46 +2133,30 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             a, lp = (sp.alpha, sp.lag_pad) if hasattr(sp, "alpha") else sp
             t0_map[int(b)] = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
         t0_bands = [b for b in bands[:-1] if b in t0_map]
-        if t0_bands:
-            al_vec = tuple(t0_map[b][0] if b in t0_map else 1.0 for b in bands)
-            lp_vec = tuple(t0_map[b][1] if b in t0_map else 0 for b in bands)
-            drawn_c = signal_draws(power, n, bands, snr, nsamp, window=window, alphas=al_vec)
-            noise_c = noise_block_maxima(power, n, bands, nsim=nsim, window=window,
-                                         alphas=al_vec, lag_pads=lp_vec)
-            # Ensure unclustered and clustered draws share the exact same profile realization
-            if drawn_c[0].shape != sig[0].shape or not np.array_equal(drawn_c[1][:, 0], sig[1][:, 0]):
-                sig, lags = signal_draws(power, n, bands, snr, nsamp, window=window,
-                                         lags_too=True, _exact=True)
-                noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window, _exact=True)
-                drawn_c = signal_draws(power, n, bands, snr, nsamp, window=window,
-                                       alphas=al_vec, _exact=True)
-                noise_c = noise_block_maxima(power, n, bands, nsim=nsim, window=window,
-                                             alphas=al_vec, lag_pads=lp_vec, _exact=True)
-                memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands),
-                        window, int(nsim), int(nsamp))
-            for b0 in t0_bands:
-                col0 = bands.index(b0)
-                c_mix = sig[0].copy()
-                c_mix[:, col0] = drawn_c[0][:, col0]
-                c_mix.setflags(write=False)
-                n_mix = noise.copy()
-                n_mix[:, col0] = noise_c[:, col0]
-                sig_b0 = (c_mix, sig[1])
-                memo_b0 = ("choose_t0", id(c_mix), id(n_mix), b0, t0_map[b0], n, float(snr),
-                           float(fd), tuple(bands), window, int(nsim), int(nsamp))
-                t0_draws[b0] = (sig_b0, n_mix, memo_b0)
+        for b0 in t0_bands:
+            a0, lp0 = t0_map[b0]
+            al_b0 = tuple(a0 if b == b0 else 1.0 for b in bands)
+            lp_b0 = tuple(lp0 if b == b0 else 0 for b in bands)
+            drawn_b0 = signal_draws(p_base, n, bands, snr, nsamp, window=win,
+                                    lags_too=True, alphas=al_b0)
+            if drawn_b0 is None:
+                continue
+            sig_b0, lags_b0 = drawn_b0
+            noise_b0 = noise_block_maxima(p_base, n, bands, nsim=nsim, window=win,
+                                          alphas=al_b0, lag_pads=lp_b0)
+            memo_b0 = ("choose_t0", id(sig_b0[0]), id(noise_b0), b0, t0_map[b0], n, float(snr),
+                       float(fd), tuple(bands), win, int(nsim), int(nsamp))
+            t0_draws[b0] = (sig_b0, noise_b0, memo_b0, lags_b0)
 
-    if offsets_by_band is None:
-        offsets_by_band = {b: band_offset(power, n, b) for b in bands}
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         offs = tuple(offsets_by_band[b] for b in chain)
         if len(chain) > 1 and chain[0] in t0_draws:
-            sig_use, noise_use, memo_use = t0_draws[chain[0]]
+            sig_use, noise_use, memo_use, lags_use = t0_draws[chain[0]]
         else:
-            sig_use, noise_use, memo_use = sig, noise, memo
+            sig_use, noise_use, memo_use, lags_use = sig, noise, memo, lags
         pl = plan_chain(sig_use, noise_use, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, memo=memo_use, lags=lags, lazy_fit=True, offsets=offs)
+                        ntemplates=ntemplates, memo=memo_use, lags=lags_use, lazy_fit=True, offsets=offs)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
