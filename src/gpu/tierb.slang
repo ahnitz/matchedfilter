@@ -190,11 +190,11 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 #define ROWWIN_WORDS 3u
 static uint _binPhase = 0u;
 #if defined(MF_VULKAN)
-#if COARSE16
-[[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
-#elif defined(MF_REFINE_BOUNDED)
+#if defined(MF_REFINE_BOUNDED)
 //: refineListedBounded's own buffers take bindings 0-5 (its count is 5).
 [[vk::binding(6, 0)]] StructuredBuffer<uint> gRowWin;
+#elif COARSE16
+[[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
 #elif defined(MF_TIERB_PEAKS)
 //: The binned fusedTierB builds (flat peaks, the fp32 gate tier): after their own four.
 [[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
@@ -1440,18 +1440,20 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
 [ForceInline]
 void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                  RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-                 uint winStart, uint winEnd, uint thrBits)
+                 uint wsA, uint weA, uint wsB, uint weB, uint thrBits)
 {
-    uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
-    uint span = winEnd - winStart;
+    uint u0A = slotToIndex(tid * R) - wsA, spanA = (weA > wsA) ? (weA - wsA) : 0u;
+    uint u0B = slotToIndex(tid * R) - wsB, spanB = (weB > wsB) ? (weB - wsB) : 0u;
     uint kA = 0u, kB = 0u;
 #if defined(MF_METAL)
     uint ovAcc = 0u;
 #endif
     MF_UNROLL for (uint i = 0; i < R; ++i) {
-        bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
+        uint si = slotToIndex(i);
+        bool liveA = (u0A + si) < spanA;            // wsA <= idx < weA
+        bool liveB = (u0B + si) < spanB;            // wsB <= idx < weB
         H mg = mag2s(re[i], im[i]);
-        uint m = live ? bit_cast<uint>(mg) : 0u;
+        uint mb = bit_cast<uint>(mg);
 #if defined(MF_METAL)
         // FAIL OPEN on fp16 overflow, per lane (A low half, B high half): an exponent
         // field of all ones carries into the sign bit (see filterOne). Exact under fast math.
@@ -1460,13 +1462,13 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
         ovAcc |= ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
                | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
 #endif
-        kA = max(kA, (m << 16) | (15u - i));
-        kB = max(kB, (m & 0xFFFF0000u) | (15u - i));
+        kA = max(kA, (liveA ? (mb << 16) : 0u) | (15u - i));
+        kB = max(kB, (liveB ? (mb & 0xFFFF0000u) : 0u) | (15u - i));
     }
 #if defined(MF_METAL)
-    // An overflowed lane takes the +inf key (slot of register 0), which wins and passes.
-    if ((ovAcc & 0x00008000u) != 0u) kA = max(kA, 0x7C00000Fu);
-    if ((ovAcc & 0x80000000u) != 0u) kB = max(kB, 0x7C00000Fu);
+    // An overflowed lane with a non-empty window takes the +inf key (slot of register 0).
+    if (spanA != 0u && (ovAcc & 0x00008000u) != 0u) kA = max(kA, 0x7C00000Fu);
+    if (spanB != 0u && (ovAcc & 0x80000000u) != 0u) kB = max(kB, 0x7C00000Fu);
 #endif
     // 0xFFFF - (tid*R + i) == ((0xFFF - tid) << 4) | (15 - i), R == 16
     kA |= (0xFFFu - tid) << 4;
@@ -1481,7 +1483,8 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     // is elected; it must then PASS. Its reported value is replaced by the largest
     // float, since the element itself may be NaN, which compares false against any
     // threshold and gated the whole loud batch out (0 peaks at SNR >= 2500).
-    bool infA = (kA >> 16) >= 0x7C00u, infB = (kB >> 16) >= 0x7C00u;
+    bool infA = spanA != 0u && (kA >> 16) >= 0x7C00u;
+    bool infB = spanB != 0u && (kB >> 16) >= 0x7C00u;
 #if defined(MF_METAL)
     // Slang's Metal target types f16tof32 as half, and as_type<uint>(half) is rejected;
     // both sides are non-negative and finite here, so values order as the bits do.
@@ -1519,23 +1522,29 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
 [ForceInline]
 void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                  RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-                 uint winStart, uint winEnd, uint nbins, float thr)
+                 uint wsA, uint weA, uint wsB, uint weB, uint nbins, float thr)
 {
-    uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
-    uint span = winEnd - winStart;
+    uint u0A = slotToIndex(tid * R) - wsA, spanA = (weA > wsA) ? (weA - wsA) : 0u;
+    uint u0B = slotToIndex(tid * R) - wsB, spanB = (weB > wsB) ? (weB - wsB) : 0u;
     H best = H(0.0f);
     uint ovAcc = 0u;
     MF_UNROLL for (uint i = 0; i < R; ++i) {
-        bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
-        best = max(best, live ? mag2s(re[i], im[i]) : H(0.0f));
+        uint si = slotToIndex(i);
+        bool liveA = (u0A + si) < spanA;            // wsA <= idx < weA
+        bool liveB = (u0B + si) < spanB;            // wsB <= idx < weB
+        uint mb = bit_cast<uint>(mag2s(re[i], im[i]));
+        uint m = (liveA ? (mb & 0x0000FFFFu) : 0u) | (liveB ? (mb & 0xFFFF0000u) : 0u);
+        best = max(best, bit_cast<H>(m));
         // FAIL OPEN on fp16 overflow anywhere in the transform: an exponent field of all
         // ones in re or im carries into bit 15 (A) or bit 31 (B), exact under fast math.
         ovAcc |= ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
                | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
     }
+    if (spanA == 0u) ovAcc &= ~0x00008000u;
+    if (spanB == 0u) ovAcc &= ~0x80000000u;
     if (nbins == 0u) {
-        // Non-final coarse tier: compactPairs tests only !(length(cval[pair]) < thr) and
-        // nothing reads cidx0 or |cval0|. Reduce two pass/fail bits without shuffles on
+        // Non-final coarse tier: compactPairs/compactListed test only !(length(cval[pair]) < thr)
+        // and nothing reads cidx or |cval|. Reduce two pass/fail bits without shuffles on
         // Vulkan (subgroup ballot) or via one integer OR-shuffle cascade, no sqrt.
         uint bb = bit_cast<uint>(best);
         float thr2 = thr * thr;
@@ -1594,27 +1603,13 @@ void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     }
 }
 
-//: TWO pairs at once in split/SoA form. Both share the data row and differ
-//: only in template, so the data broadcasts to both lanes and the templates
-//: fill one lane each. Every operation from here to the magnitude is
-//: elementwise and packs.
+//: Shared SoA radix-16 inverse transform and per-lane peak/gate reduction for two packed pairs.
 [ForceInline]
-void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
-               C dreg[RADIX], StructuredBuffer<CVal> tmpl,
+void finishTwo(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-               uint winStart, uint winEnd, uint nbins, uint thrBits)
+               uint wsA, uint weA, uint wsB, uint weB, uint nbins, uint thrBits)
 {
-    H re[16], im[16];
-    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) {
-        C ta = cload(tmpl, tA*N + tid + WG * n2);
-        C tb = cload(tmpl, tB*N + tid + WG * n2);
-        H dr = H(dreg[n2].x, dreg[n2].x);     // data broadcast: .xx swizzle
-        H di = H(dreg[n2].y, dreg[n2].y);
-        H tr = H(ta.x, tb.x);                 // one template per lane
-        H ti = H(ta.y, tb.y);
-        cmulconjs(dr, di, tr, ti, re[n2], im[n2]);
-    }
-
+    _tid = tid;
     [ForceUnroll] for (uint lvl = 0; lvl < NLEVELS; ++lvl) {
         const uint TB   = WG >> (LGR * lvl);
         const uint len  = N  >> (LGR * lvl);
@@ -1658,11 +1653,6 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     }
     innermostS(re, im);
 
-    // |v|^2 for BOTH pairs in one packed multiply-add; the AoS path
-    // promoted to fp32 here (128 v_cvt_f32_f16 in the dump).
-    // |v|^2 masked by the window, both lanes at once. `live` depends on the
-    // element index, which is shared by the two transforms, so the select
-    // is packed and no lane is extracted here.
 #if defined(MF_VULKAN) || defined(MF_CUDA) || defined(MF_METAL)
     // mfSubgroupSize is a specialization constant on Vulkan (one branch survives); 32 on
     // CUDA (the warp) and on Metal (Apple's SIMD-group width; the host checks the
@@ -1673,36 +1663,83 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     const bool wavePeak = false;
 #endif
     if (wavePeak) {
-        // Every backend: the host passes the gate threshold (magnitude bits) when tier 0's
+        // Every backend: the host passes the gate threshold (magnitude bits) when the tier's
         // index has no reader; 0 asks for the full election (peakTwoWave).
         if (thrBits != 0u)
-            peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, nbins, asfloat(thrBits));
+            peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, wsA, weA, wsB, weB, nbins, asfloat(thrBits));
         else
-            peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+            peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, wsA, weA, wsB, weB, thrBits);
     } else {
         H magv[16];
         MF_UNROLL for (uint i = 0; i < R; ++i) {
             uint idx = slotToIndex(tid * R + i);
-            bool live = (idx >= winStart && idx < winEnd);
-            H mg = mag2s(re[i], im[i]);
-            magv[i] = live ? mg : H(0.0f);
+            bool liveA = (idx >= wsA && idx < weA);
+            bool liveB = (idx >= wsB && idx < weB);
+            uint mb = bit_cast<uint>(mag2s(re[i], im[i]));
+            uint m = (liveA ? (mb & 0x0000FFFFu) : 0u) | (liveB ? (mb & 0xFFFF0000u) : 0u);
             // FAIL OPEN on fp16 overflow, per lane (see filterOne): an exponent field of
             // all ones in re or im makes that lane's magnitude +inf, which peakLane elects
-            // and passes. An integer test, so no fast-math rule can fold it: peakLane's
-            // isnan(poison) did fold on Vulkan, and at band 1024 on a 32-wide subgroup
-            // (Intel, NVIDIA) every pair of an overflowing row was dismissed.
-            if (live) {
-                uint ov = ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
-                        | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
-                uint mb = bit_cast<uint>(magv[i]);
-                if ((ov & 0x00008000u) != 0u) mb = (mb & 0xFFFF0000u) | 0x7C00u;
-                if ((ov & 0x80000000u) != 0u) mb = (mb & 0x0000FFFFu) | 0x7C000000u;
-                magv[i] = bit_cast<H>(mb);
-            }
+            // and passes. An integer test, so no fast-math rule can fold it.
+            uint ov = ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
+                    | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
+            if (liveA && (ov & 0x00008000u) != 0u) m = (m & 0xFFFF0000u) | 0x7C00u;
+            if (liveB && (ov & 0x80000000u) != 0u) m = (m & 0x0000FFFFu) | 0x7C000000u;
+            magv[i] = bit_cast<H>(m);
         }
-        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
-        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, wsA, weA, 0u);
+        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, wsB, weB, 0u);
     }
+}
+
+//: TWO pairs at once in split/SoA form. Both share the data row and differ
+//: only in template, so the data broadcasts to both lanes and the templates
+//: fill one lane each. Every operation from here to the magnitude is
+//: elementwise and packs.
+[ForceInline]
+void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
+               C dreg[RADIX], StructuredBuffer<CVal> tmpl,
+               RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
+               uint winStart, uint winEnd, uint nbins, uint thrBits)
+{
+    H re[16], im[16];
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) {
+        C ta = cload(tmpl, tA*N + tid + WG * n2);
+        C tb = cload(tmpl, tB*N + tid + WG * n2);
+        H dr = H(dreg[n2].x, dreg[n2].x);     // data broadcast: .xx swizzle
+        H di = H(dreg[n2].y, dreg[n2].y);
+        H tr = H(ta.x, tb.x);                 // one template per lane
+        H ti = H(ta.y, tb.y);
+        cmulconjs(dr, di, tr, ti, re[n2], im[n2]);
+    }
+    finishTwo(pairA, pairB, tid, re, im, peakIdx, peakVal,
+              winStart, winEnd, winStart, winEnd, nbins, thrBits);
+}
+
+//: TWO arbitrary listed survivor pairs (dA, tA) and (dB, tB) packed into lanes .x and .y of H.
+//: When both survivors come from the same block row (dB == dA, uniform across the WG slice),
+//: the data load is shared; otherwise each lane loads its own block row and window [ws, we).
+[ForceInline]
+void filterTwoListed(uint pairA, uint pairB, uint dA, uint tA, uint dB, uint tB, uint tid,
+                     StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
+                     RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
+                     uint wsA, uint weA, uint wsB, uint weB, uint nbins, uint thrBits)
+{
+    H re[16], im[16];
+    const uint stride = DSTRIDE;
+    const bool sameRow = (dB == dA);
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) {
+        uint k = tid + WG * n2;
+        C da = dload(data, dA * stride + k);
+        C db = sameRow ? da : dload(data, dB * stride + k);
+        C ta = cload(tmpl, tA * N + k);
+        C tb = cload(tmpl, tB * N + k);
+        H dr = H(da.x, db.x);
+        H di = H(da.y, db.y);
+        H tr = H(ta.x, tb.x);
+        H ti = H(ta.y, tb.y);
+        cmulconjs(dr, di, tr, ti, re[n2], im[n2]);
+    }
+    finishTwo(pairA, pairB, tid, re, im, peakIdx, peakVal, wsA, weA, wsB, weB, nbins, thrBits);
 }
 #endif
 
@@ -1909,7 +1946,7 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
                   StructuredBuffer<float2> coarse,
                   RWStructuredBuffer<uint> survivors,
                   RWStructuredBuffer<uint> args,
-                  uniform uint pairs, uniform float thr, uniform uint nbins)
+                  uniform uint pairs, uniform float thr, uniform uint packShift)
 {
     uint pair = gid.x;
 #if defined(MF_VULKAN) || defined(MF_CUDA)
@@ -1922,6 +1959,10 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
     if (WaveIsFirstLane()) {
         if (waveCount > 0) {
             InterlockedAdd(args[0], waveCount, baseSlot);
+            if (packShift > 0u) {
+                uint endGroups = (baseSlot + waveCount + ((1u << packShift) - 1u)) >> packShift;
+                InterlockedMax(args[4], endGroups);
+            }
         }
     }
     baseSlot = WaveReadLaneFirst(baseSlot);
@@ -1935,6 +1976,10 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
         uint slot;
         InterlockedAdd(args[0], 1u, slot);
         survivors[slot] = pair;
+        if (packShift > 0u) {
+            uint endGroups = (slot + 1u + ((1u << packShift) - 1u)) >> packShift;
+            InterlockedMax(args[4], endGroups);
+        }
     }
 #endif
 }
@@ -1949,7 +1994,8 @@ void compactPairsClustered(uint3 gid: SV_DispatchThreadID,
                            StructuredBuffer<uint> clusterMembers,
                            RWStructuredBuffer<uint> survivors,
                            RWStructuredBuffer<uint> args,
-                           uniform uint pairs0, uniform uint nc, uniform uint nt, uniform float thr)
+                           uniform uint pairs0, uniform uint nc, uniform uint nt,
+                           uniform float thr, uniform uint packShift)
 {
     uint pair0 = gid.x;
     // !(x < thr): a NaN coarse value (an overflowed narrow tier) passes (fails open).
@@ -1970,6 +2016,10 @@ void compactPairsClustered(uint3 gid: SV_DispatchThreadID,
     if (WaveIsFirstLane()) {
         if (waveTotal > 0u) {
             InterlockedAdd(args[0], waveTotal, baseSlot);
+            if (packShift > 0u) {
+                uint endGroups = (baseSlot + waveTotal + ((1u << packShift) - 1u)) >> packShift;
+                InterlockedMax(args[4], endGroups);
+            }
         }
     }
     baseSlot = WaveReadLaneFirst(baseSlot);
@@ -1982,6 +2032,10 @@ void compactPairsClustered(uint3 gid: SV_DispatchThreadID,
         InterlockedAdd(args[0], cnt, slot);
         for (uint j = 0u; j < cnt; ++j) {
             survivors[slot + j] = d * nt + clusterMembers[m0 + j];
+        }
+        if (packShift > 0u) {
+            uint endGroups = (slot + cnt + ((1u << packShift) - 1u)) >> packShift;
+            InterlockedMax(args[4], endGroups);
         }
     }
 #endif
