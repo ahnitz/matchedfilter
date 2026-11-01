@@ -109,6 +109,20 @@ def _aligned_zeros(shape, dtype=np.complex64, align: int = 64) -> np.ndarray:
     return raw[off:off + nbytes].view(dtype).reshape(shape)
 
 
+class _RecycledBuffer:
+    """Array-interface owner keeping a backing uint8 buffer alive across all NumPy views."""
+    __slots__ = ("__array_interface__", "_raw", "__weakref__")
+
+    def __init__(self, raw: np.ndarray, off: int, shape: tuple, dtype: np.dtype):
+        self._raw = raw
+        self.__array_interface__ = {
+            "shape": shape,
+            "typestr": dtype.str,
+            "data": (raw.ctypes.data + off, False),
+            "version": 3,
+        }
+
+
 def _interval_runs(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
     """The union of [starts, stops) clipped to [0, S), as sorted disjoint (K, 2) runs.
 
@@ -2251,7 +2265,8 @@ class TimeDomainFilterBank:
         else:
             support = None
         # Input samples the windows read (matchedfilter._roofline), once per call.
-        self._add_corr_in(int((W[:, 1] - W[:, 0]).sum()))
+        w_span = int((W[:, 1] - W[:, 0]).sum())
+        self._add_corr_in(w_span)
 
         if template_index is not None:
             if template_index < 0 or template_index >= nt:
@@ -2281,8 +2296,7 @@ class TimeDomainFilterBank:
                 else:
                     raise ValueError(f"out shape {out.shape} must match ({S},) or (1, {S})")
             else:
-                out_2d = _aligned_zeros((1, S), dtype=np.complex64, align=16384)
-                support = np.empty((0, 2), dtype=np.int64)
+                out_2d, support = self._alloc_corr_output((1, S), S, w_span)
 
             self._correlate_windows(target_g, ser, W, ti_local, 1, out_2d, support=support)
             if single_scale is not None:
@@ -2313,8 +2327,7 @@ class TimeDomainFilterBank:
                 raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
             result = out
         else:
-            result = _aligned_zeros(shape, dtype=np.complex64, align=16384)
-            support = np.empty((0, 2), dtype=np.int64)
+            result, support = self._alloc_corr_output(shape, S, w_span)
 
         settle = []
         ok = False
@@ -2408,6 +2421,46 @@ class TimeDomainFilterBank:
         self._groups
         return all(_gpu_reads_real(g.get_correlation_plan()._gpu, g.n) for g in self._groups)
 
+    def _alloc_corr_output(self, shape, S: int, w_span: int):
+        """Allocate a correlation output array and its initial dirty-region support.
+
+        On CPU when windows cover more than half of S, uninitialized page-aligned memory backed
+        by a 1-slot weakref-finalized pool avoids both user-space zero-fill and >32 MiB glibc
+        mmap/munmap kernel page-fault zeroing once an earlier result and all views over it are
+        freed, while _correlate_windows clears only unwritten margins. Sparse windows and GPU
+        outputs retain calloc zero-page backing so untouched pages are never faulted.
+        """
+        from .device import parse as _parse_device
+        dtype = np.dtype(np.complex64)
+        nbytes = int(np.prod(shape)) * dtype.itemsize
+        if nbytes > 0 and _parse_device(self.device).kind == 'cpu' and w_span > S // 2:
+            page = 16384
+            need = nbytes + page
+            pool = self.__dict__.setdefault('_corr_out_pool', [])
+            raw = None
+            while pool:
+                cand = pool.pop()
+                if cand.size >= need:
+                    raw = cand
+                    break
+            if raw is None:
+                raw = np.empty(need, dtype=np.uint8)
+            off = (-raw.ctypes.data) % page
+            owner = _RecycledBuffer(raw, off, shape, dtype)
+            wself = weakref.ref(self)
+
+            def _return_raw(buf=raw, bank_ref=wself):
+                bank = bank_ref()
+                if bank is not None:
+                    free_list = bank.__dict__.get('_corr_out_pool')
+                    if free_list is not None and len(free_list) < 1:
+                        free_list.append(buf)
+
+            weakref.finalize(owner, _return_raw)
+            return np.asarray(owner), None
+        return (_aligned_zeros(shape, dtype=dtype, align=16384),
+                np.empty((0, 2), dtype=np.int64))
+
     def _correlate_selected(self, ser, W, templates, scales, out, support=None, wait=True):
         """correlate_series(templates=...): row j of the result is template templates[j]."""
         from ._filter import _from_any
@@ -2424,8 +2477,8 @@ class TimeDomainFilterBank:
                 raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
             result = out
         else:
-            result = _aligned_zeros(shape, dtype=np.complex64, align=16384)
-            support = np.empty((0, 2), dtype=np.int64)
+            w_span = int((W[:, 1] - W[:, 0]).sum())
+            result, support = self._alloc_corr_output(shape, S, w_span)
         if scales is not None:
             sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
             if sc.ndim != 1 or sc.size != self.n_templates:
