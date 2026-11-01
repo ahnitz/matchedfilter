@@ -157,7 +157,8 @@ ap_prod_kernel ap_plan_prod_kernel(const ap_plan *,float threshold);
 int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
                  const float *tr, const float *ti, float *out);
 int ap_corr_prod_window(ap_plan *p, const float *dr, const float *di,
-                        const float *tr, const float *ti, size_t blo, size_t end, float *dst);
+                        const float *tr, const float *ti, size_t blo, size_t end, float *dst,
+                        float *scratch, int stream);
 int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);
 int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
                        const float *tr, const float *ti, int nlane, float *out);
