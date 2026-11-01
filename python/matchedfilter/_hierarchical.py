@@ -1,5 +1,6 @@
 """The hierarchical filter (HierarchicalFilter): a gate chain of cheap coarse correlations
 that refines on demand, and its resolved plan. Re-exported by the package."""
+import math
 import time
 from typing import NamedTuple, Optional
 
@@ -111,6 +112,13 @@ def _direct_refine_enabled():
     return _config.get("MF_DIRECT_REFINE")
 
 
+_TIER0_PAIR_CENTROID = True
+
+
+def _tier0_centroid_enabled():
+    return bool(_TIER0_PAIR_CENTROID)
+
+
 class _Resolved(NamedTuple):
     """A hierarchical filter's resolved plan (docs/resolved-plan.md), immutable: one is
     computed per set of inputs (HierarchicalFilter._resolve)."""
@@ -179,6 +187,10 @@ class HierarchicalFilter(MatchedFilter):
         self._hermitian = False
         self._mf = None
         self._q15 = False
+        self._tier0_clusters = {}
+        self._clusters_dirty = False
+        self._chosen_csig = ()
+        self._synced_t0 = None
         # The joint-trial arm this plan runs (_trial): DEFAULT, a lock, or a trial's arm. A plan
         # inside a bank is governed by the bank's trial and runs none of its own.
         self._arm, self._governed, self._forced = _trial.DEFAULT, False, False
@@ -282,9 +294,77 @@ class HierarchicalFilter(MatchedFilter):
         device, its chain; whether the direct refine is priced in)."""
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         chain = ",".join(str(int(b)) for b in self._chain)
-        return "plan|%d|%g|%g|%d|%s|%s%s" % (self.n, float(self._fs_snr or self.snr), float(self.fd),
-                                             tiers, self.device, chain,
-                                             "" if self._direct_key() is None else "|direct")
+        cl = self._active_tier0_cluster(self._chain)
+        ctag = "|t0=%.1f" % round(cl.ratio, 1) if cl is not None else ""
+        return "plan|%d|%g|%g|%d|%s|%s%s%s" % (self.n, float(self._fs_snr or self.snr), float(self.fd),
+                                               tiers, self.device, chain,
+                                               "" if self._direct_key() is None else "|direct", ctag)
+
+    def _clusters_sig(self):
+        """Hashable summary of active candidate Tier-0 clusters for chain choice caching."""
+        if not self._tier0_clusters or not _tier0_centroid_enabled():
+            return ()
+        return tuple(
+            (b, round(cl.ratio, 1), math.floor(cl.alpha * 50.0 + 1e-9) / 50.0, cl.lag_pad)
+            for b, cl in sorted(self._tier0_clusters.items())
+        )
+
+    def _active_tier0_cluster(self, chain=None):
+        """Active `Tier0Cluster` for `chain[0]`, or `None` when Tier-0 clustering is disabled."""
+        ch = self._chain if chain is None else chain
+        if (ch is None or len(ch) < 2 or self._pinned is not None or self._cal_thr is not None
+                or self._pending_ref is None or len(self._pending_ref) != self.n
+                or self.device.kind != "cpu" or self._gpu is not None
+                or self._hermitian or not _tier0_centroid_enabled()):
+            return None
+        return self._tier0_clusters.get(int(ch[0]))
+
+    def _update_tier0_clusters(self, templates):
+        """Compute per-band Tier-0 pair centroids for `templates` under `_pending_ref`."""
+        self._tier0_clusters = {}
+        self._clusters_dirty = False
+        self._synced_t0 = None
+        if (templates is None or not isinstance(templates, np.ndarray)
+                or self.ntemplates < 4 or self._pinned is not None
+                or self._pending_ref is None or len(self._pending_ref) != self.n
+                or self._cal_thr is not None or self.device.kind != "cpu"
+                or self._gpu is not None or self._hermitian
+                or not _tier0_centroid_enabled()):
+            return
+        tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+        if tiers < 2:
+            return
+        usable = _gatechain.usable_bands(self._pending_ref, self.n)
+        if len(usable) < 2:
+            return
+        cand_bands = usable[:-1]
+        clusters = {}
+        for b in cand_bands:
+            k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
+            cl = _gatechain.cluster_tier0_templates(
+                templates, self._pending_ref, self.n, b, k0=k0
+            )
+            if cl is not None:
+                clusters[int(b)] = cl
+        self._tier0_clusters = clusters
+
+    def _sync_tier0_clusters(self, plan):
+        """Upload or clear Tier-0 pair centroids on CPU `_core.HMF` `plan`."""
+        if plan is None or not hasattr(plan, "set_tier0_clusters"):
+            return
+        cl = self._active_tier0_cluster()
+        tag = (id(plan), None if cl is None else id(cl))
+        if self._synced_t0 == tag and (
+            (cl is None and plan.tier0_cluster_count() == 0)
+            or (cl is not None and plan.tier0_cluster_count() == cl.specs.shape[0])
+        ):
+            return
+        if cl is None:
+            if plan.tier0_cluster_count() > 0:
+                plan.clear_tier0_clusters()
+        else:
+            plan.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad))
+        self._synced_t0 = tag
 
     def _trial_arms(self):
         """DEFAULT, then the screen both ways where the chain's first band has one."""
@@ -325,7 +405,10 @@ class HierarchicalFilter(MatchedFilter):
         if t is None and getattr(self, "_template_source", None) is not None:
             t = np.ascontiguousarray(self._template_source(), dtype=np.complex64)
         if isinstance(t, np.ndarray):
+            if self._clusters_dirty:
+                self._update_tier0_clusters(t)
             plan.set_template_batch(0, t)
+            self._sync_tier0_clusters(plan)
         elif isinstance(t, list):
             for i, x in enumerate(t):
                 if x is not None:
@@ -348,6 +431,7 @@ class HierarchicalFilter(MatchedFilter):
             self._load_held_templates(plan)
         else:
             plan.set_template_batch(0, templates)
+            self._sync_tier0_clusters(plan)
         if self._held:
             if -1 in self._held:
                 plan.set_data_batch(0, self._held[-1])
@@ -394,6 +478,7 @@ class HierarchicalFilter(MatchedFilter):
                     plan.set_reference(self._pending_ref)
                 self._reload_templates()
             plan.set_thresholds(list(r.thresholds))
+            self._sync_tier0_clusters(plan)
             taps = getattr(self, "_taps", None)
             if taps is not None:
                 if r.direct_hw is not None:
@@ -498,8 +583,10 @@ class HierarchicalFilter(MatchedFilter):
                 # priced as it runs: a pinned chain's first tier has no screen (_arm_q15), so a
                 # one-tier chain's tier reports its lag for the direct refine's window
                 cost = cost.unscreened()
+            cl0 = self._active_tier0_cluster(self._chain)
             pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
-                                             self._chain, cost=cost, window=self.search_window)
+                                             self._chain, cost=cost, window=self.search_window,
+                                             tier0_cluster=cl0)
             if pl is not None:
                 th = tuple(float(x) for x in pl["thresholds"])
                 for v in th:
@@ -571,6 +658,9 @@ class HierarchicalFilter(MatchedFilter):
             self._tdirty = True
         if power is None:
             self._pending_ref = None
+            self._tier0_clusters = {}
+            self._clusters_dirty = False
+            self._synced_t0 = None
             if self._mf is not None:
                 if hasattr(self._mf, "set_band_offsets"):
                     self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
@@ -578,6 +668,7 @@ class HierarchicalFilter(MatchedFilter):
                 self._reload_templates()
             return
         self._pending_ref = p.copy()
+        self._clusters_dirty = True
         if self._mf is not None:
             if hasattr(self._mf, "set_band_offsets"):
                 self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
@@ -604,12 +695,15 @@ class HierarchicalFilter(MatchedFilter):
         cm = _calibration.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
         price = self._direct_price()
-        if price is None:
-            return cm
-        mfrac = max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0)))
-        return cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
-                              fraction=getattr(self, "_one_bin_frac", 1.0),
-                              base=0.25 * cm.refine(0.1), multi_frac=mfrac)
+        if price is not None:
+            mfrac = max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0)))
+            cm = cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
+                                fraction=getattr(self, "_one_bin_frac", 1.0),
+                                base=0.25 * cm.refine(0.1), multi_frac=mfrac)
+        csig = self._clusters_sig()
+        if csig and self._cal_thr is None:
+            cm = cm.with_tier0_cluster({b: r for b, r, _, _ in csig})
+        return cm
 
     def _direct_key(self):
         """The direct refine's rounded tap length when it is priced into this plan's chain
@@ -653,14 +747,19 @@ class HierarchicalFilter(MatchedFilter):
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
         direct = self._direct_key()
+        csig = self._clusters_sig() if self._cal_thr is None else ()
         key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),
                _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct)
+        if csig:
+            key = key + (csig,)
         with _AUTOTUNE_LOCK:
             hit = _chains._CHAIN_CHOICE.get(key)
         if hit is None:
+            t0_choice = {b: (a, lp) for b, _, a, lp in csig} if csig else None
             best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                                   cost=self._cost_model(), max_tiers=tiers,
-                                                  window=self.search_window)
+                                                  window=self.search_window,
+                                                  tier0_clusters=t0_choice)
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
             hit = (tuple(best["chain"]), tuple(tuple(q["chain"]) for q in plans))
@@ -685,6 +784,7 @@ class HierarchicalFilter(MatchedFilter):
                         model_best = want
                         self._forced = True
         self._choice_key = key
+        self._chosen_csig = csig
         self._model_chain = chain = tuple(model_best)
         self.autotune_info = {"status": "forced" if self._forced else "model", "winner": chain,
                               "model": self._model_chain, "arm": self._arm}
@@ -724,6 +824,15 @@ class HierarchicalFilter(MatchedFilter):
 
     def set_templates(self, spectra, index=None):
         if self._gpu is not None or index is not None:
+            if index is not None and self._gpu is None:
+                if self._tier0_clusters:
+                    self._tier0_clusters = {}
+                    self._synced_t0 = None
+                    self._resolved = None
+                    if self._mf is not None:
+                        self._mf.clear_tier0_clusters()
+                if self._pinned is None and self._chain is not None and self._chosen_csig:
+                    self._chain, self._mf, self._resolved = None, None, None
             return super().set_templates(spectra, index=index)
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
         if a.ndim != 2:
@@ -736,9 +845,17 @@ class HierarchicalFilter(MatchedFilter):
             self._bandlimited, k = True, self.n // 2
         else:
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
-        rebuild = self._mf is None or getattr(self._mf, 'k', self.n) != k
+        old_csig = self._clusters_sig()
         self.k = k
         self._held_templates = self._hold(a)
+        self._update_tier0_clusters(a)
+        new_csig = self._clusters_sig()
+        if new_csig != old_csig:
+            self._resolved = None
+        if self._pinned is None and self._chain is not None and self._chosen_csig != new_csig:
+            self._chain = None
+            self._mf = None
+        rebuild = self._mf is None or getattr(self._mf, 'k', self.n) != k
         if rebuild:
             self._mf = None
         # A new plan consumes this batch while restoring its state; regenerating it
@@ -746,6 +863,7 @@ class HierarchicalFilter(MatchedFilter):
         plan = self._ensure(templates=a)
         if not rebuild:
             plan.set_template_batch(0, a)
+            self._sync_tier0_clusters(plan)
         self._mark_ready("template", None)
 
     def set_taps(self, taps, counts=None):
@@ -786,7 +904,15 @@ class HierarchicalFilter(MatchedFilter):
         return self._mf.direct_stats() if self._mf is not None else {}
 
     def set_hermitian(self, hermitian: bool):
-        self._hermitian = bool(hermitian)
+        h = bool(hermitian)
+        if h != self._hermitian:
+            self._hermitian = h
+            self._resolved = None
+            if h and self._tier0_clusters:
+                self._tier0_clusters = {}
+                self._synced_t0 = None
+                if self._pinned is None and self._chain is not None and self._chosen_csig:
+                    self._chain, self._mf = None, None
         if self._mf is not None:
             self._mf.set_hermitian(self._hermitian)
         # The GPU kernels take full spectra: half-length templates were unpacked when

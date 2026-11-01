@@ -116,6 +116,17 @@ struct ap_hmf_plan {
   ap_plan *fwd_cplx_batch;        /* lane-batched n-point forward (n <= 2048), or NULL */
   ap_plan *fwd_real_batch;        /* lane-batched n/2-point real forward (n <= 4096), or NULL */
   float *rtw;                     /* [2(n/2+1)] cos, sin of 2 pi k/n */
+  /* Tier-0 pair-centroid clustering (ap_hmf_set_tier0_clusters): evaluates tier0_nt <= nt
+     lag- and phase-aligned coarse centroids at tier 0 on full-bank multi-tier sweeps and
+     expands firing centroids to their member template indices for tier 1. */
+  int tier0_clustered;
+  int tier0_nt;
+  int tier0_lag_pad;
+  ap_mf_plan *tier0_mf;
+  void *tier0_g16;
+  int *tier0_off;                 /* [tier0_nt + 1] CSR offsets into tier0_members */
+  int *tier0_members;             /* [nt] disjoint member template indices in [0, nt) */
+  unsigned char *tier0_uncl_pend; /* [nd] deferred ingest into unclustered tier[0] */
 };
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
@@ -218,8 +229,11 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   return p;
 }
 
+static void hmf_free_tier0_clusters(ap_hmf_plan *p);
+
 void ap_hmf_destroy(ap_hmf_plan *p){
   if(!p) return;
+  hmf_free_tier0_clusters(p);
   ap_mf_destroy(p->full);
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
@@ -473,6 +487,7 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
      last tier gates in Q15 for a direct-refine plan, ap_mf_q15_pairs_lag also elects its
      coarse argmax lag. */
   ap_mf_set_q15_margin(p->tier[0].mf,0);
+  if(p->tier0_mf) ap_mf_set_q15_margin(p->tier0_mf,0);
   for(int i=1;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     tr->q15=ap_mf_q15_lanes(tr->mf)>0;
@@ -495,9 +510,12 @@ int ap_hmf_q15_stats(const ap_hmf_plan *p,long *passed,unsigned long long *ticks
   return 0;
 }
 
+void ap_hmf_clear_tier0_clusters(ap_hmf_plan *p);
+
 int ap_hmf_set_hermitian(ap_hmf_plan *p,int hermitian){
   if(!p) return -1;
   if(p->hermitian == !!hermitian) return 0;
+  ap_hmf_clear_tier0_clusters(p);
   p->hermitian = hermitian ? 1 : 0;
   /* The packed DC/Nyquist convention changes both the coarse normalization
      and the refine's template layout. Replay rows already ingested. */
@@ -556,8 +574,8 @@ static inline size_t tier_khi(const ap_hmf_plan *p,const hmf_tier *tr){
 }
 /* Copy data row d's active band [k0, khi) into tier tr, wrapping bin k into cyclic slot
    k & (m - 1) when k0 > 0 so the m-point backward IFFT needs no twiddles. */
-static int ingest_tier_data(const ap_hmf_plan *p,hmf_tier *tr,int d,const float *spec,
-                            int to_mf,int to_g16){
+static int ingest_tier_data_target(const ap_hmf_plan *p,hmf_tier *tr,ap_mf_plan *mf,void *g16,
+                                   int d,const float *spec,int to_mf,int to_g16){
   const float *src = spec;
   if(tr->k0 > 0){
     const size_t khi = tier_khi(p,tr);
@@ -569,9 +587,18 @@ static int ingest_tier_data(const ap_hmf_plan *p,hmf_tier *tr,int d,const float 
     if(len > first) memcpy(tr->scratch, spec + 2*(tr->k0 + first), 2*(len - first)*sizeof(float));
     src = tr->scratch;
   }
-  if(to_mf && ap_mf_set_data(tr->mf,d,src)) return -1;
-  if(to_g16 && tr->g16 && ap_gate16_set_data(tr->g16,d,src)) return -1;
+  if(to_mf && mf && ap_mf_set_data(mf,d,src)) return -1;
+  if(to_g16 && g16 && ap_gate16_set_data(g16,d,src)) return -1;
   return 0;
+}
+static int ingest_tier_data(ap_hmf_plan *p,hmf_tier *tr,int d,const float *spec,
+                            int to_mf,int to_g16){
+  if(tr == &p->tier[0] && p->tier0_clustered){
+    if(ingest_tier_data_target(p,tr,p->tier0_mf,p->tier0_g16,d,spec,to_mf,to_g16)) return -1;
+    if(p->tier0_uncl_pend) p->tier0_uncl_pend[d] = 1;
+    return 0;
+  }
+  return ingest_tier_data_target(p,tr,tr->mf,tr->g16,d,spec,to_mf,to_g16);
 }
 int ap_hmf_band_offsets(const ap_hmf_plan *p,size_t *k0s){
   if(!p) return 0;
@@ -587,6 +614,7 @@ int ap_hmf_set_band_offsets(ap_hmf_plan *p,const size_t *k0s,int ntiers){
     if(p->tier[i].k0 != k0s[i]) same = 0;
   }
   if(same) return 0;
+  ap_hmf_clear_tier0_clusters(p);
   for(int i=0;i<ntiers;i++) p->tier[i].k0 = k0s[i];
   for(int t=0;t<p->nt;t++) if(p->tready[t]==1) p->tready[t]=2;
   if(p->dcopy){
@@ -663,6 +691,7 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
   } else p->ref_on=0;
   /* The tier templates already loaded were scaled for the old reference: stale until set
      again (a run over them fails rather than use the old scale). */
+  ap_hmf_clear_tier0_clusters(p);
   for(int t=0;t<p->nt;t++) if(p->tready[t]==1) p->tready[t]=2;
   return 0;
 }
@@ -708,6 +737,7 @@ int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
 }
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   if(!p||t<0||t>=p->nt||!spec) return -1;
+  if(p->tier0_clustered) ap_hmf_clear_tier0_clusters(p);
   if(p->is_dif){
     if(p->tmpls_half && spec!=p->tmpls_half+(size_t)t*2*p->k)
       memcpy(p->tmpls_half+(size_t)t*2*p->k,spec,2*p->k*sizeof(float));
@@ -744,6 +774,123 @@ int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   p->tready[t]=1;
   return load_tiers(p,t,spec);
 }
+
+static void hmf_free_tier0_clusters(ap_hmf_plan *p){
+  if(!p) return;
+  if(p->tier0_mf){ ap_mf_destroy(p->tier0_mf); p->tier0_mf=NULL; }
+  if(p->tier0_g16){ ap_gate16_destroy(p->tier0_g16); p->tier0_g16=NULL; }
+  free(p->tier0_off); p->tier0_off=NULL;
+  free(p->tier0_members); p->tier0_members=NULL;
+  free(p->tier0_uncl_pend); p->tier0_uncl_pend=NULL;
+  p->tier0_clustered=0;
+  p->tier0_nt=0;
+  p->tier0_lag_pad=0;
+}
+
+static int hmf_sync_unclustered_tier0(ap_hmf_plan *p,int d0,int nd){
+  if(!p->tier0_uncl_pend || p->ntiers<1) return 0;
+  hmf_tier *tr=&p->tier[0];
+  for(int d=d0;d<d0+nd;d++){
+    if(p->tier0_uncl_pend[d]){
+      if(p->dspec[d]){
+        const int to_mf=(p->q15 || !tr->g16 || !tr->pending[d]) ? 1 : 0;
+        if(ingest_tier_data_target(p,tr,tr->mf,tr->g16,d,p->dspec[d],to_mf,1)) return -1;
+      }
+      p->tier0_uncl_pend[d]=0;
+    }
+  }
+  return 0;
+}
+
+void ap_hmf_clear_tier0_clusters(ap_hmf_plan *p){
+  if(!p || !p->tier0_clustered) return;
+  (void)hmf_sync_unclustered_tier0(p,0,p->nd);
+  hmf_free_tier0_clusters(p);
+}
+
+int ap_hmf_tier0_cluster_count(const ap_hmf_plan *p){
+  return (p && p->tier0_clustered) ? p->tier0_nt : 0;
+}
+
+int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
+                              const int *offsets,const int *members,int lag_pad){
+  if(!p || p->ntiers<2 || p->hermitian || !specs || !offsets || !members) return -1;
+  if(nc<1 || nc>p->nt || lag_pad<0 || (size_t)lag_pad>=p->tier[0].m) return -1;
+  if(offsets[0]!=0 || offsets[nc]!=p->nt) return -1;
+  unsigned char *seen=calloc((size_t)p->nt,1);
+  if(!seen) return -1;
+  for(int c=0;c<nc;c++){
+    if(offsets[c]>=offsets[c+1]){ free(seen); return -1; }
+    for(int m=offsets[c];m<offsets[c+1];m++){
+      const int t=members[m];
+      if(t<0 || t>=p->nt || seen[t]){ free(seen); return -1; }
+      seen[t]=1;
+    }
+  }
+  free(seen);
+
+  ap_hmf_clear_tier0_clusters(p);
+
+  const size_t m0=p->tier[0].m;
+  const long pbmax=ap_env_int("MF_PBMAX",-1);
+  const int lw=ap_lane_width();
+  const size_t pblim=pbmax>=0 ? (size_t)pbmax : (lw>=16 ? 1024u : 512u);
+  const size_t min_ntmpl=(lw>0) ? (size_t)lw : 16u;
+  ap_mf_plan *cmf=NULL;
+  if((size_t)nc>=min_ntmpl && m0<=pblim) cmf=ap_mf_create_pairbatch(m0,p->nd,nc);
+  if(!cmf) cmf=ap_mf_create(m0,p->nd,nc);
+  void *cg16=ap_gate16_available() ? ap_gate16_create(m0,p->nd,nc) : NULL;
+  int *coff=malloc((size_t)(nc+1)*sizeof(int));
+  int *cmem=malloc((size_t)p->nt*sizeof(int));
+  unsigned char *cpend=calloc((size_t)p->nd,1);
+  if(!cmf || (ap_gate16_available() && !cg16) || !coff || !cmem || !cpend){
+    if(cmf) ap_mf_destroy(cmf);
+    if(cg16) ap_gate16_destroy(cg16);
+    free(coff); free(cmem); free(cpend);
+    return -1;
+  }
+  for(int c=0;c<nc;c++){
+    const float *cspec=specs+(size_t)c*2*m0;
+    if(ap_mf_set_template(cmf,c,cspec)
+       || (cg16 && ap_gate16_set_template(cg16,c,cspec))){
+      ap_mf_destroy(cmf);
+      if(cg16) ap_gate16_destroy(cg16);
+      free(coff); free(cmem); free(cpend);
+      return -1;
+    }
+  }
+  if(p->q15) ap_mf_set_q15_margin(cmf,0);
+  memcpy(coff,offsets,(size_t)(nc+1)*sizeof(int));
+  memcpy(cmem,members,(size_t)p->nt*sizeof(int));
+  p->tier0_mf=cmf;
+  p->tier0_g16=cg16;
+  p->tier0_off=coff;
+  p->tier0_members=cmem;
+  p->tier0_uncl_pend=cpend;
+  p->tier0_nt=nc;
+  p->tier0_lag_pad=lag_pad;
+  p->tier0_clustered=1;
+
+  if(p->dcopy){
+    hmf_tier *tr=&p->tier[0];
+    const size_t row=2*p->n;
+    for(int d=0;d<p->nd;d++){
+      if(p->dmirrored[d] && p->dspec[d]==p->dcopy+(size_t)d*row){
+        const int to_mf=(p->q15 || !cg16) ? 1 : 0;
+        if(ingest_tier_data_target(p,tr,cmf,cg16,d,p->dcopy+(size_t)d*row,to_mf,1)){
+          ap_hmf_clear_tier0_clusters(p);
+          return -1;
+        }
+        if(!to_mf && !tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+      }
+    }
+  }
+  return 0;
+}
+
+static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,size_t nb,
+                                   ap_peak *peaks,int *counts,size_t start,size_t end,
+                                   const int **out_fire_d,const int **out_fire_t,int *out_nfire);
 
 int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
   if(!p) return -1;
@@ -1369,6 +1516,15 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     size_t cend   = (end+R-1)/R+1; if(cend>tr->m) cend=tr->m;
     if(cstart>0) cstart--;
     const size_t cspan = cend>cstart ? cend-cstart : 1;
+    if(i==0 && p->tier0_clustered){
+      if(t0==0 && nt==p->nt && p->ntiers>=2 && !p->dump){
+        int rc=hmf_run_tier0_clustered(p,d0,nd,fast_sparse,nb,peaks,counts,start,end,
+                                       &fire_d,&fire_t,&nfire);
+        if(rc<=0) return rc;
+        continue;
+      }
+      if(hmf_sync_unclustered_tier0(p,d0,nd)) return -1;
+    }
     const float thr=tr->thr;
     tr->lagged = !(tr->g16 && i==0 && !p->q15);
     tr->last_q15 = 0;
@@ -1500,5 +1656,172 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                      peaks, counts, start, end);
   p->c_ref += ap_ticks()-r0;
   return r;
+}
+
+static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,size_t nb,
+                                   ap_peak *peaks,int *counts,size_t start,size_t end,
+                                   const int **out_fire_d,const int **out_fire_t,int *out_nfire){
+  hmf_tier *tr=&p->tier[0];
+  const int nc=p->tier0_nt, nt=p->nt;
+  const int * restrict off=p->tier0_off;
+  const int * restrict members=p->tier0_members;
+  const size_t R=p->n/tr->m;
+  const size_t pad=(size_t)(1+p->tier0_lag_pad);
+  size_t cstart=start/R;
+  size_t cend=(end+R-1)/R+pad;
+  if(cend>tr->m) cend=tr->m;
+  cstart=cstart>pad ? cstart-pad : 0;
+  if(p->tier0_lag_pad>0 && (start<(size_t)p->tier0_lag_pad*R
+                            || end+(size_t)p->tier0_lag_pad*R>p->n)){
+    cstart=0;
+    cend=tr->m;
+  }
+  const size_t cspan=cend>cstart ? cend-cstart : 1;
+  const float thr=tr->thr;
+  tr->lagged=0;
+  tr->last_q15=0;
+
+  if((p->q15 || !p->tier0_g16) && tr->npending){
+    for(int d=d0;d<d0+nd;d++){
+      if(tr->pending[d]){
+        if(ingest_tier_data_target(p,tr,p->tier0_mf,p->tier0_g16,d,p->dspec[d],1,0)) return -1;
+        tr->pending[d]=0;
+        tr->npending--;
+      }
+    }
+  }
+
+  unsigned long long t_0=ap_ticks();
+  const int dump_or_trace=(p->dump || p->trace);
+  const long first_pair=p->pairs;
+  int nnext=0;
+
+  if(p->q15){
+    unsigned long long q0=ap_ticks();
+    int ns=ap_mf_q15_screen(p->tier0_mf,d0,nd,0,nc,thr,cstart,cend,p->qpass,
+                            dump_or_trace ? p->qstat : NULL);
+    if(ns<0) return -1;
+    if(fast_sparse && !dump_or_trace){
+      int * restrict dst_d=tr->fire_d;
+      int * restrict dst_t=tr->fire_t;
+      for(int d=0;d<nd;d++){
+        const unsigned char *qp=p->qpass+(size_t)d*nc;
+        int c=0;
+        for(;c+8<=nc;c+=8){
+          uint64_t w;
+          memcpy(&w,qp+c,sizeof w);
+          if(!w) continue;
+          uint64_t m=(w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
+                     & 0x8080808080808080ULL;
+          while(m){
+            const int ci=c+(__builtin_ctzll(m)>>3);
+            for(int u=off[ci];u<off[ci+1];u++){
+              dst_d[nnext]=d;
+              dst_t[nnext]=members[u];
+              nnext++;
+            }
+            m&=m-1;
+          }
+        }
+        for(;c<nc;c++){
+          if(qp[c]){
+            for(int u=off[c];u<off[c+1];u++){
+              dst_d[nnext]=d;
+              dst_t[nnext]=members[u];
+              nnext++;
+            }
+          }
+        }
+      }
+    } else {
+      for(int d=0;d<nd;d++){
+        for(int c=0;c<nc;c++){
+          const size_t crow=(size_t)d*nc+c;
+          const int fire=p->qpass[crow]!=0;
+          const float mag=dump_or_trace ? p->qstat[crow] : 0.0f;
+          for(int u=off[c];u<off[c+1];u++){
+            const int t=members[u];
+            const size_t row=(size_t)d*nt+t;
+            if(fire){
+              if(p->dump){
+                float rec[8]={mag,0.0f,mag,thr,thr,thr,(float)(d0+d),(float)t};
+                fwrite(rec,sizeof rec,1,p->dump);
+              }
+              const long pair=first_pair+(long)row+1;
+              if(p->trace && pair<6)
+                fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",pair,thr,mag);
+              tr->fire_d[nnext]=d;
+              tr->fire_t[nnext]=t;
+              nnext++;
+            } else if(!fast_sparse){
+              reject_row(p,peaks,counts,row,nb);
+            }
+          }
+        }
+      }
+    }
+    p->qpassed+=nnext;
+    p->qticks+=ap_ticks()-q0;
+    tr->ticks+=ap_ticks()-t_0;
+  } else {
+    if(p->tier0_g16){
+      if(ap_gate16_run(p->tier0_g16,d0,nd,0,nc,cstart,cend,tr->cebuf)<0) return -1;
+    } else if(ap_mf_run(p->tier0_mf,d0,nd,0,nc,cspan,thr,tr->cebuf,NULL,cstart,cend)<0){
+      return -1;
+    }
+    tr->ticks+=ap_ticks()-t_0;
+    if(fast_sparse && !dump_or_trace){
+      int * restrict dst_d=tr->fire_d;
+      int * restrict dst_t=tr->fire_t;
+      for(int d=0;d<nd;d++){
+        const ap_peak *ce_row=tr->cebuf+(size_t)d*nc;
+        for(int c=0;c<nc;c++){
+          if(ce_row[c].index>=0 && ce_row[c].magnitude>=thr){
+            for(int u=off[c];u<off[c+1];u++){
+              dst_d[nnext]=d;
+              dst_t[nnext]=members[u];
+              nnext++;
+            }
+          }
+        }
+      }
+    } else {
+      for(int d=0;d<nd;d++){
+        for(int c=0;c<nc;c++){
+          const ap_peak ce=tr->cebuf[(size_t)d*nc+c];
+          const int fire=(ce.index>=0 && ce.magnitude>=thr);
+          for(int u=off[c];u<off[c+1];u++){
+            const int t=members[u];
+            const size_t row=(size_t)d*nt+t;
+            if(fire){
+              if(p->dump){
+                float rec[8]={ce.magnitude,0.0f,p->tier0_g16 ? ce.im : ce.magnitude,
+                              thr,thr,thr,(float)(d0+d),(float)t};
+                fwrite(rec,sizeof rec,1,p->dump);
+              }
+              const long pair=first_pair+(long)row+1;
+              if(p->trace && pair<6)
+                fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",
+                        pair,thr,ce.magnitude);
+              tr->fire_d[nnext]=d;
+              tr->fire_t[nnext]=t;
+              nnext++;
+            } else if(!fast_sparse){
+              reject_row(p,peaks,counts,row,nb);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  p->pairs+=(long)nd*nt;
+  tr->checked+=(long)nd*nc;
+  tr->passed+=nnext;
+  p->first_gate_passed+=nnext;
+  *out_fire_d=tr->fire_d;
+  *out_fire_t=tr->fire_t;
+  *out_nfire=nnext;
+  return nnext>0 ? 1 : 0;
 }
 
