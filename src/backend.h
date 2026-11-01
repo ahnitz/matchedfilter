@@ -135,6 +135,15 @@ typedef struct {
                                   const float *const *trp, const float *const *tip, int nlane,
                                   size_t binsize, float thr, ap_peak *out, int conj,
                                   size_t start, size_t end, const unsigned *ph);
+  /* Fused scaled forward transform storing split group-major (re, im) directly from stage B. */
+  void (*fft_forward_scaled_gm)(void *, const float *in, size_t have_floats, size_t stride,
+                                float scale, float *re, float *im, float *scratch);
+  /* Multi-template windowed inverse product correlation sharing (dr, di) and stage-A twiddles. */
+  int (*corr_prod_window_multi)(void *, const float *dr, const float *di, const float *tr,
+                                const float *ti, size_t t_stride, int nt, size_t blo, size_t end,
+                                float *dst, size_t dst_stride, float *scratch, int stream);
+  /* Lazily reserve up to `want` N-float split data-spectrum tile slots on the transform plan. */
+  int (*corr_tile_slots)(void *, int want, float **dr_out, float **di_out);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
