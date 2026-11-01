@@ -2439,7 +2439,10 @@ class TimeDomainFilterBank:
             pool = self.__dict__.setdefault('_corr_out_pool', [])
             raw = None
             while pool:
-                cand = pool.pop()
+                try:
+                    cand = pool.pop()
+                except IndexError:
+                    break
                 if cand.size >= need:
                     raw = cand
                     break
