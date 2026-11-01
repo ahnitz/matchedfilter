@@ -140,4 +140,19 @@ static inline const ap_q15_twiddles *ap_q15_twiddle_table(size_t N){
   return &ap_q15_tw_tab[i];
 }
 
+struct ap_plan;
+#ifdef __cplusplus
+extern "C" {
+#endif
+int ap_q15_data_contig(const struct ap_plan *p, const float *re, const float *im, int n1, int n2,
+                       int w, int16_t *qdr, int16_t *qdi, float *scale_out);
+int ap_q15_screen_gather(const struct ap_plan *p, const int16_t *const *drp,
+                         const int16_t *const *dip, const int16_t *const *trp,
+                         const int16_t *const *tip, int cnt, size_t start, size_t end,
+                         const int16_t *lanethr, uint64_t *bits, int16_t *lanemax,
+                         int16_t *laneidx, void *scratch);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

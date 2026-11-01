@@ -325,6 +325,7 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
 
 def _emit_family(out, fused):
     for nn in (8, 16, 32):
+        out.append(build_q(nn, "qsr%d" % nn, fused=fused))
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=fused))
         out.append(build_q(nn, "qsr%d_prod_perm" % nn, prod=True, fused=fused, perm=True))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True, fused=fused))

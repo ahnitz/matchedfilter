@@ -935,14 +935,25 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
+/* Pairbatch forward FFT limit: 16-lane AVX3 and 8-lane AVX2 (with integer Q15 lanes)
+   have fast full-width shuffles up to 2048; AVX1 (no 256-bit integer shuffles) and
+   4-lane targets stay capped at 512. */
+static inline size_t hmf_fwd_pb_limit(const ap_hmf_plan *p){
+  const int w=ap_plan_lanes(p->full_fft);
+  if(w>=16) return 2048u;
+  if(w>=8 && p->ntiers>0 && ap_mf_q15_lanes(p->tier[0].mf)>0) return 2048u;
+  return 512u;
+}
+
 /* Transform blocks start[b0 .. b0+g) of series into p->spec slots 0 .. g-1 and ingest tier 0. */
 static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
                             const size_t *start,int b0,int g){
   const size_t n=p->n;
   const size_t sstride=2*n+16;
-  if(p->real_series && !p->fwd_real_batch && p->half_fft && n>=128 && n<=4096)
+  const size_t pblim=hmf_fwd_pb_limit(p);
+  if(p->real_series && !p->fwd_real_batch && p->half_fft && n>=128 && n/2<=pblim)
     p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,n/2);
-  if(!p->real_series && !p->use_accel && !p->fwd_cplx_batch && p->full_fft && n>=64 && n<=2048)
+  if(!p->real_series && !p->use_accel && !p->fwd_cplx_batch && p->full_fft && n>=64 && n<=pblim)
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   const size_t st_real = p->real_stride ? p->real_stride : 1;
   const int w_real = p->fwd_real_batch ? ap_plan_lanes(p->fwd_real_batch) : 0;
@@ -1102,9 +1113,11 @@ static int hmf_forward_slab_quad_pair(ap_hmf_plan *pa,const float *sa,
                                       size_t nseries,const size_t *start,int b0,int g){
   const size_t n=pa->n;
   const size_t sstride=2u*n+16u;
-  if(!pa->fwd_real_batch && pa->half_fft && n>=128 && n<=4096)
+  const size_t pblim_a=hmf_fwd_pb_limit(pa);
+  const size_t pblim_b=hmf_fwd_pb_limit(pb);
+  if(!pa->fwd_real_batch && pa->half_fft && n>=128 && n/2<=pblim_a)
     pa->fwd_real_batch=ap_create_pairbatch_like(pa->full_fft,n/2);
-  if(!pb->fwd_real_batch && pb->half_fft && n>=128 && n<=4096)
+  if(!pb->fwd_real_batch && pb->half_fft && n>=128 && n/2<=pblim_b)
     pb->fwd_real_batch=ap_create_pairbatch_like(pb->full_fft,n/2);
   const int wa = pa->fwd_real_batch ? ap_plan_lanes(pa->fwd_real_batch) : 0;
   const int wb = pb->fwd_real_batch ? ap_plan_lanes(pb->fwd_real_batch) : 0;
@@ -1931,11 +1944,10 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     } else {
       if(tr->q15){
         const int ql = ap_mf_q15_lanes(tr->mf);
-        const long nslabs = ql>0 ? ((long)nd+ql-1)/ql : 1;
-        /* Intermediate tiers gate in listed Q15 down to ~0.25 survivors per (slab, template);
-           the final tier also elects coarse lags and only switches to Q15 above ~2 per group. */
-        const long min_q15 = (i+1<p->ntiers) ? ((nslabs*(long)nt)>>2) : (2L*nslabs*(long)nt);
-        use_q15 = nfire >= min_q15;
+        /* Arbitrary-pair Q15 gather pools survivors directly across SIMD lanes without
+           slab or template-group bucketing; switch once nfire exceeds one FP32 vector (ql/2). */
+        const long min_q15 = ql > 1 ? ql / 2 + 1 : 1;
+        use_q15 = ql > 0 && nfire >= min_q15;
       }
       qlag = (use_q15 && i==p->ntiers-1 && p->direct && p->taps) ? p->qidx : NULL;
       if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end,use_q15,qlag)<0) return -1;

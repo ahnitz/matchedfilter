@@ -112,6 +112,8 @@ struct ap_mf_plan {
   unsigned char *qdxok;       /* [nd] block's slab copy is current */
   int *qord; int qordcap;     /* listed pairs' bucket order and keys (ap_mf_q15_pairs) */
   float *qzero;               /* [n] zeros: a slab lane past the plan's blocks */
+  int16_t *qdm, *qtm;         /* [nd][2*n+32], [nt][2*n+32] contiguous padded rows for gather */
+  unsigned char *qdmok, *qtmok;
 };
 
 /* Set the rows' bin phases for the calls that follow ([nd], or NULL): for a plan another
@@ -251,6 +253,7 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->sfwd_n);free(p->sspec_n);
   free(p->qtr);free(p->qti);free(p->qts);free(p->qtok);
   free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);free(p->qdx);free(p->qdxok);free(p->qord);free(p->qzero);
+  free(p->qdm);free(p->qtm);free(p->qdmok);free(p->qtmok);
   free(p);
 }
 
@@ -279,6 +282,7 @@ int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
   if(!p||d<0||d>=p->nd) return -1;
   if(p->qdok) p->qdok[d]=0;
   if(p->qdxok) p->qdxok[d]=0;
+  if(p->qdmok) p->qdmok[d]=0;
   ap_split_store_on(p->fft, spec, p->dre+(size_t)d*p->n, p->dim+(size_t)d*p->n, p->n, 0,
                     p->gmajor?p->n1:0, p->n2, p->w);
   if(p->pair_alt){
@@ -330,6 +334,7 @@ int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec){
   if(!p||t<0||t>=p->nt) return -1;
   if(p->aready) p->aready[t]=0;
   if(p->qtok) p->qtok[t]=0;
+  if(p->qtmok) p->qtmok[t]=0;
   if(p->pb){
     /* Bank stored [group][element][lane], lane = t % pb.  The pair kernel
        reads a whole group as one contiguous [element][lane] run, so the
@@ -1753,33 +1758,62 @@ int ap_mf_q15_lanes(const ap_mf_plan *p){
   return ap_q15_lanes(p->fft);
 }
 
-static int q15_prepare(ap_mf_plan *p){
+static int q15_prepare_common(ap_mf_plan *p){
   if(p->qw) return 0;
   const int qw=ap_mf_q15_lanes(p);
   if(qw<=0) return -1;
-  const size_t n=p->n, ng=((size_t)p->nt+qw-1)/qw;
-  p->qtr=ap_alloc64(ng*n*qw*sizeof(int16_t));
-  p->qti=ap_alloc64(ng*n*qw*sizeof(int16_t));
+  const size_t n=p->n;
   p->qts=calloc((size_t)p->nt,sizeof(float));
-  p->qtok=calloc((size_t)p->nt,1);
-  p->qd=ap_alloc64((size_t)p->nd*n*3*sizeof(int16_t));
   p->qds=calloc((size_t)p->nd,sizeof(float));
-  p->qdok=calloc((size_t)p->nd,1);
   p->qscr=ap_alloc64(ap_q15_scratch_bytes(n,qw));
-  if(!p->qtr||!p->qti||!p->qts||!p->qtok||!p->qd||!p->qds||!p->qdok||!p->qscr){
-    free(p->qtr);free(p->qti);free(p->qts);free(p->qtok);
-    free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);
-    p->qtr=p->qti=NULL;p->qts=NULL;p->qtok=NULL;p->qd=NULL;p->qds=NULL;p->qdok=NULL;p->qscr=NULL;
+  if(!p->qts||!p->qds||!p->qscr){
+    free(p->qts);free(p->qds);free(p->qscr);
+    p->qts=NULL;p->qds=NULL;p->qscr=NULL;
     return -1;
   }
-  /* padding lanes of the last group stay zero */
-  memset(p->qtr,0,ng*n*qw*sizeof(int16_t));
-  memset(p->qti,0,ng*n*qw*sizeof(int16_t));
   p->qw=qw;
   p->qtail=ap_q15_has_tile(p->fft);
   {
     const size_t l1d=ap_l1d_bytes();
     p->qfull=p->qtail && qw>=32 && n>=512 && (!l1d || ap_q15_batch_bytes(n,qw)>2*l1d);
+  }
+  return 0;
+}
+
+static int q15_prepare(ap_mf_plan *p){
+  if(q15_prepare_common(p)) return -1;
+  if(p->qtr) return 0;
+  const size_t n=p->n, qw=(size_t)p->qw, ng=((size_t)p->nt+qw-1)/qw;
+  p->qtr=ap_alloc64(ng*n*qw*sizeof(int16_t));
+  p->qti=ap_alloc64(ng*n*qw*sizeof(int16_t));
+  p->qtok=calloc((size_t)p->nt,1);
+  p->qd=ap_alloc64((size_t)p->nd*n*3*sizeof(int16_t));
+  p->qdok=calloc((size_t)p->nd,1);
+  if(!p->qtr||!p->qti||!p->qtok||!p->qd||!p->qdok){
+    free(p->qtr);free(p->qti);free(p->qtok);free(p->qd);free(p->qdok);
+    p->qtr=p->qti=NULL;p->qtok=NULL;p->qd=NULL;p->qdok=NULL;
+    return -1;
+  }
+  /* padding lanes of the last group stay zero */
+  memset(p->qtr,0,ng*n*qw*sizeof(int16_t));
+  memset(p->qti,0,ng*n*qw*sizeof(int16_t));
+  return 0;
+}
+
+static int q15_prepare_gather(ap_mf_plan *p){
+  if(q15_prepare_common(p)) return -1;
+  if(p->qdm) return 0;
+  /* +32 int16 (64 B) row padding makes every row stride an odd multiple of 64 B,
+     preventing 4 KB L1D/L2 set-conflict aliasing across gathered rows at n = 1024. */
+  const size_t stride=2*p->n+32;
+  p->qdm=ap_alloc64((size_t)p->nd*stride*sizeof(int16_t));
+  p->qdmok=calloc((size_t)p->nd,1);
+  p->qtm=ap_alloc64((size_t)p->nt*stride*sizeof(int16_t));
+  p->qtmok=calloc((size_t)p->nt,1);
+  if(!p->qdm||!p->qdmok||!p->qtm||!p->qtmok){
+    free(p->qdm);free(p->qdmok);free(p->qtm);free(p->qtmok);
+    p->qdm=p->qtm=NULL;p->qdmok=p->qtmok=NULL;
+    return -1;
   }
   return 0;
 }
@@ -2053,56 +2087,72 @@ int ap_mf_set_q15_margin(ap_mf_plan *p,int on){
   return 0;
 }
 
-/* The screen over a list of pairs: pair j is data d0+dsel[j] against template t0+tsel[j].
-   pass[j] is set when its int16 maximum over [start, end) can reach `threshold` (with the
-   margin, as ap_mf_q15_screen decides; without it, on the maximum itself); stat, when not
-   NULL, gets the maximum in the float tier's units.  Returns the passes, or -1.
-   A batch takes its QW lanes from one slab of QW data blocks and two adjacent template
-   groups, so each lane's operands are looked up in vectors the screen already has: the
-   templates' own groups (qtr/qti) and each block's data laid out across its slab (qdx, made
-   once per block).  The pairs are bucketed by (slab, group pair) to fill the lanes. */
-/* Block d's data into its slab (qdx), with its scale (qds): the eight lanes of d's group are
-   quantised together (ap_q15_slab8), each from its own block's float copy and scale, the same
-   values q15_data gives them; lanes past the plan's blocks hold zeros. Group-major plans keep
-   their rows in element order, so they are read through q15_nat one element at a time. */
-static int q15_slab_lanes(ap_mf_plan *p,int d){
-  const size_t n=p->n; const int qw=p->qw;
-  const int slab=d/qw, g=(d%qw)/8;
-  int16_t *xr=p->qdx+(size_t)slab*2*n*qw, *xi=xr+n*qw;
-  if(p->gmajor){
-    const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
-    const double sc=q15_data_scale(p,d);
-    const float scf=(float)sc;
-    if(!(sc>0)){
-      for(size_t k=0;k<n;k++){ xr[k*qw+d%qw]=0; xi[k*qw+d%qw]=0; }
-    } else {
-      for(size_t k=0;k<n;k++){
-        const size_t j=q15_nat(p,k);
-        xr[k*qw+d%qw]=(int16_t)lrintf(re[j]*scf);
-        xi[k*qw+d%qw]=(int16_t)lrintf(im[j]*scf);
-      }
+/* The screen over an arbitrary list of pairs: pair j is data d0+dsel[j] against template
+   t0+tsel[j].  pass[j] is set when its int16 maximum over [start, end) can reach `threshold`
+   (with the margin, as ap_mf_q15_screen decides; without it, on the maximum itself); stat,
+   when not NULL, gets the maximum in the float tier's units; lag_idx, when not NULL, gets the
+   window's argmax lag index (ties broken to earliest lag).  Returns the passes, or -1.
+   Only touched data blocks and templates are quantised into contiguous padded rows (qdm, qtm),
+   and pairs are pooled directly in QW-lane gather batches at 100% SIMD occupancy without slab
+   or template-group bucketing. */
+static void q15_template_contig(ap_mf_plan *p,int t){
+  const size_t n=p->n, stride=2*n+32;
+  const float *re,*im; int nat=0;
+  if(p->pb && p->tmre){ re=p->tmre+(size_t)t*n; im=p->tmim+(size_t)t*n; }
+  else { re=p->tre+(size_t)t*n; im=p->tim+(size_t)t*n; nat=1; }
+  double ss=0, amax=0;
+  for(size_t k=0;k<n;k++){
+    const size_t j=nat?q15_nat(p,k):k;
+    const double r=re[j], i=im[j];
+    ss+=r*r+i*i;
+    if(fabs(r)>amax) amax=fabs(r);
+    if(fabs(i)>amax) amax=fabs(i);
+  }
+  double sc = !isfinite(ss) ? -1.0 : 0.0;
+  if(sc==0.0 && ss>0){
+    sc=AP_Q15_TNORM(n)/sqrt(ss);
+    if(sc*amax>32767.0) sc=32767.0/amax;
+  }
+  int16_t *qr=p->qtm+(size_t)t*stride, *qi=qr+n;
+  if(!(sc>0)){
+    memset(qr,0,2*n*sizeof(int16_t));
+  } else {
+    for(size_t k=0;k<n;k++){
+      const size_t j=nat?q15_nat(p,k):k;
+      qr[k]=q15_q(re[j],sc);
+      qi[k]=q15_q(im[j],sc);
     }
-    p->qds[d]=(float)sc;
-    p->qdxok[d]=1;
-    return 0;
   }
-  if(!p->qzero){
-    p->qzero=calloc(n,sizeof(float));
-    if(!p->qzero) return -1;
+  p->qts[t]=(float)sc;
+  p->qtmok[t]=1;
+}
+
+static void q15_data_row(ap_mf_plan *p,int d){
+  const size_t n=p->n, stride=2*n+32;
+  const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
+  int16_t *qdr=p->qdm+(size_t)d*stride, *qdi=qdr+n;
+  if(!ap_q15_data_contig(p->fft,re,im,p->gmajor?p->n1:0,p->n2,p->w,qdr,qdi,&p->qds[d])){
+    p->qdmok[d]=1;
+    return;
   }
-  const float *rr[8], *ri[8]; float sc[8];
-  for(int b=0;b<8;b++){
-    const int e=slab*qw+g*8+b;
-    if(e<p->nd){
-      const double s=q15_data_scale(p,e);
-      p->qds[e]=(float)s;
-      if(s>0){ rr[b]=p->dre+(size_t)e*n; ri[b]=p->dim+(size_t)e*n; sc[b]=(float)s; }
-      else { rr[b]=ri[b]=p->qzero; sc[b]=0.f; }
-    } else { rr[b]=ri[b]=p->qzero; sc[b]=0.f; }
+  const double sc=q15_data_scale(p,d);
+  const float scf=(float)sc;
+  if(!(sc>0)){
+    memset(qdr,0,2*n*sizeof(int16_t));
+  } else if(p->gmajor){
+    for(size_t k=0;k<n;k++){
+      const size_t j=q15_nat(p,k);
+      qdr[k]=(int16_t)lrintf(re[j]*scf);
+      qdi[k]=(int16_t)lrintf(im[j]*scf);
+    }
+  } else {
+    for(size_t k=0;k<n;k++){
+      qdr[k]=(int16_t)lrintf(re[k]*scf);
+      qdi[k]=(int16_t)lrintf(im[k]*scf);
+    }
   }
-  if(ap_q15_slab8(p->fft,rr,ri,sc,xr+g*8,xi+g*8)) return -1;
-  for(int b=0;b<8;b++){ const int e=slab*qw+g*8+b; if(e<p->nd) p->qdxok[e]=1; }
-  return 0;
+  p->qds[d]=(float)sc;
+  p->qdmok[d]=1;
 }
 
 int ap_mf_q15_pairs_lag(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npairs,int t0,
@@ -2114,72 +2164,49 @@ int ap_mf_q15_pairs_lag(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int
   if(start>=end) return 0;
   for(int j=0;j<npairs;j++)
     if(d0+dsel[j]<0||d0+dsel[j]>=p->nd||t0+tsel[j]<0||t0+tsel[j]>=p->nt) return -1;
-  if(q15_prepare(p)) return -1;
-  const size_t n=p->n; const int qw=p->qw;
-  const int nslab=(p->nd+qw-1)/qw, ngroup=(p->nt+qw-1)/qw, npair=(ngroup+1)/2;
-  if(!p->qdx){
-    p->qdx=ap_alloc64((size_t)nslab*2*n*qw*sizeof(int16_t));
-    p->qdxok=calloc((size_t)p->nd,1);
-    if(!p->qdx||!p->qdxok){ free(p->qdx); free(p->qdxok); p->qdx=NULL; p->qdxok=NULL; return -1; }
-    memset(p->qdx,0,(size_t)nslab*2*n*qw*sizeof(int16_t));
-  }
-  if(p->qordcap<npairs){
-    int *o=realloc(p->qord,2*(size_t)npairs*sizeof(int));
-    if(!o) return -1;
-    p->qord=o; p->qordcap=npairs;
-  }
-  /* counting sort of the pairs by bucket */
-  const int nbucket=nslab*npair;
-  int *order=p->qord, *key=p->qord+npairs;
-  int cstack[256], *cnt=nbucket+1<=256 ? cstack : calloc((size_t)nbucket+1,sizeof(int));
-  if(!cnt) return -1;
-  memset(cnt,0,((size_t)nbucket+1)*sizeof(int));
-  for(int j=0;j<npairs;j++){
-    key[j]=((d0+dsel[j])/qw)*npair+(t0+tsel[j])/(2*qw);
-    cnt[key[j]+1]++;
-  }
-  for(int b=0;b<nbucket;b++) cnt[b+1]+=cnt[b];
-  for(int j=0;j<npairs;j++) order[cnt[key[j]]++]=j;
-  if(cnt!=cstack) free(cnt);
+  if(q15_prepare_gather(p)) return -1;
+  const size_t n=p->n, stride=2*n+32;
+  const int qw=p->qw;
   const float margin=(float)ap_q15_margin(n);
   float qds_lane[64], qts_lane[64];
-  int16_t lanethr[64], lanemax[64], laneidx[64], ld[64], lt[64];
-  int jj[64];
+  int16_t lanethr[64], lanemax[64], laneidx[64];
+  const int16_t *drp[64], *dip[64], *trp[64], *tip[64];
   int total=0;
-  for(int i0=0;i0<npairs;){
-    const int b=key[order[i0]];
-    int cnt1=0;
-    while(cnt1<qw && i0+cnt1<npairs && key[order[i0+cnt1]]==b) cnt1++;
-    const int slab=b/npair, gp=b%npair;
-    for(int l=0;l<qw;l++){
-      const int j=order[i0+(l<cnt1 ? l : 0)];
-      const int d=d0+dsel[j], t=t0+tsel[j];
-      if(!p->qdxok[d] && q15_slab_lanes(p,d)) return -1;
-      if(!p->qtok[t]) q15_template(p,t);
-      jj[l]=j; ld[l]=(int16_t)(d%qw); lt[l]=(int16_t)(t-gp*2*qw);
+  for(int i0=0;i0<npairs;i0+=qw){
+    const int cnt=npairs-i0<qw ? npairs-i0 : qw;
+    for(int l=0;l<cnt;l++){
+      const int d=d0+dsel[i0+l], t=t0+tsel[i0+l];
+      if(!p->qdmok[d]) q15_data_row(p,d);
+      if(!p->qtmok[t]) q15_template_contig(p,t);
+      const int16_t *dq=p->qdm+(size_t)d*stride;
+      const int16_t *tq=p->qtm+(size_t)t*stride;
+      drp[l]=dq; dip[l]=dq+n;
+      trp[l]=tq; tip[l]=tq+n;
       qds_lane[l]=p->qds[d]; qts_lane[l]=p->qts[t];
     }
+    for(int l=cnt;l<qw;l++){
+      qds_lane[l]=0.f; qts_lane[l]=0.f;
+    }
     if(ap_q15_lanethr(p->fft,threshold,qds_lane,1,qts_lane,margin,p->qnomargin,lanethr)){
-      for(int l=0;l<qw;l++)
+      for(int l=0;l<cnt;l++)
         lanethr[l]=q15_lanethr(threshold,qds_lane[l],qts_lane[l],margin,p->qnomargin);
+      for(int l=cnt;l<qw;l++)
+        lanethr[l]=32767;
     }
-    const int16_t *dr=p->qdx+(size_t)slab*2*n*qw, *di=dr+n*qw;
-    const size_t g0=(size_t)gp*2;
-    const long tw=(long)(g0+1<(size_t)ngroup ? n*qw : 0);
     uint64_t bits=0;
-    if(ap_q15_screen_perm(p->fft,dr,di,p->qtr+g0*n*qw,p->qti+g0*n*qw,tw,ld,lt,start,end,
-                          lanethr,&bits,stat?lanemax:NULL,lag_idx?laneidx:NULL,p->qscr)) return -1;
-    for(int l=0;l<cnt1;l++){
-      const int ok=(int)((bits>>l)&1u), j=jj[l];
-      pass[j]=(unsigned char)ok;
-      total+=ok;
-      if(stat || lag_idx){
-        const int d=d0+dsel[j], t=t0+tsel[j];
-        if(stat) stat[j]=q15_stat_val(p->qds[d],p->qts[t],lanemax[l]);
-        if(lag_idx) lag_idx[j]=(p->qds[d]>0.f && p->qts[t]>0.f) ? laneidx[l] : (int16_t)-1;
-      }
+    if(ap_q15_screen_gather(p->fft,drp,dip,trp,tip,cnt,start,end,lanethr,&bits,
+                            stat?lanemax:NULL,lag_idx?laneidx:NULL,p->qscr)) return -1;
+    if(!bits && !stat && !lag_idx){
+      memset(pass+i0,0,(size_t)cnt);
+      continue;
     }
-    i0+=cnt1;
+    for(int l=0;l<cnt;l++){
+      const int ok=(int)((bits>>l)&1u);
+      pass[i0+l]=(unsigned char)ok;
+      total+=ok;
+      if(stat) stat[i0+l]=q15_stat_val(qds_lane[l],qts_lane[l],lanemax[l]);
+      if(lag_idx) lag_idx[i0+l]=(qds_lane[l]>0.f && qts_lane[l]>0.f) ? laneidx[l] : (int16_t)-1;
+    }
   }
   return total;
 }

@@ -384,3 +384,22 @@ int ap_q15_lanethr(const ap_plan *p, float threshold, const float *qds, int qds_
   b->q15_lanethr(threshold,qds,qds_stride,qts,margin,nomargin,out);
   return 0;
 }
+
+int ap_q15_data_contig(const ap_plan *p, const float *re, const float *im, int n1, int n2, int w,
+                       int16_t *qdr, int16_t *qdi, float *scale_out){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_data_contig || !re || !im || !qdr || !qdi || !scale_out) return -1;
+  b->q15_data_contig(p->n,re,im,n1,n2,w,qdr,qdi,scale_out);
+  return 0;
+}
+
+int ap_q15_screen_gather(const ap_plan *p, const int16_t *const *drp, const int16_t *const *dip,
+                         const int16_t *const *trp, const int16_t *const *tip, int cnt,
+                         size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
+                         int16_t *lanemax, int16_t *laneidx, void *scratch){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_screen_gather || !drp || !dip || !trp || !tip || cnt<1 ||
+     !lanethr || !bits || !scratch) return -1;
+  return b->q15_screen_gather(p->n,drp,dip,trp,tip,cnt,start,end,lanethr,bits,lanemax,laneidx,
+                              scratch);
+}
