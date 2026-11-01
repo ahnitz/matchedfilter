@@ -27,11 +27,37 @@
 
 #include "balanced-inl.h"
 
+#if defined(AP_KERNELEXT_INL_) == defined(HWY_TARGET_TOGGLE)
+#ifdef AP_KERNELEXT_INL_
+#undef AP_KERNELEXT_INL_
+#else
+#define AP_KERNELEXT_INL_
+#endif
+HWY_BEFORE_NAMESPACE();
+namespace ap {
+namespace HWY_NAMESPACE {
+const ap_backend *BackendExt(void) {
+  static const ap_backend be = [] {
+    ap_backend b = *Backend();
+    b.q15_data_contig = q15_data_contig;
+    b.q15_screen_gather = q15_screen_gather;
+    return b;
+  }();
+  return &be;
+}
+}  // namespace HWY_NAMESPACE
+}  // namespace ap
+HWY_AFTER_NAMESPACE();
+#endif
+
 #if HWY_ONCE
 #include "hwy/targets.h"
 
 namespace ap {
+#if AP_HAVE_AVX1
 HWY_EXPORT(Backend);
+#endif
+HWY_EXPORT(BackendExt);
 
 /* MF_ISA names a Highway target -- SSE4, AVX2, AVX3, NEON, EMU128 -- and
    restricts the process to it: it is the baseline the selection starts from and
@@ -102,9 +128,10 @@ static bool env_applied(void) {
    function is ap::N_NEON::Backend, and the build fails on an undeclared
    N_NEON.  Calling it unqualified from in here resolves both ways. */
 static const ap_backend *active(void) {
-  const ap_backend *b = HWY_DYNAMIC_DISPATCH(Backend)();
+  const ap_backend *b = HWY_DYNAMIC_DISPATCH(BackendExt)();
 #if AP_HAVE_AVX1
-  if (avx1_now && b && avx1_cpu() && !strcmp(b->name, "SSE4")) return ap_avx1_backend(b);
+  if (avx1_now && b && avx1_cpu() && !strcmp(b->name, "SSE4"))
+    return ap_avx1_backend(HWY_DYNAMIC_DISPATCH(Backend)());
 #endif
   return b;
 }

@@ -135,6 +135,13 @@ typedef struct {
                                   const float *const *trp, const float *const *tip, int nlane,
                                   size_t binsize, float thr, ap_peak *out, int conj,
                                   size_t start, size_t end, const unsigned *ph);
+  /* Contiguous single-block Q15 data quantisation and arbitrary-pair gather screen. */
+  void (*q15_data_contig)(size_t N, const float *re, const float *im, int n1, int n2, int w,
+                          int16_t *qdr, int16_t *qdi, float *scale_out);
+  int (*q15_screen_gather)(size_t N, const int16_t *const *drp, const int16_t *const *dip,
+                           const int16_t *const *trp, const int16_t *const *tip, int cnt,
+                           size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
+                           int16_t *lanemax, int16_t *laneidx, void *scratch);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
