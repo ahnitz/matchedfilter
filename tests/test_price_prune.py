@@ -80,7 +80,7 @@ def isolated_caches(monkeypatch):
     for name in (
         "_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE",
         "_PLAN_CACHE", "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_PRICE_CACHE",
-        "_OFFSET_CACHE", "_BOUND_CACHE", "_BOUND_PRICE_CACHE",
+        "_OFFSET_CACHE", "_BOUND_PRICE_CACHE",
     ):
         monkeypatch.setattr(gc, name, OrderedDict())
     monkeypatch.setattr(gc, "_SIMILAR", {})
@@ -203,7 +203,7 @@ def test_price_block_sizes_prunes_simulations_and_preserves_winner(isolated_cach
         nt_mid += 1
 
     for cache_name in ("_PRICE_CACHE", "_CHOICE_CACHE", "_SIGNAL_CACHE", "_NOISE_CACHE",
-                       "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_BOUND_CACHE", "_BOUND_PRICE_CACHE"):
+                       "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_BOUND_PRICE_CACHE"):
         getattr(gc, cache_name).clear()
     gc._SIMILAR.clear()
     sim_ns.clear()
@@ -237,7 +237,7 @@ def test_price_block_sizes_prunes_simulations_and_preserves_winner(isolated_cach
 
     # 3. Verify ahead=1 prices the first dearer candidate (2048) and prunes subsequent ones (4096, 8192)
     for cache_name in ("_PRICE_CACHE", "_CHOICE_CACHE", "_SIGNAL_CACHE", "_NOISE_CACHE",
-                       "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_BOUND_CACHE", "_BOUND_PRICE_CACHE"):
+                       "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_BOUND_PRICE_CACHE"):
         getattr(gc, cache_name).clear()
     gc._SIMILAR.clear()
     sim_ns.clear()
