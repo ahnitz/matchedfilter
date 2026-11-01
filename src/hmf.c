@@ -920,6 +920,8 @@ int ap_hmf_set_real_stride(ap_hmf_plan *p,size_t stride){
   return 0;
 }
 
+#include "hmf.h"
+
 /* The real block at x[s0 .. s0+have) zero-padded to n and scaled by 1/n, transformed into
    non-negative bins 0 .. n/2 of sp: the n reals read as n/2 complex z, Z = FFT_{n/2}(z), then
    X[k] = E[k] + W^k O[k] for k = 0 .. n/2. Negative bins are mirrored lazily on blocks that
@@ -933,6 +935,109 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
+/* Transform blocks start[b0 .. b0+g) of series into p->spec slots 0 .. g-1 and ingest tier 0. */
+static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
+                            const size_t *start,int b0,int g){
+  const size_t n=p->n;
+  const size_t sstride=2*n+16;
+  if(p->real_series && !p->fwd_real_batch && p->half_fft && n>=128 && n<=4096)
+    p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,n/2);
+  if(!p->real_series && !p->use_accel && !p->fwd_cplx_batch && p->full_fft && n>=64 && n<=2048)
+    p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
+  const size_t st_real = p->real_stride ? p->real_stride : 1;
+  const int w_real = p->fwd_real_batch ? ap_plan_lanes(p->fwd_real_batch) : 0;
+  const int use_real_batch = (w_real > 0 && n <= 4096);
+  if(p->real_series && p->fwd_real_batch && use_real_batch){
+    const int W = w_real;
+    const size_t st = st_real;
+    const float inv = 1.0f/(float)n;
+    for(int j=0; j<g; j+=W){
+      const int cnt = g-j<W ? g-j : W;
+      const float *srcs[AP_MAX_LANES];
+      size_t haves[AP_MAX_LANES];
+      float *outs[AP_MAX_LANES];
+      for(int l=0; l<cnt; l++){
+        const size_t s0=start[b0+j+l];
+        size_t have = s0<nseries ? nseries-s0 : 0;
+        if(have>n) have=n;
+        srcs[l]=have ? series+s0*st : series;
+        haves[l]=have;
+        outs[l]=p->spec+(size_t)(j+l)*sstride;
+      }
+      if(ap_fft_real_batch(p->fwd_real_batch,srcs,haves,st,cnt,inv,p->rtw,0,outs)<0) return -1;
+      for(int l=0; l<cnt; l++){
+        p->dmirrored[j+l]=0;
+        if(set_data_tiers(p,j+l,outs[l],1)) return -1;
+        p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
+      }
+    }
+  } else if(!p->real_series && !p->use_accel && p->fwd_cplx_batch){
+    const int W = ap_plan_lanes(p->fwd_cplx_batch);
+    const float inv = 1.0f/(float)n;
+    for(int j=0; j<g; j+=W){
+      const int cnt = g-j<W ? g-j : W;
+      const float *srcs[AP_MAX_LANES];
+      size_t haves[AP_MAX_LANES];
+      float *outs[AP_MAX_LANES];
+      for(int l=0; l<cnt; l++){
+        const size_t s0=start[b0+j+l];
+        size_t have = s0<nseries ? nseries-s0 : 0;
+        if(have>n) have=n;
+        srcs[l]=have ? series+2*s0 : series;
+        haves[l]=have;
+        outs[l]=p->spec+(size_t)(j+l)*sstride;
+      }
+      if(ap_fft_forward_batch(p->fwd_cplx_batch,srcs,haves,cnt,inv,outs)<0) return -1;
+      for(int l=0; l<cnt; l++){
+        p->dmirrored[j+l]=1;
+        if(set_data_tiers(p,j+l,outs[l],1)) return -1;
+        p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
+      }
+    }
+  } else for(int j=0;j<g;j++){
+    const size_t s0=start[b0+j];
+    size_t have = s0<nseries ? nseries-s0 : 0;
+    if(have>n) have=n;
+    if(p->real_series){
+      /* A real series: the half-size transform (half-spectrum; negative bins mirrored lazily
+         on transform refine), with real block samples kept for direct refine. */
+      const size_t st=p->real_stride ? p->real_stride : 1;
+      float *sp=p->spec+(size_t)j*sstride;
+      hmf_forward_real(p,series,s0,have,sp);
+      p->dmirrored[j]=0;
+      if(set_data_tiers(p,j,sp,1)) return -1;
+      p->dtime[j]=have ? series+s0*st : NULL; p->dhave[j]=have;
+      continue;
+    }
+    /* pycbc's inverse is unnormalised and so is matchedfilter's, so the
+       caller's convention of pre-dividing the block spectrum by n is kept.
+       Doing it on the way IN rather than to the result folds it into a copy
+       that has to happen anyway and removes a separate pass over 2n floats
+       -- 12% of the per-block cost, which is itself 12% of the total at 37
+       templates.  n is a power of two, so 1/n is exact and the transform is
+       linear: scaling before is bit-for-bit the same as scaling after, which
+       the fixtures check by reproducing pycbc's SNRs to 0.0e+00. */
+    float *const sp=p->spec+(size_t)j*sstride;
+    if(p->use_accel){
+      ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
+    } else {
+      ap_fft_forward_scaled(p->full_fft,have ? series+2*s0 : series,2*have,1,1.0f/(float)n,sp);
+    }
+    p->dmirrored[j]=1;
+    if(set_data_tiers(p,j,sp,1)) return -1;
+    p->dtime[j]=have ? series+2*s0 : NULL; p->dhave[j]=have;
+    /* The full spectrum is NOT ingested here.  Only the coarse band is read
+       by every pair; the full one is read only when a pair fires, which at
+       threshold 5.5 is 0.1% of pairs and so about 4% of blocks.  Ingesting
+       it eagerly costs 0.4-1.0 us a block for nothing on the rest.  What
+       forced it was that one staging buffer was reused by the next block,
+       so set_data's retained pointer went stale; giving the group a buffer
+       per slot removes that and lets ap_hmf_run's existing lazy path do it
+       on demand.  dready stays 0 to say so. */
+  }
+  return 0;
+}
+
 int ap_hmf_run_series(ap_hmf_plan *p,
                       const float *series,size_t nseries,
                       const size_t *start,const size_t *win_start,
@@ -942,108 +1047,16 @@ int ap_hmf_run_series(ap_hmf_plan *p,
   if(!p||nblocks<1||nt<1||!binsize) return 0;
   if(!ap_range_ok(t0,nt,p->nt)) return -1;
   const unsigned long long call0=ap_ticks();
-  const size_t n=p->n;
   const size_t nb0=hmf_nbins_phased(p,binsize,win_start[0],win_end[0],
                                     bin_phase?bin_phase[0]:0u);
   int total=0;
   /* Filter several blocks together where they share a window.  Blocks differ
      only at a segment's edges, so runs of equal windows are long. */
   for(int b0=0;b0<nblocks;){
-    const size_t sstride=2*n+16;
     int g=1;
     while(g<p->dgroup && b0+g<nblocks
           && win_start[b0+g]==win_start[b0] && win_end[b0+g]==win_end[b0]) g++;
-    const size_t st_real = p->real_stride ? p->real_stride : 1;
-    const int w_real = p->fwd_real_batch ? ap_plan_lanes(p->fwd_real_batch) : 0;
-    const int use_real_batch = (w_real > 0 && n <= 4096);
-    if(p->real_series && p->fwd_real_batch && use_real_batch){
-      const int W = w_real;
-      const size_t st = st_real;
-      const float inv = 1.0f/(float)n;
-      for(int j=0; j<g; j+=W){
-        const int cnt = g-j<W ? g-j : W;
-        const float *srcs[AP_MAX_LANES];
-        size_t haves[AP_MAX_LANES];
-        float *outs[AP_MAX_LANES];
-        for(int l=0; l<cnt; l++){
-          const size_t s0=start[b0+j+l];
-          size_t have = s0<nseries ? nseries-s0 : 0;
-          if(have>n) have=n;
-          srcs[l]=have ? series+s0*st : series;
-          haves[l]=have;
-          outs[l]=p->spec+(size_t)(j+l)*sstride;
-        }
-        if(ap_fft_real_batch(p->fwd_real_batch,srcs,haves,st,cnt,inv,p->rtw,0,outs)<0) return -1;
-        for(int l=0; l<cnt; l++){
-          p->dmirrored[j+l]=0;
-          if(set_data_tiers(p,j+l,outs[l],1)) return -1;
-          p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
-        }
-      }
-    } else if(!p->real_series && !p->use_accel && p->fwd_cplx_batch){
-      const int W = ap_plan_lanes(p->fwd_cplx_batch);
-      const float inv = 1.0f/(float)n;
-      for(int j=0; j<g; j+=W){
-        const int cnt = g-j<W ? g-j : W;
-        const float *srcs[AP_MAX_LANES];
-        size_t haves[AP_MAX_LANES];
-        float *outs[AP_MAX_LANES];
-        for(int l=0; l<cnt; l++){
-          const size_t s0=start[b0+j+l];
-          size_t have = s0<nseries ? nseries-s0 : 0;
-          if(have>n) have=n;
-          srcs[l]=have ? series+2*s0 : series;
-          haves[l]=have;
-          outs[l]=p->spec+(size_t)(j+l)*sstride;
-        }
-        if(ap_fft_forward_batch(p->fwd_cplx_batch,srcs,haves,cnt,inv,outs)<0) return -1;
-        for(int l=0; l<cnt; l++){
-          p->dmirrored[j+l]=1;
-          if(set_data_tiers(p,j+l,outs[l],1)) return -1;
-          p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
-        }
-      }
-    } else for(int j=0;j<g;j++){
-      const size_t s0=start[b0+j];
-      size_t have = s0<nseries ? nseries-s0 : 0;
-      if(have>n) have=n;
-      if(p->real_series){
-        /* A real series: the half-size transform (half-spectrum; negative bins mirrored lazily
-           on transform refine), with real block samples kept for direct refine. */
-        const size_t st=p->real_stride ? p->real_stride : 1;
-        float *sp=p->spec+(size_t)j*sstride;
-        hmf_forward_real(p,series,s0,have,sp);
-        p->dmirrored[j]=0;
-        if(set_data_tiers(p,j,sp,1)) return -1;
-        p->dtime[j]=have ? series+s0*st : NULL; p->dhave[j]=have;
-        continue;
-      }
-      /* pycbc's inverse is unnormalised and so is matchedfilter's, so the
-         caller's convention of pre-dividing the block spectrum by n is kept.
-         Doing it on the way IN rather than to the result folds it into a copy
-         that has to happen anyway and removes a separate pass over 2n floats
-         -- 12% of the per-block cost, which is itself 12% of the total at 37
-         templates.  n is a power of two, so 1/n is exact and the transform is
-         linear: scaling before is bit-for-bit the same as scaling after, which
-         the fixtures check by reproducing pycbc's SNRs to 0.0e+00. */
-      float *const sp=p->spec+(size_t)j*sstride;
-      if(p->use_accel){
-        ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
-      } else {
-        ap_fft_forward_scaled(p->full_fft,have ? series+2*s0 : series,2*have,1,1.0f/(float)n,sp);
-      }
-      p->dmirrored[j]=1;
-      if(set_data_tiers(p,j,sp,1)) return -1;
-      p->dtime[j]=have ? series+2*s0 : NULL; p->dhave[j]=have;
-      /* The full spectrum is NOT ingested here.  Only the coarse band is read
-         by every pair; the full one is read only when a pair fires, which at
-         threshold 5.5 is 0.1% of pairs and so about 4% of blocks.  Ingesting
-         it eagerly costs 0.4-1.0 us a block for nothing on the rest.  What
-         forced it was that one staging buffer was reused by the next block,
-         so set_data's retained pointer went stale; giving the group a buffer
-         per slot removes that and lets ap_hmf_run's existing lazy path do it
-         on demand.  dready stays 0 to say so. */
-    }
+    if(hmf_forward_slab(p,series,nseries,start,b0,g)<0) return -1;
     /* peaks is addressed at a single stride, so every window must produce the
        same bin count. A shorter one at a segment's edge does not: it writes
        where the next block's row begins and runs off the end of the caller's
@@ -1053,7 +1066,10 @@ int ap_hmf_run_series(ap_hmf_plan *p,
        in it and cannot express two. */
     for(int j=0;j<g;j++)
       if(hmf_nbins_phased(p,binsize,win_start[b0+j],win_end[b0+j],
-                          bin_phase?bin_phase[b0+j]:0u)!=nb0) return -1;
+                          bin_phase?bin_phase[b0+j]:0u)!=nb0){
+        for(int u=0;u<g;u++) p->dtime[u]=NULL;
+        return -1;
+      }
     p->bph = bin_phase ? bin_phase+b0 : NULL;    /* rows 0..g-1 are blocks b0..b0+g-1 */
     int r=ap_hmf_run(p,0,g,t0,nt,binsize,threshold,
                      peaks+(size_t)b0*nt*nb0,counts?counts+(size_t)b0*nt:NULL,
@@ -1066,6 +1082,318 @@ int ap_hmf_run_series(ap_hmf_plan *p,
   }
   p->c_series += ap_ticks()-call0;
   return total;
+}
+
+static int hmf_slab_len(const ap_hmf_sparse_job *jb,int b0,size_t nb0){
+  int g=1;
+  while(g<jb->p->dgroup && b0+g<jb->nblocks
+        && jb->win_start[b0+g]==jb->win_start[b0]
+        && jb->win_end[b0+g]==jb->win_end[b0]) g++;
+  for(int j=0;j<g;j++)
+    if(hmf_nbins_phased(jb->p,jb->binsize,jb->win_start[b0+j],jb->win_end[b0+j],
+                        jb->bin_phase?jb->bin_phase[b0+j]:0u)!=nb0) return -1;
+  return g;
+}
+
+/* Transform two packed strided real lanes (even/odd floats of one complex64 series) per
+   W-block mini-batch so the second lane hits L1/L2 before template sweeps evict the input. */
+static int hmf_forward_slab_quad_pair(ap_hmf_plan *pa,const float *sa,
+                                      ap_hmf_plan *pb,const float *sb,
+                                      size_t nseries,const size_t *start,int b0,int g){
+  const size_t n=pa->n;
+  const size_t sstride=2u*n+16u;
+  if(!pa->fwd_real_batch && pa->half_fft && n>=128 && n<=4096)
+    pa->fwd_real_batch=ap_create_pairbatch_like(pa->full_fft,n/2);
+  if(!pb->fwd_real_batch && pb->half_fft && n>=128 && n<=4096)
+    pb->fwd_real_batch=ap_create_pairbatch_like(pb->full_fft,n/2);
+  const int wa = pa->fwd_real_batch ? ap_plan_lanes(pa->fwd_real_batch) : 0;
+  const int wb = pb->fwd_real_batch ? ap_plan_lanes(pb->fwd_real_batch) : 0;
+  if(!(wa>0 && wa==wb && n<=4096)){
+    const unsigned long long t0=ap_ticks();
+    if(hmf_forward_slab(pa,sa,nseries,start,b0,g)<0) return -1;
+    const unsigned long long t1=ap_ticks();
+    pa->c_series += t1-t0;
+    if(hmf_forward_slab(pb,sb,nseries,start,b0,g)<0) return -1;
+    pb->c_series += ap_ticks()-t1;
+    return 0;
+  }
+  const int W = wa;
+  const float inv = 1.0f/(float)n;
+  for(int j=0;j<g;j+=W){
+    const int cnt = g-j<W ? g-j : W;
+    const float *srca[AP_MAX_LANES], *srcb[AP_MAX_LANES];
+    size_t haves[AP_MAX_LANES];
+    float *outa[AP_MAX_LANES], *outb[AP_MAX_LANES];
+    for(int l=0;l<cnt;l++){
+      const size_t s0=start[b0+j+l];
+      size_t have = s0<nseries ? nseries-s0 : 0;
+      if(have>n) have=n;
+      srca[l]=have ? sa+2u*s0 : sa;
+      srcb[l]=have ? sb+2u*s0 : sb;
+      haves[l]=have;
+      outa[l]=pa->spec+(size_t)(j+l)*sstride;
+      outb[l]=pb->spec+(size_t)(j+l)*sstride;
+    }
+    const unsigned long long t0=ap_ticks();
+    if(ap_fft_real_batch(pa->fwd_real_batch,srca,haves,2,cnt,inv,pa->rtw,0,outa)<0) return -1;
+    const unsigned long long t1=ap_ticks();
+    pa->c_series += t1-t0;
+    if(ap_fft_real_batch(pb->fwd_real_batch,srcb,haves,2,cnt,inv,pb->rtw,0,outb)<0) return -1;
+    const unsigned long long t2=ap_ticks();
+    pb->c_series += t2-t1;
+    for(int l=0;l<cnt;l++){
+      pa->dmirrored[j+l]=0;
+      if(set_data_tiers(pa,j+l,outa[l],1)) return -1;
+      pa->dtime[j+l]=haves[l] ? srca[l] : NULL; pa->dhave[j+l]=haves[l];
+    }
+    const unsigned long long t3=ap_ticks();
+    pa->c_series += t3-t2;
+    for(int l=0;l<cnt;l++){
+      pb->dmirrored[j+l]=0;
+      if(set_data_tiers(pb,j+l,outb[l],1)) return -1;
+      pb->dtime[j+l]=haves[l] ? srcb[l] : NULL; pb->dhave[j+l]=haves[l];
+    }
+    pb->c_series += ap_ticks()-t3;
+  }
+  return 0;
+}
+
+static int hmf_job_win_ok(const ap_hmf_sparse_job *jb,int b0,int g,size_t nb){
+  for(int j=0;j<g;j++){
+    if(jb->win_start[b0+j]!=jb->win_start[b0]
+       || jb->win_end[b0+j]!=jb->win_end[b0]
+       || hmf_nbins_phased(jb->p,jb->binsize,jb->win_start[b0+j],jb->win_end[b0+j],
+                           jb->bin_phase?jb->bin_phase[b0+j]:0u)!=nb)
+      return 0;
+  }
+  return 1;
+}
+
+static int hmf_run_sparse_slab(ap_hmf_sparse_job *jb,size_t *cap,int b0,int g,size_t nb0,
+                               ap_peak *slab_pk,int *slab_cnt){
+  ap_hmf_plan *p=jb->p;
+  int *cnt_ptr = jb->counts ? jb->counts+(size_t)b0*(size_t)jb->nt : slab_cnt;
+  const size_t wend = jb->win_end[b0]>p->n ? p->n : jb->win_end[b0];
+  if(jb->counts && jb->win_start[b0]>=wend)
+    memset(cnt_ptr,0,(size_t)g*(size_t)jb->nt*sizeof(int));
+  const hmf_tier *ltr=&p->tier[p->ntiers-1];
+  const long prev_passed=ltr->passed;
+  const unsigned long long t_run=ap_ticks();
+  p->sparse = jb->counts ? 1 : 2;
+  p->bph = jb->bin_phase ? jb->bin_phase+b0 : NULL;
+  const int r=ap_hmf_run(p,0,g,jb->t0,jb->nt,jb->binsize,jb->threshold,
+                         slab_pk,cnt_ptr,jb->win_start[b0],jb->win_end[b0]);
+  p->bph = NULL;
+  p->sparse = 0;
+  p->c_series += ap_ticks()-t_run;
+  if(r<0) return -1;
+  jb->total += r;
+  const int nfire=(int)(ltr->passed-prev_passed);
+  if(r>0 && nfire>0){
+    for(int f=0;f<nfire;f++){
+      const int d=ltr->fire_d[f], t=ltr->fire_t[f];
+      const size_t lrow=(size_t)d*(size_t)jb->nt+(size_t)t;
+      if(cnt_ptr[lrow]<=0) continue;
+      const size_t grow=((size_t)b0+(size_t)d)*(size_t)jb->nt+(size_t)t;
+      const ap_peak *row_pk=slab_pk+lrow*nb0;
+      for(size_t b=0;b<nb0;b++){
+        if(row_pk[b].index<0) continue;
+        if(jb->out_count==*cap){
+          const size_t ncap = *cap ? (*cap)*2u : 64u;
+          int64_t *nf=realloc(jb->out_flat,ncap*sizeof(int64_t));
+          int64_t *ni=realloc(jb->out_idx,ncap*sizeof(int64_t));
+          float *nv=realloc(jb->out_val,2u*ncap*sizeof(float));
+          if(!nf||!ni||!nv){
+            if(nf) jb->out_flat=nf;
+            if(ni) jb->out_idx=ni;
+            if(nv) jb->out_val=nv;
+            return -1;
+          }
+          jb->out_flat=nf; jb->out_idx=ni; jb->out_val=nv; *cap=ncap;
+        }
+        const size_t m=jb->out_count++;
+        jb->out_flat[m]=(int64_t)(grow*nb0+b);
+        jb->out_idx[m]=(int64_t)row_pk[b].index;
+        jb->out_val[2u*m]=row_pk[b].re;
+        jb->out_val[2u*m+1u]=row_pk[b].im;
+      }
+    }
+  }
+  return 0;
+}
+
+int ap_hmf_run_series_batch_sparse(ap_hmf_sparse_job *jobs,int njobs){
+  if(!jobs || njobs<0) return -1;
+  if(njobs==0) return 0;
+  for(int i=0;i<njobs;i++){
+    jobs[i].out_flat=NULL; jobs[i].out_idx=NULL; jobs[i].out_val=NULL;
+    jobs[i].out_count=0; jobs[i].total=0;
+  }
+  size_t *nb0=calloc((size_t)njobs,sizeof(size_t));
+  size_t *caps=calloc((size_t)njobs,sizeof(size_t));
+  int *b0=calloc((size_t)njobs,sizeof(int));
+  ap_peak *slab_pk=NULL;
+  int *slab_cnt=NULL;
+  if(!nb0||!caps||!b0) goto fail;
+
+  size_t max_pk=1, max_cnt=1;
+  for(int i=0;i<njobs;i++){
+    const ap_hmf_sparse_job *jb=&jobs[i];
+    if(!jb->p || jb->nt<1 || !jb->binsize || !ap_range_ok(jb->t0,jb->nt,jb->p->nt)) goto fail;
+    if(jb->nblocks<1) continue;
+    nb0[i]=hmf_nbins_phased(jb->p,jb->binsize,jb->win_start[0],jb->win_end[0],
+                            jb->bin_phase?jb->bin_phase[0]:0u);
+    if(!nb0[i]) goto fail;
+    const size_t rc=(size_t)jb->p->dgroup*(size_t)jb->nt;
+    if(nb0[i] > SIZE_MAX/sizeof(ap_peak)/rc) goto fail;
+    if(rc*nb0[i]>max_pk) max_pk=rc*nb0[i];
+    if(rc>max_cnt) max_cnt=rc;
+  }
+  slab_pk=ap_alloc64(max_pk*sizeof(ap_peak));
+  slab_cnt=malloc(max_cnt*sizeof(int));
+  if(!slab_pk||!slab_cnt) goto fail;
+
+  for(int c0=0;c0<njobs;){
+    int c1=c0+1;
+    while(c1<njobs && jobs[c1].cluster_id==jobs[c0].cluster_id) c1++;
+    if(c1==c0+1){
+      ap_hmf_sparse_job *jb=&jobs[c0];
+      ap_hmf_plan *p=jb->p;
+      for(int cur=0;cur<jb->nblocks;){
+        const int g=hmf_slab_len(jb,cur,nb0[c0]);
+        const unsigned long long t_fwd=ap_ticks();
+        if(g<0 || hmf_forward_slab(p,jb->series,jb->nseries,jb->start,cur,g)<0) goto fail;
+        p->c_series += ap_ticks()-t_fwd;
+        const int rc=hmf_run_sparse_slab(jb,&caps[c0],cur,g,nb0[c0],slab_pk,slab_cnt);
+        for(int j=0;j<g;j++) p->dtime[j]=NULL;
+        if(rc<0) goto fail;
+        cur+=g;
+      }
+    } else {
+      for(;;){
+        int lead=-1;
+        uintptr_t min_pos=0;
+        for(int k=c0;k<c1;k++){
+          if(b0[k]>=jobs[k].nblocks) continue;
+          const ap_hmf_plan *kp=jobs[k].p;
+          const size_t eb=kp->real_series ? (kp->real_stride==2 ? 8u : 4u) : 8u;
+          const uintptr_t pos=(uintptr_t)jobs[k].series + jobs[k].start[b0[k]]*eb;
+          if(lead<0 || pos<min_pos){ lead=k; min_pos=pos; }
+        }
+        if(lead<0) break;
+        ap_hmf_sparse_job *ljb=&jobs[lead];
+        ap_hmf_plan *lp=ljb->p;
+        const int g=hmf_slab_len(ljb,b0[lead],nb0[lead]);
+        if(g<0) goto fail;
+
+        /* Detect a paired strided quadrature lane on the same complex64 buffer so both lanes
+           forward-transform per W-block mini-batch while cache lines are hot in L1/L2. */
+        int qpeer=-1;
+        if(lp->real_series && lp->real_stride==2 && !lp->use_accel){
+          for(int k=c0;k<c1;k++){
+            if(k==lead || b0[k]+g>jobs[k].nblocks) continue;
+            ap_hmf_sparse_job *kjb=&jobs[k];
+            ap_hmf_plan *kp=kjb->p;
+            if(kp==lp || !kp->real_series || kp->real_stride!=2 || kp->use_accel
+               || kp->n!=lp->n || g>kp->dgroup || kjb->nseries!=ljb->nseries
+               || !(kjb->series==ljb->series+1 || ljb->series==kjb->series+1))
+              continue;
+            if(!hmf_job_win_ok(kjb,b0[k],g,nb0[k])) continue;
+            if(memcmp(kjb->start+b0[k],ljb->start+b0[lead],(size_t)g*sizeof(size_t))!=0) continue;
+            qpeer=k;
+            break;
+          }
+        }
+
+        if(qpeer>=0){
+          ap_hmf_sparse_job *qjb=&jobs[qpeer];
+          if(hmf_forward_slab_quad_pair(lp,ljb->series,qjb->p,qjb->series,
+                                        ljb->nseries,ljb->start,b0[lead],g)<0) goto fail;
+        } else {
+          const unsigned long long t_fwd=ap_ticks();
+          if(hmf_forward_slab(lp,ljb->series,ljb->nseries,ljb->start,b0[lead],g)<0) goto fail;
+          lp->c_series += ap_ticks()-t_fwd;
+        }
+
+        if(hmf_run_sparse_slab(ljb,&caps[lead],b0[lead],g,nb0[lead],slab_pk,slab_cnt)<0){
+          for(int j=0;j<g;j++) lp->dtime[j]=NULL;
+          if(qpeer>=0) for(int j=0;j<g;j++) jobs[qpeer].p->dtime[j]=NULL;
+          goto fail;
+        }
+
+        /* Share lead's L2-hot forward spectra with any cluster peer on identical block starts. */
+        const size_t sstride=2u*lp->n+16u;
+        const size_t lst=lp->real_stride ? lp->real_stride : 1u;
+        for(int k=c0;k<c1;k++){
+          if(k==lead || k==qpeer || b0[k]+g>jobs[k].nblocks) continue;
+          ap_hmf_sparse_job *kjb=&jobs[k];
+          ap_hmf_plan *kp=kjb->p;
+          const size_t kst=kp->real_stride ? kp->real_stride : 1u;
+          if(kp->n!=lp->n || g>kp->dgroup || kp->real_series!=lp->real_series || kst!=lst
+             || kp->use_accel!=lp->use_accel
+             || ap_plan_lanes(kp->full_fft)!=ap_plan_lanes(lp->full_fft)
+             || kjb->series!=ljb->series || kjb->nseries!=ljb->nseries) continue;
+          if(!hmf_job_win_ok(kjb,b0[k],g,nb0[k])) continue;
+          if(memcmp(kjb->start+b0[k],ljb->start+b0[lead],(size_t)g*sizeof(size_t))!=0) continue;
+
+          if(kp!=lp){
+            const unsigned long long t_sh=ap_ticks();
+            for(int j=0;j<g;j++){
+              kp->dmirrored[j]=lp->dmirrored[j];
+              if(set_data_tiers(kp,j,lp->spec+(size_t)j*sstride,1)){
+                for(int u=0;u<=j;u++){ kp->dtime[u]=NULL; kp->dspec[u]=NULL; kp->dready[u]=0; }
+                for(int u=0;u<g;u++) lp->dtime[u]=NULL;
+                if(qpeer>=0) for(int u=0;u<g;u++) jobs[qpeer].p->dtime[u]=NULL;
+                goto fail;
+              }
+              kp->dtime[j]=lp->dtime[j]; kp->dhave[j]=lp->dhave[j];
+            }
+            kp->c_series += ap_ticks()-t_sh;
+          }
+          const int rc=hmf_run_sparse_slab(kjb,&caps[k],b0[k],g,nb0[k],slab_pk,slab_cnt);
+          if(kp!=lp){
+            for(int j=0;j<g;j++){
+              lp->dmirrored[j] |= kp->dmirrored[j];
+              kp->dtime[j]=NULL; kp->dspec[j]=NULL; kp->dready[j]=0;
+            }
+          }
+          if(rc<0){
+            for(int u=0;u<g;u++) lp->dtime[u]=NULL;
+            if(qpeer>=0) for(int u=0;u<g;u++) jobs[qpeer].p->dtime[u]=NULL;
+            goto fail;
+          }
+          b0[k]+=g;
+        }
+        for(int j=0;j<g;j++) lp->dtime[j]=NULL;
+        b0[lead]+=g;
+
+        if(qpeer>=0){
+          ap_hmf_sparse_job *qjb=&jobs[qpeer];
+          ap_hmf_plan *qp=qjb->p;
+          const int qrc=hmf_run_sparse_slab(qjb,&caps[qpeer],b0[qpeer],g,nb0[qpeer],slab_pk,slab_cnt);
+          for(int j=0;j<g;j++) qp->dtime[j]=NULL;
+          if(qrc<0) goto fail;
+          b0[qpeer]+=g;
+        }
+      }
+    }
+    c0=c1;
+  }
+  free(slab_pk); free(slab_cnt); free(nb0); free(caps); free(b0);
+  return 0;
+
+fail:
+  for(int i=0;i<njobs;i++){
+    if(jobs[i].p){
+      jobs[i].p->bph=NULL; jobs[i].p->sparse=0;
+      for(int j=0;j<jobs[i].p->dgroup;j++) jobs[i].p->dtime[j]=NULL;
+    }
+    free(jobs[i].out_flat); free(jobs[i].out_idx); free(jobs[i].out_val);
+    jobs[i].out_flat=NULL; jobs[i].out_idx=NULL; jobs[i].out_val=NULL;
+    jobs[i].out_count=0; jobs[i].total=0;
+  }
+  free(slab_pk); free(slab_cnt); free(nb0); free(caps); free(b0);
+  return -1;
 }
 
 unsigned long long ap_hmf_series_ticks(const ap_hmf_plan *p){ return p ? p->c_series : 0; }
@@ -1502,7 +1830,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
 
   const int fast_sparse = p->sparse && counts && !p->prof;
-  if(fast_sparse) memset(counts, 0, (size_t)nd * (size_t)nt * sizeof(int));
+  if(fast_sparse && p->sparse == 1) memset(counts, 0, (size_t)nd * (size_t)nt * sizeof(int));
 
   const int *fire_d=NULL,*fire_t=NULL;
   int nfire=0;

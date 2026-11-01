@@ -679,80 +679,171 @@ static PyObject *HMF_set_data_batch(HMFObject *s,PyObject *a){ return bind_set_b
 static PyObject *HMF_set_template_batch(HMFObject *s,PyObject *a){ return bind_set_batch(hmf_view(s),a,0); }
 static PyObject *HMF_run(HMFObject *s,PyObject *a){ return bind_run(hmf_view(s),a); }
 static PyObject *HMF_run_series(HMFObject *s,PyObject *a){ return bind_run_series(hmf_view(s),a,0); }
-/* run_series_sparse(series, starts, wstart, wend, t0, nt, binsize, thr, cnt[i32 rows])
-   -> (flat, index, value) as bytes: int64 flat positions in the (blocks, nt, bins) table,
-   int64 bin indices and complex64 values of every peak, in C order. The engine runs
-   sparse (ap_hmf_set_sparse): rows no tier passes write only cnt, and only rows with
-   cnt > 0 are read back -- no pass over the dense table at either end. */
+#include "hmf.h"
+static PyTypeObject HMFType;
+static int cnt_arg(PyObject *o,Py_ssize_t rows,Py_buffer *bcnt){
+  bcnt->buf=NULL;
+  if(!o || o==Py_None) return 1;
+  if(PyObject_GetBuffer(o,bcnt,PyBUF_WRITABLE)<0) return 0;
+  if(bcnt->len/(Py_ssize_t)sizeof(int)<rows){
+    PyBuffer_Release(bcnt); bcnt->buf=NULL;
+    PyErr_SetString(PyExc_ValueError,"counts buffer too small");
+    return 0;
+  }
+  return 1;
+}
+static void cnt_release(Py_buffer *bcnt){
+  if(bcnt->buf){ PyBuffer_Release(bcnt); bcnt->buf=NULL; }
+}
+static PyObject *sparse_job_tuple(const ap_hmf_sparse_job *jb){
+  const Py_ssize_t m=(Py_ssize_t)jb->out_count;
+  if(m<0 || m>PY_SSIZE_T_MAX/8){
+    PyErr_SetString(PyExc_RuntimeError,"inconsistent sparse peak count");
+    return NULL;
+  }
+  PyObject *fl=PyBytes_FromStringAndSize(NULL,m*8),
+           *ix=PyBytes_FromStringAndSize(NULL,m*8),
+           *vl=PyBytes_FromStringAndSize(NULL,m*8);
+  if(!fl||!ix||!vl){ Py_XDECREF(fl); Py_XDECREF(ix); Py_XDECREF(vl); return NULL; }
+  if(m){
+    memcpy(PyBytes_AS_STRING(fl),jb->out_flat,(size_t)m*8u);
+    memcpy(PyBytes_AS_STRING(ix),jb->out_idx,(size_t)m*8u);
+    memcpy(PyBytes_AS_STRING(vl),jb->out_val,(size_t)m*8u);
+  }
+  return Py_BuildValue("(NNNi)",fl,ix,vl,jb->total);
+}
+/* run_series_sparse(series, starts, wstart, wend, t0, nt, binsize, thr, cnt[i32 rows]|None)
+   -> (flat, index, value, total): int64 flat positions in the (blocks, nt, bins) table,
+   int64 bin indices and complex64 values of every peak, in C order. */
 static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
-  Py_buffer bs,bst,bws,bwe,bcnt,bph={0};
+  Py_buffer bs,bst,bws,bwe,bcnt={0},bph={0};
   int t0,nt; Py_ssize_t binsize; double thr;
-  PyObject *ph_arg=NULL;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*|O",&bs,&bst,&bws,&bwe,&t0,&nt,&binsize,&thr,&bcnt,
+  PyObject *cnt_obj=NULL,*ph_arg=NULL;
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindO|O",&bs,&bst,&bws,&bwe,&t0,&nt,&binsize,&thr,&cnt_obj,
                        &ph_arg))
     return NULL;
   int nblocks; size_t nb; Py_ssize_t rows;
   PyObject *ret=NULL;
-  ap_peak *pk=NULL;
+  ap_hmf_sparse_job jb={0};
   if(!phase_arg(ph_arg,&bph)) goto done;
   if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,&bph,
                      &nblocks,&nb,&rows))
     goto done;
-  if(bcnt.len/(Py_ssize_t)sizeof(int)<rows){
-    PyErr_SetString(PyExc_ValueError,"counts buffer too small"); goto done; }
-  if(nb>(size_t)PY_SSIZE_T_MAX/(size_t)rows){
+  if(!cnt_arg(cnt_obj,rows,&bcnt)) goto done;
+  if(nb>(size_t)PY_SSIZE_T_MAX/(size_t)rows
+     || rows*(Py_ssize_t)nb>PY_SSIZE_T_MAX/(Py_ssize_t)sizeof(ap_peak)){
     PyErr_SetString(PyExc_ValueError,"overflowing output shape"); goto done; }
-  const Py_ssize_t need=rows*(Py_ssize_t)nb;
-  if(need>PY_SSIZE_T_MAX/(Py_ssize_t)sizeof(ap_peak)){
-    PyErr_SetString(PyExc_ValueError,"overflowing output shape"); goto done; }
-  pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
-  if(!pk) goto done;
-  int tot;
-  int *cnt=(int*)bcnt.buf;
+  jb.p=self->p;
+  jb.series=(const float*)bs.buf;
+  jb.nseries=series_samples(bs.len,self->real,self->real_stride);
+  jb.start=(const size_t*)bst.buf;
+  jb.win_start=(const size_t*)bws.buf;
+  jb.win_end=(const size_t*)bwe.buf;
+  jb.bin_phase=phase_of(&bph);
+  jb.nblocks=nblocks; jb.t0=t0; jb.nt=nt;
+  jb.binsize=(size_t)binsize; jb.threshold=(float)thr;
+  jb.counts=(int*)bcnt.buf; jb.cluster_id=0;
+  int rc;
   Py_BEGIN_ALLOW_THREADS
-  ap_hmf_set_sparse(self->p,1);
-  tot=ap_hmf_run_series(self->p,(const float*)bs.buf,series_samples(bs.len,self->real,self->real_stride),
-                        (const size_t*)bst.buf,(const size_t*)bws.buf,
-                        (const size_t*)bwe.buf,phase_of(&bph),nblocks,t0,nt,(size_t)binsize,
-                        (float)thr,pk,cnt);
-  ap_hmf_set_sparse(self->p,0);
+  rc=ap_hmf_run_series_batch_sparse(&jb,1);
   Py_END_ALLOW_THREADS
-  if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
-  /* The engine already counts final peaks. Trust its int total only when the
-     output shape bounds it; retain the recount for larger shapes. */
-  Py_ssize_t m=tot;
-  if(need>INT_MAX){
-    m=0;
-    for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
-      for(size_t b=0;b<nb;b++) if(pk[(size_t)r*nb+b].index>=0) m++;
-  }
-  if(m>need){ PyErr_SetString(PyExc_RuntimeError,"inconsistent sparse peak count"); goto done; }
-  PyObject *fl=PyBytes_FromStringAndSize(NULL,m*8), *ix=PyBytes_FromStringAndSize(NULL,m*8),
-           *vl=PyBytes_FromStringAndSize(NULL,m*8);
-  if(!fl||!ix||!vl){ Py_XDECREF(fl);Py_XDECREF(ix);Py_XDECREF(vl); goto done; }
-  if(m){ long long *F=(long long*)PyBytes_AS_STRING(fl), *I=(long long*)PyBytes_AS_STRING(ix);
-    float *V=(float*)PyBytes_AS_STRING(vl);
-    Py_ssize_t k=0;
-    for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
-      for(size_t b=0;b<nb;b++){
-        const ap_peak *q=&pk[(size_t)r*nb+b];
-        if(q->index<0) continue;
-        if(k>=m) goto bad_count;
-        F[k]=(long long)((size_t)r*nb+b); I[k]=(long long)q->index;
-        V[2*k]=q->re; V[2*k+1]=q->im; k++;
-      }
-    if(k!=m) goto bad_count;
-  }
-  ret=Py_BuildValue("(NNNi)",fl,ix,vl,tot);
-  goto done;
-bad_count:
-  Py_DECREF(fl);Py_DECREF(ix);Py_DECREF(vl);
-  PyErr_SetString(PyExc_RuntimeError,"inconsistent sparse peak count");
+  if(rc<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
+  ret=sparse_job_tuple(&jb);
 done:
-  PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
-  PyBuffer_Release(&bwe);PyBuffer_Release(&bcnt);
+  free(jb.out_flat); free(jb.out_idx); free(jb.out_val);
+  PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);PyBuffer_Release(&bwe);
+  cnt_release(&bcnt);
   phase_release(&bph);
   return ret;
+}
+typedef struct {
+  Py_buffer bs,bst,bws,bwe,bcnt,bph;
+  int have_main;
+  HMFObject *hmf;
+} hmf_batch_item;
+static PyObject *HMF_run_series_batch_sparse(PyObject *cls_unused,PyObject *seq_arg){
+  (void)cls_unused;
+  PyObject *seq=PySequence_Fast(seq_arg,"jobs must be a sequence");
+  if(!seq) return NULL;
+  const Py_ssize_t n=PySequence_Fast_GET_SIZE(seq);
+  if(n==0){ Py_DECREF(seq); return PyList_New(0); }
+  if(n>INT_MAX){ Py_DECREF(seq); PyErr_SetString(PyExc_ValueError,"too many batch jobs"); return NULL; }
+  hmf_batch_item *items=PyMem_Calloc((size_t)n,sizeof(*items));
+  ap_hmf_sparse_job *jobs=PyMem_Calloc((size_t)n,sizeof(*jobs));
+  PyObject *out=NULL;
+  if(!items||!jobs){ PyErr_NoMemory(); goto done; }
+  for(Py_ssize_t i=0;i<n;i++){
+    PyObject *it=PySequence_Fast_GET_ITEM(seq,i);
+    hmf_batch_item *bi=&items[i];
+    int t0=0,nt=0,cluster_id=0; Py_ssize_t binsize=0; double thr=0.0;
+    PyObject *cnt_obj=NULL,*ph_obj=NULL;
+    if(!PyArg_ParseTuple(it,"O!y*y*y*y*iindOOi",&HMFType,&bi->hmf,&bi->bs,&bi->bst,&bi->bws,
+                         &bi->bwe,&t0,&nt,&binsize,&thr,&cnt_obj,&ph_obj,&cluster_id))
+      goto done;
+    Py_INCREF(bi->hmf);
+    bi->have_main=1;
+    if(bi->hmf->busy){
+      PyErr_SetString(PyExc_RuntimeError,
+                      "matchedfilter: filter in use by another thread; use one filter per thread");
+      goto done;
+    }
+    int nblocks=0; size_t nb=0; Py_ssize_t rows=0;
+    if(!phase_arg(ph_obj,&bi->bph)) goto done;
+    if(!series_shape_r(bi->hmf->n,bi->hmf->nt,t0,nt,binsize,bi->hmf->real,&bi->bs,&bi->bst,
+                       &bi->bws,&bi->bwe,&bi->bph,&nblocks,&nb,&rows))
+      goto done;
+    if(!cnt_arg(cnt_obj,rows,&bi->bcnt)) goto done;
+    if(nb>(size_t)PY_SSIZE_T_MAX/(size_t)rows
+       || rows*(Py_ssize_t)nb>PY_SSIZE_T_MAX/(Py_ssize_t)sizeof(ap_peak)){
+      PyErr_SetString(PyExc_ValueError,"overflowing output shape"); goto done;
+    }
+    ap_hmf_sparse_job *jb=&jobs[i];
+    jb->p=bi->hmf->p;
+    jb->series=(const float*)bi->bs.buf;
+    jb->nseries=series_samples(bi->bs.len,bi->hmf->real,bi->hmf->real_stride);
+    jb->start=(const size_t*)bi->bst.buf;
+    jb->win_start=(const size_t*)bi->bws.buf;
+    jb->win_end=(const size_t*)bi->bwe.buf;
+    jb->bin_phase=phase_of(&bi->bph);
+    jb->nblocks=nblocks; jb->t0=t0; jb->nt=nt;
+    jb->binsize=(size_t)binsize; jb->threshold=(float)thr;
+    jb->counts=(int*)bi->bcnt.buf; jb->cluster_id=cluster_id;
+  }
+  for(Py_ssize_t i=0;i<n;i++) items[i].hmf->busy=1;
+  int rc;
+  Py_BEGIN_ALLOW_THREADS
+  rc=ap_hmf_run_series_batch_sparse(jobs,(int)n);
+  Py_END_ALLOW_THREADS
+  for(Py_ssize_t i=0;i<n;i++) items[i].hmf->busy=0;
+  if(rc<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
+  out=PyList_New(n);
+  if(!out) goto done;
+  for(Py_ssize_t i=0;i<n;i++){
+    PyObject *tup=sparse_job_tuple(&jobs[i]);
+    if(!tup){ Py_CLEAR(out); goto done; }
+    PyList_SET_ITEM(out,i,tup);
+  }
+done:
+  if(jobs){
+    for(Py_ssize_t i=0;i<n;i++){
+      free(jobs[i].out_flat); free(jobs[i].out_idx); free(jobs[i].out_val);
+    }
+  }
+  if(items){
+    for(Py_ssize_t i=0;i<n;i++){
+      if(items[i].have_main){
+        PyBuffer_Release(&items[i].bs); PyBuffer_Release(&items[i].bst);
+        PyBuffer_Release(&items[i].bws); PyBuffer_Release(&items[i].bwe);
+      }
+      cnt_release(&items[i].bcnt);
+      phase_release(&items[i].bph);
+      Py_XDECREF(items[i].hmf);
+    }
+  }
+  PyMem_Free(jobs);
+  PyMem_Free(items);
+  Py_DECREF(seq);
+  return out;
 }
 static PyObject *HMF_nbins(HMFObject *self,PyObject *args){
   Py_ssize_t bs,st,en;
@@ -1025,7 +1116,9 @@ static PyMethodDef HMF_methods[]={
   {"nbins",(PyCFunction)HMF_nbins_g,METH_VARARGS,"nbins(binsize, start, end)"},
   {"run_series",(PyCFunction)HMF_run_series_g,METH_VARARGS,"run_series(...)"},
   {"run_series_sparse",(PyCFunction)HMF_run_series_sparse_g,METH_VARARGS,
-   "run_series_sparse(series,starts,wstart,wend,t0,nt,binsize,thr,cnt) -> (flat,index,value bytes,total)"},
+   "run_series_sparse(series,starts,wstart,wend,t0,nt,binsize,thr,cnt|None) -> (flat,index,value bytes,total)"},
+  {"run_series_batch_sparse",(PyCFunction)HMF_run_series_batch_sparse,METH_O|METH_STATIC,
+   "run_series_batch_sparse(jobs) -> [(flat,index,value bytes,total), ...]"},
   {"stats",(PyCFunction)HMF_stats_g,METH_NOARGS,"stats() -> (pairs, refined)"},
   {"chain",(PyCFunction)HMF_chain_g,METH_NOARGS,"chain() -> bands"},
   {"band_offsets",(PyCFunction)HMF_band_offsets_g,METH_NOARGS,"band_offsets() -> per-tier starting fine bins"},
