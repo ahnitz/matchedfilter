@@ -776,3 +776,77 @@ def test_multi_batch_small_fft_and_permuted_templates():
         assert wt["tmpl_values"] == wr["tmpl_values"]
 
 
+def test_auto_tile_bytes_selects_tiled_or_untiled_by_cohort_footprint():
+    """With tile_bytes=None, compact L3-resident cohorts execute ephemerally in L3 tiles
+    while oversized full-segment cohorts fall back to untiled streaming bit-identically."""
+    rng = np.random.default_rng(20261102)
+    S = 262144
+    pad = 2048
+    ref_w = _reference_profile()
+
+    mid_counts = np.sort(rng.integers(500, 2200, size=12))
+    mid_taps, mid_counts = _make_real_taps(rng, len(mid_counts), mid_counts)
+    mid = TimeDomainFilterBank(
+        mid_taps, mid_counts, engine="corr", device="cpu", fft_lengths=(8192,))
+
+    fine_banks = []
+    for _ in range(len(mid_counts)):
+        ft, fc = _make_real_taps(rng, 10, rng.integers(180, 280, size=10))
+        fb = TimeDomainFilterBank(
+            ft, fc, engine="hier", device="cpu",
+            threshold=3.9, false_dismissal=1e-3, binsize=1024, fft_lengths=(2048,),
+        )
+        fb.set_reference(ref_w, delta_f=1.0 / 16.0)
+        fine_banks.append(fb)
+
+    ser = {
+        ifo: ((rng.standard_normal(S) + 1j * rng.standard_normal(S))
+              * np.float32(1.0 / np.sqrt(2.0))).astype(np.complex64)
+        for ifo in ("H1", "L1")
+    }
+    ser["H1"][40000:40128] += np.float32(10.0) * np.exp(1j * np.linspace(0, 15, 128, dtype=np.float32))
+    ser["L1"][180000:180128] += np.float32(10.0) * np.exp(1j * np.linspace(0, 14, 128, dtype=np.float32))
+
+    # 1. Sparse window (D=2, 12 rows, 16384 samples -> 3.1 MiB <= 4 MiB): runs L3-tiled ephemerally.
+    sparse_mid_w = slice(32768 - pad, 45056 + pad)
+    sparse_leaf_w = slice(32768, 45056)
+    sentinel = np.complex64(-42.0 + 19.0j)
+    out_sparse = {ifo: np.full((len(mid_counts), S), sentinel, dtype=np.complex64) for ifo in ("H1", "L1")}
+    t_sparse = {}
+    res_sparse = TimeDomainFilterBank.correlate_and_filter_many(
+        [(mid, ser[ifo], dict(windows=sparse_mid_w, out=out_sparse[ifo])) for ifo in ("H1", "L1")],
+        [(fine_banks[r], out_sparse[ifo][r], dict(windows=sparse_leaf_w))
+         for r in range(len(mid_counts)) for ifo in ("H1", "L1")],
+        timings=t_sparse, retain_radius=0,
+    )
+    assert t_sparse["ephemeral_used"] is True
+    for ifo in ("H1", "L1"):
+        assert np.all(out_sparse[ifo] == sentinel)
+    assert sum(len(r.snr) for r in res_sparse) > 0
+
+    # 2. Full segment (D=2, 12 rows, ~245k samples -> 47 MiB > 4 MiB): auto-routes to untiled streaming.
+    full_mid_w = slice(8192 - pad, S - 8192 + pad)
+    full_leaf_w = slice(8192, S - 8192)
+    out_auto = {ifo: np.zeros((len(mid_counts), S), dtype=np.complex64) for ifo in ("H1", "L1")}
+    t_auto = {}
+    res_auto = TimeDomainFilterBank.correlate_and_filter_many(
+        [(mid, ser[ifo], dict(windows=full_mid_w, out=out_auto[ifo])) for ifo in ("H1", "L1")],
+        [(fine_banks[r], out_auto[ifo][r], dict(windows=full_leaf_w))
+         for r in range(len(mid_counts)) for ifo in ("H1", "L1")],
+        timings=t_auto, retain_radius=0,
+    )
+    assert t_auto["ephemeral_used"] is False
+
+    out_forced = {ifo: np.zeros((len(mid_counts), S), dtype=np.complex64) for ifo in ("H1", "L1")}
+    res_forced = TimeDomainFilterBank.correlate_and_filter_many(
+        [(mid, ser[ifo], dict(windows=full_mid_w, out=out_forced[ifo])) for ifo in ("H1", "L1")],
+        [(fine_banks[r], out_forced[ifo][r], dict(windows=full_leaf_w))
+         for r in range(len(mid_counts)) for ifo in ("H1", "L1")],
+        tile_bytes=1 << 20,
+    )
+    for ifo in ("H1", "L1"):
+        _assert_bits_equal(out_auto[ifo], out_forced[ifo])
+    _assert_results_bit_identical(res_auto, res_forced)
+
+
+
