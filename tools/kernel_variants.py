@@ -210,7 +210,8 @@ CUDA_WIDE_BLOCK_FLAGS = ("-Xnvrtc", "-maxrregcount=64")
 
 #: Artifact prefix per entry point. Two entries used to be distinguished by `entry == ENTRY`,
 #: which silently collides the moment there is a third.
-STEMS = {"fusedTierB": "tierb", "compactPairs": "compact", "compactListed": "compactl",
+STEMS = {"fusedTierB": "tierb", "compactPairs": "compact",
+         "compactPairsClustered": "compactc", "compactListed": "compactl",
          "refineListed": "refine", "refineItems": "items", "fullCorrelation": "full",
          "fullCorrelationSeries": "full_series"}
 
@@ -466,7 +467,9 @@ def _compaction(backend, n, add):
     """The survivor compactions, one kernel each on every backend (they use no workgroup
     memory and read no length: built at the first length, the code is the same at every
     one)."""
-    for entry, stem in (("compactPairs", "compact"), ("compactListed", "compactl")):
+    for entry, stem in (("compactPairs", "compact"),
+                        ("compactPairsClustered", "compactc"),
+                        ("compactListed", "compactl")):
         v = _tierb(backend, n, entry, metal_cap(n) if backend == "metal" else None)
         v.stem = stem
         add(v)

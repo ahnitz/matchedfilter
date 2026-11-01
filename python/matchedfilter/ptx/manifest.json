@@ -39,6 +39,25 @@
    "single_bin": 0,
    "tile": 1
   },
+  "compactc": {
+   "cap": 512,
+   "coarse16": 0,
+   "entry": "compactPairsClustered",
+   "file": "compactc.ptx.gz",
+   "gate_only": 0,
+   "lds_bytes": 0,
+   "local_size": [
+    256,
+    1,
+    1
+   ],
+   "n": 64,
+   "portable": 0,
+   "ppg": 1,
+   "sha256": "80e4ca0d47b1dc6d416eeccde13674d0ebe5945856d67d926350a6cd1542bd28",
+   "single_bin": 0,
+   "tile": 1
+  },
   "compactl": {
    "cap": 512,
    "coarse16": 0,
@@ -6187,7 +6206,7 @@
   "refine_td.slang": "dad40afe6c9d8d57f412482f9cce42c45ca389e2db800b358005d932fda35b89",
   "series_bands.slang": "3a73e4936a174feda042fb3572bd4c2266e7bc786b7cf3a30648ca597cffa727",
   "series_forward.slang": "d0eeeb45919905c746274ddb96d149c56ca3e8448406c3ec6045b8601051c433",
-  "tierb.slang": "2fc65b32677b75d445a2208f749eec9c5549dff4a593ee1756fc14cb7cfc4804",
+  "tierb.slang": "d7d3fc8ec0be7f8490e9c151c26e1b460f659c999b1062d97a6c0b829c84bbf6",
   "twiddle.slang": "f4459e231e7d8ca95fda92e1d73780cd723bdb4a2589753632b02293821433e7"
  },
  "two_stage": {

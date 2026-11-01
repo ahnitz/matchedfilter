@@ -868,6 +868,8 @@ class Context(Executor, InputUploads):
             return "pack_coarse"
         if entry == "compactPairs":
             return "compact"
+        if entry == "compactPairsClustered":
+            return "compactc"
         if entry == "compactListed":
             return "compactl"
         if entry == "markBlocks":
@@ -1054,7 +1056,8 @@ class Context(Executor, InputUploads):
             return fn, wg, 11, 1
         if name == "compact_peaks":
             return self._compact_peaks()
-        entries = {"compact": "compactPairs", "compactl": "compactListed", "mark": "markBlocks",
+        entries = {"compact": "compactPairs", "compactc": "compactPairsClustered",
+                   "compactl": "compactListed", "mark": "markBlocks",
                    "pack": "packCoarse", "fwd_tier0": "forwardTier0",
                    "fwd_bands": "seriesForwardBands", "fwd_listed": "seriesForwardListed",
                    "full": "fullCorrelation", "series": "fullCorrelationSeries",
@@ -1072,6 +1075,8 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_kernel(name, n):
+        if name == "compactc":
+            return _shipped("compactc") is not None
         if name == "tier1":
             return _shipped(f"refine_{n}_onebin") is not None
         if name == "fwd_tier0":
@@ -1083,6 +1088,10 @@ class Context(Executor, InputUploads):
         if name == "refine_td":
             return _shipped("refine_td") is not None
         raise ValueError(name)
+
+    def hier_peaks_grouped(self, *args, **kwargs):
+        from ._gpuhost import hier_peaks_grouped
+        return hier_peaks_grouped(self, *args, **kwargs)
 
     def _x_coarse_candidates(self, band):
         """Every coarse layout (subgroup 0: the warp, ppg, tile, twt) at this band
