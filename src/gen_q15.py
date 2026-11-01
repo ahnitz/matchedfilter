@@ -25,12 +25,18 @@ def q15(v):
 
 
 class QScheduleMixin:
-    """Register-conscious split-radix schedule: for n <= 16, evaluate U(n/2) first while 0
-    outer vectors are live (so n=8 fits in 16 registers and n=16 fits in 32 registers), then
-    Zc(n/4) -> t1, then Zp(n/4), draining live vectors in k = 0..n/4-1 order.  At n = 32,
-    evaluate Zc(8) and Zp(8) -> (su, pdf) first (32 outer vectors instead of 48) and stream
-    U(16) directly into the root sink.  At the root (sink_fn != None), emit each store or
+    """Register-conscious split-radix schedule: evaluate U(n/2) first while 0 outer vectors are
+    live (so n=8 fits in 16 registers and n=16 fits in 32 registers), then Zc(n/4) and Zp(n/4),
+    deferring both twiddle multiplies into the combination loop so n-level twiddle constants
+    never overlap Zp's subtree and draining subproblem outputs in LIFO order.  On 16-register
+    x86 targets (SSE4, AVX1, AVX2) at n = 32 (stream_z32=True), U(16)'s 32 vectors already
+    exceed 16 registers, so streaming Zc(8) -> t1 and Zp(8) -> (su, pdf) first (32 outer vectors
+    instead of 48) and streaming U(16) directly into the root sink cuts ~50-90 stack spills; on
+    32-register targets (AVX-512, AArch64 NEON), keeping U(16) first lets Zc(8) and Zp(8) run
+    spill-free in the 32-register file.  At the root (sink_fn != None), emit each store or
     window-maximum reduction immediately (loading M0, M1 lazily on the first output)."""
+
+    stream_z32 = False
 
     def twmul(s, a, k, n):
         c, sn = wconst(k, n)
@@ -57,16 +63,22 @@ class QScheduleMixin:
                 return None
             return out
         q = n // 4
-        if n >= 32 and sink_fn is not None:
-            Zc = s.rec(idxs[1::4])
-            t1 = [s.twmul(Zc[k], k, n) for k in range(q)]
-            Zp = s.rec(idxs[3::4])
+        if n >= 32 and sink_fn is not None and s.stream_z32:
+            t1 = [None] * q
+
+            def zc_sink(k, zc_val):
+                t1[k] = s.twmul(zc_val, k, n)
+
+            s.rec(idxs[1::4], sink_fn=zc_sink)
             su = [None] * q
             pdf = [None] * q
-            for k in range(q):
-                t2 = s.twmul(Zp[k], 3 * k, n)
+
+            def zp_sink(k, zp_val):
+                t2 = s.twmul(zp_val, 3 * k, n)
                 su[k] = s.add(t1[k], t2)
                 pdf[k] = s.pi_(s.sub(t1[k], t2))
+
+            s.rec(idxs[3::4], sink_fn=zp_sink)
 
             def u_sink(uk_idx, uk_val):
                 if uk_idx < q:
@@ -81,23 +93,24 @@ class QScheduleMixin:
             return None
         U = s.rec(idxs[0::2])
         Zc = s.rec(idxs[1::4])
-        t1 = [s.twmul(Zc[k], k, n) for k in range(q)]
         Zp = s.rec(idxs[3::4])
         if sink_fn is not None:
             for k in range(q):
+                t1 = s.twmul(Zc[k], k, n)
                 t2 = s.twmul(Zp[k], 3 * k, n)
-                su = s.add(t1[k], t2)
-                pdf = s.pi_(s.sub(t1[k], t2))
+                su = s.add(t1, t2)
+                pdf = s.pi_(s.sub(t1, t2))
                 sink_fn(k, s.add(U[k], su))
                 sink_fn(k + 2 * q, s.sub(U[k], su))
                 sink_fn(k + q, s.add(U[k + q], pdf))
                 sink_fn(k + 3 * q, s.sub(U[k + q], pdf))
             return None
         X = [None] * n
-        for k in range(q):
+        for k in reversed(range(q)):
+            t1 = s.twmul(Zc[k], k, n)
             t2 = s.twmul(Zp[k], 3 * k, n)
-            su = s.add(t1[k], t2)
-            pdf = s.pi_(s.sub(t1[k], t2))
+            su = s.add(t1, t2)
+            pdf = s.pi_(s.sub(t1, t2))
             X[k] = s.add(U[k], su)
             X[k + 2 * q] = s.sub(U[k], su)
             X[k + q] = s.add(U[k + q], pdf)
@@ -254,7 +267,7 @@ class QGenClassic(QScheduleMixin, SRGen):
 
 
 def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interior=None, tile=False,
-            perm=False):
+            perm=False, stream_z32=False):
     """maxout: instead of storing the n outputs, accumulate max(|z|^2) of those with index
     in [lo, hi) into mx[0] and mx[1] -- the screen's window maximum fused into its last pass,
     so the outputs never go back to memory.  Same Q_MUL squares as the separate maximum loop:
@@ -265,6 +278,7 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
     the templates' layout and stride) through Q_DLOAD, templates from two template groups
     (the second TW further) through Q_TLOAD, with index vectors dix/tix (q15-inl.h)."""
     g = (QGen if fused else QGenClassic)(n, name, tw, False, prod)
+    g.stream_z32 = stream_z32
     acc_toggle = [0]
     first_sink = [True]
 
@@ -277,7 +291,7 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
             acc_toggle[0] ^= 1
             condition = "" if max_interior and max_interior[0] <= k < max_interior[1] else (
                 "if(%d>=lo && %d<hi) " % (k, k))
-            g.emit(condition + "M%d=hn::Max(M%d,hn::SaturatedAdd(Q_MUL(%s,%s),Q_MUL(%s,%s)));"
+            g.emit(condition + "M%d=Q_MAX(M%d,Q_ADDS(Q_MUL(%s,%s),Q_MUL(%s,%s)));"
                    % (acc, acc, xk[0], xk[0], xk[1], xk[1]))
         else:
             g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, xk[0], k, xk[1]))
@@ -323,8 +337,20 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
     return prefix + ("static HWY_INLINE void %s(%s){\n%s%s\n%s\n}\n" % (name, args, zero, cdefs, body))
 
 
+def _emit_32(out, fused, stream_z32):
+    out.append(build_q(32, "qsr32", fused=fused, stream_z32=stream_z32))
+    out.append(build_q(32, "qsr32_prod", prod=True, fused=fused, stream_z32=stream_z32))
+    out.append(build_q(32, "qsr32_prod_perm", prod=True, fused=fused, perm=True, stream_z32=stream_z32))
+    out.append(build_q(32, "qsr32_tw", tw=True, fused=fused, stream_z32=stream_z32))
+    out.append(build_q(32, "qsr32_twmax", tw=True, fused=fused, maxout=True, stream_z32=stream_z32))
+    out.append(build_q(32, "qsr32_twmax_middle", tw=True, fused=fused,
+                       maxout=True, max_interior=(4, 28), stream_z32=stream_z32))
+    out.append(build_q(32, "qsr32_twmax_wide", tw=True, fused=fused,
+                       maxout=True, max_interior=(8, 24), stream_z32=stream_z32))
+
+
 def _emit_family(out, fused):
-    for nn in (8, 16, 32):
+    for nn in (8, 16):
         out.append(build_q(nn, "qsr%d" % nn, fused=fused))
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=fused))
         out.append(build_q(nn, "qsr%d_prod_perm" % nn, prod=True, fused=fused, perm=True))
@@ -338,11 +364,14 @@ def _emit_family(out, fused):
                                maxout=True, max_interior=(2, 14)))
             out.append(build_q(nn, "qsr16_twmax_wide", tw=True, fused=fused,
                                maxout=True, max_interior=(4, 12)))
-        if nn == 32:
-            out.append(build_q(nn, "qsr32_twmax_middle", tw=True, fused=fused,
-                               maxout=True, max_interior=(4, 28)))
-            out.append(build_q(nn, "qsr32_twmax_wide", tw=True, fused=fused,
-                               maxout=True, max_interior=(8, 24)))
+    if fused:
+        _emit_32(out, fused=True, stream_z32=False)
+    else:
+        out.append("#if defined(AP_SIMD_AVX1) || (defined(HWY_ARCH_X86) && HWY_ARCH_X86 && (!defined(HWY_MAX_BYTES) || HWY_MAX_BYTES < 64))")
+        _emit_32(out, fused=False, stream_z32=True)
+        out.append("#else")
+        _emit_32(out, fused=False, stream_z32=False)
+        out.append("#endif")
 
 
 if __name__ == "__main__":
@@ -358,8 +387,13 @@ if __name__ == "__main__":
     _emit_family(out, fused=False)
     out.append("#endif")
     out.append("#if AP_Q15_TAIL")
-    for nn in (8, 16, 32):
+    for nn in (8, 16):
         out.append(build_q(nn, "qsr%d_prod_tile" % nn, prod=True, fused=False, tile=True))
+    out.append("#if defined(AP_SIMD_AVX1) || (defined(HWY_ARCH_X86) && HWY_ARCH_X86 && (!defined(HWY_MAX_BYTES) || HWY_MAX_BYTES < 64))")
+    out.append(build_q(32, "qsr32_prod_tile", prod=True, fused=False, tile=True, stream_z32=True))
+    out.append("#else")
+    out.append(build_q(32, "qsr32_prod_tile", prod=True, fused=False, tile=True, stream_z32=False))
+    out.append("#endif")
     out.append("#endif")
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif", ""]

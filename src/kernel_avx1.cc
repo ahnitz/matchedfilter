@@ -2,13 +2,12 @@
  * Ivy Bridge), which Highway would otherwise serve with its 4-lane SSE4 target.
  *
  * Built with -mavx and AP_SIMD_AVX1, which puts simd-avx1.h under the same kernel headers the
- * Highway targets use (balanced-inl.h and everything it includes for the float path). The
- * table starts as the SSE4 back end's and replaces its float entries: the direct refine's
- * correlation and the real-series kernels stay SSE4's, while SSE4's 8-lane int16 Q15 screen is
- * disabled so AVX1 screens directly at 8 float lanes without quantisation overhead. Results are
- * the SSE4 path's bit for bit: both multiply then add (no FMA). The block
- * and spectrum loads (loads-inl.h) are AVX's too: split_store's vector path takes the plan's
- * lane width, 8 here, so SSE4's copy ran its scalar loop.
+ * Highway targets use (balanced-inl.h for the 8-lane float path, plus q15-inl.h for VEX-encoded
+ * 128-bit int16 Q15 screening with zero AVX-to-SSE transition penalty). The table starts as the
+ * SSE4 back end's and replaces its float and Q15 entries: the direct refine's correlation and
+ * the real-series kernels stay SSE4's. Results are the SSE4 path's bit for bit: both multiply
+ * then add (no FMA). The block and spectrum loads (loads-inl.h) are AVX's too: split_store's
+ * vector path takes the plan's lane width, 8 here, so SSE4's copy ran its scalar loop.
  */
 #include <math.h>
 #include <stdio.h>
@@ -22,6 +21,7 @@
 
 #define AP_SIMD_AVX1 1
 #include "balanced-inl.h"
+#include "q15-inl.h"
 
 /* The AVX1 table on top of base (the SSE4 back end's), built once. */
 extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
@@ -69,16 +69,16 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.real_split_pos = k::real_split_pos;
     be.real_split_mirror = k::real_split_mirror;
     be.root_merge = k::root_merge;
-    be.q15_lanes = NULL;
-    be.q15_screen = NULL;
-    be.q15_screen_tile = NULL;
-    be.q15_screen_perm = NULL;
-    be.q15_slab8 = NULL;
-    be.q15_sumsq = NULL;
-    be.q15_data = NULL;
-    be.q15_lanethr = NULL;
-    be.q15_data_contig = NULL;
-    be.q15_screen_gather = NULL;
+    be.q15_lanes = k::q15_lanes;
+    be.q15_screen = k::q15_screen;
+    be.q15_screen_tile = k::q15_screen_tile;
+    be.q15_screen_perm = k::q15_screen_perm;
+    be.q15_slab8 = k::q15_slab8;
+    be.q15_sumsq = k::q15_sumsq;
+    be.q15_data = k::q15_data;
+    be.q15_lanethr = k::q15_lanethr;
+    be.q15_data_contig = k::q15_data_contig;
+    be.q15_screen_gather = k::q15_screen_gather;
     ready = 1;
   }
   return &be;

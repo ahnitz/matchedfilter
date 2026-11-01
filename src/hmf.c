@@ -941,7 +941,8 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
 static inline size_t hmf_fwd_pb_limit(const ap_hmf_plan *p){
   const int w=ap_plan_lanes(p->full_fft);
   if(w>=16) return 2048u;
-  if(w>=8 && p->ntiers>0 && ap_mf_q15_lanes(p->tier[0].mf)>0) return 2048u;
+  if(w>=8 && p->ntiers>0 && ap_mf_q15_lanes(p->tier[0].mf)>0 &&
+     strcmp(ap_plan_backend(p->full_fft),"AVX")!=0) return 2048u;
   return 512u;
 }
 

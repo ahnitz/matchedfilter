@@ -182,13 +182,13 @@ def test_cost_model_prices_the_screen():
     assert rt.signature() == cm.signature()
 
 
-def test_avx1_disables_inherited_sse4_q15_screen():
+def test_avx1_exposes_vex_q15_screen():
     if "AVX" not in mf.targets():
         pytest.skip("AVX target not built on this platform")
     prev = mf.backend()
     try:
         mf.set_target("AVX")
-        assert mf._core.MF(256, 1, 1).q15_lanes() == 0
+        assert mf._core.MF(256, 1, 1).q15_lanes() in (8, 16)
     finally:
         mf.set_target(prev)
 
