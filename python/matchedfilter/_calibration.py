@@ -8,6 +8,8 @@ import numpy as np
 from . import _choice
 from . import gatechain as _gc
 
+_ORIG_CHOOSE_CHAIN = _gc.choose_chain
+
 
 #: calibrate_costs' calls (blocks a call, `reps` for its rounds, the seed of its series and
 #: templates) when the caller names none. A model measured with any other is kept apart, in
@@ -649,6 +651,26 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             if ref is not None:
                 ref = ref.astype(np.float32, copy=False)
                 cm = device_costs(n, device, ntemplates)
+                # Skip Monte Carlo simulation at n when a sound lower bound already exceeds best_so_far
+                best_so_far = min((o[0] for o in out), default=None)
+                choose_fn = _gc.choose_chain
+                while hasattr(choose_fn, "__wrapped__"):
+                    choose_fn = choose_fn.__wrapped__
+                if (best_so_far is not None
+                        and sum(o[0] > best_so_far for o in out) + 1 > ahead
+                        and choose_fn is _ORIG_CHOOSE_CHAIN
+                        and isinstance(cm, _gc.CostModel)):
+                    nt_eff = max(int(ntemplates), 1)
+                    max_pair_cost = best_so_far * nvalid - cm.block / nt_eff
+                    if max_pair_cost < 0.0:
+                        break
+                    pair_lb = _gc.pair_cost_lower_bound(
+                        ref, n, snr, fd, cm, max_tiers=max_tiers,
+                        window=(lo, n - lo), ntemplates=ntemplates,
+                        max_cost=max_pair_cost,
+                    )
+                    if pair_lb is not None and (cm.block / nt_eff + pair_lb) / nvalid > best_so_far:
+                        break
                 best, _ = _gc.choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
                                            ntemplates=ntemplates)
                 if best is not None:
