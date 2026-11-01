@@ -88,9 +88,8 @@ def test_rows_of_draws_are_spans_of_the_stream(offset, step, length, rows):
                     reason="one SIMD target in this build")
 def test_every_isa_draws_the_same_integers():
     """The generators' integers are identical on every target; the float part (log, sincos)
-    differs in the last ulp at most. AVX2 and AVX-512 share that arithmetic (FMA, the same
-    polynomials), so AVX-512's two blocks a 16-lane vector give bit for bit what AVX2's one
-    block an 8-lane vector gives."""
+    differs in the last ulp at most. AVX2 and AVX-512 share FMA arithmetic, while AVX and SSE4
+    share non-FMA arithmetic, so each pair gives bit-for-bit identical draws."""
     code = ("import sys, numpy as np; from matchedfilter import _core; "
             "o = np.empty(100000, np.float32); _core.gauss_fill(o, %d, 12345); "
             "w = np.empty((5, 2048), np.float32); _core.gauss_fill_rows(w, %d, 4096, 4096); "
@@ -108,6 +107,8 @@ def test_every_isa_draws_the_same_integers():
         np.testing.assert_allclose(v, ref, rtol=0, atol=1e-6, err_msg=isa)
     if "AVX3" in got and "AVX2" in got:
         np.testing.assert_array_equal(got["AVX3"], got["AVX2"])
+    if "AVX" in got and "SSE4" in got:
+        np.testing.assert_array_equal(got["AVX"], got["SSE4"])
 
 
 def _records_one_at_a_time(a, e0, step, L, d0):
