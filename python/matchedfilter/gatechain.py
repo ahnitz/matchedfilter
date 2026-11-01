@@ -1636,6 +1636,22 @@ def _flop_cost(chain, reach, n):
 
 
 _CHOICE_CACHE = OrderedDict()
+_OFFSET_CACHE = OrderedDict()
+
+
+def _cached_band_offsets(p, sig_p, n, floor):
+    """Return cached (k0_cand, usable_bands_list) for normalized profile `p` at `(n, floor)`."""
+    off_key = (sig_p, int(n), int(floor))
+    hit = _OFFSET_CACHE.get(off_key)
+    if hit is not None:
+        _OFFSET_CACHE.move_to_end(off_key)
+        return hit
+    c_bands = candidate_bands(n, floor)
+    k0_cand = tuple(band_offset(p, n, b) for b in c_bands)
+    bands = [b for b, k0 in zip(c_bands, k0_cand) if p[slice(*_band_slice(n, b, k0))].sum() > 0]
+    res = (c_bands, k0_cand, bands)
+    _cache_put(_OFFSET_CACHE, off_key, res)
+    return res
 
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
@@ -1654,12 +1670,13 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     nsim = dsim if nsim is None else int(nsim)
     if nsamp is None:
         return None, []          # the tail bound needs more detections than the model holds
-    k0_cand = tuple(band_offset(p, n, b) for b in candidate_bands(n, floor))
+    sig_p = _gm._profile_sig(p)
+    c_bands, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
     extra = (k0_cand,) if any(k0_cand) else ()
     params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
               # ntemplates prices the feed
               None if not getattr(cost, "feed", None) else int(ntemplates or 0)) + extra
-    key = (_gm._profile_sig(p),) + params
+    key = (sig_p,) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
         _CHOICE_CACHE.move_to_end(key)
@@ -1668,15 +1685,18 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if hit is not None:
         _cache_put(_CHOICE_CACHE, key, hit)
         return hit
-    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp)
+    offsets_map = dict(zip(c_bands, k0_cand))
+    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp,
+                        bands=bands, offsets_by_band=offsets_map)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
-                  nsamp=None):
-    bands = usable_bands(power, n, floor)
+                  nsamp=None, bands=None, offsets_by_band=None):
+    if bands is None:
+        bands = usable_bands(power, n, floor)
     if not bands:
         return None, []
     nsamp = _gm._nsamp_for(fd) if nsamp is None else int(nsamp)
@@ -1687,7 +1707,8 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), window,
             int(nsim), int(nsamp))
-    offsets_by_band = {b: band_offset(power, n, b) for b in bands}
+    if offsets_by_band is None:
+        offsets_by_band = {b: band_offset(power, n, b) for b in bands}
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         offs = tuple(offsets_by_band[b] for b in chain)
@@ -1734,9 +1755,16 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     nsim = dsim if nsim is None else int(nsim)
     if nsamp is None:
         return None              # the tail bound needs more detections than the model holds
-    k0_chain = tuple(band_offset(p, n, b) for b in chain)
+    sig_p = _gm._profile_sig(p)
+    ch_off_key = ("chain", sig_p, int(n), chain)
+    k0_chain = _OFFSET_CACHE.get(ch_off_key)
+    if k0_chain is None:
+        k0_chain = tuple(band_offset(p, n, b) for b in chain)
+        _cache_put(_OFFSET_CACHE, ch_off_key, k0_chain)
+    else:
+        _OFFSET_CACHE.move_to_end(ch_off_key)
     extra = (k0_chain,) if any(k0_chain) else ()
-    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost), *extra)
+    key = (sig_p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost), *extra)
     hit = _PLAN_CACHE.get(key)
     if hit is not None:
         _PLAN_CACHE.move_to_end(key)
@@ -1746,7 +1774,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     if hit is not None:
         _cache_put(_PLAN_CACHE, key, hit)
         return hit
-    bands = usable_bands(p, n, floor)
+    _, _, bands = _cached_band_offsets(p, sig_p, n, floor)
     if not set(chain) <= set(bands):
         return None
     drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True)
@@ -1761,6 +1789,1147 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out
+
+
+_INV_RT2 = 1.0 / math.sqrt(2.0)
+_INV_RT2PI = 1.0 / math.sqrt(2.0 * math.pi)
+_BOUND_LOG_INV_DELTA = 25.33
+_BOUND_CACHE = OrderedDict()
+_BOUND_PRICE_CACHE = OrderedDict()
+
+
+def _norm_sf_1d(z_arr):
+    return np.array([0.5 * math.erfc(float(z) * _INV_RT2) for z in z_arr], dtype=np.float64)
+
+
+def _gauss_tail_ub(t):
+    t = np.maximum(np.asarray(t, dtype=np.float64), 0.0)
+    mills_ub = np.minimum(math.sqrt(0.5 * math.pi), 2.0 / (t + np.sqrt(t * t + 2.0)))
+    return mills_ub * np.exp(-0.5 * np.minimum(t * t, 1400.0))
+
+
+def _gauss_tail_lb(t):
+    t = np.maximum(np.asarray(t, dtype=np.float64), 0.0)
+    mills_lb = 2.0 / (t + np.sqrt(t * t + 4.0))
+    return mills_lb * np.exp(-0.5 * np.minimum(t * t, 1400.0))
+
+
+def _norm_cdf_lb(z):
+    z = np.asarray(z, dtype=np.float64)
+    return np.where(z >= 0.0,
+                    np.maximum(0.5, 1.0 - _gauss_tail_ub(z) * _INV_RT2PI),
+                    _gauss_tail_lb(-z) * _INV_RT2PI)
+
+
+def _norm_cdf_ub(z):
+    z = np.asarray(z, dtype=np.float64)
+    return np.where(z >= 0.0,
+                    1.0 - _gauss_tail_lb(z) * _INV_RT2PI,
+                    np.minimum(0.5, _gauss_tail_ub(-z) * _INV_RT2PI))
+
+
+def _binom_kl(p, q):
+    if q >= 1.0:
+        return float("inf") if p < 1.0 else 0.0
+    if q <= 0.0 or p >= q:
+        return 0.0
+    if p <= 0.0:
+        return -math.log(max(1.0 - q, 1e-300))
+    return p * math.log(p / q) + (1.0 - p) * math.log((1.0 - p) / (1.0 - q))
+
+
+def _binom_lower_tail_q_needed(m_trials, k_max_fail, log_inv_delta=_BOUND_LOG_INV_DELTA):
+    if k_max_fail < 0:
+        return 0.0
+    if k_max_fail >= m_trials:
+        return float("inf")
+    p = float(k_max_fail) / float(m_trials)
+    target = float(log_inv_delta) / float(m_trials)
+    lo, hi = p, 1.0 - 1e-15
+    if _binom_kl(p, hi) < target:
+        return float("inf")
+    for _ in range(44):
+        mid = 0.5 * (lo + hi)
+        if _binom_kl(p, mid) >= target:
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def _binom_rate_lb(m_trials, q_true_lb, log_inv_delta=_BOUND_LOG_INV_DELTA):
+    q = float(q_true_lb)
+    if q <= 0.0 or m_trials < 1:
+        return 0.0
+    if q >= 1.0:
+        return 1.0
+    target = float(log_inv_delta) / float(m_trials)
+    if _binom_kl(0.0, q) < target:
+        return 0.0
+    lo, hi = 0.0, q
+    for _ in range(38):
+        mid = 0.5 * (lo + hi)
+        if _binom_kl(mid, q) >= target:
+            lo = mid
+        else:
+            hi = mid
+    k_lb = int(math.floor(m_trials * lo)) + 1
+    return min(q, float(k_lb) / float(m_trials))
+
+
+def _biv_rayleigh_ub(g, kappa):
+    kappa = np.clip(np.asarray(kappa, dtype=np.float64), 0.0, 1.0)
+    g = np.asarray(g, dtype=np.float64)
+    g2 = g * g
+    k = np.clip(kappa, 1e-12, 1.0 - 1e-12)
+    omk2 = 1.0 - k * k
+    sq_omk2 = np.sqrt(omk2)
+    s0 = np.maximum(g * np.sqrt((1.0 - k) / (1.0 + k)), 0.0)
+    s1 = np.maximum(g * sq_omk2 / k, 0.0)
+    term1 = omk2 * np.exp(-np.minimum(g2 / (1.0 + k), 700.0))
+    term2 = (k * k) * np.exp(-np.minimum(g2 / (2.0 * k * k), 700.0))
+    integral_diff_ub = np.maximum(_gauss_tail_ub(s0) - _gauss_tail_lb(s1), 0.0)
+    term3 = k * np.maximum(g, 0.0) * sq_omk2 * np.exp(-0.5 * np.minimum(g2, 1400.0)) * integral_diff_ub
+    out = term1 + term2 + term3
+    out = np.where(kappa <= 1e-12, np.exp(-np.minimum(g2, 700.0)), out)
+    out = np.where(kappa >= 1.0 - 1e-12, np.exp(-0.5 * np.minimum(g2, 1400.0)), out)
+    return np.where(g <= 0.0, 1.0, np.minimum(1.0, out))
+
+
+def _pivoted_chol_pivots(gamma_b, m_full, b):
+    st = max(1, m_full // 48)
+    m = (m_full + st - 1) // st
+    if m <= 1:
+        return np.ones(1, dtype=np.float64)
+    idx = (np.arange(m, dtype=np.int64) * st) % b
+    dif = idx[:, None] - idx[None, :]
+    c_mat = np.where(dif >= 0, gamma_b[dif % b], np.conj(gamma_b[(-dif) % b]))
+    diag_rem = np.ones(m, dtype=np.float64)
+    lt_mat = np.zeros((m, m), dtype=np.complex128)
+    used = np.zeros(m, dtype=bool)
+    vs = []
+    for step in range(m):
+        bi = int(np.argmax(np.where(~used, diag_rem, -1.0)))
+        vr = float(diag_rem[bi]) - 1e-11 * (step + 1)
+        if vr <= 0.15:
+            break
+        used[bi] = True
+        vs.append(vr)
+        proj = (np.conj(lt_mat[:step, bi])[:, None] * lt_mat[:step, :]).sum(axis=0) if step > 0 else 0.0
+        col = (c_mat[:, bi] - proj) / math.sqrt(vr)
+        lt_mat[step, :] = col
+        diag_rem -= col.real * col.real + col.imag * col.imag
+    return np.array(vs if vs else [1.0], dtype=np.float64)
+
+
+def _noise_pop_lb(gamma_b, b, c_cnt, g_vals, nnz_bins=None):
+    g_arr = np.asarray(g_vals, dtype=np.float64)
+    if not np.all(np.isfinite(g_arr)):
+        res = np.zeros_like(g_arr, dtype=np.float64)
+        fin = np.isfinite(g_arr)
+        if np.any(fin):
+            res[fin] = _noise_pop_lb(gamma_b, b, c_cnt, g_arr[fin], nnz_bins=nnz_bins)
+        return res
+    m_full = min(max(int(c_cnt), 1), int(b))
+    g2 = np.minimum(g_arr * g_arr, 1400.0)
+    p1 = np.where(g_arr <= 0.0, 1.0, np.exp(-0.5 * g2))
+    best_p = p1.copy()
+
+    if m_full > 1:
+        kappa_all = np.abs(gamma_b)
+        strides = {1, 4}
+        if nnz_bins is not None and nnz_bins > 0:
+            strides.add(max(1, int(b) // int(nnz_bins)))
+        for stride in sorted(strides):
+            m = (m_full + stride - 1) // stride
+            if m <= 1:
+                continue
+            d_idx = (np.arange(1, m, dtype=np.int64) * stride) % b
+            weights = 2.0 * (m - np.arange(1, m, dtype=np.float64))
+            b2 = _biv_rayleigh_ub(g_arr[:, None], kappa_all[d_idx][None, :])
+            two_s2 = b2 @ weights
+            s1 = m * p1
+            valid = s1 > 1e-30
+            ratio = np.where(valid, two_s2 / np.maximum(s1, 1e-30), 0.0)
+            k_ds = 1.0 + np.floor(np.maximum(ratio, 0.0))
+            p_ds = np.where(valid, (2.0 * k_ds * s1 - two_s2) / (k_ds * (k_ds + 1.0)), 0.0)
+            best_p = np.maximum(best_p, np.clip(p_ds, 0.0, 1.0))
+
+        if float(np.min(g_arr)) < 3.4:
+            vs_piv = _pivoted_chol_pivots(gamma_b, m_full, b)
+            p_piv = np.where(g_arr <= 0.0, 1.0,
+                             1.0 - np.prod(1.0 - np.exp(-0.5 * g2[:, None] / vs_piv[None, :]), axis=1))
+            best_p = np.maximum(best_p, np.clip(p_piv, 0.0, 1.0))
+    return best_p
+
+
+def _i0_exp_neg_a_ub(x, a):
+    x2 = x * _INV_RT2
+    c1 = 0.5 * (np.exp(np.clip(x - a, -700.0, 500.0)) + np.exp(-np.minimum(x + a, 700.0)))
+    c2 = 0.5 * (np.exp(np.clip(x2 - a, -700.0, 500.0)) + np.exp(-np.minimum(x2 + a, 700.0)))
+    c0 = np.exp(-np.minimum(a, 700.0))
+    return 0.25 * (c1 + 2.0 * c2 + c0)
+
+
+def _marcum_fast_ub(mu, sig, g):
+    inv_2s2 = 0.5 / np.maximum(sig * sig, 1e-30)
+    a = g * g * inv_2s2
+    lam = mu * mu * inv_2s2
+    over = g <= mu
+    a_safe = np.where(over, 1.0, a)
+    lam_safe = np.where(over, 0.0, lam)
+    q = np.sqrt(1.0 + 4.0 * a_safe * lam_safe)
+    u = np.maximum(2.0 * a_safe / (1.0 + q), 1.0 + 1e-7)
+    b1 = u * np.exp(np.clip(-a_safe * (1.0 - 1.0 / u) + lam_safe * (u - 1.0), -700.0, 50.0))
+    b2 = _i0_exp_neg_a_ub(2.0 * np.sqrt(a_safe * lam_safe), a_safe)
+    return np.where(over, 1.0, np.minimum(1.0, np.minimum(b1, b2)))
+
+
+def _disk_prob_lb(mu_hi, sig, g):
+    inv_s = 1.0 / np.maximum(sig, 1e-12)
+    sig_pos = sig > 1e-9
+    h = 0.86 * g
+    py_lb = np.maximum(0.0, 1.0 - 2.0 * _gauss_tail_ub((0.5100 * g) * inv_s) * _INV_RT2PI)
+    px_lb = np.maximum(0.0, _norm_cdf_lb((h - mu_hi) * inv_s) - _norm_cdf_ub((-h - mu_hi) * inv_s))
+    best = np.where(sig_pos, py_lb * px_lb, np.where(g > mu_hi, 1.0, 0.0))
+    inv_2s2 = 0.5 * (inv_s * inv_s)
+    a = (g * g) * inv_2s2
+    lam = (mu_hi * mu_hi) * inv_2s2
+    over = g <= mu_hi
+    a_s = np.where(over, 1.0, a)
+    l_s = np.where(over, 0.0, lam)
+    q = np.sqrt(1.0 + 4.0 * a_s * l_s)
+    u = np.maximum(2.0 * a_s / (1.0 + q), 1.0 + 1e-7)
+    b1 = u * np.exp(np.clip(-a_s * (1.0 - 1.0 / u) + l_s * (u - 1.0), -700.0, 50.0))
+    p_chern = np.where(sig_pos, np.where(over, 0.0, np.maximum(0.0, 1.0 - b1)),
+                       np.where(g > mu_hi, 1.0, 0.0))
+    best = np.maximum(best, p_chern)
+    return np.where(g <= 0.0, 0.0, best)
+
+
+def _fine_det_prob_ub(p, n, snr, span, phase_f_nz, k_nz):
+    if float(snr) >= 6.5:
+        return 1.0
+    n_lags = min(int(span), int(n))
+    q_fine = np.zeros((phase_f_nz.shape[0], n), dtype=np.complex128)
+    q_fine[:, :k_nz] = phase_f_nz * p[:k_nz][None, :]
+    resp_all = np.fft.ifft(q_fine, axis=1) * (n * float(snr))
+    if n <= 32:
+        p_ub = float(np.minimum(1.0, _marcum_fast_ub(np.abs(resp_all), 1.0, float(snr)).sum(axis=1)).mean())
+        return min(1.0, max(p_ub, 1e-12))
+    gamma_f = np.fft.ifft(p) * n
+    n_near = min(48, n // 2)
+    agf_all = np.abs(gamma_f)
+    agf_all[0] = 2.0
+    d_near = np.argpartition(agf_all, n - n_near)[n - n_near:]
+    lag0_pos = int(np.flatnonzero(d_near == 0)[0])
+    gf_near = gamma_f[d_near]
+    agf_near = np.minimum(np.abs(gf_near), 1.0)
+    sig_near = np.sqrt(np.maximum(1.0 - agf_near * agf_near, 1e-12))
+
+    far_mask = np.ones(n, dtype=bool)
+    far_mask[d_near] = False
+    if n_lags < n:
+        rem_lags = max(0, n_lags - 1)
+        far_abs = np.abs(resp_all[:, far_mask])
+        if rem_lags == 0:
+            p_far_ub = np.zeros(resp_all.shape[0], dtype=np.float64)
+        elif rem_lags < far_abs.shape[1]:
+            top_far = np.partition(far_abs, far_abs.shape[1] - rem_lags, axis=1)[:, far_abs.shape[1] - rem_lags:]
+            p_far_ub = _marcum_fast_ub(top_far, 1.0, float(snr)).sum(axis=1)
+        else:
+            p_far_ub = _marcum_fast_ub(far_abs, 1.0, float(snr)).sum(axis=1)
+    else:
+        p_far_ub = _marcum_fast_ub(np.abs(resp_all[:, far_mask]), 1.0, float(snr)).sum(axis=1)
+
+    ux = np.linspace(-3.2, 3.2, 11)
+    hux = 0.5 * (ux[1] - ux[0])
+    uxm = 0.5 * (ux[:-1] + ux[1:])
+    pux = _norm_sf_1d(ux[:-1]) - _norm_sf_1d(ux[1:])
+    uy = np.linspace(-2.8, 2.8, 9)
+    huy = 0.5 * (uy[1] - uy[0])
+    uym = 0.5 * (uy[:-1] + uy[1:])
+    puy = _norm_sf_1d(uy[:-1]) - _norm_sf_1d(uy[1:])
+    zfm = np.repeat(uxm, uym.size) + 1j * np.tile(uym, uxm.size)
+    rfc = math.hypot(hux, huy)
+    pwf = np.repeat(pux, uym.size) * np.tile(puy, uxm.size)
+    p_out = max(0.0, 1.0 - float(pwf.sum()))
+
+    mu_c = (np.abs(resp_all[:, d_near][:, :, None] + gf_near[None, :, None] * zfm[None, None, :])
+            + agf_near[None, :, None] * rfc)
+    p_near = _marcum_fast_ub(mu_c, sig_near[None, :, None], float(snr))
+    p_near[:, lag0_pos, :] = np.where(mu_c[:, lag0_pos, :] >= float(snr), 1.0, 0.0)
+    p_cell = np.minimum(1.0, p_far_ub[:, None] + p_near.sum(axis=1))
+    p_det = float(((p_cell @ pwf) + p_out).mean())
+    return min(1.0, max(p_det, 1e-12))
+
+
+def _new_bound_state(p, n, bands, k0_by_band, snr, fd, window, nsamp, nsim):
+    m_search = (int(nsamp) + 1) // 2
+    m_fit = int(nsamp) // 2
+    K = int(round(float(fd) * (m_search + 1))) - 1
+    fit_j = int(round(float(fd) * (m_fit + 1)))
+    if K < 0 or fit_j < 1 or fit_j > m_fit:
+        return None
+
+    idx_set = {K}
+    t0_idxs = sorted({int(math.floor(float(a0) * K))
+                      for a0 in _SPLIT if int(math.floor(float(a0) * K)) >= 1})
+    idx_set.update(t0_idxs)
+    t01_pairs = []
+    for a0 in _SPLIT:
+        i0 = int(math.floor(float(a0) * K))
+        if i0 < 1:
+            continue
+        rem = 1.0 - float(a0)
+        for a1 in _SPLIT:
+            i1 = int(math.floor(float(a1) * rem * K))
+            if i1 < 1:
+                continue
+            idx_set.add(i1)
+            t01_pairs.append((i0, i1))
+    t01_pairs = sorted(set(t01_pairs))
+    all_idxs = sorted(idx_set)
+    q_needed = {idx: _binom_lower_tail_q_needed(m_search, idx) for idx in all_idxs}
+
+    w0, w1, c0, c1 = _engine_lags(n, bands, window)
+    span = w1 - w0
+    if span < 1:
+        return None
+    band_pos = {int(b): i for i, b in enumerate(bands)}
+    return {
+        "p": p, "n": int(n), "bands": tuple(bands), "band_pos": band_pos,
+        "k0_by_band": dict(k0_by_band), "snr": float(snr), "w0": w0, "span": span,
+        "c0": c0, "c1": c1, "nsamp": int(nsamp), "nsim": int(nsim), "K": K,
+        "t0_idxs": t0_idxs, "t01_pairs": t01_pairs, "all_idxs": all_idxs,
+        "q_needed": q_needed, "common": None,
+        "bands_info": {}, "q_new_3": {}, "q_new_cov": {},
+    }
+
+
+def _ensure_bound_common(bstate):
+    common = bstate["common"]
+    if common is not None:
+        return common
+    p = bstate["p"]
+    n = bstate["n"]
+    bands = bstate["bands"]
+    snr = bstate["snr"]
+    w0 = bstate["w0"]
+    span = bstate["span"]
+    whole = span >= n
+    step = n // bands[0]
+
+    # Exact integer arrival-position weights modulo R_max
+    t_mod = (np.arange(step, dtype=np.int64) - w0) % step
+    if whole:
+        cnt0 = np.ones(step, dtype=np.float64) / step
+        cnt1 = cnt0
+    else:
+        cnt0 = np.where(t_mod < span, (span - 1 - t_mod) // step + 1, 0).astype(np.float64) / float(span)
+        cnt1 = (np.where(t_mod < span - 1, (span - 2 - t_mod) // step + 1, 0).astype(np.float64) / float(span)
+                if span > 1 else np.zeros(step, dtype=np.float64))
+
+    # Fine-stage mean response and detection probability upper bound
+    k_all = np.arange(n, dtype=np.float64)
+    k_nz = int(np.flatnonzero(p)[-1]) + 1
+    j_all = np.arange(_NF, dtype=np.int64)
+    deltas = np.where(j_all <= 8, j_all / float(_NF), (j_all - _NF) / float(_NF))
+    phase_f_nz = np.exp((-2j * math.pi / n) * np.outer(deltas, k_all[:k_nz]))
+    mu_f = float(snr) * (phase_f_nz @ p[:k_nz])
+    p_det_ub = _fine_det_prob_ub(p, n, snr, span, phase_f_nz, k_nz)
+
+    # Compact 12 x 6 cell grid on shared in-band noise U1 ~ CN(0, 2)
+    x_edges = np.linspace(-3.4, 1.6, 13)
+    hx_cell = 0.5 * float(x_edges[1] - x_edges[0])
+    x_mids = 0.5 * (x_edges[:-1] + x_edges[1:])
+    px = _norm_sf_1d(x_edges[:-1]) - _norm_sf_1d(x_edges[1:])
+
+    y_edges = np.linspace(-1.8, 1.8, 7)
+    hy_cell = 0.5 * float(y_edges[1] - y_edges[0])
+    y_mids = 0.5 * (y_edges[:-1] + y_edges[1:])
+    py = _norm_sf_1d(y_edges[:-1]) - _norm_sf_1d(y_edges[1:])
+
+    nx_c, ny_c = x_mids.size, y_mids.size
+    cx_mid = np.repeat(x_mids, ny_c)
+    cy_mid = np.tile(y_mids, nx_c)
+    cz_mid = cx_mid + 1j * cy_mid
+    crad = math.hypot(hx_cell, hy_cell)
+    cp_xy = np.repeat(px, ny_c) * np.tile(py, nx_c)
+
+    # Aligned 6 x 4 cell grid on residual noise U2 for main-lobe coarse lags (e = 0, 1)
+    x2e = np.array([-2.8, -1.9, -1.2, -0.6, 0.0, 0.7, 1.6])
+    y2e = np.array([-1.6, -0.6, 0.0, 0.6, 1.6])
+    px2 = _norm_sf_1d(x2e[:-1]) - _norm_sf_1d(x2e[1:])
+    py2 = _norm_sf_1d(y2e[:-1]) - _norm_sf_1d(y2e[1:])
+    nx2, ny2 = px2.size, py2.size
+    x2_lo = np.repeat(x2e[:-1], ny2)
+    x2_hi = np.repeat(x2e[1:], ny2)
+    x2_m = 0.5 * (x2_lo + x2_hi)
+    hx2 = 0.5 * (x2_hi - x2_lo)
+    y2_lo = np.tile(y2e[:-1], nx2)
+    y2_hi = np.tile(y2e[1:], nx2)
+    y2_m = 0.5 * (y2_lo + y2_hi)
+    hy2 = 0.5 * (y2_hi - y2_lo)
+    y2_amax = np.maximum(np.abs(y2_lo), np.abs(y2_hi))
+    z2_c = x2_m + 1j * y2_m
+    r2_c = np.hypot(hx2, hy2)
+    p2_w = np.repeat(px2, ny2) * np.tile(py2, nx2)
+
+    grp_1 = ((0.5 / 16.0, 7.5 / 16.0, tuple(range(16))),)
+    grp_3 = (
+        (0.0, 2.0 / 16.0, (14, 15, 0, 1, 2)),
+        (5.5 / 16.0, 2.5 / 16.0, (3, 4, 5, 6, 7, 8)),
+        (-5.0 / 16.0, 2.0 / 16.0, (9, 10, 11, 12, 13)),
+    )
+    common = (cnt0, cnt1, k_all, deltas, mu_f, p_det_ub,
+              hx_cell, hy_cell, cx_mid, cy_mid, cz_mid, crad, cp_xy,
+              x2_lo, x2_hi, y2_amax, z2_c, r2_c, p2_w, grp_1, grp_3)
+    bstate["common"] = common
+    return common
+
+
+def _bound_band_info(bstate, b):
+    b = int(b)
+    hit = bstate["bands_info"].get(b)
+    if hit is not None:
+        return hit
+    p = bstate["p"]
+    n = bstate["n"]
+    snr = bstate["snr"]
+    nsim = bstate["nsim"]
+    all_idxs = bstate["all_idxs"]
+    q_needed = bstate["q_needed"]
+    bi = bstate["band_pos"][b]
+    c_cnt = int(bstate["c1"][bi] - bstate["c0"][bi])
+
+    k0 = bstate["k0_by_band"][b]
+    k_lo, k_hi = _band_slice(n, b, k0)
+    p_sub = p[k_lo:k_hi]
+    fb = float(p_sub.sum())
+
+    # Wide high-SNR bands dismiss detections well above the noise floor (r = 0 is unconditionally sound)
+    if fb > 0.60 and float(snr) * math.sqrt(fb) > 5.4 and bi >= 2:
+        info = {
+            "k_lo": k_lo, "k_hi": k_hi, "fb": fb, "c_cnt": c_cnt,
+            "g": {idx: float("inf") for idx in all_idxs},
+            "q": {idx: 0.0 for idx in all_idxs},
+            "r": {idx: 0.0 for idx in all_idxs},
+        }
+        bstate["bands_info"][b] = info
+        return info
+
+    (cnt0, cnt1, k_all, deltas, mu_f, p_det_ub,
+     hx_cell, hy_cell, cx_mid, cy_mid, cz_mid, crad, cp_xy,
+     x2_lo, x2_hi, y2_amax, z2_c, r2_c, p2_w, grp_1, grp_3) = _ensure_bound_common(bstate)
+
+    sq_fb = math.sqrt(fb)
+    sig_out = math.sqrt(max(1.0 - fb, 0.0))
+    R = n // b
+
+    # In-band noise autocorrelation and Gram-Schmidt couplings onto U1, U2, U3
+    wb = np.zeros(b, dtype=np.float64)
+    u_bins = np.arange(k_lo, k_hi) % b
+    wb[u_bins] = p_sub / fb
+    nnz_bins = int(np.count_nonzero(wb > 1e-12))
+    gamma_b = np.fft.ifft(wb) * b
+
+    noise_med = math.sqrt(2.0 * math.log(max(b, 2)))
+    g_lo = max(1.2, min(float(snr) * sq_fb, noise_med) - 1.8)
+    g_hi = max(float(snr) * sq_fb, noise_med) + 1.8
+    G = 14
+    g_grid = np.linspace(g_lo, g_hi, G)
+
+    w_rho0 = cnt0.reshape(-1, R).sum(axis=0)
+    w_rho1 = np.roll(cnt1.reshape(-1, R).sum(axis=0), 1)
+
+    k_sub = k_all[k_lo:k_hi]
+    omega_sub = (2.0 * math.pi / n) * k_sub
+    omega_c = float(np.dot(omega_sub, p_sub)) / fb
+    domega = omega_sub - omega_c
+    scale_mu = float(snr) / sq_fb
+    m2_cen = 0.5 * float(np.dot(domega * domega, p_sub)) * scale_mu
+    d1_max_est = float(np.dot(np.abs(domega), p_sub)) * scale_mu
+
+    rho_vec = np.arange(R, dtype=np.float64)[:, None]
+    tw_rho = np.exp((-2j * math.pi / n) * (rho_vec * k_sub[None, :]))
+
+    buf_b = np.zeros((R, b), dtype=np.complex128)
+    buf_b[:, u_bins] = tw_rho * (p_sub / fb)[None, :]
+    c_u1 = np.fft.ifft(buf_b, axis=1) * b
+    ac_u1 = np.minimum(np.abs(c_u1), 1.0)
+    sig_u1 = np.sqrt(np.maximum(1.0 - ac_u1 * ac_u1, 1e-12))
+    inv_2s2 = 0.5 / np.maximum(sig_u1 * sig_u1, 1e-24)
+
+    s0 = sig_u1[:, 0]
+    r_cap = 3.2
+    tail_23 = 2.0 * math.exp(-0.5 * r_cap * r_cap)
+    if b >= 2:
+        cov10 = gamma_b[1 % b] - c_u1[:, 1 % b] * np.conj(c_u1[:, 0])
+        alpha1 = np.where(s0 > 1e-6, cov10 / np.maximum(s0, 1e-6), 0.0 + 0.0j)
+        tau1 = np.sqrt(np.maximum(sig_u1[:, 1] ** 2 - np.abs(alpha1) ** 2, 0.0))
+
+    # Partition side-lobe lags e >= 2 into exact top couplings and geometric buckets
+    rows_r = np.arange(R)[:, None]
+    far_buckets = []
+    if b > 2:
+        other_idx = np.arange(2, b)
+        cov_e0 = gamma_b[other_idx][None, :] - c_u1[:, 2:] * np.conj(c_u1[:, 0])[:, None]
+        beta2 = np.where(s0[:, None] > 1e-6, cov_e0 / np.maximum(s0[:, None], 1e-6), 0.0 + 0.0j)
+        cov_e1 = gamma_b[(other_idx - 1) % b][None, :] - c_u1[:, 2:] * np.conj(c_u1[:, 1])[:, None]
+        beta3 = np.where(tau1[:, None] > 1e-6,
+                         (cov_e1 - beta2 * np.conj(alpha1)[:, None]) / np.maximum(tau1[:, None], 1e-6),
+                         0.0 + 0.0j)
+        ab23_all = r_cap * (np.abs(beta2) + np.abs(beta3))
+
+        n_other = b - 2
+        s_side = min(n_other, 6 if R >= 32 else 12)
+        rank_score = ac_u1[:, 2:] + ab23_all
+        if n_other > s_side:
+            order = np.argsort(rank_score, axis=1)
+            side_rel = order[:, n_other - s_side:]
+            side_idx = other_idx[side_rel]
+            ab23_s = ab23_all[rows_r, side_rel]
+            rem_end = n_other - s_side
+            for b_sz in (16, 48, 128, rem_end):
+                if rem_end <= 0:
+                    break
+                b_lo = max(0, rem_end - b_sz)
+                b_rel = order[:, b_lo:rem_end]
+                b_idx = other_idx[b_rel]
+                n_b = rem_end - b_lo
+                acu_max = ac_u1[rows_r, b_idx].max(axis=1)
+                ab23_max = ab23_all[rows_r, b_rel].max(axis=1)
+                inv_2s_min = 0.5 / np.maximum(sig_u1[rows_r, b_idx].max(axis=1) ** 2, 1e-24)
+                far_buckets.append((b_idx, n_b, acu_max, ab23_max, inv_2s_min))
+                rem_end = b_lo
+        else:
+            side_idx = np.broadcast_to(other_idx[None, :], (R, n_other))
+            ab23_s = ab23_all
+    else:
+        side_idx = None
+        ab23_s = None
+
+    if side_idx is not None:
+        cu1_s = c_u1[rows_r, side_idx]
+        acu1_s = ac_u1[rows_r, side_idx]
+        inv_2sigs_sq = inv_2s2[rows_r, side_idx]
+
+    # Lower bound on joint event {C_b <= g, F_win >= snr} across sub-sample arrival groups
+    cur_groups = grp_1 if 0.47 * d1_max_est <= 0.22 else grp_3
+    p_joint_lb = np.zeros(G, dtype=np.float64)
+    abs_z = np.abs(cz_mid) + crad
+
+    for d_mid, d_half, g_js in cur_groups:
+        ph_m = np.exp((-1j * d_mid) * domega) * p_sub
+        buf_b.fill(0.0)
+        buf_b[:, u_bins] = tw_rho * ph_m[None, :]
+        mu_m = np.fft.ifft(buf_b, axis=1) * (b * scale_mu)
+        buf_b.fill(0.0)
+        buf_b[:, u_bins] = tw_rho * (-1j * domega * ph_m)[None, :]
+        d1_m = np.abs(np.fft.ifft(buf_b, axis=1)) * (b * scale_mu)
+        d2_t = (d_half * d_half) * m2_cen
+
+        w_rc = np.zeros((R, cz_mid.size), dtype=np.float64)
+        for j in g_js:
+            w0_j = np.exp(1j * float(deltas[j]) * omega_c) * mu_f[j]
+            rx_min = np.maximum(0.0, np.abs(w0_j.real + sq_fb * cx_mid) - sq_fb * hx_cell)
+            ry_min = np.maximum(0.0, np.abs(w0_j.imag + sq_fb * cy_mid) - sq_fb * hy_cell)
+            mf_lb = np.hypot(rx_min, ry_min)
+            if sig_out > 1e-12:
+                s_thr = float(snr) / sig_out
+                a_val = mf_lb / sig_out
+                z1 = s_thr - a_val
+                pf1 = np.where(z1 >= 0.0, _gauss_tail_lb(z1) * _INV_RT2PI,
+                               1.0 - _gauss_tail_ub(-z1) * _INV_RT2PI)
+                c_st = 0.75
+                z_c = c_st * s_thr - a_val
+                pf_c = np.where(z_c >= 0.0, _gauss_tail_lb(z_c) * _INV_RT2PI,
+                                1.0 - _gauss_tail_ub(-z_c) * _INV_RT2PI)
+                py_out = 2.0 * _gauss_tail_lb(math.sqrt(1.0 - c_st * c_st) * s_thr) * _INV_RT2PI
+                pf_ray = math.exp(-0.5 * min(s_thr * s_thr, 700.0))
+                pf = np.clip(np.maximum(pf_ray, pf1 + np.maximum(0.0, pf_c - pf1) * py_out), 0.0, 1.0)
+            else:
+                pf = np.where(mf_lb >= float(snr), 1.0, 0.0)
+            w_arr = (w_rho0 if j <= 8 else w_rho1)[:, None]
+            w_rc += w_arr * cp_xy[None, :] * pf / float(_NF)
+
+        act = np.flatnonzero(w_rc.sum(axis=0) > 5e-5)
+        if act.size == 0:
+            continue
+        zc, az, wc = cz_mid[act], abs_z[act], w_rc[:, act]
+
+        p_rest = np.ones((R, act.size, G), dtype=np.float64)
+        p_rest_cond = np.ones((R, act.size, G), dtype=np.float64)
+        if side_idx is not None:
+            mu_s = (np.abs(mu_m[rows_r, side_idx][:, None, :] + cu1_s[:, None, :] * zc[None, :, None])
+                    + acu1_s[:, None, :] * crad
+                    + (d_half * d1_m[rows_r, side_idx] + d2_t)[:, None, :])
+            rg_s = np.maximum(0.0, g_grid[None, None, None, :] - mu_s[..., None])
+            p_side_each = np.where(rg_s > 0.0,
+                                   1.0 - np.exp(-np.minimum(rg_s * rg_s * inv_2sigs_sq[:, None, :, None], 700.0)),
+                                   0.0)
+            p_rest *= np.prod(p_side_each, axis=2)
+
+            rg_sc = np.maximum(0.0, rg_s - ab23_s[:, None, :, None])
+            p_sc_each = np.where(rg_sc > 0.0,
+                                 1.0 - np.exp(-np.minimum(rg_sc * rg_sc * inv_2sigs_sq[:, None, :, None], 700.0)),
+                                 0.0)
+            p_rest_cond *= np.prod(p_sc_each, axis=2)
+
+        for b_idx, n_b, acu_max, ab23_max, inv_2s_min in far_buckets:
+            amu_f = np.abs(mu_m[rows_r, b_idx]).max(axis=1)
+            d1_f = d1_m[rows_r, b_idx].max(axis=1)
+            mu_f_hi = amu_f[:, None] + acu_max[:, None] * az[None, :] + (d_half * d1_f + d2_t)[:, None]
+            rg_f = np.maximum(0.0, g_grid[None, None, :] - mu_f_hi[..., None])
+            p_far_one = np.where(rg_f > 0.0,
+                                 1.0 - np.exp(-np.minimum(rg_f * rg_f * inv_2s_min[:, None, None], 700.0)),
+                                 0.0)
+            p_rest *= p_far_one ** n_b
+
+            rg_fc = np.maximum(0.0, rg_f - ab23_max[:, None, None])
+            p_fc_one = np.where(rg_fc > 0.0,
+                                1.0 - np.exp(-np.minimum(rg_fc * rg_fc * inv_2s_min[:, None, None], 700.0)),
+                                0.0)
+            p_rest_cond *= p_fc_one ** n_b
+
+        m0_c = mu_m[:, None, 0] + c_u1[:, None, 0] * zc[None, :]
+        rad0 = ac_u1[:, 0][:, None] * crad + (d_half * d1_m[:, 0] + d2_t)[:, None]
+        mu0_hi = np.abs(m0_c) + rad0
+        rg0 = np.maximum(0.0, g_grid[None, None, :] - mu0_hi[..., None])
+        p0_sym = np.where(rg0 > 0.0,
+                          1.0 - np.exp(-np.minimum(rg0 * rg0 * inv_2s2[:, 0][:, None, None], 700.0)),
+                          0.0)
+        if b == 1:
+            surv = p0_sym * p_rest
+            if fb >= 0.15:
+                p0_d = _disk_prob_lb(mu0_hi[..., None], s0[:, None, None], g_grid[None, None, :])
+                surv = np.maximum(surv, np.maximum(0.0, p0_d + p_rest - 1.0))
+        else:
+            m1_c = mu_m[:, None, 1] + c_u1[:, None, 1] * zc[None, :]
+            rad1 = ac_u1[:, 1][:, None] * crad + (d_half * d1_m[:, 1] + d2_t)[:, None]
+            mu1_hi = np.abs(m1_c) + rad1
+            rg1 = np.maximum(0.0, g_grid[None, None, :] - mu1_hi[..., None])
+            p1_sym = np.where(rg1 > 0.0,
+                              1.0 - np.exp(-np.minimum(rg1 * rg1 * inv_2s2[:, 1][:, None, None], 700.0)),
+                              0.0)
+            surv = p0_sym * p1_sym * p_rest
+            if fb >= 0.15 and float(p_rest_cond[:, :, -1].max()) > 0.02:
+                p0_1d = _disk_prob_lb(mu0_hi[..., None], s0[:, None, None], g_grid[None, None, :])
+                p1_1d = _disk_prob_lb(mu1_hi[..., None], sig_u1[:, 1][:, None, None], g_grid[None, None, :])
+                p01 = np.maximum(0.0, p0_1d + p1_1d - 1.0)
+                r_sub_cnt = min(R, 8)
+                if R > r_sub_cnt:
+                    top_r = np.argpartition(wc.sum(axis=1), R - r_sub_cnt)[R - r_sub_cnt:]
+                else:
+                    top_r = slice(None)
+                m0_sub = m0_c[top_r]
+                m1_sub = m1_c[top_r]
+                s0_sub = s0[top_r]
+                rad0_sub = rad0[top_r]
+                rad1_sub = rad1[top_r]
+                alpha1_sub = alpha1[top_r]
+                tau1_sub = tau1[top_r]
+                am0 = np.abs(m0_sub)
+                phi0 = np.where(am0 > 1e-12, m0_sub / np.maximum(am0, 1e-12), 1.0 + 0.0j)
+                u0_x = np.maximum(np.abs(am0[:, :, None] + s0_sub[:, None, None] * x2_lo[None, None, :]),
+                                  np.abs(am0[:, :, None] + s0_sub[:, None, None] * x2_hi[None, None, :]))
+                u0_hi_2 = np.hypot(u0_x, s0_sub[:, None, None] * y2_amax[None, None, :]) + rad0_sub[:, :, None]
+                u1_hi_2 = (np.abs(m1_sub[:, :, None] + (alpha1_sub[:, None] * phi0)[:, :, None] * z2_c[None, None, :])
+                           + np.abs(alpha1_sub)[:, None, None] * r2_c[None, None, :] + rad1_sub[:, :, None])
+                ok0 = g_grid[None, None, None, :] > u0_hi_2[..., None]
+                p1_c = _disk_prob_lb(u1_hi_2[..., None], tau1_sub[:, None, None, None], g_grid[None, None, None, :])
+                p01_2d = (p2_w[None, None, :, None] * np.where(ok0, p1_c, 0.0)).sum(axis=2)
+                p01[top_r] = np.maximum(p01[top_r], p01_2d)
+                surv_cond = np.maximum(0.0, p01 - tail_23) * p_rest_cond
+                surv = np.maximum(surv, np.maximum(surv_cond, np.maximum(0.0, p01 + p_rest - 1.0)))
+
+        p_joint_lb += (wc[:, :, None] * surv).sum(axis=(0, 1))
+
+    # Invert conservative dismissal CDF for threshold upper bounds and noise-pass lower bounds
+    q_safe = np.clip(p_joint_lb / p_det_ub, 0.0, 1.0)
+    g_ubs = {}
+    for idx in all_idxs:
+        ok_g = np.flatnonzero(q_safe >= q_needed[idx])
+        g_ubs[idx] = float(g_grid[ok_g[0]]) if ok_g.size > 0 else float("inf")
+    g_vec = np.array([g_ubs[idx] for idx in all_idxs], dtype=np.float64)
+    q_pop = _noise_pop_lb(gamma_b, b, c_cnt, g_vec, nnz_bins=nnz_bins)
+    r_emp = np.array([_binom_rate_lb(int(nsim), float(qv)) for qv in q_pop])
+    info = {
+        "k_lo": k_lo, "k_hi": k_hi, "fb": fb, "c_cnt": c_cnt,
+        "g": {idx: g_ubs[idx] for idx in all_idxs},
+        "q": {idx: float(q_pop[i]) for i, idx in enumerate(all_idxs)},
+        "r": {idx: float(r_emp[i]) for i, idx in enumerate(all_idxs)},
+    }
+    bstate["bands_info"][b] = info
+    return info
+
+
+def _bound_q_new_3(bstate, b0, b1, b2):
+    key3 = (int(b0), int(b1), int(b2))
+    hit = bstate["q_new_3"].get(key3)
+    if hit is not None:
+        return hit
+    inf0 = _bound_band_info(bstate, b0)
+    inf1 = _bound_band_info(bstate, b1)
+    inf2 = _bound_band_info(bstate, b2)
+    g2_ub = inf2["g"][bstate["K"]]
+    if not math.isfinite(g2_ub):
+        bstate["q_new_3"][key3] = 0.0
+        return 0.0
+    if inf0["k_hi"] >= inf1["k_lo"] and inf1["k_hi"] >= inf0["k_lo"]:
+        cov_key = ("iv", min(inf0["k_lo"], inf1["k_lo"]), max(inf0["k_hi"], inf1["k_hi"]), int(b2))
+    else:
+        cov_key = ("2iv", inf0["k_lo"], inf0["k_hi"], inf1["k_lo"], inf1["k_hi"], int(b2))
+    val = bstate["q_new_cov"].get(cov_key)
+    if val is None:
+        p = bstate["p"]
+        n = bstate["n"]
+        nsim = bstate["nsim"]
+        mask_new = np.zeros(n, dtype=bool)
+        mask_new[inf2["k_lo"]:inf2["k_hi"]] = True
+        mask_new[inf0["k_lo"]:inf0["k_hi"]] = False
+        mask_new[inf1["k_lo"]:inf1["k_hi"]] = False
+        ks_new = np.flatnonzero(mask_new)
+        f_new = float(p[ks_new].sum()) if ks_new.size > 0 else 0.0
+        if f_new <= 1e-12:
+            val = 0.0
+        else:
+            sig_new = math.sqrt(f_new / inf2["fb"])
+            g_eff = g2_ub / sig_new
+            if inf2["c_cnt"] * math.exp(-0.5 * min(g_eff * g_eff, 700.0)) * nsim < _BOUND_LOG_INV_DELTA:
+                val = 0.0
+            else:
+                wb_new = np.zeros(int(b2), dtype=np.float64)
+                np.add.at(wb_new, ks_new % int(b2), p[ks_new] / f_new)
+                nnz_new = int(np.count_nonzero(wb_new > 1e-12))
+                gamma_new = np.fft.ifft(wb_new) * int(b2)
+                val = float(_noise_pop_lb(
+                    gamma_new, int(b2), inf2["c_cnt"], np.array([g_eff]), nnz_bins=nnz_new
+                )[0])
+        bstate["q_new_cov"][cov_key] = val
+    bstate["q_new_3"][key3] = val
+    return val
+
+
+def _cost_model_nonneg(cost):
+    if any(v < 0.0 for v in cost.dense.values()):
+        return False
+    if any(v < 0.0 for _, v in cost._refine):
+        return False
+    if any(v < 0.0 for rows in cost._sparse.values() for _, v in rows):
+        return False
+    if any(sc["dense"] < 0.0 or sc["recheck"] < 0.0 for sc in cost.screen.values()):
+        return False
+    dlag = getattr(cost, "direct_lag", None)
+    if dlag is not None:
+        dfrac = getattr(cost, "direct_frac", 1.0)
+        if not (0.0 <= dfrac <= 1.0) or getattr(cost, "direct_multi_frac", 0.0) < 0.0:
+            return False
+        if dlag < 0.0 or getattr(cost, "direct_base", 0.0) + dlag < 0.0:
+            return False
+    return True
+
+
+def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND, nsim=None,
+                          window=None, ntemplates=None, nsamp=None, max_cost=None):
+    """Analytic lower bound on `choose_chain(...)[0]["cost"]` without Monte Carlo draws.
+
+    Parameters
+    ----------
+    power : array_like
+        Nonnegative filter-output power profile of length `n`.
+    n : int
+        Transform block length.
+    snr : float
+        Target detection signal-to-noise ratio.
+    fd : float
+        False-dismissal budget.
+    cost : CostModel
+        Calibrated tier and refine cost model at block length `n`.
+    max_tiers : int, optional
+        Maximum number of coarse gate tiers to consider (default `3`).
+    floor : int, optional
+        Minimum candidate coarse band size (default `_MIN_BAND`).
+    nsim : int, optional
+        Number of noise blocks in the gate model (default `model_draws(fd)[1]`).
+    window : tuple of int, optional
+        Searched fine-lag window `(start, end)` within `[0, n)`, or `None` for the whole block.
+    ntemplates : int, optional
+        Template count for GPU feed pricing (`CostModel.feed_delta`), or `None`.
+    nsamp : int, optional
+        Number of signal detections in the gate model (default `model_draws(fd)[0]`).
+    max_cost : float, optional
+        Optional branch-and-bound threshold. When provided, evaluation stops early as soon
+        as a sound lower bound at or below `max_cost` is certified, while still returning a
+        valid lower bound on the minimum pair cost across all chains.
+
+    Returns
+    -------
+    float or None
+        Conservative lower bound on the best searched chain cost per `(block, template)` pair,
+        or `None` when `cost` is not a nonnegative `CostModel` or `fd` cannot be resolved.
+    """
+    if not isinstance(cost, CostModel) or not cost._refine or not _cost_model_nonneg(cost):
+        return None
+    p = _norm_profile(power, n)
+    win = None if window is None else (int(window[0]), int(window[1]))
+    dsamp, dsim = model_draws(fd)
+    nsamp = dsamp if nsamp is None else int(nsamp)
+    nsim = dsim if nsim is None else int(nsim)
+    if nsamp is None or nsamp < 2 or nsim < 1:
+        return None
+    max_c = None if max_cost is None else float(max_cost)
+
+    sig_p = _gm._profile_sig(p)
+    c_bands, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
+    if not bands:
+        return None
+
+    # Check exact and similarity caches for previously computed full lower bounds
+    extra = (k0_cand,) if any(k0_cand) else ()
+    feed_nt = None if not getattr(cost, "feed", None) else int(ntemplates or 0)
+    price_params = (int(n), float(snr), float(fd), int(max_tiers), int(floor), int(nsim),
+                    int(nsamp), win, _cost_sig(cost), feed_nt) + extra
+    price_key = (sig_p,) + price_params
+    if price_key in _BOUND_PRICE_CACHE:
+        _BOUND_PRICE_CACHE.move_to_end(price_key)
+        return _BOUND_PRICE_CACHE[price_key]
+
+    # Build piecewise-monotone knot grid for CostModel tables
+    has_feed = bool(ntemplates and getattr(cost, "feed", None))
+    base_knots = {0.0, 1e-12, 1e-6, 0.05 - 1e-12, 0.05, float(_USELESS_PASS), 1.0}
+    for f_k, _ in cost._refine:
+        base_knots.add(float(f_k))
+    for rows in cost._sparse.values():
+        for f_k, _ in rows:
+            base_knots.add(float(f_k))
+    for sc in cost.screen.values():
+        for f_k, _ in sc["excess"]:
+            base_knots.add(float(f_k))
+    knots_tup = tuple(sorted(f_k for f_k in base_knots if 0.0 <= f_k <= 1.0))
+
+    ft_memo = {}
+
+    def _first_tier_lb(b0, f_lo, f_hi):
+        key_ft = (b0, f_lo, f_hi)
+        hit = ft_memo.get(key_ft)
+        if hit is not None:
+            return hit
+        c_dense = cost.dense[int(b0)]
+        sc = cost.screen.get(int(b0))
+        if sc is None or not sc["excess"]:
+            res = (c_dense, None, c_dense)
+            ft_memo[key_ft] = res
+            return res
+        sr_lo = cost.screen_reach(b0, f_lo)
+        sr_hi = cost.screen_reach(b0, f_hi)
+        cq_min = sc["dense"] + min(sr_lo, sr_hi) * sc["recheck"]
+        cq_max = sc["dense"] + max(sr_lo, sr_hi) * sc["recheck"]
+        scr_lb = cq_min if cq_min <= c_dense * (1.0 + TIE) else None
+        flt_lb = c_dense if cq_max > c_dense * (1.0 + TIE) else None
+        c_min = min(scr_lb if scr_lb is not None else float("inf"),
+                    flt_lb if flt_lb is not None else float("inf"))
+        res = (c_min, scr_lb, flt_lb)
+        ft_memo[key_ft] = res
+        return res
+
+    def _feed_min(chain):
+        if not has_feed:
+            return 0.0
+        vals = [cost.feed_delta(chain, [1.0] * len(chain) + [0.0], ntemplates, None),
+                cost.feed_delta(chain, [1.0] * len(chain) + [1.0], ntemplates, None)]
+        if cost.prices_direct(chain):
+            vals.append(cost.feed_delta(chain, [1.0] * len(chain) + [1.0], ntemplates, 1))
+        return min(vals)
+
+    # Zero-FFT tier-0 + feed floor check before touching similarity features or FFTs
+    c0_floor = {
+        b: min(_first_tier_lb(b, knots_tup[i], knots_tup[i + 1])[0]
+               for i in range(len(knots_tup) - 1))
+        for b in bands
+    }
+    all_chains = enumerate_chains(n, max_tiers, floor, bands=bands)
+    if not all_chains:
+        return None
+    ordered = sorted(
+        ((c0_floor[ch[0]] + _feed_min(ch), ch) for ch in all_chains),
+        key=lambda item: (-item[1][0], len(item[1]), item[1]),
+    )
+    min_all_floor = min(fl for fl, _ in ordered)
+    if max_c is not None:
+        m_search = (int(nsamp) + 1) // 2
+        m_fit = int(nsamp) // 2
+        k_bud = int(round(float(fd) * (m_search + 1))) - 1
+        fit_j = int(round(float(fd) * (m_fit + 1)))
+        span_chk = n if win is None else (win[1] - win[0])
+        if k_bud < 0 or fit_j < 1 or fit_j > m_fit or span_chk < 1:
+            return None
+        if min_all_floor > max_c:
+            return min_all_floor
+        if int(max_tiers) >= 1 and len(bands) >= 3:
+            k0_map = dict(zip(c_bands, k0_cand))
+            for b_wide in bands[2:]:
+                c_wide = _first_tier_lb(b_wide, knots_tup[0], knots_tup[1])[0] + _feed_min((b_wide,))
+                if c_wide <= max_c:
+                    fb_w = float(p[slice(*_band_slice(n, b_wide, k0_map[b_wide]))].sum())
+                    if fb_w > 0.60 and float(snr) * math.sqrt(fb_w) > 5.4:
+                        return min_all_floor
+
+    unit_price, cached_lb = _similar_get("pair-lb", p, price_params)
+    if cached_lb is not None:
+        _cache_put(_BOUND_PRICE_CACHE, price_key, cached_lb)
+        return cached_lb
+
+    # Retrieve or initialize lazy per-band analytic reach state
+    b_params = (int(n), float(snr), float(fd), int(floor), int(nsim), int(nsamp), win) + extra
+    b_key = (sig_p,) + b_params
+    bstate = _BOUND_CACHE.get(b_key)
+    if bstate is not None:
+        _BOUND_CACHE.move_to_end(b_key)
+    else:
+        unit, bstate = _similar_get("bound", p, b_params)
+        if bstate is None:
+            bstate = _new_bound_state(p, n, bands, dict(zip(c_bands, k0_cand)), snr, fd, win, nsamp, nsim)
+            if bstate is None:
+                return None
+            _similar_put("bound", unit, b_params, bstate)
+        _cache_put(_BOUND_CACHE, b_key, bstate)
+
+    sp_at = {}
+
+    def _sp_eval(bt, u):
+        k_sp = (bt, u)
+        v = sp_at.get(k_sp)
+        if v is None:
+            v = sp_at[k_sp] = cost.sparse(bt, u)
+        return v
+
+    ref_at = {}
+
+    def _ref_eval(u):
+        v = ref_at.get(u)
+        if v is None:
+            v = ref_at[u] = cost.refine(u)
+        return v
+
+    def _pts_between(lo_v, hi_v):
+        pts = [lo_v]
+        for x in knots_tup:
+            if lo_v < x < hi_v:
+                pts.append(x)
+        pts.append(hi_v if hi_v > lo_v else lo_v)
+        return pts
+
+    def _direct_refine_min(chain, u0_f, u1_f):
+        dlag = getattr(cost, "direct_lag", None)
+        if dlag is None or dlag < 0.0:
+            return 0.0
+        f_right = u0_f if (u0_f < 0.05 and u1_f >= 0.05) else u1_f
+        return min(cost.refine_for(chain, u0_f, hw=1), cost.refine_for(chain, f_right, hw=1))
+
+    sp_memo = {}
+
+    def _sparse_term_lb(bt, r_lo, r_hi=float(_USELESS_PASS)):
+        if r_lo <= 0.0:
+            return 0.0
+        if r_lo > r_hi:
+            return float("inf")
+        key_sp = (bt, r_lo, r_hi)
+        hit = sp_memo.get(key_sp)
+        if hit is not None:
+            return hit
+        pts = _pts_between(r_lo, r_hi)
+        best = float("inf")
+        for i in range(len(pts) - 1):
+            u0_f, u1_f = pts[i], pts[i + 1]
+            v = u0_f * min(_sp_eval(bt, u0_f), _sp_eval(bt, u1_f))
+            if v < best:
+                best = v
+        sp_memo[key_sp] = best
+        return best
+
+    ref_memo = {}
+
+    def _refine_term_lb(chain, f_lo, allow_direct=True):
+        if f_lo <= 0.0:
+            return 0.0
+        pdir = allow_direct and cost.prices_direct(chain)
+        key_ref = (chain[-1] if pdir else 0, len(chain) if pdir else 0, f_lo, pdir)
+        hit = ref_memo.get(key_ref)
+        if hit is not None:
+            return hit
+        pts = _pts_between(f_lo, 1.0)
+        best = float("inf")
+        for i in range(len(pts) - 1):
+            u0_f, u1_f = pts[i], pts[i + 1]
+            ref_min = min(_ref_eval(u0_f), _ref_eval(u1_f))
+            if pdir:
+                ref_min = min(ref_min, _direct_refine_min(chain, u0_f, u1_f))
+            v = u0_f * ref_min
+            if v < best:
+                best = v
+        ref_memo[key_ref] = best
+        return best
+
+    K = bstate["K"]
+    u_cap = float(_USELESS_PASS)
+    rate_memo = {}
+
+    def _emp_lb(q_val):
+        key_q = round(float(q_val), 9)
+        hit = rate_memo.get(key_q)
+        if hit is None:
+            hit = rate_memo[key_q] = _binom_rate_lb(nsim, key_q)
+        return hit
+
+    i1s_by_i0 = {}
+    for i0, i1 in bstate["t01_pairs"]:
+        i1s_by_i0.setdefault(i0, []).append(i1)
+
+    pair01_memo = {}
+
+    def _pair01_costs(b0, b1):
+        hit = pair01_memo.get((b0, b1))
+        if hit is not None:
+            return hit
+        inf0 = _bound_band_info(bstate, b0)
+        res = {}
+        for i0 in bstate["t0_idxs"]:
+            r1_lb = inf0["r"][i0]
+            if r1_lb > u_cap:
+                continue
+            pts = _pts_between(r1_lb, u_cap)
+            best01 = float("inf")
+            for i in range(len(pts) - 1):
+                u0_f, u1_f = pts[i], pts[i + 1]
+                c0_lb, _, _ = _first_tier_lb(b0, u0_f, u1_f)
+                sp1_min = min(_sp_eval(b1, u0_f), _sp_eval(b1, u1_f))
+                v = c0_lb + u0_f * sp1_min
+                if v < best01:
+                    best01 = v
+            res[i0] = best01
+        pair01_memo[(b0, b1)] = res
+        return res
+
+    # Branch-and-bound minimization across all candidate chains
+    best_lb = float("inf")
+    used_max_c = False
+    for idx_ch, (fl_chain, chain) in enumerate(ordered):
+        if fl_chain >= best_lb:
+            continue
+        if max_c is not None and fl_chain > max_c:
+            used_max_c = True
+            if fl_chain < best_lb:
+                best_lb = fl_chain
+            continue
+
+        k = len(chain)
+        b0 = chain[0]
+        feed_lb = fl_chain - c0_floor[b0]
+        c_chain = float("inf")
+
+        if k == 1:
+            inf0 = _bound_band_info(bstate, b0)
+            r_min = inf0["r"][K]
+            pts = _pts_between(r_min, 1.0)
+            pdir = cost.prices_direct(chain)
+            for i in range(len(pts) - 1):
+                u0_f, u1_f = pts[i], pts[i + 1]
+                _, scr_lb, flt_lb = _first_tier_lb(b0, u0_f, u1_f)
+                ref_xform = min(_ref_eval(u0_f), _ref_eval(u1_f))
+                if scr_lb is not None:
+                    c_scr = scr_lb + u0_f * ref_xform + feed_lb
+                    if c_scr < c_chain:
+                        c_chain = c_scr
+                if flt_lb is not None:
+                    ref_flt = min(ref_xform, _direct_refine_min(chain, u0_f, u1_f)) if pdir else ref_xform
+                    c_flt = flt_lb + u0_f * ref_flt + feed_lb
+                    if c_flt < c_chain:
+                        c_chain = c_flt
+
+        elif k == 2:
+            b1 = chain[1]
+            c01_map = _pair01_costs(b0, b1)
+            if c01_map:
+                p_lb_01 = min(c01_map.values()) + feed_lb
+                if p_lb_01 >= best_lb:
+                    continue
+                if max_c is not None and p_lb_01 > max_c:
+                    used_max_c = True
+                    if p_lb_01 < best_lb:
+                        best_lb = p_lb_01
+                    continue
+                inf0 = _bound_band_info(bstate, b0)
+                inf1 = _bound_band_info(bstate, b1)
+                q1_k = inf1["q"][K]
+                for i0, c01 in c01_map.items():
+                    f2_lb = _emp_lb(inf0["q"][i0] * q1_k)
+                    c_val = c01 + _refine_term_lb(chain, f2_lb, allow_direct=True) + feed_lb
+                    if c_val < c_chain:
+                        c_chain = c_val
+
+        else:
+            b1, b2 = chain[1], chain[2]
+            c01_map = _pair01_costs(b0, b1)
+            if c01_map:
+                p_lb_01 = min(c01_map.values()) + feed_lb
+                if p_lb_01 >= best_lb:
+                    continue
+                if max_c is not None and p_lb_01 > max_c:
+                    used_max_c = True
+                    if p_lb_01 < best_lb:
+                        best_lb = p_lb_01
+                    continue
+                inf0 = _bound_band_info(bstate, b0)
+                inf1 = _bound_band_info(bstate, b1)
+                cand_012 = []
+                p_lb_012 = float("inf")
+                for i0, c01 in c01_map.items():
+                    i1_list = i1s_by_i0.get(i0)
+                    if not i1_list:
+                        continue
+                    q1_min = min(inf1["q"][i1] for i1 in i1_list)
+                    q01 = inf0["q"][i0] * q1_min
+                    r2_lb = _emp_lb(q01)
+                    if r2_lb > u_cap:
+                        continue
+                    sp2_lb = _sparse_term_lb(b2, r2_lb, u_cap)
+                    base_012 = c01 + sp2_lb + feed_lb
+                    if base_012 < p_lb_012:
+                        p_lb_012 = base_012
+                    cand_012.append((q01, base_012))
+                if k != 3 or p_lb_012 >= best_lb:
+                    if p_lb_012 < best_lb:
+                        best_lb = p_lb_012
+                    continue
+                if max_c is not None and p_lb_012 > max_c:
+                    used_max_c = True
+                    if p_lb_012 < best_lb:
+                        best_lb = p_lb_012
+                    continue
+                q_new2 = _bound_q_new_3(bstate, b0, b1, b2)
+                for q01, base_012 in cand_012:
+                    f3_lb = _emp_lb(q01 * q_new2)
+                    c_val = base_012 + _refine_term_lb(chain, f3_lb, allow_direct=True)
+                    if c_val < c_chain:
+                        c_chain = c_val
+
+        if c_chain < best_lb:
+            best_lb = c_chain
+            if max_c is not None and best_lb <= max_c:
+                if idx_ch + 1 < len(ordered):
+                    rem_floor = min(fl for fl, _ in ordered[idx_ch + 1:])
+                    return min(best_lb, rem_floor)
+                used_max_c = False
+                break
+
+    out_val = best_lb if math.isfinite(best_lb) else None
+    if not used_max_c:
+        _cache_put(_BOUND_PRICE_CACHE, price_key, out_val)
+        if out_val is not None:
+            _similar_put("pair-lb", unit_price, price_params, out_val)
+    return out_val
 
 
 def rebin_profile(fine, delta_f, data_rate, n):
