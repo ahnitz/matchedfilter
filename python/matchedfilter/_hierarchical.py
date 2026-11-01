@@ -207,7 +207,7 @@ class HierarchicalFilter(MatchedFilter):
 
     def _new_cpu_plan(self, chain):
         self._execution_policy = self._series_policy('hierarchical_series', chain[-1], self.ntemplates)
-        grp = self._execution_policy.get('series_group', 32 if self.n <= 2048 else 16)
+        grp = int(self._execution_policy.get('series_group', _gatechain.default_series_group(self.n)))
         plan = _core.HMF(self.n, self.ndata, self.ntemplates, list(chain), grp,
                          int(getattr(self, 'k', self.n) or self.n))
         if self._hermitian:

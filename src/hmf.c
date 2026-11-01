@@ -7,6 +7,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <limits.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
 #include "ticks.h"
 #include "alloc.h"
 #include "env.h"
@@ -99,6 +102,8 @@ struct ap_hmf_plan {
   const float **dtime;            /* [nd] the block's complex samples (run_series only) */
   size_t *dhave;                  /* [nd] samples present (the rest are zero) */
   float *dx, *dout;               /* [2n] a zero-padded block copy; direct output */
+  int dx_d;                       /* block row currently cached in dx, or -1 */
+  size_t dx_lo, dx_hi;            /* unpacked sample span [dx_lo, dx_hi) in dx */
   int *dfd, *dft;                 /* [nd*nt] pairs the transform refines instead */
   ap_peak *dir_sub;               /* [ns*HMF_COARSE_SUBBINS] coarse sub-bin peaks of multi-bin survivors */
   size_t dir_sub_cap;
@@ -118,15 +123,66 @@ struct ap_hmf_plan {
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
-/* The series group a plan of size n runs when asked for `requested`: halved until the held
-   spectra fit 512 KB (256 KB of active positive-frequency bins under real_series, keeping the
-   slab L2-resident per core without thrashing shared L3 under multi-core load). MF_DGROUP
-   overrides it for measurement up to the 4 MB safety ceiling. Calibrations key their models by
-   this, the group that ran, not the one asked for. */
+/* Per-core private L2 cache size in bytes, queried once and cached (defaults to 256 KB). */
+static size_t l2_bytes(void){
+  static size_t cached = 0;
+  size_t cur = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+  if(cur) return cur;
+  size_t sz = 0;
+#ifdef __linux__
+  for(int idx = 0; idx < 6; idx++){
+    char path[96], buf[64];
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/level", idx);
+    FILE *fl = fopen(path, "r");
+    if(!fl) break;
+    int lvl = 0;
+    if(fscanf(fl, "%d", &lvl) != 1) lvl = 0;
+    fclose(fl);
+    if(lvl != 2) continue;
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/size", idx);
+    FILE *fs = fopen(path, "r");
+    if(fs){
+      if(fgets(buf, sizeof buf, fs)){
+        char *end = NULL;
+        unsigned long val = strtoul(buf, &end, 10);
+        if(val > 0 && end){
+          if(*end == 'K' || *end == 'k') sz = (size_t)val * 1024u;
+          else if(*end == 'M' || *end == 'm') sz = (size_t)val * 1024u * 1024u;
+          else sz = (size_t)val;
+        }
+      }
+      fclose(fs);
+    }
+    break;
+  }
+#endif
+#if defined(__x86_64__) || defined(__i386__)
+  if(!sz){
+    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if(__get_cpuid(0x80000000u, &eax, &ebx, &ecx, &edx) && eax >= 0x80000006u){
+      __cpuid(0x80000006u, eax, ebx, ecx, edx);
+      unsigned kb = (ecx >> 16) & 0xffffu;
+      if(kb > 0) sz = (size_t)kb * 1024u;
+    }
+  }
+#endif
+  if(sz < (size_t)128 * 1024) sz = (size_t)256 * 1024;
+  __atomic_store_n(&cached, sz, __ATOMIC_RELAXED);
+  return sz;
+}
+
+/* The series group a plan of size n runs when asked for `requested`: halved until the active
+   positive-frequency spectra fit half of private per-core L2 (up to 256 KB positive / 512 KB
+   full-spectrum cap, e.g. dgroup = 16 on 256 KB-L2 Haswell/Ivy Bridge and dgroup = 32 on
+   1 MB-L2 Zen 5 at n = 2048, keeping the slab L2-resident per core without thrashing shared L3).
+   MF_DGROUP overrides it for measurement up to the 4 MB safety ceiling. Calibrations key their
+   models by this, the group that ran, not the one asked for. */
 int ap_hmf_effective_group(size_t n,int requested){
   const long v=ap_env_int("MF_DGROUP",0);
-  int grp = v>0 ? (int)v : requested;
-  const size_t cap = v>0 ? (size_t)4*1024*1024 : (size_t)512*1024;
+  int grp = v>0 ? (int)v : (requested>0 ? requested : (n<=2048 ? 32 : 16));
+  const size_t l2 = l2_bytes();
+  const size_t auto_cap = l2 < (size_t)512*1024 ? l2 : (size_t)512*1024;
+  const size_t cap = v>0 ? (size_t)4*1024*1024 : auto_cap;
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > cap) grp>>=1;
   return grp;
 }
@@ -171,8 +227,8 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     p->full=ap_mf_create(n, p->nd, ntmpl);
   }
   { long pbmax=ap_env_int("MF_PBMAX",-1);
-    size_t pblim = pbmax>=0 ? (size_t)pbmax : 512u;
     int lw = ap_lane_width();
+    size_t pblim = pbmax>=0 ? (size_t)pbmax : (lw>=16 ? 1024u : 512u);
     size_t min_ntmpl = (lw > 0) ? (size_t)lw : 16u;
     for(int i=0;i<ntiers;i++){
       hmf_tier *tr=&p->tier[i];
@@ -279,6 +335,7 @@ static int set_taps_impl(ap_hmf_plan *p,const float *taps,size_t stride,const in
     p->tap_len[t]=L;
   }
   p->tap_cplx=cplx?1:0;
+  p->dx_d=-1;
   p->dir_lagtap=0;
   return 0;
 fail:
@@ -778,12 +835,7 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   const float inv=1.0f/(float)n;
   const size_t st=p->real_stride ? p->real_stride : 1;
   float * restrict Z=p->fwd+n;               /* the h-point transform */
-  if(st==1){
-    ap_fft_forward_scaled(p->half_fft,have ? x+s0 : x,have,1,inv,Z);
-  } else {
-    ap_scale_load_on(p->half_fft,p->fwd,have ? x+s0*st : x,have,n,st,inv);
-    ap_fft(p->half_fft,p->fwd,Z,AP_FORWARD);
-  }
+  ap_fft_forward_scaled(p->half_fft,have ? x+s0*st : x,have,st,inv,Z);
   ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
@@ -809,8 +861,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
           && win_start[b0+g]==win_start[b0] && win_end[b0+g]==win_end[b0]) g++;
     const size_t st_real = p->real_stride ? p->real_stride : 1;
     const int w_real = p->fwd_real_batch ? ap_plan_lanes(p->fwd_real_batch) : 0;
-    const int use_real_batch = (w_real<=4) || (st_real==1 && n!=2048)
-                               || (w_real<=8 ? n<=2048 : n<=1024);
+    const int use_real_batch = (w_real > 0 && n <= 4096);
     if(p->real_series && p->fwd_real_batch && use_real_batch){
       const int W = w_real;
       const size_t st = st_real;
@@ -1087,9 +1138,27 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
     if(p->real_series){
       const size_t st=p->real_stride ? p->real_stride : 1;
       if(st!=1 || s_max>have){
-        const size_t avail=have>s_min ? (have-s_min<s_max-s_min ? have-s_min : s_max-s_min) : 0;
-        ap_scale_load_on(p->full_fft,p->dx+s_min,avail ? x+s_min*st : p->dx,avail,s_max-s_min,st,
-                         1.0f);
+        /* Reuse or extend the unpacked sample span in p->dx across survivors of block d. */
+        if(p->dx_d==d && s_min<=p->dx_hi && s_max>=p->dx_lo){
+          if(s_min<p->dx_lo){
+            const size_t len=p->dx_lo-s_min;
+            const size_t avail=have>s_min ? (have-s_min<len ? have-s_min : len) : 0;
+            ap_scale_load_on(p->full_fft,p->dx+s_min,avail ? x+s_min*st : p->dx,avail,len,st,1.0f);
+            p->dx_lo=s_min;
+          }
+          if(s_max>p->dx_hi){
+            const size_t len=s_max-p->dx_hi;
+            const size_t avail=have>p->dx_hi ? (have-p->dx_hi<len ? have-p->dx_hi : len) : 0;
+            ap_scale_load_on(p->full_fft,p->dx+p->dx_hi,avail ? x+p->dx_hi*st : p->dx,avail,len,st,
+                             1.0f);
+            p->dx_hi=s_max;
+          }
+        } else {
+          const size_t avail=have>s_min ? (have-s_min<s_max-s_min ? have-s_min : s_max-s_min) : 0;
+          ap_scale_load_on(p->full_fft,p->dx+s_min,avail ? x+s_min*st : p->dx,avail,s_max-s_min,st,
+                           1.0f);
+          p->dx_d=d; p->dx_lo=s_min; p->dx_hi=s_max;
+        }
         x=p->dx;
       }
     } else if(s_max>have){
@@ -1199,6 +1268,7 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
   }
 
   int total=0, nf=0, s=0;
+  p->dx_d=-1;
   for(int j=0;j<nfire;j++){
     const int d=fire_d[j], t=fire_t[j];
     const size_t row=(size_t)d*nt+t;
