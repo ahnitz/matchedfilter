@@ -196,6 +196,22 @@ int ap_binmax_prod_batch_lanes_peaks(ap_plan *p,const float *dr,const float *di,
                                        peaks,sign==AP_BACKWARD,start,end,ph);
 }
 
+int ap_binmax_prod_gather_lanes_peaks(ap_plan *p,const float *const *drp,const float *const *dip,
+                                      const float *const *trp,const float *const *tip,int nlane,
+                                      size_t binsize,float threshold,ap_peak *peaks,
+                                      int sign,size_t start,size_t end,const unsigned *ph);
+int ap_binmax_prod_gather_lanes_peaks(ap_plan *p,const float *const *drp,const float *const *dip,
+                                      const float *const *trp,const float *const *tip,int nlane,
+                                      size_t binsize,float threshold,ap_peak *peaks,
+                                      int sign,size_t start,size_t end,const unsigned *ph){
+  if(!p||!binsize||nlane<1) return -1;
+  if(end>p->n) end=p->n;
+  if(start>=end) return 0;
+  if(!p->be->binmax_prod_gather_lanes) return -1;
+  return p->be->binmax_prod_gather_lanes(p->h,drp,dip,trp,tip,nlane,binsize,threshold,
+                                         peaks,sign==AP_BACKWARD,start,end,ph);
+}
+
 ap_prod_kernel ap_plan_prod_kernel(const ap_plan *p,float threshold){
   ap_prod_kernel k={NULL,NULL};
   if(p){
