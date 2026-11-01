@@ -1544,6 +1544,13 @@ class TimeDomainFilterBank:
                 return played
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
+        if template_index is None and not getattr(self, '_defer', False) and self.engine == 'hier':
+            single_out = [None]
+            if TimeDomainFilterBank._cpu_sparse_batch(
+                None, single_out,
+                pre_jobs=[(0, self, ser, W, cache_key, binsize, eff_threshold)],
+            ):
+                return single_out[0]
 
         # The peaks' columns, filled by _consume_into and read by _results_from.
         lists = ([], [], [], [], [])
@@ -1858,6 +1865,7 @@ class TimeDomainFilterBank:
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
         done = TimeDomainFilterBank._items_batch(jobs, out)
+        done |= TimeDomainFilterBank._cpu_sparse_batch(jobs, out, skip=done)
         try:
             for j, (bank, series, kw) in enumerate(jobs):
                 if j in done:
@@ -1973,6 +1981,305 @@ class TimeDomainFilterBank:
                     res_j = FilterResults(*_merge_window_bins(W, bs, *res_j))
                 out[j] = res_j
                 done.add(j)
+        return done
+
+    @staticmethod
+    def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold):
+        """Prepare group sub-tasks for a CPU hierarchical sparse filter_series call, or None."""
+        from .device import parse as _parse_device
+        from ._filter import MatchedFilter
+        if (bank.engine != 'hier' or _parse_device(bank.device).kind != 'cpu'
+                or not np.isfinite(eff_threshold) or eff_threshold < bank.threshold
+                or eff_threshold <= 0.0):
+            return None
+        if binsize is not None and int(binsize) < 1:
+            return None
+        groups = bank._groups
+        for g in groups:
+            plan = g.plan
+            if (not g.is_hier or getattr(plan, '_gpu', None) is not None
+                    or not getattr(plan, '_is_hierarchical', False)
+                    or 'run_series' in plan.__dict__ or '_series_flags' in plan.__dict__
+                    or getattr(type(plan).run_series, '__qualname__', '') != 'HierarchicalFilter.run_series'
+                    or getattr(MatchedFilter.run_series, '__qualname__', '') != 'MatchedFilter.run_series'
+                    or getattr(type(plan)._series_flags, '__qualname__', '') != 'MatchedFilter._series_flags'
+                    or plan._plan_trial() is not None):
+                return None
+
+        from ._series import SeriesLayout
+        S = len(ser)
+        aligned = binsize is not None or bank.binsize is not None
+        merge_bs = []
+        entries = []
+
+        # Build or retrieve cached block layouts and grouped SeriesLayouts per template group.
+        for g in groups:
+            N = g.n
+            layout = g._cached_layout
+            if layout is None or layout[0] != cache_key:
+                bstarts, bws, bwe = bank._window_layout(g, W, S)
+                g._cached_layout = (cache_key, bstarts, bws, bwe)
+            else:
+                _, bstarts, bws, bwe = layout
+            if bstarts.size == 0:
+                continue
+
+            bs = int(binsize) if binsize is not None else (bank.binsize or N)
+            if bs < 1:
+                return None
+            bph = None
+            if aligned:
+                pkey = ('_bin_phase', cache_key, bs)
+                memo = g.__dict__.setdefault('_phase_memo', {})
+                if pkey not in memo:
+                    if len(memo) >= 16:
+                        memo.clear()
+                    ph = _window_bin_phases(W, bstarts, bws, bs)
+                    if ph is not None:
+                        counts = (bwe.astype(np.int64) - bws.astype(np.int64)
+                                  + ph.astype(np.int64) + bs - 1) // bs
+                        ph = (ph.astype(np.int64) + bs * (counts.max() - counts)).astype(np.uint32)
+                    memo[pkey] = ph
+                bph = memo[pkey]
+                if bph is not None and bs not in merge_bs:
+                    merge_bs.append(bs)
+
+            sl_memo = g.__dict__.setdefault('_cpu_series_layouts', {})
+            sl_key = (cache_key, bs, aligned)
+            sl_list = sl_memo.get(sl_key)
+            if sl_list is None:
+                if len(sl_memo) >= 16:
+                    sl_memo.clear()
+                if bph is not None or bs >= N:
+                    raw_parts = [(bstarts, bws, bwe, bph)]
+                else:
+                    raw_parts = _bin_count_groups(
+                        bstarts, bws, bwe, ((bwe - bws + bs - 1) // bs).astype(np.int64))
+                sl_list = []
+                for sub_st, sub_ws, sub_we, sub_ph in raw_parts:
+                    st_u = np.ascontiguousarray(sub_st, dtype=np.uintp)
+                    ws_u = np.ascontiguousarray(sub_ws, dtype=np.uintp)
+                    we_u = np.ascontiguousarray(sub_we, dtype=np.uintp)
+                    sl = SeriesLayout(N, st_u, ws_u, we_u, bs, ragged=False, phase=sub_ph)
+                    sl.group(materialize=False)
+                    sl_list.append((sub_st, sl, int(sl.starts.min()), int(sl.starts.max())))
+                sl_memo[sl_key] = sl_list
+
+            for sub_st, sl, s_min, s_max in sl_list:
+                entries.append((g, sub_st, sl, s_min, s_max, g.plan, ser, bs, eff_threshold))
+
+        return (W, merge_bs, entries)
+
+    @staticmethod
+    def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
+        """Execute eligible CPU hierarchical sparse jobs in one C batch call.
+
+        Parameters
+        ----------
+        jobs : sequence of tuple or None
+            Sequence of ``(bank, series, kwargs)`` batch items when ``pre_jobs`` is None.
+        out : list
+            Output result list populated at each handled job index.
+        skip : set of int, optional
+            Job indices already handled earlier in the batch.
+        pre_jobs : list of tuple, optional
+            Pre-normalized ``(job_index, bank, ser, W, cache_key, binsize, eff_threshold)``
+            items from ``filter_series``.
+
+        Returns
+        -------
+        set of int
+            Indices of jobs whose ``FilterResults`` were written into ``out``.
+        """
+        if _core is None or not hasattr(_core.HMF, "run_series_batch_sparse"):
+            return set()
+        import time
+        from ._results import _SparsePeaks
+
+        done = set()
+        prepared = []
+
+        # Normalize and screen candidate CPU hierarchical jobs.
+        if pre_jobs is not None:
+            for j, bank, ser, W, cache_key, binsize, eff_threshold in pre_jobs:
+                prep = TimeDomainFilterBank._prepare_cpu_sparse_job(
+                    bank, ser, W, cache_key, binsize, eff_threshold)
+                if prep is not None:
+                    prepared.append((j, prep))
+        else:
+            skip = skip or set()
+            for j, (bank, series, kw) in enumerate(jobs):
+                if j in skip:
+                    continue
+                kw = kw or {}
+                if (bank.engine != 'hier' or kw.get("template_index") is not None
+                        or (set(kw) - {"windows", "binsize", "threshold", "template_index"})):
+                    continue
+                thr_arg = kw.get("threshold")
+                eff_threshold = bank.threshold if thr_arg is None else float(thr_arg)
+                if not np.isfinite(eff_threshold) or eff_threshold < bank.threshold or eff_threshold <= 0.0:
+                    continue
+                from .device import parse as _parse_device
+                if _parse_device(bank.device).kind != 'cpu':
+                    continue
+                ser = bank._input_series(series)
+                if ser.ndim != 1:
+                    continue
+                S = len(ser)
+                windows = kw.get("windows")
+                wkey = ((S, windows.start, windows.stop, windows.step)
+                        if type(windows) is slice else None)
+                wmemo = bank.__dict__.setdefault('_window_memo', {})
+                hit = wmemo.get(wkey) if wkey is not None else None
+                if hit is not None:
+                    W, cache_key = hit
+                else:
+                    W = _normalize_windows(windows, S)
+                    cache_key = (S, W.tobytes())
+                    if wkey is not None:
+                        if len(wmemo) >= 64:
+                            wmemo.clear()
+                        W.flags.writeable = False
+                        wmemo[wkey] = (W, cache_key)
+                if W.shape[0] == 0:
+                    out[j] = _EMPTY_FILTER_RESULTS
+                    done.add(j)
+                    continue
+                prep = TimeDomainFilterBank._prepare_cpu_sparse_job(
+                    bank, ser, W, cache_key, kw.get("binsize"), eff_threshold)
+                if prep is not None:
+                    prepared.append((j, prep))
+
+        if not prepared:
+            return done
+
+        # Ensure any device writes to shared host-readable buffers have completed once.
+        _settle_device_writes()
+
+        def flush_chunk(chunk):
+            if not chunk:
+                return
+            # Group sub-tasks whose series byte spans overlap on 64-byte cache lines.
+            n_sub = len(chunk)
+            order_by_addr = sorted(range(n_sub), key=lambda k: (chunk[k][10], chunk[k][11]))
+            clusters = []
+            cur_members = [order_by_addr[0]]
+            cur_end = chunk[order_by_addr[0]][11]
+            for idx_k in order_by_addr[1:]:
+                lo_k, hi_k = chunk[idx_k][10], chunk[idx_k][11]
+                if lo_k < cur_end:
+                    cur_members.append(idx_k)
+                    if hi_k > cur_end:
+                        cur_end = hi_k
+                else:
+                    cur_members.sort()
+                    clusters.append(cur_members)
+                    cur_members = [idx_k]
+                    cur_end = hi_k
+            cur_members.sort()
+            clusters.append(cur_members)
+            clusters.sort(key=lambda m: m[0])
+
+            c_jobs = []
+            back_map = []
+            for cluster_id, members in enumerate(clusters):
+                for idx_k in members:
+                    sub = chunk[idx_k]
+                    sl = sub[2]
+                    c_jobs.append((sub[5], sub[6], sl.starts, sl.low, sl.high,
+                                   0, sub[7], sub[8], sub[9], None, sl.phase, cluster_id))
+                    back_map.append(idx_k)
+
+            t0 = time.perf_counter()
+            c_out = _core.HMF.run_series_batch_sparse(c_jobs)
+            dt_each = (time.perf_counter() - t0) / max(len(c_jobs), 1)
+            for res_tuple, idx_k in zip(c_out, back_map):
+                chunk[idx_k][12] = (res_tuple, dt_each)
+
+        # Configure execution plans and batch sub-tasks (flushing only if an HMF switches real mode).
+        all_job_subs = []
+        chunk = []
+        ep_modes = {}
+        for j, (W, merge_bs, entries) in prepared:
+            job_subs = []
+            for g, sub_st, sl, s_min, s_max, active_plan, ser_in, bs, eff_threshold in entries:
+                nt = active_plan.ntemplates
+                active_plan._require_templates(0, nt)
+                active_plan._dataset = False
+                active_plan._data_ready = set()
+                ser_cur = ser_in
+                real = ser_cur.dtype == np.float32
+                stride = 2 if real and ser_cur.strides == (8,) else 1
+
+                # Flush pending chunk if the same HMF instance is reused with a different real/stride mode.
+                ep_prev = getattr(active_plan, '_mf', None)
+                if ep_prev is not None and id(ep_prev) in ep_modes and ep_modes[id(ep_prev)] != (real, stride):
+                    flush_chunk(chunk)
+                    chunk = []
+                    ep_modes.clear()
+
+                active_plan._want_real = real
+                ep = active_plan._execution_plan()
+                if id(ep) in ep_modes and ep_modes[id(ep)] != (real, stride):
+                    flush_chunk(chunk)
+                    chunk = []
+                    ep_modes.clear()
+                held = active_plan.__dict__.get("_ep_real")
+                if real or (held is not None and held[0] is ep and held[1]):
+                    if not ep.set_real_series(real, stride) and real:
+                        ser_cur = np.ascontiguousarray(ser_cur, dtype=np.complex64)
+                        real, stride = False, 1
+                        active_plan._want_real = False
+                        ep.set_real_series(False)
+                    active_plan._ep_real = (ep, real)
+                if (active_plan.__dict__.get("_applied_real") is not real
+                        and hasattr(active_plan, "_sync_direct_prices")):
+                    active_plan._sync_direct_prices(ep, real)
+                ep_modes[id(ep)] = (real, stride)
+
+                cser = (np.lib.stride_tricks.as_strided(ser_cur, shape=(2 * ser_cur.size - 1,), strides=(4,))
+                        if stride == 2 else ser_cur)
+                base_addr = cser.ctypes.data
+                elem_step = 8 if (not real or stride == 2) else 4
+                elem_width = 4 if real else 8
+                byte_lo = (base_addr + s_min * elem_step) & ~63
+                byte_hi = (min(base_addr + cser.nbytes,
+                               base_addr + (s_max + g.n - 1) * elem_step + elem_width) + 63) & ~63
+
+                rec = [g, sub_st, sl, active_plan, None, ep, cser, nt, bs, float(eff_threshold),
+                       byte_lo, byte_hi, None]
+                chunk.append(rec)
+                job_subs.append(rec)
+            all_job_subs.append((j, W, merge_bs, job_subs))
+
+        flush_chunk(chunk)
+
+        # Assemble FilterResults per job in original group and block order.
+        for j, W, merge_bs, job_subs in all_job_subs:
+            lists = ([], [], [], [], [])
+            for rec in job_subs:
+                g, sub_st, sl, active_plan = rec[0], rec[1], rec[2], rec[3]
+                nt = rec[7]
+                (fl, ix, vl, tot), dt_each = rec[12]
+                active_plan._last_n_triggers = tot
+                active_plan._record_batch_time(dt_each)
+                if tot == 0:
+                    continue
+                shape = (sl.starts.size, nt, sl.nbins)
+                sp = _SparsePeaks(shape, np.frombuffer(fl, np.int64),
+                                  np.frombuffer(ix, np.int64), np.frombuffer(vl, np.complex64))
+                if sl.order is not None:
+                    sp = _SparsePeaks.combine([(0, sp)], shape, sl.order)
+                _consume_into(lists, sp, None, sub_st, g, None, g.n, None)
+            if merge_bs and lists[0]:
+                cols = [np.concatenate(c) for c in lists]
+                for bs_m in merge_bs:
+                    cols = list(_merge_window_bins(W, bs_m, *cols))
+                for lst, c in zip(lists, cols):
+                    lst[:] = [c]
+            out[j] = _results_from(lists)
+            done.add(j)
+
         return done
 
     @staticmethod
