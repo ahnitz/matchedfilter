@@ -26,6 +26,7 @@ fraction this shape measured last time, on every backend. Listed stages are boun
 a device with indirect dispatch sizes them by the count, one without strides a fixed grid
 (the driver's `listed` op).
 """
+import hashlib
 import math
 
 import struct
@@ -420,7 +421,7 @@ class HierOps:
                    window=None, upload_data=True, upload_tmpl=True, cascade_band=None, ct1=None,
                    raw_thr1=None, slot=None, async_submit=False, sparse=False, row_windows=None,
                    handle_out=None, refine_reach=None, nbins=None, band_offsets=None,
-                   direct=None):
+                   direct=None, tier0_cluster=None):
         """Hierarchical peaks: (idx, val) shaped (data rows, templates, bins) as peaks returns,
         or a _SparsePeaks when sparse, from one recording that gates every pair at a narrow
         band (one tier, or a cascade of two) and refines only the survivors at n.
@@ -446,7 +447,7 @@ class HierOps:
                     n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
                     window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
                     ct1=ct1, raw_thr1=raw_thr1, slot=slot, refine_reach=refine_reach,
-                    band_offsets=band_offsets, direct=direct),
+                    band_offsets=band_offsets, direct=direct, tier0_cluster=tier0_cluster),
                 lo, hi, binsize, MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
         if cascade_band is not None:
             tiers = ((int(cascade_band), ct0, float(raw_thr)), (int(band), ct1, float(raw_thr1)))
@@ -455,10 +456,46 @@ class HierOps:
                                  % ((tiers[0][0], tiers[1][0]),))
         else:
             tiers = ((int(band), ct0, float(raw_thr)),)
+        cl_meta = None
+        cl_sig = None
+        cl_lag_pad = 0
+        nc = nt
+        if tier0_cluster is not None:
+            if len(tiers) < 2:
+                raise ValueError("tier0_cluster requires a two-tier cascade")
+            cl_cache = self.__dict__.setdefault("_cl_meta_cache", {})
+            cid = id(tier0_cluster)
+            hit = cl_cache.get(cid)
+            if hit is not None and hit[0] is tier0_cluster and hit[1] == nt:
+                cl_off, cl_mem, cl_lag_pad, cl_sig = hit[2:]
+            else:
+                raw_off = np.asarray(tier0_cluster.offsets, dtype=np.int64)
+                raw_mem = np.asarray(tier0_cluster.members, dtype=np.int64)
+                cl_lag_pad = int(getattr(tier0_cluster, "lag_pad", 0))
+                if (raw_off.ndim != 1 or raw_off.size < 2 or int(raw_off[0]) != 0
+                        or int(raw_off[-1]) != nt or raw_mem.shape != (nt,)
+                        or cl_lag_pad < 0 or cl_lag_pad >= tiers[0][0]):
+                    raise ValueError("invalid tier0_cluster partition or lag_pad")
+                if np.any(raw_off[:-1] >= raw_off[1:]) or np.any((raw_mem < 0) | (raw_mem >= nt)):
+                    raise ValueError("invalid tier0_cluster CSR offsets or member indices")
+                if np.unique(raw_mem).size != nt:
+                    raise ValueError("tier0_cluster members must partition [0, nt)")
+                cl_off = np.ascontiguousarray(raw_off, dtype=np.uint32)
+                cl_mem = np.ascontiguousarray(raw_mem, dtype=np.uint32)
+                h = hashlib.blake2b(digest_size=12)
+                h.update(memoryview(cl_off))
+                h.update(memoryview(cl_mem))
+                cl_sig = (int(cl_off.size - 1), cl_lag_pad, h.digest())
+                if len(cl_cache) > 256:
+                    cl_cache.clear()
+                cl_cache[cid] = (tier0_cluster, nt, cl_off, cl_mem, cl_lag_pad, cl_sig)
+            nc = int(cl_off.size - 1)
+            cl_meta = (nc, cl_off, cl_mem, cl_lag_pad)
         for i, (b, ct, _) in enumerate(tiers):
-            if ct.shape != (nt, b):
+            want_nt = nc if i == 0 else nt
+            if ct.shape != (want_nt, b):
                 raise ValueError("tier-%d coarse templates must be (%d, %d), got %s"
-                                 % (i, nt, b, ct.shape))
+                                 % (i, want_nt, b, ct.shape))
         if band_offsets is None:
             k0s = (0,) * len(tiers)
         else:
@@ -504,9 +541,10 @@ class HierOps:
         ed = 0
         et = 0
         k0_extra = (k0s,) if shifted else ()
+        cl_extra = (("cl", cl_sig),) if cl_sig is not None else ()
         storage_key = ("hierstore", n, bands, nd, nt, nbins, rw_key is not None,
                        dv is not None and data.ctypes.data, tv is not None and tmpl.ctypes.data,
-                       slot if async_submit else None, *k0_extra)
+                       slot if async_submit else None, *k0_extra, *cl_extra)
         uploads = self._input_uploads(storage_key, data, tmpl, upload_data, upload_tmpl)
         if half:
             held = self.__dict__.setdefault("_c16_template_exp", {})
@@ -529,19 +567,22 @@ class HierOps:
             if fresh:
                 rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
                                         ed, dv, tv, data, tmpl, claim, k0s,
-                                        use_direct=use_direct)
+                                        use_direct=use_direct, cl_meta=cl_meta)
                 table[key] = rec
             self._cache_touch(key)
             self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
             # every way's record takes the call's inputs (a play runs each on this call)
             up = (True, True, *uploads[2:]) if fresh else uploads
-            self._hier_upload(rec, storage_key, up, data, tmpl, tiers, half, et, slot)
+            self._hier_upload(rec, storage_key, up, data, tmpl, tiers, half, et, slot,
+                              cl_meta=cl_meta)
             if rw is not None:
                 # Every row-window table in one upload, each at its section (_hier_record).
                 span = (self._section_offset(rec.buffers, "rw0")
                         - self._section_offset(rec.buffers, "rw"))
-                tables = [np.ascontiguousarray(rw, np.uint32)] + [band_windows(rw, n, b)
-                                                                  for b in bands]
+                tables = [np.ascontiguousarray(rw, np.uint32)] + [
+                    band_windows(rw, n, b, lag_pad=cl_lag_pad if j == 0 else 0)
+                    for j, b in enumerate(bands)
+                ]
                 packed = np.zeros((len(tables), span // 4), np.uint32)
                 for j, t in enumerate(tables):
                     packed[j, :t.size] = t.reshape(-1)
@@ -549,7 +590,7 @@ class HierOps:
 
             binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
                                      et, rw is not None, layout, claim, data, k0s,
-                                     direct=direct if use_direct else None)
+                                     direct=direct if use_direct else None, cl_meta=cl_meta)
             shape = (nd, nt, nbins)
             if handle_out is not None:
                 slots = self._call_slots(bands, half, sparse, use_direct=use_direct)
@@ -569,7 +610,8 @@ class HierOps:
             handle_out.append(handles[way])
         return res
 
-    def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, half, et, slot):
+    def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, half, et, slot,
+                     cl_meta=None):
         """Inputs found stale (_input_uploads): the spectra and templates where the record owns
         them, and the tiers' templates -- the fp16 tier's packed at 2^et -- always."""
         if uploads[0] and "data" in rec.owned:
@@ -584,24 +626,30 @@ class HierOps:
                 self._x_upload(rec.buffers["ct%d" % i],
                                pack_half2(pow2_scaled(ct, et)) if i == 0 and half
                                else np.ascontiguousarray(ct, np.complex64), slot)
+            if cl_meta is not None:
+                self._x_upload(rec.buffers["cloff"], cl_meta[1], slot)
+                self._x_upload(rec.buffers["clmem"], cl_meta[2], slot)
             self._uploaded["tmpl"][storage_key] = uploads[3]
 
     def _hier_record(self, key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw, ed, dv,
-                     tv, data, tmpl, claim, k0s=None, use_direct=False):
+                     tv, data, tmpl, claim, k0s=None, use_direct=False, cl_meta=None):
         """Buffers and the recording of one call shape (see the module docstring)."""
         from ._coarse import coarse_launch
         from ._gpuexec import Arg, Record
         k0s = (0,) * len(tiers) if k0s is None else k0s
         bands = tuple(b for b, _, _ in tiers)
         last = len(tiers) - 1
+        nc = nt if cl_meta is None else cl_meta[0]
+        pairs0 = nd * nc
         pairs = nd * nt
         out = pairs * nbins
         rowwin = rw is not None
         cb0 = 4 if half else 8
         align = max(16, int(self.storage_offset_alignment))
         estimate = (sum(a.nbytes for a, v in ((data, dv), (tmpl, tv)) if v is None)
-                    + sum((cb0 if i == 0 else 8) * b * nt for i, b in enumerate(bands))
-                    + pairs * (12 * len(bands) + 4) + out * 12 + 64
+                    + sum((cb0 * b * nc if i == 0 else 8 * b * nt) for i, b in enumerate(bands))
+                    + pairs0 * 12 + pairs * (4 + (16 if last else 0)) + out * 12 + 64
+                    + ((nc + 1 + nt) * 4 if cl_meta is not None else 0)
                     + (nd * (bands[0] * cb0 + (bands[1] * 8 if last else 0))
                        if feed in ("tier0", "pack") else nd * max(bands) * 8 if feed == "bands"
                        else 0)
@@ -613,10 +661,15 @@ class HierOps:
         bd = self._exec_buffer(rec, "data", dv, data.nbytes)
         bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
         for i, b in enumerate(bands):
-            buf("ct%d" % i, nt * b * (cb0 if i == 0 else 8), upload=True)
-            buf("cidx%d" % i, pairs * 4)
-            buf("cval%d" % i, pairs * 8)
+            nti = nc if i == 0 else nt
+            pi = pairs0 if i == 0 else pairs
+            buf("ct%d" % i, nti * b * (cb0 if i == 0 else 8), upload=True)
+            buf("cidx%d" % i, pi * 4)
+            buf("cval%d" % i, pi * 8)
             buf("surv%d" % i, pairs * 4, readback=i == last)
+        if cl_meta is not None:
+            buf("cloff", (nc + 1) * 4, upload=True)
+            buf("clmem", nt * 4, upload=True)
         if use_direct:
             buf("fbsurv", pairs * 4)
         # Small words share one buffer each way (one update, one readback; one upload of the
@@ -699,16 +752,21 @@ class HierOps:
             if i == 0:
                 if half:
                     kern = self._coarse_kernel(b, layout, stride, scale, rowwin)
-                    _, groups = coarse_launch(nd, nt, layout[1], layout[2], 0)
+                    _, groups = coarse_launch(nd, nc, layout[1], layout[2], 0)
                 else:
                     kern = self._x_kernel("gate", b, dict(stride=stride, rowwin=rowwin))
-                    groups = pairs
+                    groups = pairs0
                 lst.dispatch(kern, groups, [sbuf, S("ct0"), S("cidx0"), S("cval0")] + rws("rw0"),
                              (Arg("coarse", 7),))
                 lst.barrier()
                 lst.stamp("coarse0")
-                lst.dispatch(self._x_kernel("compact", n), (pairs + 255) // 256,
-                             [S("cval0"), S("surv0"), S("args0")], (Arg("compact0", 3),))
+                if cl_meta is not None:
+                    lst.dispatch(self._x_kernel("compactc", n), (pairs0 + 255) // 256,
+                                 [S("cval0"), S("cloff"), S("clmem"), S("surv0"), S("args0")],
+                                 (Arg("compact0", 4),))
+                else:
+                    lst.dispatch(self._x_kernel("compact", n), (pairs + 255) // 256,
+                                 [S("cval0"), S("surv0"), S("args0")], (Arg("compact0", 3),))
             else:
                 one = self._shipped("tier1", b)
                 kern = self._x_kernel("tier1" if one else "tier", b,
@@ -774,26 +832,32 @@ class HierOps:
         return rec
 
     def _hier_binds(self, n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed, et,
-                    rowwin, layout, claim, data, k0s=None, direct=None):
+                    rowwin, layout, claim, data, k0s=None, direct=None, cl_meta=None):
         """The per-run words and bindings of a hier_peaks call."""
         from ._coarse import coarse_launch
         k0s = (0,) * len(tiers) if k0s is None else k0s
+        nc = nt if cl_meta is None else cl_meta[0]
+        lag_pad0 = 0 if cl_meta is None else cl_meta[3]
+        pairs0 = nd * nc
         pairs = nd * nt
         binds = {}
         start = (lambda first: ROWWIN_ON) if rowwin else (lambda first: first)
         b0, _, thr0 = tiers[0]
-        cs, ce, csp, csh = coarse_span(n, b0, lo, hi)
+        cs, ce, csp, csh = coarse_span(n, b0, lo, hi, lag_pad=lag_pad0)
         thr0 = thr0 * (2.0 ** (et + ed) if half else 1.0)
         if half:
-            slot_val, _ = coarse_launch(nd, nt, layout[1], layout[2], csp)
+            slot_val, _ = coarse_launch(nd, nc, layout[1], layout[2], csp)
             gate_bits = (0 if (direct is not None and len(tiers) == 1)
                          else self._gate_bits(thr0, b0, layout))
             # nbins 0 asks a non-final fp16 gate tier for the pass/fail decision alone.
-            binds["coarse"] = (nt, start(cs), ce, slot_val, csh & 0xFFFFFFFF,
+            binds["coarse"] = (nc, start(cs), ce, slot_val, csh & 0xFFFFFFFF,
                                0 if len(tiers) > 1 else 1, gate_bits)
         else:
-            binds["coarse"] = (nt, start(cs), ce, csp, csh & 0xFFFFFFFF, 1, 0)
-        binds["compact0"] = (pairs, _bits(thr0), nbins)
+            binds["coarse"] = (nc, start(cs), ce, csp, csh & 0xFFFFFFFF, 1, 0)
+        if cl_meta is not None:
+            binds["compact0"] = (pairs0, nc, nt, _bits(thr0))
+        else:
+            binds["compact0"] = (pairs, _bits(thr0), nbins)
         if len(tiers) > 1:
             b1, _, thr1 = tiers[1]
             cs1, ce1, csp1, csh1 = coarse_span(n, b1, lo, hi)
@@ -848,6 +912,7 @@ class HierOps:
         pairs, out = nd * nt, nd * nt * nbins
         B = rec.buffers
         last = 1 if cascade else 0
+        self.last_tier0_checked = getattr(B.get("cidx0"), "nbytes", pairs * 4) // 4
         words = self._x_view(B["counts"], np.uint32, B["counts"].nbytes // 4)
         at = lambda name: int(words[self._section_offset(B, name) // 4])
         count = at("args%d" % last)

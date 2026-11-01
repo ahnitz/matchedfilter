@@ -714,9 +714,10 @@ class Context(Executor, InputUploads):
                  "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
         if entry in tierc:
             return "tc_%s_%d" % (tierc[entry], n)
-        if entry in ("compactPairs", "compactListed"):
+        if entry in ("compactPairs", "compactPairsClustered", "compactListed"):
             # One compaction each, at every length: they use no threadgroup memory.
-            return "compact" if entry == "compactPairs" else "compactl"
+            return {"compactPairs": "compact", "compactPairsClustered": "compactc",
+                    "compactListed": "compactl"}[entry]
         base = "%s_%d" % ({"fusedTierB": "tierb",
                            "refineListed": "refine",
                            "refineItems": "items",
@@ -1068,7 +1069,8 @@ class Context(Executor, InputUploads):
             if name in ("tc1", "tc2", "tcs2", "tf1", "tf2") and _kernels.two_stage("metal", n) is None:
                 raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
             entry = {"compact_peaks": "compactPeaks", "compact": "compactPairs",
-                     "compactl": "compactListed", "mark": "markBlocks", "pack": "packCoarse",
+                     "compactc": "compactPairsClustered", "compactl": "compactListed",
+                     "mark": "markBlocks", "pack": "packCoarse",
                      "fwd_tier0": "forwardTier0", "fwd_bands": "seriesForwardBands",
                      "fwd_listed": "seriesForwardListed", "forward": "seriesForward",
                      "items": "refineItems", "full": "fullCorrelation",
@@ -1085,6 +1087,8 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_kernel(name, n):
+        if name == "compactc":
+            return _shipped("compactc")
         if name == "tier1":
             return _shipped("refine_%d_onebin" % n)
         if name == "fwd_tier0":
@@ -1096,6 +1100,10 @@ class Context(Executor, InputUploads):
         if name == "refine_td":
             return _shipped("refine_td")
         raise ValueError(name)
+
+    def hier_peaks_grouped(self, *args, **kwargs):
+        from ._gpuhost import hier_peaks_grouped
+        return hier_peaks_grouped(self, *args, **kwargs)
 
     def _x_coarse_candidates(self, band):
         """Every coarse layout (subgroup 0, ppg, tile, twt) the choice may take at this band

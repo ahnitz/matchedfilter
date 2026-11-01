@@ -1839,8 +1839,8 @@ class Context(Executor, InputUploads):
                                         row_windows=rowwin)
         # The other kernels: bindings and push-constant bytes as the module declares them
         # (the manifest's reflection of it).
-        stems = {"compact": "compact", "compactl": "compactl", "mark": "markblocks",
-                 "pack": "pack_coarse", "compact_peaks": "compact_peaks",
+        stems = {"compact": "compact", "compactc": "compactc", "compactl": "compactl",
+                 "mark": "markblocks", "pack": "pack_coarse", "compact_peaks": "compact_peaks",
                  "fwd_tier0": "forward_tier0_%d" % n, "fwd_bands": "forward_bands_%d" % n,
                  "fwd_listed": "forward_listed_%d" % n, "forward": "forward_%d" % n,
                  "full": "full_%d" % n, "series": "full_series_%d" % n,
@@ -1861,6 +1861,8 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_kernel(name, n):
+        if name == "compactc":
+            return _spv_shipped("compactc")
         if name == "tier1":
             return _spv_shipped("refine_%d_onebin" % n) or _spv_shipped("refine_%d_onebin_lds32" % n)
         if name == "fwd_tier0":
@@ -1872,6 +1874,10 @@ class Context(Executor, InputUploads):
         if name == "refine_td":
             return _spv_shipped("refine_td")
         raise ValueError(name)
+
+    def hier_peaks_grouped(self, *args, **kwargs):
+        from ._gpuhost import hier_peaks_grouped
+        return hier_peaks_grouped(self, *args, **kwargs)
 
     def _x_coarse_candidates(self, band):
         """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band

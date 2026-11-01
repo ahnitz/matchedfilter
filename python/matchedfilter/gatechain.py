@@ -99,7 +99,7 @@ class GateTier(NamedTuple):
 
 
 class Tier0Cluster(NamedTuple):
-    """Precomputed Tier-0 pair-centroid bank and calibration parameters."""
+    """Precomputed Tier-0 coarse centroid bank and calibration parameters."""
     specs: np.ndarray
     offsets: np.ndarray
     members: np.ndarray
@@ -116,8 +116,8 @@ def _band_slice(n, b, k0):
     return k0, min(k0 + int(b), int(n) // 2)
 
 
-def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
-    """Build a 2-to-1 lag-and-phase-aligned Tier-0 coarse centroid bank.
+def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4):
+    """Build Pass-1 (``k <= 2``) and optional Pass-2 (``k <= max_arity``) Tier-0 centroid banks.
 
     Parameters
     ----------
@@ -132,30 +132,36 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     k0 : int, optional
         Starting fine bin offset of Tier 0 (default ``0``).
     rho_min : float, optional
-        Minimum PSD-weighted in-band coherence required to merge a pair (default ``0.90``).
+        Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
+    max_arity : int, optional
+        Maximum cluster arity for Pass 2 in ``{2, 3, 4}`` (default ``4``).
 
     Returns
     -------
-    Tier0Cluster or None
-        Precomputed centroid spectra ``(nt0, b0)``, CSR ``offsets`` ``(nt0 + 1,)``,
-        ``members`` ``(nt,)``, coarse window ``lag_pad``, quantized count ``ratio``,
-        and conservative signal-retention factor ``alpha``, or ``None`` when ``nt < 2``
-        or fewer than 15% of templates merge.
+    tuple of (Tier0Cluster or None, Tier0Cluster or None)
+        ``(cl_k2, cl_hi)`` where ``cl_k2`` is the ``k <= 2`` centroid bank (or ``None`` when
+        fewer than 15% of templates merge) and ``cl_hi`` is the ``k <= max_arity`` minimax
+        centroid bank (or ``None`` when ``max_arity <= 2`` or Pass 2 merges no additional
+        clusters).
     """
     n, b0, k0 = int(n), int(band), int(k0)
+    cap_arity = int(max_arity)
+    if cap_arity < 2:
+        raise ValueError("max_arity must be >= 2")
+    cap_arity = min(cap_arity, 4)
     H = np.asarray(spectra)
     if H.ndim != 2 or H.shape[0] < 2 or b0 < 1 or b0 >= n // 2 or n % b0 != 0:
-        return None
+        return None, None
     nt = int(H.shape[0])
     p = _norm_profile(power, n)
     k_lo, k_hi = _band_slice(n, b0, k0)
     length = k_hi - k_lo
     if length <= 0 or k_hi > H.shape[1]:
-        return None
+        return None, None
     p_band = p[k_lo:k_hi]
     f0 = float(p_band.sum())
     if f0 <= 0.0:
-        return None
+        return None, None
 
     # Estimate scale-free inverse-PSD weights W_k from p_ref / mean_t |H_t[k]|^2
     H_band = np.asarray(H[:, k_lo:k_hi], dtype=np.complex128)
@@ -165,7 +171,7 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     m_bin = h_pow.mean(axis=0)
     m_max = float(m_bin.max())
     if m_max <= 0.0:
-        return None
+        return None, None
     W = p_band / np.maximum(m_bin, 1e-6 * m_max)
     sqrt_W = np.sqrt(W)
     c_pow = C.real * C.real + C.imag * C.imag
@@ -173,7 +179,7 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     valid = v > 0.0
     valid_idx = np.flatnonzero(valid)
     if valid_idx.size < 2:
-        return None
+        return None, None
 
     # Order valid templates by mean in-band frequency so neighbors fall in one L1/L2 chunk
     inv_sqrt_v = np.zeros(nt, dtype=np.float64)
@@ -192,7 +198,8 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     exp_all = np.exp((-2j * np.pi / n) * (all_dls[:, None] * k_idx[None, :]))
     dls = all_dls[::s_step]
     zero_pos = int(np.argmin(np.abs(dls)))
-    shifts64 = exp_all[::s_step].astype(np.complex64)
+    shifts_c128 = exp_all[::s_step]
+    shifts64 = shifts_c128.astype(np.complex64)
     shift_order = [zero_pos]
     for s in range(1, len(dls)):
         if zero_pos - s >= 0:
@@ -206,27 +213,30 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     coarse_rho_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
     floor2 = coarse_rho_floor * coarse_rho_floor
 
-    def _match_subset(sub_idx):
+    def _match_subset(sub_idx, U_arr, v_arr, f2_floor, sizes=None, size_cap=2):
         from . import _core
         m_c = int(sub_idx.size)
         if m_c < 2:
             return [], [], []
-        U_c = U64[sub_idx]
-        v_c = np.ascontiguousarray(v[sub_idx], dtype=np.float64)
+        U_c = U_arr[sub_idx]
+        v_c = np.ascontiguousarray(v_arr[sub_idx], dtype=np.float64)
         Ur = np.ascontiguousarray(U_c.real, dtype=np.float32)
         Ui = np.ascontiguousarray(U_c.imag, dtype=np.float32)
         best_rho2 = np.empty((m_c, m_c), dtype=np.float32)
         best_s = np.empty((m_c, m_c), dtype=np.int32)
         _core.tier0_pair_scores(Ur, Ui, Sr, Si, v_c, best_rho2, best_s)
+        if sizes is not None and size_cap < 4:
+            sz_c = sizes[sub_idx]
+            best_rho2[sz_c[:, None] + sz_c[None, :] > size_cap] = -1.0
         ri = np.arange(m_c)[:, None]
         if m_c > 9:
             top_cols = np.argpartition(-best_rho2, kth=7, axis=1)[:, :8]
             top_vals = best_rho2[ri, top_cols]
-            ia_loc, kb_loc = np.nonzero(top_vals >= floor2)
+            ia_loc, kb_loc = np.nonzero(top_vals >= f2_floor)
             ib_loc = top_cols[ia_loc, kb_loc]
             cand_r2 = top_vals[ia_loc, kb_loc]
         else:
-            ia_loc, ib_loc = np.nonzero(best_rho2 >= floor2)
+            ia_loc, ib_loc = np.nonzero(best_rho2 >= f2_floor)
             cand_r2 = best_rho2[ia_loc, ib_loc]
         if ia_loc.size == 0:
             return [], [], []
@@ -257,26 +267,26 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
                     node_v = free_nodes[i_v]
                     if used[node_v]:
                         continue
-                    for e_idx, (w, z) in enumerate(local_pairs):
-                        if sym_r2[node_u, w] >= floor2 and sym_r2[node_v, z] >= floor2:
-                            sc = float(sym_r2[node_u, w] + sym_r2[node_v, z])
+                    for e_idx, (w_n, z_n) in enumerate(local_pairs):
+                        if sym_r2[node_u, w_n] >= f2_floor and sym_r2[node_v, z_n] >= f2_floor:
+                            sc = float(sym_r2[node_u, w_n] + sym_r2[node_v, z_n])
                             if sc > best_gain:
                                 best_gain = sc
                                 best_swap = (
                                     e_idx,
                                     node_v,
-                                    (node_u, w) if node_u < w else (w, node_u),
-                                    (node_v, z) if node_v < z else (z, node_v),
+                                    (node_u, w_n) if node_u < w_n else (w_n, node_u),
+                                    (node_v, z_n) if node_v < z_n else (z_n, node_v),
                                 )
-                        if sym_r2[node_u, z] >= floor2 and sym_r2[node_v, w] >= floor2:
-                            sc = float(sym_r2[node_u, z] + sym_r2[node_v, w])
+                        if sym_r2[node_u, z_n] >= f2_floor and sym_r2[node_v, w_n] >= f2_floor:
+                            sc = float(sym_r2[node_u, z_n] + sym_r2[node_v, w_n])
                             if sc > best_gain:
                                 best_gain = sc
                                 best_swap = (
                                     e_idx,
                                     node_v,
-                                    (node_u, z) if node_u < z else (z, node_u),
-                                    (node_v, w) if node_v < w else (w, node_v),
+                                    (node_u, z_n) if node_u < z_n else (z_n, node_u),
+                                    (node_v, w_n) if node_v < w_n else (w_n, node_v),
                                 )
                 if best_swap is not None:
                     e_idx, node_v, e1, e2 = best_swap
@@ -300,34 +310,60 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
                 out_dl.append(-dl_ab)
         return out_a, out_b, out_dl
 
-    pair_a_list = []
-    pair_b_list = []
-    pair_dl_list = []
-    paired_global = np.zeros(nt, dtype=bool)
-    chunk_size = 48
-    for c_start in range(0, perm.size, chunk_size):
-        ca, cb, cdl = _match_subset(perm[c_start:c_start + chunk_size])
-        if ca:
-            paired_global[ca] = True
-            paired_global[cb] = True
-            pair_a_list.extend(ca)
-            pair_b_list.extend(cb)
-            pair_dl_list.extend(cdl)
-    unpaired = perm[~paired_global[perm]]
-    if unpaired.size >= 2:
-        for c_start in range(0, unpaired.size, chunk_size):
-            ca, cb, cdl = _match_subset(unpaired[c_start:c_start + chunk_size])
+    def _run_chunked_matching(order_idx, total_nodes, U_arr, v_arr, f2_floor, sizes=None, size_cap=2):
+        a_list, b_list, dl_list = [], [], []
+        paired_flag = np.zeros(total_nodes, dtype=bool)
+        chunk_size = 48
+        for c_start in range(0, order_idx.size, chunk_size):
+            ca, cb, cdl = _match_subset(
+                order_idx[c_start:c_start + chunk_size], U_arr, v_arr, f2_floor, sizes, size_cap
+            )
             if ca:
-                pair_a_list.extend(ca)
-                pair_b_list.extend(cb)
-                pair_dl_list.extend(cdl)
+                paired_flag[ca] = True
+                paired_flag[cb] = True
+                a_list.extend(ca)
+                b_list.extend(cb)
+                dl_list.extend(cdl)
+        rem = order_idx[~paired_flag[order_idx]]
+        if rem.size >= 2:
+            for c_start in range(0, rem.size, chunk_size):
+                ca, cb, cdl = _match_subset(
+                    rem[c_start:c_start + chunk_size], U_arr, v_arr, f2_floor, sizes, size_cap
+                )
+                if ca:
+                    a_list.extend(ca)
+                    b_list.extend(cb)
+                    dl_list.extend(cdl)
+        return a_list, b_list, dl_list
 
+    def _pack_cluster(bvecs_c64, offs_i32, mems_i32, alphas_arr, max_dl):
+        nc_out = int(offs_i32.size) - 1
+        specs_out = np.zeros((nc_out, b0), dtype=np.complex64)
+        if k0 <= 0:
+            specs_out[:, :length] = bvecs_c64
+        else:
+            u0 = k_lo & (b0 - 1)
+            first = min(length, b0 - u0)
+            if first > 0:
+                specs_out[:, u0:u0 + first] = bvecs_c64[:, :first]
+            if length > first:
+                specs_out[:, :length - first] = bvecs_c64[:, first:]
+        lpad = int((max_dl + R - 1) // R) if max_dl > 0 else 0
+        rat = round((nc_out / float(nt)) * 20.0) / 20.0
+        raw_a = float(np.mean(alphas_arr) - 0.5 * np.std(alphas_arr))
+        eff_a = max(0.5, min(1.0, math.floor(raw_a * 50.0 + 1e-9) / 50.0))
+        return Tier0Cluster(specs=specs_out, offsets=offs_i32, members=mems_i32,
+                            lag_pad=lpad, ratio=rat, alpha=eff_a)
+
+    pair_a_list, pair_b_list, pair_dl_list = _run_chunked_matching(
+        perm, nt, U64, v, floor2
+    )
     max_nc = int(0.85 * nt)
     npairs = len(pair_a_list)
     if npairs == 0 or (nt - npairs) > max_nc:
-        return None
+        return None, None
 
-    # Vectorized exact complex128 lag refinement and unit-variance centroid synthesis
+    # Pass 1: vectorized exact complex128 lag refinement and unit-variance pair synthesis
     pa = np.asarray(pair_a_list, dtype=np.int32)
     pb = np.asarray(pair_b_list, dtype=np.int32)
     pdl = np.asarray(pair_dl_list, dtype=np.int64)
@@ -335,8 +371,8 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
     Cb_u = C[pb] * inv_sqrt_v[pb, None]
     prod_ab = (W[None, :] * Ca_u.conj()) * Cb_u
 
-    if s_step > 1:
-        sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64)
+    sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64) if s_step > 1 else None
+    if sub_offs is not None:
         cand_dls = np.clip(pdl[:, None] + sub_offs[None, :], -R, R)
         phases_sub = exp_all[cand_dls + R]
         g_sub = np.sum(prod_ab[:, None, :] * phases_sub, axis=2)
@@ -359,15 +395,16 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
         rho_vec = rho_vec[keep_mask]
         npairs = int(pa.size)
         if npairs == 0 or (nt - npairs) > max_nc:
-            return None
+            return None, None
 
     Cb_u_s = Cb_u * exp_all[pdl + R]
     u_psi = g_vec.conj() / rho_vec
     target_v = 0.5 * (v[pa] + v[pb])
-    pair_vecs = (
+    pair_vecs_128 = (
         (np.sqrt(target_v) / np.sqrt(2.0 * (1.0 + rho_vec)))[:, None]
         * (Ca_u + u_psi[:, None] * Cb_u_s)
-    ).astype(np.complex64)
+    )
+    pair_vecs = pair_vecs_128.astype(np.complex64)
 
     base_ret = np.sqrt(0.5 * (1.0 + rho_vec))
     alphas = np.ones(nt, dtype=np.float64)
@@ -383,6 +420,9 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
 
     nc = nt - npairs
     band_vecs = np.empty((nc, length), dtype=np.complex64)
+    band_vecs_128 = np.empty((nc, length), dtype=np.complex128) if cap_arity > 2 else None
+    v_cl2 = np.empty(nc, dtype=np.float64) if cap_arity > 2 else None
+    dl_cl2 = np.zeros(nc, dtype=np.int64) if cap_arity > 2 else None
     offsets = np.empty(nc + 1, dtype=np.int32)
     members = np.empty(nt, dtype=np.int32)
     ci = 0
@@ -393,34 +433,244 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90):
             continue
         offsets[ci] = m_pos
         if b > t:
-            band_vecs[ci] = pair_vecs[pair_slot[t]]
+            slot = int(pair_slot[t])
+            band_vecs[ci] = pair_vecs[slot]
+            if cap_arity > 2:
+                band_vecs_128[ci] = pair_vecs_128[slot]
+                v_cl2[ci] = target_v[slot]
+                dl_cl2[ci] = abs(int(pdl[slot]))
             members[m_pos] = t
             members[m_pos + 1] = b
             m_pos += 2
         else:
             band_vecs[ci] = C[t].astype(np.complex64)
+            if cap_arity > 2:
+                band_vecs_128[ci] = C[t]
+                v_cl2[ci] = v[t]
             members[m_pos] = t
             m_pos += 1
         ci += 1
     offsets[ci] = m_pos
 
-    specs = np.zeros((nc, b0), dtype=np.complex64)
-    if k0 <= 0:
-        specs[:, :length] = band_vecs
-    else:
-        u0 = k_lo & (b0 - 1)
-        first = min(length, b0 - u0)
-        if first > 0:
-            specs[:, u0:u0 + first] = band_vecs[:, :first]
-        if length > first:
-            specs[:, :length - first] = band_vecs[:, first:]
+    cl_k2 = _pack_cluster(band_vecs, offsets, members, alphas, max_abs_dl)
+    if cap_arity <= 2 or nc < 2:
+        return cl_k2, None
 
-    lag_pad = int((max_abs_dl + R - 1) // R) if max_abs_dl > 0 else 0
-    ratio = round((nc / float(nt)) * 20.0) / 20.0
-    raw_alpha = float(np.mean(alphas) - 0.5 * np.std(alphas))
-    eff_alpha = max(0.5, min(1.0, math.floor(raw_alpha * 50.0 + 1e-9) / 50.0))
-    return Tier0Cluster(specs=specs, offsets=offsets, members=members,
-                        lag_pad=lag_pad, ratio=ratio, alpha=eff_alpha)
+    # Pass 2: pair-of-pairs matching on Pass-1 centroids + 2-step minimax weight synthesis
+    sz_2 = offsets[1:] - offsets[:-1]
+    valid2 = (v_cl2 > 0.0) & (sz_2 < cap_arity)
+    valid2_idx = np.flatnonzero(valid2)
+    if valid2_idx.size < 2:
+        return cl_k2, None
+
+    inv_sqrt_v2 = np.zeros(nc, dtype=np.float64)
+    inv_sqrt_v2[valid2] = 1.0 / np.sqrt(v_cl2[valid2])
+    U2_64 = (band_vecs_128 * (inv_sqrt_v2[:, None] * sqrt_W[None, :])).astype(np.complex64)
+    u2_pow = U2_64.real * U2_64.real + U2_64.imag * U2_64.imag
+    f_mean2 = np.sum(u2_pow[valid2_idx] * k_f32[None, :], axis=1)
+    perm2 = valid2_idx[np.argsort(f_mean2, kind="stable")]
+
+    rho_min_p2 = max(0.84, float(rho_min) - 0.05)
+    coarse_floor_p2 = rho_min_p2 * (0.90 if s_step > 1 else 1.0)
+    ca_list, cb_list, _ = _run_chunked_matching(
+        perm2, nc, U2_64, v_cl2, coarse_floor_p2 * coarse_floor_p2, sizes=sz_2, size_cap=cap_arity
+    )
+    if not ca_list:
+        return cl_k2, None
+
+    # Filter Pass-2 candidates by group variance compatibility and collect member lag pairs
+    cand_groups = []
+    cand_pairs = []
+    ref_list = []
+    mem_list = []
+    for ca_i, cb_i in zip(ca_list, cb_list):
+        grp = sorted(
+            int(x)
+            for x in list(members[offsets[ca_i]:offsets[ca_i + 1]])
+            + list(members[offsets[cb_i]:offsets[cb_i + 1]])
+        )
+        v_grp = v[grp]
+        if float(v_grp.min()) < 0.80 * float(v_grp.max()):
+            continue
+        t0_ref = grp[0]
+        for tj in grp[1:]:
+            ref_list.append(t0_ref)
+            mem_list.append(tj)
+        cand_groups.append(grp)
+        cand_pairs.append((ca_i, cb_i))
+    if not cand_groups:
+        return cl_k2, None
+
+    # Align every candidate member tj to its group reference t0_ref across [-R, +R]
+    ref_arr = np.asarray(ref_list, dtype=np.int32)
+    mem_arr = np.asarray(mem_list, dtype=np.int32)
+    prod_p2 = (W[None, :] * (C[ref_arr] * inv_sqrt_v[ref_arr, None]).conj()) * (
+        C[mem_arr] * inv_sqrt_v[mem_arr, None]
+    )
+    g_coarse_p2 = prod_p2 @ shifts_c128.T
+    dl_p2 = dls[np.argmax(np.abs(g_coarse_p2), axis=1)]
+    if sub_offs is not None:
+        cand_dls_p2 = np.clip(dl_p2[:, None] + sub_offs[None, :], -R, R)
+        g_sub_p2 = np.sum(prod_p2[:, None, :] * exp_all[cand_dls_p2 + R], axis=2)
+        dl_p2 = cand_dls_p2[np.arange(dl_p2.size), np.argmax(np.abs(g_sub_p2), axis=1)]
+
+    # Group candidates by arity m in {2, 3, 4} for vectorized 2-step minimax synthesis
+    alpha_floor = max(0.88, min(0.93, float(rho_min) + 0.03))
+    by_arity = {2: [], 3: [], 4: []}
+    pos_dl = 0
+    for idx_g, grp in enumerate(cand_groups):
+        m_arity = len(grp)
+        dls_grp = [0] + [int(x) for x in dl_p2[pos_dl:pos_dl + m_arity - 1]]
+        pos_dl += m_arity - 1
+        by_arity[m_arity].append((idx_g, grp, dls_grp))
+
+    accepted = {}
+    for m_arity, bucket in by_arity.items():
+        if not bucket:
+            continue
+        g_ids = [item[0] for item in bucket]
+        grp_mat = np.asarray([item[1] for item in bucket], dtype=np.int32)
+        dls_mat = np.asarray([item[2] for item in bucket], dtype=np.int64)
+        U_raw = (C[grp_mat] * inv_sqrt_v[grp_mat, None]) * exp_all[dls_mat + R]
+        g0 = np.sum(W[None, None, :] * U_raw[:, 0:1, :].conj() * U_raw, axis=2)
+        abs_g0 = np.abs(g0)
+        phase0 = np.where(abs_g0 > 1e-12, g0.conj() / np.maximum(abs_g0, 1e-12), 1.0 + 0.0j)
+        U_tilde = U_raw * phase0[:, :, None]
+
+        # Unweighted aligned mean baseline + 4-step Multiplicative Weights Update (Hedge) minimax
+        mean_vec = np.mean(U_tilde, axis=1)
+        mean_norm = np.sqrt(np.maximum(
+            np.sum((mean_vec.real * mean_vec.real + mean_vec.imag * mean_vec.imag) * W[None, :], axis=1),
+            1e-30,
+        ))
+        c_mean = mean_vec / mean_norm[:, None]
+        ov_mean = np.abs(np.sum(W[None, None, :] * c_mean[:, None, :].conj() * U_raw, axis=2))
+
+        weights = np.ones((len(bucket), m_arity), dtype=np.float64)
+        U_iter = U_tilde.copy()
+        for _ in range(4):
+            s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
+            s_norm = np.sqrt(np.maximum(
+                np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
+                1e-30,
+            ))
+            c_iter = s_vec / s_norm[:, None]
+            ov = np.sum(W[None, None, :] * c_iter[:, None, :].conj() * U_iter, axis=2)
+            abs_ov = np.abs(ov)
+            rephase = np.where(abs_ov > 1e-12, ov.conj() / np.maximum(abs_ov, 1e-12), 1.0 + 0.0j)
+            U_iter = U_iter * rephase[:, :, None]
+            deficit = np.maximum(1.0 - abs_ov, 0.0)
+            shift_def = deficit - np.min(deficit, axis=1, keepdims=True)
+            weights = weights * np.exp(np.minimum(25.0 * shift_def, 10.0))
+            weights = weights / np.mean(weights, axis=1, keepdims=True)
+
+        s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
+        s_norm = np.sqrt(np.maximum(
+            np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
+            1e-30,
+        ))
+        c_mwu = s_vec / s_norm[:, None]
+        ov_mwu = np.abs(np.sum(W[None, None, :] * c_mwu[:, None, :].conj() * U_raw, axis=2))
+        use_mwu = np.min(ov_mwu, axis=1) >= np.min(ov_mean, axis=1)
+        c_unit = np.where(use_mwu[:, None], c_mwu, c_mean)
+        exact_ov = np.where(use_mwu[:, None], ov_mwu, ov_mean)
+        v_mem = v[grp_mat]
+        v_bar = np.mean(v_mem, axis=1)
+        alpha_mat = np.minimum(1.0, np.sqrt(v_bar[:, None] / v_mem) * exact_ov)
+        c_vecs_64 = (np.sqrt(v_bar)[:, None] * c_unit).astype(np.complex64)
+
+        for row_k, gid in enumerate(g_ids):
+            if float(alpha_mat[row_k].min()) >= alpha_floor:
+                accepted[gid] = (
+                    c_vecs_64[row_k],
+                    grp_mat[row_k],
+                    alpha_mat[row_k],
+                    int(np.max(np.abs(dls_mat[row_k]))),
+                )
+
+    if not accepted:
+        return cl_k2, None
+
+    merged_c2 = np.full(nc, -1, dtype=np.int32)
+    merged_partner = np.full(nc, -1, dtype=np.int32)
+    for gid, (ca_i, cb_i) in enumerate(cand_pairs):
+        if gid in accepted:
+            lo_c, hi_c = (ca_i, cb_i) if ca_i < cb_i else (cb_i, ca_i)
+            merged_c2[lo_c] = gid
+            merged_partner[lo_c] = hi_c
+            merged_partner[hi_c] = lo_c
+
+    nc_hi = nc - len(accepted)
+    band_vecs_hi = np.empty((nc_hi, length), dtype=np.complex64)
+    offsets_hi = np.empty(nc_hi + 1, dtype=np.int32)
+    members_hi = np.empty(nt, dtype=np.int32)
+    alphas_hi = alphas.copy()
+    max_dl_hi = 0
+    ci_hi = 0
+    m_pos_hi = 0
+    for c_idx in range(nc):
+        other_c = int(merged_partner[c_idx])
+        if other_c >= 0 and other_c < c_idx:
+            continue
+        offsets_hi[ci_hi] = m_pos_hi
+        if other_c > c_idx:
+            c_vec, grp_row, a_row, dl_row = accepted[int(merged_c2[c_idx])]
+            band_vecs_hi[ci_hi] = c_vec
+            m_len = int(grp_row.size)
+            members_hi[m_pos_hi:m_pos_hi + m_len] = grp_row
+            alphas_hi[grp_row] = a_row
+            if dl_row > max_dl_hi:
+                max_dl_hi = dl_row
+            m_pos_hi += m_len
+        else:
+            band_vecs_hi[ci_hi] = band_vecs[c_idx]
+            s0, s1 = int(offsets[c_idx]), int(offsets[c_idx + 1])
+            m_len = s1 - s0
+            members_hi[m_pos_hi:m_pos_hi + m_len] = members[s0:s1]
+            if int(dl_cl2[c_idx]) > max_dl_hi:
+                max_dl_hi = int(dl_cl2[c_idx])
+            m_pos_hi += m_len
+        ci_hi += 1
+    offsets_hi[ci_hi] = m_pos_hi
+
+    cl_hi = _pack_cluster(band_vecs_hi, offsets_hi, members_hi, alphas_hi, max_dl_hi)
+    return cl_k2, cl_hi
+
+
+def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=2):
+    """Build a lag-and-phase-aligned Tier-0 coarse centroid bank up to ``max_arity``.
+
+    Parameters
+    ----------
+    spectra : array_like
+        Complex frequency-domain template bank of shape ``(nt, k_bins)``.
+    power : array_like
+        Expected nonnegative filter-output power profile of length ``n``.
+    n : int
+        Full fine FFT block length.
+    band : int
+        Tier-0 coarse FFT band length ``b0`` (must divide ``n`` and be ``< n // 2``).
+    k0 : int, optional
+        Starting fine bin offset of Tier 0 (default ``0``).
+    rho_min : float, optional
+        Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
+    max_arity : int, optional
+        Maximum templates merged into a single centroid in ``{2, 3, 4}`` (default ``2``).
+
+    Returns
+    -------
+    Tier0Cluster or None
+        Precomputed centroid spectra ``(nt0, b0)``, CSR ``offsets`` ``(nt0 + 1,)``,
+        ``members`` ``(nt,)``, coarse window ``lag_pad``, quantized count ``ratio``,
+        and conservative signal-retention factor ``alpha``, or ``None`` when ``nt < 2``
+        or fewer than 15% of templates merge.
+    """
+    cl_k2, cl_hi = cluster_tier0_candidates(
+        spectra, power, n, band, k0=k0, rho_min=rho_min, max_arity=max_arity
+    )
+    if int(max_arity) <= 2 or cl_hi is None:
+        return cl_k2
+    return cl_hi
 
 
 def band_offset(power, n, b):
@@ -1928,7 +2178,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     has_feed = bool(ntemplates and getattr(cost, "feed", None))
     k = len(chain)
     # Hoist prefix tier costs across candidate half-widths when pricing on CostModel (k >= 2)
-    if isinstance(cost, CostModel) and k >= 2 and not has_feed:
+    if isinstance(cost, CostModel) and k >= 2:
         later = chain[1:]
         prices_dir = cost.prices_direct(chain)
         dlag = getattr(cost, "direct_lag", 0.0) if prices_dir else 0.0
@@ -1955,6 +2205,8 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
                     d_cost = min(r_cost, d_cost)
                     r_cost = (1.0 - dfrac) * r_cost + dfrac * d_cost
                 c = c_prefix + f * r_cost
+                if has_feed:
+                    c += cost.feed_delta(chain, preach + (f,), ntemplates, hw)
                 if best is None or c < best[0]:
                     best = (float(c), pth + (last[0],), preach + (f,), hw)
     else:
