@@ -868,15 +868,15 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     }
     return 0;
   }
-  if(alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float))) return -1;
   const float inv=1.0f/(float)n;
   if(p->real_series){
+    if(alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float))) return -1;
     for(int j=0;j<count;j++){
       size_t start=starts[j];
       size_t have=start<nseries?nseries-start:0;
       if(have>n) have=n;
-      ap_fft_forward_scaled(p->half_fft,have ? series+start : series,have,1,inv,p->sfwd+n);
-      ap_real_split_on(p->fft,p->sfwd+n,p->rtw,n,p->sspec);
+      ap_fft_forward_scaled(p->half_fft,have ? series+start : series,have,1,inv,p->sfwd);
+      ap_real_split_on(p->fft,p->sfwd,p->rtw,n,p->sspec);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
     }
     return 0;
@@ -885,8 +885,8 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     size_t start=starts[j];
     size_t have=start<nseries?nseries-start:0;
     if(have>n) have=n;
-    ap_fft_forward_scaled(p->fft,have ? series+2*start : series,2*have,1,inv,p->sspec);
-    if(ap_mf_set_data(p,j,p->sspec)) return -1;
+    ap_fft_forward_scaled(p->fft,have ? series+2*start : series,2*have,1,inv,p->scratch);
+    if(ap_mf_set_data(p,j,p->scratch)) return -1;
   }
   return 0;
 }
@@ -953,10 +953,22 @@ static void out_copy(float *dst,const float *src,size_t bytes,int stream){
 #if defined(__x86_64__) || defined(__i386__)
   if(stream){
     size_t nf=bytes/sizeof(float);
-    while(nf && ((uintptr_t)dst&15u)){ *dst++=*src++; nf--; }
-    size_t v=nf/4;
-    for(size_t i=0;i<v;i++) _mm_stream_ps(dst+4*i,_mm_loadu_ps(src+4*i));
-    for(size_t i=4*v;i<nf;i++) dst[i]=src[i];
+    while(nf && ((uintptr_t)dst&63u)){
+      if((((uintptr_t)dst&15u)==0) && nf>=4){
+        _mm_stream_ps(dst,_mm_loadu_ps(src));
+        dst+=4; src+=4; nf-=4;
+      }else{
+        *dst++=*src++; nf--;
+      }
+    }
+    for(;nf>=16;nf-=16,dst+=16,src+=16){
+      const __m128 v0=_mm_loadu_ps(src), v1=_mm_loadu_ps(src+4);
+      const __m128 v2=_mm_loadu_ps(src+8), v3=_mm_loadu_ps(src+12);
+      _mm_stream_ps(dst,v0); _mm_stream_ps(dst+4,v1);
+      _mm_stream_ps(dst+8,v2); _mm_stream_ps(dst+12,v3);
+    }
+    for(;nf>=4;nf-=4,dst+=4,src+=4) _mm_stream_ps(dst,_mm_loadu_ps(src));
+    for(size_t i=0;i<nf;i++) dst[i]=src[i];
     return;
   }
 #endif
@@ -975,10 +987,18 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
       if(bounds[2*b]<lo||bounds[2*b]>=bounds[2*b+1]||bounds[2*b+1]>hi) return -1;
   const size_t n=p->n;
   const int W=p->pb;
-  /* this call's output footprint: nt rows over the blocks' valid spans */
+  /* this call's output footprint: nt rows over the blocks' written spans */
+  size_t span_sum=0;
+  for(int b=0;b<nblocks;b++){
+    const size_t start=starts[b];
+    const size_t blo=bounds?bounds[2*b]:lo, bhi=bounds?bounds[2*b+1]:hi;
+    if(start>=nseries||blo>=nseries-start) continue;
+    const size_t end=bhi<nseries-start?bhi:nseries-start;
+    span_sum+=end-blo;
+  }
   const size_t llc = llc_bytes();
-  const int stream = llc && (size_t)nt*(size_t)nblocks*(hi-lo)*8u > llc
-                     && !ap_env_flag("MF_CORR_NO_STREAM",0);
+  const int stream = !ap_env_flag("MF_CORR_NO_STREAM",0)
+                     && llc && (size_t)nt*span_sum*8u > 3*(llc/4);
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;
@@ -1051,17 +1071,13 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
         for(int t=0;t<nt;t++){
           const float *tr=p->tre+(size_t)(t0+t)*n;
           const float *ti=p->tim+(size_t)(t0+t)*n;
-          if(p->gmajor && !stream){
-            if(ap_corr_prod_window(p->fft,Dr,Di,tr,ti,blo,end,
-                                   out+2*((size_t)t*nseries+start+blo))) return -1;
+          float *tdst=out+2*((size_t)t*nseries+start+blo);
+          if(p->gmajor){
+            if(ap_corr_prod_window(p->fft,Dr,Di,tr,ti,blo,end,tdst,p->scratch,stream)) return -1;
           }else{
-            if(p->gmajor){
-              if(ap_corr_prod(p->fft,Dr,Di,tr,ti,p->scratch)) return -1;
-            }else{
-              mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
-              if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
-            }
-            out_copy(out+2*((size_t)t*nseries+start+blo),p->scratch+2*blo,bytes,stream);
+            mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
+            if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
+            out_copy(tdst,p->scratch+2*blo,bytes,stream);
           }
         }
       }
@@ -1069,7 +1085,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     b0+=g;
   }
 #if defined(__x86_64__) || defined(__i386__)
-  _mm_sfence();
+  if(stream) _mm_sfence();
 #endif
   return 0;
 }

@@ -100,6 +100,15 @@ def _page_aligned_empty(shape, dtype=np.complex64, page: int = 16384) -> np.ndar
     return raw[off:off + nbytes].view(dtype).reshape(shape)
 
 
+def _aligned_zeros(shape, dtype=np.complex64, align: int = 64) -> np.ndarray:
+    """np.zeros starting on an align-byte boundary while keeping calloc zero-page backing."""
+    dtype = np.dtype(dtype)
+    nbytes = int(np.prod(shape)) * dtype.itemsize
+    raw = np.zeros(nbytes + align, dtype=np.uint8)
+    off = (-raw.ctypes.data) % align
+    return raw[off:off + nbytes].view(dtype).reshape(shape)
+
+
 def _interval_runs(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
     """The union of [starts, stops) clipped to [0, S), as sorted disjoint (K, 2) runs.
 
@@ -1989,7 +1998,7 @@ class TimeDomainFilterBank:
             if dest.flags.c_contiguous and dest.flags.writeable:
                 run(ser, st, lo, hi, t0, nt, dest, bnd)
             else:
-                tmp = np.empty((nt, S), dtype=np.complex64)
+                tmp = _page_aligned_empty((nt, S), dtype=np.complex64)
                 run(ser, st, lo, hi, t0, nt, tmp, bnd)
                 if bounds is None:
                     runs = self._block_coverage(S, st, lo, hi)
@@ -2272,7 +2281,8 @@ class TimeDomainFilterBank:
                 else:
                     raise ValueError(f"out shape {out.shape} must match ({S},) or (1, {S})")
             else:
-                out_2d = np.empty((1, S), dtype=np.complex64)
+                out_2d = _aligned_zeros((1, S), dtype=np.complex64, align=16384)
+                support = np.empty((0, 2), dtype=np.int64)
 
             self._correlate_windows(target_g, ser, W, ti_local, 1, out_2d, support=support)
             if single_scale is not None:
@@ -2303,7 +2313,8 @@ class TimeDomainFilterBank:
                 raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
             result = out
         else:
-            result = _page_aligned_empty(shape)
+            result = _aligned_zeros(shape, dtype=np.complex64, align=16384)
+            support = np.empty((0, 2), dtype=np.int64)
 
         settle = []
         ok = False
@@ -2413,7 +2424,8 @@ class TimeDomainFilterBank:
                 raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
             result = out
         else:
-            result = _page_aligned_empty(shape)
+            result = _aligned_zeros(shape, dtype=np.complex64, align=16384)
+            support = np.empty((0, 2), dtype=np.int64)
         if scales is not None:
             sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
             if sc.ndim != 1 or sc.size != self.n_templates:
@@ -2464,7 +2476,7 @@ class TimeDomainFilterBank:
                 g_dest = result[g_indices[0] : g_indices[0] + g_cnt]
             else:
                 # Interleaved templates: compute into a group-sized array, then scatter.
-                g_dest = np.empty((g_cnt, S), dtype=np.complex64)
+                g_dest = _page_aligned_empty((g_cnt, S), dtype=np.complex64)
             # Only a group written in place with nothing to do after may stay in flight.
             late = is_contiguous_slice and scales_arr is None
             # a scratch destination holds anything: all of it is written
