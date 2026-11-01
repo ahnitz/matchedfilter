@@ -2699,14 +2699,10 @@ static HWY_ATTR HWY_INLINE void corr_stream_copy(float *dst,const float *src,siz
 #endif
 }
 
-#if defined(AP_SIMD_AVX1) || (HWY_ARCH_X86 && HWY_MAX_BYTES == 32)
+#if !defined(AP_SIMD_AVX1) && HWY_ARCH_X86 && HWY_MAX_BYTES == 32
 template<int V> struct corr_rtag { enum{v=V}; };
 static HWY_ATTR HWY_INLINE void corr_inter_256(vf re,vf im,__m256 *lo,__m256 *hi){
-#if defined(AP_SIMD_AVX1)
-  const __m256 a=_mm256_unpacklo_ps(re,im), b=_mm256_unpackhi_ps(re,im);
-#else
   const __m256 a=_mm256_unpacklo_ps(re.raw,im.raw), b=_mm256_unpackhi_ps(re.raw,im.raw);
-#endif
   *lo=_mm256_permute2f128_ps(a,b,0x20);
   *hi=_mm256_permute2f128_ps(a,b,0x31);
 }
@@ -2730,15 +2726,9 @@ static HWY_ATTR HWY_INLINE void corr_stream_shift16_256(float *dst64,__m256 p0,_
 template<int Align>
 static HWY_ATTR HWY_INLINE void corr_stream_inter(float *p,vf re,vf im){
 #if defined(AP_SIMD_AVX1)
-  if constexpr (Align==0){
-    __m256 lo,hi; corr_inter_256(re,im,&lo,&hi);
-    _mm256_stream_ps(p,lo);
-    _mm256_stream_ps(p+8,hi);
-  }else{
-    alignas(32) float tmp[16];
-    v_inter(tmp,re,im);
-    corr_stream_range(p,tmp,16);
-  }
+  alignas(32) float tmp[16];
+  v_inter(tmp,re,im);
+  corr_stream_range(p,tmp,16);
 #elif HWY_ARCH_X86 && HWY_TARGET <= HWY_AVX3 && HWY_MAX_BYTES == 64
   if constexpr (Align==0){
     hn::Stream(hn::InterleaveWholeLower(AP_D,re,im),AP_D,p);
@@ -2867,7 +2857,7 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
       return 0;
     }
   }
-#elif defined(AP_SIMD_AVX1) || (HWY_ARCH_X86 && HWY_MAX_BYTES == 32)
+#elif !defined(AP_SIMD_AVX1) && HWY_ARCH_X86 && HWY_MAX_BYTES == 32
   if(stream && scratch && (mis64&7u)==0 && p->N>=1024 && p->N<=65536 && NB>=4 && (NB&1)==0
      && 48*(size_t)p->N1+4*uN2+32<=2*p->N){
     const long k1_lo=(long)((blo+uN2-1)/uN2), k1_hi=(long)(end/uN2)-1;
@@ -2994,7 +2984,11 @@ static HWY_NOINLINE MF_FWD_SECTION int corr_prod_window(void *vp,const float*dr,
     }
   }
 #endif
+#if defined(AP_SIMD_AVX1)
+  if(stream && scratch){
+#else
   if(stream && scratch && !((AP_W==16 || AP_W==8) && mis64==0 && p->N<=65536)){
+#endif
     for(int b=0;b<NB;b++){
       const size_t base=(size_t)AP_W*(size_t)b;
       const long lo = base+(size_t)(AP_W-1) >= r_lo ? (long)q_lo : (long)q_lo+1;

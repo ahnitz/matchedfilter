@@ -196,7 +196,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     }
   }
   p->full_fft=ap_create(n);
-  if(p->full_fft && n>=64 && n<=2048)
+  if(p->full_fft && n>=64 && n<=(ap_plan_lanes(p->full_fft)>=16 ? 2048u : 512u))
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
   p->accel=ap_accel_create(n);           /* NULL where the platform has none */
@@ -760,7 +760,7 @@ int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
       const double a=2.0*3.14159265358979323846*(double)k/(double)p->n;
       p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
     }
-    if(h>=64 && h<=2048)
+    if(h>=64 && h<=(ap_plan_lanes(p->full_fft)>=16 ? 2048u : 512u))
       p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,h);
   }
   p->real_series=on?1:0;
