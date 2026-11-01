@@ -249,7 +249,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     }
   }
   p->full_fft=ap_create(n);
-  if(p->full_fft && n>=64 && n<=128)
+  if(p->full_fft && n>=64 && n<=2048)
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
   p->accel=ap_accel_create(n);           /* NULL where the platform has none */

@@ -1273,53 +1273,93 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *
   if (!p || !p->small || cnt < 1 || cnt > AP_W) return -1;
   const size_t N = p->N, W = (size_t)AP_W;
   const vf vs = V_SET1(scale), vz = V_ZERO();
-  for (size_t j0 = 0; j0 < N; j0 += W) {
-    vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
-    for (int l = 0; l < cnt; l++) {
-      const size_t hv = haves[l] < N ? haves[l] : N;
-      if (j0 + W <= hv) {
+  int full_batch = (cnt == AP_W);
+  if (full_batch) {
+    for (int l = 0; l < AP_W; l++)
+      if (haves[l] < N) full_batch = 0;
+  }
+  if (full_batch) {
+    /* Full SIMD batch with no zero-padding: compile-time AP_W loop bounds keep rr/ri in registers. */
+    for (size_t j0 = 0; j0 < N; j0 += W) {
+      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+      for (int l = 0; l < AP_W; l++) {
         vf a, b;
         v_deint(srcs[l] + 2 * j0, &a, &b);
         rr[l] = V_MUL(a, vs);
         ri[l] = V_MUL(b, vs);
-      } else if (j0 >= hv) {
-        rr[l] = vz;
-        ri[l] = vz;
-      } else {
-        float sr[AP_W] = {0}, si[AP_W] = {0};
-        const float *s = srcs[l] + 2 * j0;
-        const size_t rem = hv - j0;
-        for (size_t u = 0; u < rem; u++) {
-          sr[u] = s[2 * u] * scale;
-          si[u] = s[2 * u + 1] * scale;
-        }
-        rr[l] = V_LOADU(sr);
-        ri[l] = V_LOADU(si);
+      }
+      V_TRANSPOSE(rr, tr);
+      V_TRANSPOSE(ri, ti);
+      const int slot0 = einp(&p->ea, (int)j0);
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = tr[u];
+        p->bI[slot0 + u] = ti[u];
       }
     }
-    for (int l = cnt; l < AP_W; l++) {
-      rr[l] = vz;
-      ri[l] = vz;
-    }
-    V_TRANSPOSE(rr, tr);
-    V_TRANSPOSE(ri, ti);
-    const int slot0 = einp(&p->ea, (int)j0);
-    for (int u = 0; u < AP_W; u++) {
-      p->bR[slot0 + u] = tr[u];
-      p->bI[slot0 + u] = ti[u];
+  } else {
+    for (size_t j0 = 0; j0 < N; j0 += W) {
+      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+      for (int l = 0; l < cnt; l++) {
+        const size_t hv = haves[l] < N ? haves[l] : N;
+        if (j0 + W <= hv) {
+          vf a, b;
+          v_deint(srcs[l] + 2 * j0, &a, &b);
+          rr[l] = V_MUL(a, vs);
+          ri[l] = V_MUL(b, vs);
+        } else if (j0 >= hv) {
+          rr[l] = vz;
+          ri[l] = vz;
+        } else {
+          float sr[AP_W] = {0}, si[AP_W] = {0};
+          const float *s = srcs[l] + 2 * j0;
+          const size_t rem = hv - j0;
+          for (size_t u = 0; u < rem; u++) {
+            sr[u] = s[2 * u] * scale;
+            si[u] = s[2 * u + 1] * scale;
+          }
+          rr[l] = V_LOADU(sr);
+          ri[l] = V_LOADU(si);
+        }
+      }
+      for (int l = cnt; l < AP_W; l++) {
+        rr[l] = vz;
+        ri[l] = vz;
+      }
+      V_TRANSPOSE(rr, tr);
+      V_TRANSPOSE(ri, ti);
+      const int slot0 = einp(&p->ea, (int)j0);
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = tr[u];
+        p->bI[slot0 + u] = ti[u];
+      }
     }
   }
   small_efft(p);
-  for (size_t k0 = 0; k0 < N; k0 += W) {
-    vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
-    for (int u = 0; u < AP_W; u++) {
-      const int e = eidx(&p->ea, (int)(k0 + (size_t)u));
-      kr[u] = p->bR[e];
-      ki[u] = p->bI[e];
+  if (cnt == AP_W) {
+    /* Full SIMD batch output: compile-time AP_W bounds keep or_/oi in registers across v_inter. */
+    for (size_t k0 = 0; k0 < N; k0 += W) {
+      vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
+      for (int u = 0; u < AP_W; u++) {
+        const int e = eidx(&p->ea, (int)(k0 + (size_t)u));
+        kr[u] = p->bR[e];
+        ki[u] = p->bI[e];
+      }
+      V_TRANSPOSE(kr, or_);
+      V_TRANSPOSE(ki, oi);
+      for (int l = 0; l < AP_W; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
     }
-    V_TRANSPOSE(kr, or_);
-    V_TRANSPOSE(ki, oi);
-    for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
+  } else {
+    for (size_t k0 = 0; k0 < N; k0 += W) {
+      vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
+      for (int u = 0; u < AP_W; u++) {
+        const int e = eidx(&p->ea, (int)(k0 + (size_t)u));
+        kr[u] = p->bR[e];
+        ki[u] = p->bI[e];
+      }
+      V_TRANSPOSE(kr, or_);
+      V_TRANSPOSE(ki, oi);
+      for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
+    }
   }
   return 0;
 }
