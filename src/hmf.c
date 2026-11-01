@@ -7,9 +7,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <limits.h>
-#if defined(__x86_64__) || defined(__i386__)
-#include <cpuid.h>
-#endif
 #include "ticks.h"
 #include "alloc.h"
 #include "env.h"
@@ -123,66 +120,16 @@ struct ap_hmf_plan {
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
-/* Per-core private L2 cache size in bytes, queried once and cached (defaults to 256 KB). */
-static size_t l2_bytes(void){
-  static size_t cached = 0;
-  size_t cur = __atomic_load_n(&cached, __ATOMIC_RELAXED);
-  if(cur) return cur;
-  size_t sz = 0;
-#ifdef __linux__
-  for(int idx = 0; idx < 6; idx++){
-    char path[96], buf[64];
-    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/level", idx);
-    FILE *fl = fopen(path, "r");
-    if(!fl) break;
-    int lvl = 0;
-    if(fscanf(fl, "%d", &lvl) != 1) lvl = 0;
-    fclose(fl);
-    if(lvl != 2) continue;
-    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/size", idx);
-    FILE *fs = fopen(path, "r");
-    if(fs){
-      if(fgets(buf, sizeof buf, fs)){
-        char *end = NULL;
-        unsigned long val = strtoul(buf, &end, 10);
-        if(val > 0 && end){
-          if(*end == 'K' || *end == 'k') sz = (size_t)val * 1024u;
-          else if(*end == 'M' || *end == 'm') sz = (size_t)val * 1024u * 1024u;
-          else sz = (size_t)val;
-        }
-      }
-      fclose(fs);
-    }
-    break;
-  }
-#endif
-#if defined(__x86_64__) || defined(__i386__)
-  if(!sz){
-    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
-    if(__get_cpuid(0x80000000u, &eax, &ebx, &ecx, &edx) && eax >= 0x80000006u){
-      __cpuid(0x80000006u, eax, ebx, ecx, edx);
-      unsigned kb = (ecx >> 16) & 0xffffu;
-      if(kb > 0) sz = (size_t)kb * 1024u;
-    }
-  }
-#endif
-  if(sz < (size_t)128 * 1024) sz = (size_t)256 * 1024;
-  __atomic_store_n(&cached, sz, __ATOMIC_RELAXED);
-  return sz;
-}
-
-/* The series group a plan of size n runs when asked for `requested`: halved until the active
-   positive-frequency spectra fit half of private per-core L2 (up to 256 KB positive / 512 KB
-   full-spectrum cap, e.g. dgroup = 16 on 256 KB-L2 Haswell/Ivy Bridge and dgroup = 32 on
-   1 MB-L2 Zen 5 at n = 2048, keeping the slab L2-resident per core without thrashing shared L3).
-   MF_DGROUP overrides it for measurement up to the 4 MB safety ceiling. Calibrations key their
-   models by this, the group that ran, not the one asked for. */
+/* The series group a plan of size n runs when asked for `requested`: halved until the held
+   spectra fit 512 KB (256 KB of active positive-frequency bins under real_series, keeping the
+   slab L2-resident per core without thrashing shared L3 under multi-core load, while amortising
+   template reloads and sparse pair-batch lanes across 32 blocks at n = 2048). MF_DGROUP
+   overrides it for measurement up to the 4 MB safety ceiling. Calibrations key their models by
+   this, the group that ran, not the one asked for. */
 int ap_hmf_effective_group(size_t n,int requested){
   const long v=ap_env_int("MF_DGROUP",0);
   int grp = v>0 ? (int)v : (requested>0 ? requested : (n<=2048 ? 32 : 16));
-  const size_t l2 = l2_bytes();
-  const size_t auto_cap = l2 < (size_t)512*1024 ? l2 : (size_t)512*1024;
-  const size_t cap = v>0 ? (size_t)4*1024*1024 : auto_cap;
+  const size_t cap = v>0 ? (size_t)4*1024*1024 : (size_t)512*1024;
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > cap) grp>>=1;
   return grp;
 }
