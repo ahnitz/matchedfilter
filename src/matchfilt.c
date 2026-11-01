@@ -1023,10 +1023,128 @@ static void out_copy(float *dst,const float *src,size_t bytes,int stream){
   memcpy(dst,src,bytes);
 }
 
+typedef struct {
+  const ap_mf_plan *p;
+  const float *series;
+  float *cdr, *cdi;
+  size_t cap, n, nseries, s_first, s_last;
+  uint64_t sig;
+  int nblocks, real_series, use_fb, last_t0, busy;
+} corr_fwd_entry;
+
+static pthread_mutex_t corr_fwd_mu = PTHREAD_MUTEX_INITIALIZER;
+static corr_fwd_entry corr_fwd_tab[16];
+static unsigned corr_fwd_hand;
+static __thread float *corr_mirror_dst;
+static __thread size_t corr_mirror_stride;
+
+#if defined(__x86_64__) && defined(__GNUC__)
+__attribute__((target("avx512f")))
+static void nt_stream_avx512(float *dst, const float *src, size_t bytes){
+  size_t nf = bytes / sizeof(float);
+  while(nf && ((uintptr_t)dst & 63u)){
+    if((((uintptr_t)dst & 15u) == 0) && nf >= 4){
+      _mm_stream_ps(dst, _mm_loadu_ps(src));
+      dst += 4; src += 4; nf -= 4;
+    }else{
+      *dst++ = *src++; nf--;
+    }
+  }
+  for(; nf >= 64; nf -= 64, dst += 64, src += 64){
+    const __m512 v0 = _mm512_loadu_ps(src), v1 = _mm512_loadu_ps(src + 16);
+    const __m512 v2 = _mm512_loadu_ps(src + 32), v3 = _mm512_loadu_ps(src + 48);
+    _mm512_stream_ps(dst, v0); _mm512_stream_ps(dst + 16, v1);
+    _mm512_stream_ps(dst + 32, v2); _mm512_stream_ps(dst + 48, v3);
+  }
+  for(; nf >= 16; nf -= 16, dst += 16, src += 16)
+    _mm512_stream_ps(dst, _mm512_loadu_ps(src));
+  for(size_t i = 0; i < nf; i++) dst[i] = src[i];
+}
+#endif
+
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
+__attribute__((target("avx")))
+static void nt_stream_avx(float *dst, const float *src, size_t bytes){
+  size_t nf = bytes / sizeof(float);
+  while(nf && ((uintptr_t)dst & 63u)){
+    if((((uintptr_t)dst & 15u) == 0) && nf >= 4){
+      _mm_stream_ps(dst, _mm_loadu_ps(src));
+      dst += 4; src += 4; nf -= 4;
+    }else{
+      *dst++ = *src++; nf--;
+    }
+  }
+  for(; nf >= 32; nf -= 32, dst += 32, src += 32){
+    const __m256 v0 = _mm256_loadu_ps(src), v1 = _mm256_loadu_ps(src + 8);
+    const __m256 v2 = _mm256_loadu_ps(src + 16), v3 = _mm256_loadu_ps(src + 24);
+    _mm256_stream_ps(dst, v0); _mm256_stream_ps(dst + 8, v1);
+    _mm256_stream_ps(dst + 16, v2); _mm256_stream_ps(dst + 24, v3);
+  }
+  for(; nf >= 8; nf -= 8, dst += 8, src += 8)
+    _mm256_stream_ps(dst, _mm256_loadu_ps(src));
+  for(size_t i = 0; i < nf; i++) dst[i] = src[i];
+}
+#endif
+
+static void fast_nt_copy(float *dst, const float *src, size_t bytes){
+#if defined(__x86_64__) && defined(__GNUC__)
+  static int simd_lvl = -1;
+  if(simd_lvl < 0){
+    if(__builtin_cpu_supports("avx512f")) simd_lvl = 2;
+    else if(__builtin_cpu_supports("avx")) simd_lvl = 1;
+    else simd_lvl = 0;
+  }
+  if(simd_lvl == 2){ nt_stream_avx512(dst, src, bytes); return; }
+  if(simd_lvl == 1){ nt_stream_avx(dst, src, bytes); return; }
+#elif defined(__i386__) && defined(__GNUC__)
+  static int has_avx = -1;
+  if(has_avx < 0) has_avx = __builtin_cpu_supports("avx") ? 1 : 0;
+  if(has_avx){ nt_stream_avx(dst, src, bytes); return; }
+#endif
+  out_copy(dst, src, bytes, 1);
+}
+
+void ap_mf_set_corr_mirror(float *dst, size_t stride){
+  corr_mirror_dst = dst;
+  corr_mirror_stride = stride;
+}
+
+void ap_mf_stream_copy(float *dst, const float *src, size_t bytes){
+  fast_nt_copy(dst, src, bytes);
+}
+
+void ap_mf_stream_fence(void){
+#if defined(__x86_64__) || defined(__i386__)
+  _mm_sfence();
+#endif
+}
+
+static uint64_t corr_quick_sig(const float *series, size_t nseries, int real_series,
+                               size_t s0, size_t s1, size_t n){
+  const uint32_t *u = (const uint32_t *)series;
+  const size_t len = (real_series ? 1u : 2u) * nseries;
+  if(!len) return 0;
+  size_t a = (real_series ? 1u : 2u) * (s0 < nseries ? s0 : 0u);
+  size_t b_end = s1 + n < nseries ? s1 + n : nseries;
+  size_t b = (real_series ? 1u : 2u) * b_end;
+  if(b <= a || b > len) b = len;
+  uint64_t h = (uint64_t)len ^ ((uint64_t)a << 17) ^ ((uint64_t)b << 33);
+  const size_t span = b - a;
+  for(unsigned k = 0; k < 8; k++){
+    const size_t idx = a + ((span - 1u) * k) / 7u;
+    h = (h ^ u[idx]) * 0x9e3779b97f4a7c15ULL;
+  }
+  return h;
+}
+
 int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                                       size_t nseries,const size_t *starts,
                                       int nblocks,size_t lo,size_t hi,
                                       int t0,int nt,float *out,const size_t *bounds){
+  float *mirror_dst = corr_mirror_dst;
+  const size_t mirror_stride = corr_mirror_stride;
+  corr_mirror_dst = NULL;
+  corr_mirror_stride = 0;
   if(!p||!series||!starts||!out||nblocks<1||nt<1||!ap_range_ok(t0,nt,p->nt)
      ||lo>=hi||hi>p->n) return -1;
   if(bounds)
@@ -1044,6 +1162,25 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     span_sum+=end-blo;
   }
   const size_t llc = llc_bytes();
+  const size_t cache_lim = llc >= (16u<<20) ? llc/2 : (12u<<20);
+  if(mirror_dst && ((!W && !p->gmajor) || (p->use_accel && !p->real_series)
+     || nt >= p->nt
+     || (size_t)nblocks * (2 * n * sizeof(float)) > cache_lim)){
+    if(ap_mf_correlate_series_continuous(p, series, nseries, starts, nblocks,
+                                         lo, hi, t0, nt, out, bounds))
+      return -1;
+    for(int b = 0; b < nblocks; b++){
+      const size_t start = starts[b];
+      const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
+      if(start >= nseries || blo >= nseries - start) continue;
+      const size_t end = bhi < nseries - start ? bhi : nseries - start;
+      const size_t bytes = 2 * (end - blo) * sizeof(float);
+      for(int t = 0; t < nt; t++)
+        fast_nt_copy(mirror_dst + 2 * ((size_t)t * mirror_stride + start + blo),
+                     out + 2 * ((size_t)t * nseries + start + blo), bytes);
+    }
+    return 0;
+  }
   const int stream = !ap_env_flag("MF_CORR_NO_STREAM",0)
                      && llc && (size_t)nt*span_sum*8u > 3*(llc/4);
   if(W && !p->corrbuf){
@@ -1073,6 +1210,184 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   ap_plan *fb=ensure_fwd_batch(p,p->real_series);
   const int W_fb=fb?ap_plan_lanes(fb):0;
   const int use_fb=fb && W_fb>p->nd;
+  if((W || p->gmajor) && nt < p->nt && nblocks >= 1
+     && (size_t)nblocks * (2 * n * sizeof(float)) <= cache_lim){
+    const size_t spec_bytes = 2 * n * sizeof(float);
+    const size_t l1d = ap_l1d_bytes();
+    const size_t l2_fit = (l2_bytes() * 7) / 8;
+    const int kt_step = (spec_bytes > l1d && 9u * spec_bytes <= l2_fit) ? 4 : 1;
+    const float inv = 1.0f / (float)n;
+    const int gm_n1 = p->gmajor ? p->n1 : 0;
+    if(!use_fb && p->real_series && alloc_pair(&p->sfwd, &p->sspec, spec_bytes))
+      return -1;
+    const size_t need_fl = (size_t)nblocks * n;
+    const size_t s_first = starts[0], s_last = starts[nblocks - 1];
+    const uint64_t qsig = corr_quick_sig(series, nseries, p->real_series, s_first, s_last, n);
+    int slot = -1, hit = 0;
+    float *cdr = NULL, *cdi = NULL;
+    pthread_mutex_lock(&corr_fwd_mu);
+    if(t0 > 0){
+      for(int i = 0; i < 16; i++){
+        corr_fwd_entry *e = &corr_fwd_tab[i];
+        if(e->p == p && e->series == series && e->s_first == s_first
+           && e->s_last == s_last && e->sig == qsig && e->n == n
+           && e->nseries == nseries && e->nblocks == nblocks
+           && e->real_series == p->real_series && e->use_fb == use_fb
+           && e->last_t0 >= 0 && t0 > e->last_t0
+           && e->cdr && e->cdi && e->cap >= need_fl){
+          e->last_t0 = (t0 + nt < p->nt) ? (t0 + nt - 1) : p->nt;
+          e->busy++;
+          slot = i; cdr = e->cdr; cdi = e->cdi;
+          hit = 1; break;
+        }
+      }
+    }
+    if(!hit){
+      for(int i = 0; i < 16; i++){
+        if(corr_fwd_tab[i].busy == 0 && corr_fwd_tab[i].p == p
+           && corr_fwd_tab[i].series == series
+           && corr_fwd_tab[i].s_first == s_first
+           && corr_fwd_tab[i].nblocks == nblocks){
+          slot = i; break;
+        }
+      }
+      for(int tries = 0; slot < 0 && tries < 16; tries++){
+        int cand = (int)(corr_fwd_hand++ & 15u);
+        if(corr_fwd_tab[cand].busy == 0) slot = cand;
+      }
+      if(slot >= 0){
+        corr_fwd_entry *e = &corr_fwd_tab[slot];
+        if(e->cap < need_fl || !e->cdr || !e->cdi){
+          float *ndr = ap_alloc64(need_fl * sizeof(float));
+          float *ndi = ap_alloc64(need_fl * sizeof(float));
+          if(!ndr || !ndi){
+            free(ndr); free(ndi);
+            slot = -1;
+          }else{
+            free(e->cdr); free(e->cdi);
+            e->cdr = ndr; e->cdi = ndi; e->cap = need_fl;
+          }
+        }
+        if(slot >= 0){
+          e->p = NULL;
+          e->busy = 1;
+          cdr = e->cdr; cdi = e->cdi;
+        }
+      }
+    }
+    pthread_mutex_unlock(&corr_fwd_mu);
+    if(slot >= 0 && cdr && cdi){
+      int err = 0;
+      if(!hit){
+        if(use_fb){
+          for(int b0 = 0; b0 < nblocks; b0 += W_fb){
+            const int g = nblocks - b0 < W_fb ? nblocks - b0 : W_fb;
+            if(forward_series_batch(p, fb, series, nseries, starts + b0, g) < 0){
+              err = -1; break;
+            }
+            for(int d = 0; d < g; d++)
+              ap_split_store_on(p->fft, p->bspec + (size_t)d * 2 * n,
+                                cdr + (size_t)(b0 + d) * n, cdi + (size_t)(b0 + d) * n,
+                                n, 0, gm_n1, p->n2, p->w);
+          }
+        }else{
+          for(int b = 0; b < nblocks; b++){
+            const size_t start = starts[b];
+            if(start >= nseries) continue;
+            size_t have = nseries - start; if(have > n) have = n;
+            float *dr_b = cdr + (size_t)b * n, *di_b = cdi + (size_t)b * n;
+            if(p->real_series){
+              ap_fft_forward_scaled(p->half_fft, series + start, have, 1, inv, p->sfwd);
+              ap_real_split_on(p->fft, p->sfwd, p->rtw, n, p->sspec);
+              ap_split_store_on(p->fft, p->sspec, dr_b, di_b, n, 0, gm_n1, p->n2, p->w);
+            }else if(p->gmajor){
+              ap_fft_forward_scaled_gm(p->fft, series + 2 * start, 2 * have, 1, inv,
+                                       dr_b, di_b, p->scratch);
+            }else{
+              ap_fft_forward_scaled(p->fft, series + 2 * start, 2 * have, 1, inv, p->scratch);
+              ap_split_store_on(p->fft, p->scratch, dr_b, di_b, n, 0, 0, p->n2, p->w);
+            }
+          }
+        }
+        pthread_mutex_lock(&corr_fwd_mu);
+        corr_fwd_entry *e = &corr_fwd_tab[slot];
+        if(!err){
+          e->p = p; e->series = series; e->n = n; e->nseries = nseries;
+          e->s_first = s_first; e->s_last = s_last; e->sig = qsig;
+          e->nblocks = nblocks; e->real_series = p->real_series; e->use_fb = use_fb;
+          e->last_t0 = (t0 + nt < p->nt) ? (t0 + nt - 1) : p->nt;
+        }
+        pthread_mutex_unlock(&corr_fwd_mu);
+      }
+      if(!err){
+        for(int b = 0; b < nblocks; b++){
+          const size_t start = starts[b];
+          const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
+          if(start >= nseries || blo >= nseries - start) continue;
+          const size_t end = bhi < nseries - start ? bhi : nseries - start;
+          const size_t bytes = 2 * (end - blo) * sizeof(float);
+          if(W){
+            const float *Dr = cdr + (size_t)b * n, *Di = cdi + (size_t)b * n;
+            if(p->ebr){
+              for(size_t k = 0; k < n; k++){
+                const float a = Dr[k], bv = Di[k];
+                for(int l = 0; l < W; l++){ p->ebr[k * W + l] = a; p->ebi[k * W + l] = bv; }
+              }
+              Dr = p->ebr; Di = p->ebi;
+            }
+            for(int tt = 0; tt < nt; tt += W){
+              const int cnt = nt - tt < W ? nt - tt : W;
+              const int base = t0 + tt;
+              const float *Tr, *Ti;
+              if(base % W == 0){
+                Tr = p->tre + (size_t)(base / W) * n * W;
+                Ti = p->tim + (size_t)(base / W) * n * W;
+              }else{
+                gather_template_batch(p->tsr, p->tsi, p, base, NULL, 0, cnt);
+                Tr = p->tsr; Ti = p->tsi;
+              }
+              if(ap_corr_prod_batch(p->fft, Dr, Di, Tr, Ti, cnt, p->corrbuf)){
+                err = -1; break;
+              }
+              for(int t = 0; t < cnt; t++){
+                const float *csrc = p->corrbuf + 2 * ((size_t)t * n + blo);
+                out_copy(out + 2 * ((size_t)(tt + t) * nseries + start + blo), csrc, bytes, stream);
+                if(mirror_dst)
+                  fast_nt_copy(mirror_dst + 2 * ((size_t)(tt + t) * mirror_stride + start + blo),
+                               csrc, bytes);
+              }
+            }
+          }else{
+            for(int t = 0; t < nt;){
+              int kt = nt - t;
+              if(kt > kt_step) kt = kt_step;
+              if(ap_corr_prod_window_multi(p->fft, cdr + (size_t)b * n, cdi + (size_t)b * n,
+                                           p->tre + (size_t)(t0 + t) * n, p->tim + (size_t)(t0 + t) * n,
+                                           n, kt, blo, end,
+                                           out + 2 * ((size_t)t * nseries + start + blo),
+                                           2 * nseries, p->scratch, stream)){
+                err = -1; break;
+              }
+              if(mirror_dst){
+                for(int q = 0; q < kt; q++)
+                  fast_nt_copy(mirror_dst + 2 * ((size_t)(t + q) * mirror_stride + start + blo),
+                               out + 2 * ((size_t)(t + q) * nseries + start + blo), bytes);
+              }
+              t += kt;
+            }
+          }
+          if(err) break;
+        }
+      }
+#if defined(__x86_64__) || defined(__i386__)
+      if(!err && (stream || mirror_dst)) _mm_sfence();
+#endif
+      pthread_mutex_lock(&corr_fwd_mu);
+      corr_fwd_tab[slot].busy--;
+      pthread_mutex_unlock(&corr_fwd_mu);
+      return err;
+    }
+  }
   if(!W && p->gmajor){
     const size_t spec_bytes=2*n*sizeof(float);
     const size_t l1d=ap_l1d_bytes();
