@@ -3,6 +3,7 @@ FilterResults must be its own, equal to the same call made alone."""
 import numpy as np
 import pytest
 
+from conftest import assert_same_follow_up
 from matchedfilter import TimeDomainFilterBank
 
 
@@ -123,15 +124,7 @@ def test_device_followups_read_a_real_series_in_place(device, layout, monkeypatc
     assert taken == [True], "the device follow-up path was not taken"
     for (b, x, kw), r in zip(jobs, got):
         want = b.filter_series(np.array(x), **kw)
-        for f in want._fields:
-            w, g = np.asarray(getattr(want, f)), np.asarray(getattr(r, f))
-            if np.issubdtype(w.dtype, np.inexact):
-                # Metal compiles the forward with fast math (_mtlcompute._ieee_kernel), so
-                # reading in place and reading a copy may round apart by a few ulp (2.4e-7
-                # relative on an M2, 2026-11-01); a wrong lane or offset would differ by O(1)
-                np.testing.assert_allclose(g, w, rtol=1e-6, atol=0)
-            else:
-                np.testing.assert_array_equal(g, w)
+        assert_same_follow_up(want, r)
 
 
 @pytest.mark.parametrize("device", _device_followup_backends() or ["none"])

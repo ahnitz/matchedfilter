@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from conftest import usable_gpu_reason
+from conftest import assert_same_follow_up, usable_gpu_reason
 from matchedfilter import TimeDomainFilterBank, FilterResults
 from matchedfilter.time_domain import _partition_templates
 
@@ -984,8 +984,7 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
     many = TimeDomainFilterBank.filter_series_many(jobs)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
     for r1, r2 in zip(direct, many):
-        for f in r1._fields:
-            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+        assert_same_follow_up(r1, r2)
     if bank._groups[0].plan._gpu is not None and hasattr(bank._groups[0].plan._gpu, "peaks_items"):
         assert used, "the batched follow-up path was not taken"
         assert len(used) <= len(bank._groups), "one item submission per template group"
