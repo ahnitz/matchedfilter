@@ -69,8 +69,9 @@ struct Gate {
   float *d2;               /* [slot][element] |D|^2 (allocated only when debug != 0) */
   h16 *w1r, *w1i;          /* element split twiddles */
   int *live;               /* storage slots of the window's lags (run_max), cached per window */
-  h16 *gtre, *gtim;        /* one gathered template group (run_pairs_max) */
-  float *gt2;
+  h16 *gtre, *gtim;        /* one gathered template group (run_pairs) */
+  h16 *gdre, *gdim;        /* one gathered data group when pairs span distinct blocks */
+  float *gt2, *gd2;
   size_t live_n, live_ws, live_we;
   vf *bR, *bI, *sR, *sI;
 };
@@ -91,6 +92,7 @@ static void destroy(Gate *g) {
   free(g->dre); free(g->dim); free(g->dinv); free(g->dsum2);
   free(g->w1r); free(g->w1i); free(g->bR); free(g->bI); free(g->sR); free(g->sI);
   free(g->live); free(g->gtre); free(g->gtim); free(g->gt2);
+  free(g->gdre); free(g->gdim); free(g->gd2);
   free(g->t2); free(g->d2);
   free(g);
 }
@@ -345,20 +347,80 @@ static void pair_group_max(Gate *g, int d, int grp, float *m2_out, float *pow_ou
                    g->t2 ? g->t2 + (size_t)grp * m * AP_W : nullptr, tmax, m2_out, pow_out);
 }
 
-/* pair_group_max for one data slot against 8 templates given as one [element][lane] group
-   (a stored group, or one gathered from scattered templates: run_pairs_max). */
-static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
-                             float tsum2_max, float *m2_out, float *pow_out) {
-  const size_t m = g->m;
-  efft_prod_broadcast((int)m, g->dre + (size_t)d * m, g->dim + (size_t)d * m,
-                      tre, tim, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
-  float pmax = 0.f;
-  if (g->debug) {
-    parseval_group(g->d2 + (size_t)d * m, t2g, m, pow_out);
-    for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
-  } else {
-    pmax = g->dsum2[d] * tsum2_max;
+/* Scan the transformed 8-lane bR/bI buffer over [ws, we) with window maximum and elected lag. */
+static void scan_elect_window(Gate *g, size_t ws, size_t we, float pmax,
+                              float *m2_out, int *idx_out, float *re_out, float *im_out) {
+  int q = 0;
+  if (pmax > 0.f) {
+    int e2;
+    frexpf(16384.f / pmax, &e2);
+    q = (e2 - 1) >> 1;
+    if (q > 7) q = 7;
+    if (q < -7) q = -7;
   }
+  const hn::RebindToSigned<decltype(AP_D)> d16;
+  const hn::RebindToUnsigned<decltype(AP_D)> du;
+  using V16 = hn::Vec<decltype(d16)>;
+  using VU = hn::Vec<decltype(du)>;
+  const VU emask = hn::Set(du, (uint16_t)0x7C00u), estep = hn::Set(du, (uint16_t)0x0400u);
+  VU ov = hn::Zero(du);
+  const vf av = hn::Set(AP_D, hwy::F16FromF32(ldexpf(1.f, q)));
+  vf bm = hn::Set(AP_D, hwy::F16FromF32(-1.f)), cm = bm;
+  V16 bx = hn::Set(d16, (int16_t)-1), cx = bx;
+  const vf *R = g->bR, *I = g->bI;
+  size_t k = ws;
+  for (; k + 2 <= we; k += 2) {
+    const int e = eidx(&g->ea, (int)k), f = eidx(&g->ea, (int)k + 1);
+    const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
+    const vf s = hn::Mul(R[f], av), j = hn::Mul(I[f], av);
+    const vf p = hn::MulAdd(r, r, hn::Mul(i, i));
+    const vf q2 = hn::MulAdd(s, s, hn::Mul(j, j));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, p), emask), estep));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, q2), emask), estep));
+    const auto gt = hn::Gt(p, bm);
+    const auto gu = hn::Gt(q2, cm);
+    bm = hn::IfThenElse(gt, p, bm);
+    cm = hn::IfThenElse(gu, q2, cm);
+    bx = hn::IfThenElse(hn::RebindMask(d16, gt), hn::Set(d16, (int16_t)k), bx);
+    cx = hn::IfThenElse(hn::RebindMask(d16, gu), hn::Set(d16, (int16_t)(k + 1)), cx);
+  }
+  if (k < we) {
+    const int e = eidx(&g->ea, (int)k);
+    const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
+    const vf p = hn::MulAdd(r, r, hn::Mul(i, i));
+    ov = hn::Or(ov, hn::Add(hn::And(hn::BitCast(du, p), emask), estep));
+    const auto gu = hn::Gt(p, cm);
+    cm = hn::IfThenElse(gu, p, cm);
+    cx = hn::IfThenElse(hn::RebindMask(d16, gu), hn::Set(d16, (int16_t)k), cx);
+  }
+  {
+    const auto gu = hn::Gt(cm, bm);
+    bx = hn::IfThenElse(hn::RebindMask(d16, gu), cx, bx);
+  }
+  alignas(16) int16_t kx[AP_W];
+  alignas(16) uint16_t ovx[AP_W];
+  alignas(16) h16 lr[AP_W], li[AP_W];
+  hn::StoreU(bx, d16, kx);
+  hn::StoreU(ov, du, ovx);
+  for (int l = 0; l < AP_W; l++) {
+    if (ws < we && (ovx[l] & 0x8000u)) {
+      idx_out[l] = kx[l] >= 0 ? kx[l] : (int)ws;
+      re_out[l] = 3.402823e38f; im_out[l] = 0.f; m2_out[l] = INFINITY;
+      continue;
+    }
+    if (kx[l] < 0) { idx_out[l] = -1; m2_out[l] = re_out[l] = im_out[l] = 0.f; continue; }
+    const int e = eidx(&g->ea, (int)kx[l]);
+    hn::StoreU(R[e], AP_D, lr);
+    hn::StoreU(I[e], AP_D, li);
+    const float xr = hwy::F32FromF16(lr[l]), xi = hwy::F32FromF16(li[l]);
+    idx_out[l] = kx[l];
+    re_out[l] = xr; im_out[l] = xi;
+    m2_out[l] = xr * xr + xi * xi;
+  }
+}
+
+/* Scan the transformed 8-lane bR/bI buffer in storage order (g->live) for window max only. */
+static void scan_max_window(Gate *g, float pmax, float *m2_out) {
   int q = 0;
   if (pmax > 0.f) {
     int e2;
@@ -404,60 +466,155 @@ static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, con
     m2_out[l] = (ovx[l] & 0x8000u) ? INFINITY : hwy::F32FromF16(mx[l]) * ia2;
 }
 
-/* The gate over listed pairs (d0 + dsel[i], tsel[i]), in order: runs of up to 8 pairs that
-   share a data slot are correlated together, their templates gathered into one group.
-   out is indexed by pair row (d * nt_row + t), as hmf.c's tier buffers are. */
-static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *tsel, int n,
-                         int nt_row, size_t ws, size_t we, ap_peak *out) {
-  if (we > g->m) we = g->m;
+static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
+                             float tsum2_max, float *m2_out, float *pow_out) {
   const size_t m = g->m;
-  if (live_list(g, ws, we)) return -1;
+  efft_prod_broadcast((int)m, g->dre + (size_t)d * m, g->dim + (size_t)d * m,
+                      tre, tim, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
+  float pmax = 0.f;
+  if (g->debug) {
+    parseval_group(g->d2 + (size_t)d * m, t2g, m, pow_out);
+    for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
+  } else {
+    pmax = g->dsum2[d] * tsum2_max;
+  }
+  scan_max_window(g, pmax, m2_out);
+}
+
+/* Listed pairs (d0 + dsel[i], t0 + tsel[i]) across 8 FP16 SIMD lanes: full 8-pair runs sharing
+   one data slot use efft_prod_broadcast, while shorter runs pack up to 8 arbitrary (d, t) pairs
+   into gdre/gdim and gtre/gtim for efft_prod so sparse later tiers keep 8-lane occupancy.
+   When elect_lag != 0, each lane also elects its FP16 argmax lag in [ws, we). */
+static int run_pairs(Gate *g, int d0, int t0, const int *dsel, const int *tsel, int n,
+                     int nt_row, size_t ws, size_t we, int elect_lag, ap_peak *out) {
+  if (we > g->m) we = g->m;
+  if (n <= 0) return 0;
+  const size_t m = g->m;
+  if (!elect_lag && live_list(g, ws, we)) return -1;
   if (!g->gtre) {
     g->gtre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
     g->gtim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
     if (g->debug) g->gt2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
     if (!g->gtre || !g->gtim || (g->debug && !g->gt2)) return -1;
   }
-  alignas(16) float m2[AP_W], pw[AP_W];
+  alignas(16) float m2[AP_W], re[AP_W], im[AP_W], pw[AP_W];
+  alignas(16) int ix[AP_W];
   for (int i = 0; i < n;) {
-    const int d = dsel[i];
-    int k = 1;
-    while (k < AP_W && i + k < n && dsel[i + k] == d) k++;
-    float tmax = 0.f;
-    for (int l = 0; l < AP_W; l++) {          /* lanes past k repeat the last template */
-      const int t = t0 + tsel[i + (l < k ? l : k - 1)];
-      tmax = fmaxf(tmax, g->tsum2[t]);
-      const size_t base = (size_t)(t / AP_W) * m * AP_W + (size_t)(t % AP_W);
-      const h16 *sr = g->tre + base, *si = g->tim + base;
+    const int d_first = dsel[i];
+    int same_run = 1;
+    while (same_run < AP_W && i + same_run < n && dsel[i + same_run] == d_first) same_run++;
+    const int batch = n - i < AP_W ? n - i : AP_W;
+    const int use_bcast = (same_run == batch);
+    float pmax = 0.f;
+    if (use_bcast) {
+      float tmax = 0.f;
+      for (int l = 0; l < AP_W; l++) {
+        const int t = t0 + tsel[i + (l < batch ? l : batch - 1)];
+        tmax = fmaxf(tmax, g->tsum2[t]);
+        const size_t base = (size_t)(t / AP_W) * m * AP_W + (size_t)(t % AP_W);
+        const h16 *sr = g->tre + base, *si = g->tim + base;
+        if (g->debug) {
+          const float *s2 = g->t2 + base;
+          for (size_t e = 0; e < m; e++) {
+            g->gtre[e * AP_W + l] = sr[e * AP_W];
+            g->gtim[e * AP_W + l] = si[e * AP_W];
+            g->gt2[e * AP_W + l] = s2[e * AP_W];
+          }
+        } else {
+          for (size_t e = 0; e < m; e++) {
+            g->gtre[e * AP_W + l] = sr[e * AP_W];
+            g->gtim[e * AP_W + l] = si[e * AP_W];
+          }
+        }
+      }
+      const int gd = d0 + d_first;
+      efft_prod_broadcast((int)m, g->dre + (size_t)gd * m, g->dim + (size_t)gd * m,
+                          g->gtre, g->gtim, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
       if (g->debug) {
-        const float *s2 = g->t2 + base;
-        for (size_t e = 0; e < m; e++) {
-          g->gtre[e * AP_W + l] = sr[e * AP_W];
-          g->gtim[e * AP_W + l] = si[e * AP_W];
-          g->gt2[e * AP_W + l] = s2[e * AP_W];
-        }
+        parseval_group(g->d2 + (size_t)gd * m, g->gt2, m, pw);
+        for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pw[l]);
       } else {
-        for (size_t e = 0; e < m; e++) {
-          g->gtre[e * AP_W + l] = sr[e * AP_W];
-          g->gtim[e * AP_W + l] = si[e * AP_W];
+        pmax = g->dsum2[gd] * tmax;
+      }
+    } else {
+      if (!g->gdre) {
+        g->gdre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
+        g->gdim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
+        if (g->debug) g->gd2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
+        if (!g->gdre || !g->gdim || (g->debug && !g->gd2)) return -1;
+      }
+      for (int l = 0; l < AP_W; l++) {
+        const int u = l < batch ? l : batch - 1;
+        const int gd = d0 + dsel[i + u];
+        const int gt = t0 + tsel[i + u];
+        pmax = fmaxf(pmax, g->dsum2[gd] * g->tsum2[gt]);
+        const h16 *dr = g->dre + (size_t)gd * m, *di = g->dim + (size_t)gd * m;
+        const size_t base = (size_t)(gt / AP_W) * m * AP_W + (size_t)(gt % AP_W);
+        const h16 *sr = g->tre + base, *si = g->tim + base;
+        if (g->debug) {
+          const float *d2 = g->d2 + (size_t)gd * m, *s2 = g->t2 + base;
+          double sp = 0.0;
+          for (size_t e = 0; e < m; e++) {
+            g->gdre[e * AP_W + l] = dr[e];
+            g->gdim[e * AP_W + l] = di[e];
+            g->gtre[e * AP_W + l] = sr[e * AP_W];
+            g->gtim[e * AP_W + l] = si[e * AP_W];
+            g->gd2[e * AP_W + l] = d2[e];
+            g->gt2[e * AP_W + l] = s2[e * AP_W];
+            sp += (double)d2[e] * (double)s2[e * AP_W];
+          }
+          pw[l] = (float)(sp * (double)m);
+        } else {
+          for (size_t e = 0; e < m; e++) {
+            g->gdre[e * AP_W + l] = dr[e];
+            g->gdim[e * AP_W + l] = di[e];
+            g->gtre[e * AP_W + l] = sr[e * AP_W];
+            g->gtim[e * AP_W + l] = si[e * AP_W];
+          }
         }
       }
-    }
-    pair_group_max_t(g, d0 + d, g->gtre, g->gtim, g->gt2, tmax, m2, pw);
-    const float dinv = g->dinv[d0 + d];
-    for (int l = 0; l < k; l++) {
-      const int t = tsel[i + l];
-      ap_peak *o = out + (size_t)d * nt_row + t;
-      const float sc = dinv * g->tinv[t0 + t];
-      if (g->live_n == 0 || m2[l] == 0.f) {
-        o->index = -1; o->re = o->im = o->magnitude = 0.f;
-        continue;
+      if (g->debug) {
+        pmax = 0.f;
+        for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pw[l]);
       }
-      o->index = 0;
-      o->re = o->im = 0.f;
-      o->magnitude = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc;
+      efft_prod((int)m, g->gdre, g->gdim, g->gtre, g->gtim,
+                g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
     }
-    i += k;
+    if (elect_lag) {
+      scan_elect_window(g, ws, we, pmax, m2, ix, re, im);
+      for (int l = 0; l < batch; l++) {
+        const int d = dsel[i + l], t = tsel[i + l];
+        ap_peak *o = out + (size_t)d * nt_row + t;
+        const float sc = g->dinv[d0 + d] * g->tinv[t0 + t];
+        if (ix[l] < 0) {
+          o->index = -1; o->re = o->im = o->magnitude = 0.f;
+          continue;
+        }
+        o->index = ix[l];
+        if (!isfinite(m2[l])) {
+          o->re = 3.402823e38f; o->im = 0.f; o->magnitude = 3.402823e38f;
+        } else {
+          o->re = re[l] * sc;
+          o->im = -im[l] * sc;
+          o->magnitude = sqrtf(m2[l]) * sc;
+        }
+      }
+    } else {
+      scan_max_window(g, pmax, m2);
+      for (int l = 0; l < batch; l++) {
+        const int d = dsel[i + l], t = tsel[i + l];
+        ap_peak *o = out + (size_t)d * nt_row + t;
+        const float sc = g->dinv[d0 + d] * g->tinv[t0 + t];
+        if (g->live_n == 0 || m2[l] == 0.f) {
+          o->index = -1; o->re = o->im = o->magnitude = 0.f;
+          continue;
+        }
+        o->index = 0;
+        o->re = o->im = 0.f;
+        o->magnitude = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc;
+      }
+    }
+    i += batch;
   }
   return 0;
 }
@@ -583,14 +740,20 @@ int ap_gate16_set_data(void *g, int d, const float *spec) {
 #endif
 }
 
-int ap_gate16_run_pairs(void *g, int d0, int t0, const int *dsel, const int *tsel, int n,
-                        int nt_row, size_t ws, size_t we, ap_peak *out) {
+int ap_gate16_run_pairs_lag(void *g, int d0, int t0, const int *dsel, const int *tsel, int n,
+                            int nt_row, size_t ws, size_t we, int elect_lag, ap_peak *out) {
 #ifdef AP_GATE16
-  return g ? ap16::run_pairs_max((ap16::Gate *)g, d0, t0, dsel, tsel, n, nt_row, ws, we, out) : -1;
+  return g ? ap16::run_pairs((ap16::Gate *)g, d0, t0, dsel, tsel, n, nt_row, ws, we, elect_lag, out) : -1;
 #else
-  (void)g; (void)d0; (void)t0; (void)dsel; (void)tsel; (void)n; (void)nt_row; (void)ws; (void)we; (void)out;
+  (void)g; (void)d0; (void)t0; (void)dsel; (void)tsel; (void)n; (void)nt_row; (void)ws; (void)we;
+  (void)elect_lag; (void)out;
   return -1;
 #endif
+}
+
+int ap_gate16_run_pairs(void *g, int d0, int t0, const int *dsel, const int *tsel, int n,
+                        int nt_row, size_t ws, size_t we, ap_peak *out) {
+  return ap_gate16_run_pairs_lag(g, d0, t0, dsel, tsel, n, nt_row, ws, we, 0, out);
 }
 
 int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we,

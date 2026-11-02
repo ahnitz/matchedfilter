@@ -151,6 +151,22 @@ typedef struct {
                            const int16_t *const *trp, const int16_t *const *tip, int cnt,
                            size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                            int16_t *lanemax, int16_t *laneidx, void *scratch);
+  /* Fused quadrature complex-pair forward transform on a half-size small plan. */
+  int (*fft_quad_pair_batch)(void *, const float *const *zsrcs, const size_t *haves, int cnt,
+                             float scale, const float *rtw, float *const *out_re,
+                             float *const *out_im);
+  /* Band-sliced interleaved Q15 data quantisation and whole-list Q15 gather screen. */
+  int (*q15_data_band)(size_t N, const float *spec, size_t k0, size_t khi,
+                       int16_t *qdr, int16_t *qdi, float *scale_out);
+  int (*q15_pairs_batch)(size_t N, const int16_t *qdm, const float *qds,
+                         const int16_t *qtm, const float *qts,
+                         int d0, int t0, const int *dsel, const int *tsel, int npairs,
+                         float threshold, int nomargin, size_t start, size_t end,
+                         int *dst_d, int *dst_t, unsigned char *pass_out,
+                         int16_t *lag_out, void *scratch);
+  /* Prefix-only forward transform across SIMD lanes writing bins [0, out_bins). */
+  int (*fft_forward_batch_prefix)(void *, const float *const *srcs, const size_t *haves, int cnt,
+                                  float scale, size_t out_bins, float *const *outs);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
