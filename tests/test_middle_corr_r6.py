@@ -32,6 +32,10 @@ def _gpu_corr_bank(taps, tap_counts=None, fft_lengths=None):
     TimeDomainFilterBank
         Initialized correlation bank on ``gpu:0``.
     """
+    from conftest import usable_gpu, usable_gpu_reason
+    if usable_gpu() is None:
+        # asked first: with explicit fft_lengths the bank opens no device until it is used
+        pytest.skip(usable_gpu_reason())
     try:
         bank = TimeDomainFilterBank(
             taps, tap_counts=tap_counts, engine="corr", device="gpu:0",

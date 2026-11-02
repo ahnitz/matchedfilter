@@ -352,8 +352,45 @@ int ap_hmf_set_taps_complex(ap_hmf_plan *p,const float *taps,size_t stride,const
   return set_taps_impl(p,taps,stride,counts,1);
 }
 
-/* Ticks per lag x tap of the direct correlation on this core (best of a few reps): what
-   the cost model charges a direct refine (gatechain.CostModel.with_direct). */
+/* A direct correlation to time (price_corr_ticks): ap_td_corr_ex_on on fft (NULL: the
+   process's backend) of these operands. */
+typedef struct {
+  const ap_plan *fft; const float *x; int x_real; const float *tr, *ti; int L, nl; float *out;
+} price_corr_job;
+
+/* Ticks a timed round spans, at least. A direct correlation of 32 lags x 256 taps takes well
+   under the step of macOS's monotonic clock (ap_ticks: nanoseconds, in steps of about a
+   microsecond on an M2), so timed once it read 0, and a price of 0 is a failed price: the
+   direct refine went unpriced, and so unused, on Apple CPUs (2026-11-01). Rounds of 100,000
+   ticks -- 100 us of that clock, ~30 us of x86 cycles -- put its step under 1% of a round. */
+#define PRICE_MIN_TICKS 100000ull
+
+/* Ticks per call of job's correlation: the fastest of 7 rounds, each of as many calls as span
+   PRICE_MIN_TICKS. */
+static double price_corr_ticks(const price_corr_job *j){
+  unsigned long reps=1;
+  for(;;){                                   /* calls per round, doubled until long enough */
+    const unsigned long long a=ap_ticks();
+    for(unsigned long k=0;k<reps;k++)
+      ap_td_corr_ex_on(j->fft,j->x,j->x_real,j->tr,j->ti,j->L,j->nl,j->out);
+    const unsigned long long b=ap_ticks();
+    if(b-a>=PRICE_MIN_TICKS || reps>=(1ul<<20)) break;
+    reps*=2;
+  }
+  double best=1e30;
+  for(int r=0;r<7;r++){
+    const unsigned long long a=ap_ticks();
+    for(unsigned long k=0;k<reps;k++)
+      ap_td_corr_ex_on(j->fft,j->x,j->x_real,j->tr,j->ti,j->L,j->nl,j->out);
+    const unsigned long long b=ap_ticks();
+    const double t=(double)(b-a)/(double)reps;
+    if(t<best) best=t;
+  }
+  return best;
+}
+
+/* Ticks per lag x tap of the direct correlation on this core (price_corr_ticks): what the
+   cost model charges a direct refine (gatechain.CostModel.with_direct). */
 double ap_hmf_price_direct_mode(int x_real,int tap_cplx){
   const int L=256, nl=32;
   float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float));
@@ -365,14 +402,8 @@ double ap_hmf_price_direct_mode(int x_real,int tap_cplx){
     for(int i=0;i<2*(nl+L);i++) x[i]=(float)((i*7919)%1000)/1000.f-0.5f;
     for(int i=0;i<L;i++) tr[i]=(float)((i*104729)%1000)/1000.f-0.5f;
     if(ti) for(int i=0;i<L;i++) ti[i]=(float)((i*65537)%1000)/1000.f-0.5f;
-    best=1e30;
-    for(int r=0;r<7;r++){
-      unsigned long long a=ap_ticks();
-      ap_td_corr_ex(x,x_real?1:0,tr,ti,L,nl,out);
-      unsigned long long b=ap_ticks();
-      if((double)(b-a)<best) best=(double)(b-a);
-    }
-    best/=(double)nl*L;
+    const price_corr_job j={NULL,x,x_real?1:0,tr,ti,L,nl,out};
+    best=price_corr_ticks(&j)/((double)nl*L);
   }
   free(x); free(tr); free(ti); free(out);
   return best;
@@ -418,15 +449,15 @@ static void price_direct(ap_hmf_plan *p){
   for(int s=0;s<nslot;s++)
     ap_split_store_on(p->full_fft,spec+(size_t)s*2*n,
                       tr_s+(size_t)s*n,ti_s+(size_t)s*n,n,1,gmajor?n1:0,n2,w);
-  double best_d=1e30, best_f=1e30;
+  const price_corr_job job={p->full_fft,x,p->real_series,tr,ti,L,nl,dout};
+  const double best_d=price_corr_ticks(&job);
+  double best_f=1e30;
   for(int r=0;r<7;r++){
     const int s=r&(nslot-1);
     float *sp=spec+(size_t)s*2*n;
     float *drs=dr+(size_t)s*n, *dis=di+(size_t)s*n;
     const float *trs=tr_s+(size_t)s*n, *tis=ti_s+(size_t)s*n;
-    unsigned long long a=ap_ticks();
-    ap_td_corr_ex_on(p->full_fft,x,p->real_series,tr,ti,L,nl,dout);
-    unsigned long long b=ap_ticks();
+    const unsigned long long b=ap_ticks();
     if(p->real_series) ap_real_split_mirror_on(p->full_fft,sp,n);
     if(gmajor && pkern.run){
       ap_split_store_on(p->full_fft,sp,drs,dis,n,0,n1,n2,w);
@@ -439,8 +470,7 @@ static void price_direct(ap_hmf_plan *p){
       int c=0;
       ap_binmax(p->full_fft,prod,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n,NULL);
     }
-    unsigned long long e=ap_ticks();
-    if((double)(b-a)<best_d) best_d=(double)(b-a);
+    const unsigned long long e=ap_ticks();
     if((double)(e-b)<best_f) best_f=(double)(e-b);
   }
   p->dir_lagtap=best_d/((double)nl*L);

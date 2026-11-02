@@ -7,6 +7,15 @@ from matchedfilter import TimeDomainFilterBank
 from matchedfilter.search import BlockInput, HierarchicalSearch, Inner, Leaf, Root
 
 
+@pytest.fixture(autouse=True)
+def _decisions_fixed(monkeypatch):
+    """Every run here gates as every other: with measured choices on, a joint trial times the
+    reference and the tiled run apart and may lock other arms in each (block size, Q15
+    screen), and hierarchical peaks depend on them -- 84 peaks against 86 on a CI runner,
+    with tiling exact. The model's choices are deterministic, so they hold the comparison."""
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+
+
 def _reference_profile(n_bins=16385, delta_f=1.0 / 16.0):
     f = np.arange(n_bins, dtype=np.float64) * delta_f
     w = np.where((f >= 24.0) & (f <= 850.0), np.maximum(f, 1.0) ** (-7.0 / 3.0), 0.0)
