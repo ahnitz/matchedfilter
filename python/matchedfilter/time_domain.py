@@ -1021,8 +1021,7 @@ class TimeDomainFilterBank:
         self._choice_ns = tuple(n for n in candidate_ns if n <= max(int(max_block_length), legacy_max))
         self._built: Optional[List[_TemplateGroup]] = None
         if self.engine == 'corr' and fft_lengths is None:
-            self._legacy_layout = _corr_partition(self.effective_data_counts, candidate_ns,
-                                                  self.max_batch_size, self.device)
+            self._legacy_layout = self._corr_bank_layout(candidate_ns)
         self._input_psd_spec = None
         if not self._choose_n:
             self._build(*self._legacy_layout)
@@ -1037,6 +1036,68 @@ class TimeDomainFilterBank:
         if not self._choose_n:
             self._taps_list = None
             self._raw_taps = None
+
+    def _corr_bank_layout(self, candidate_ns: Sequence[int]):
+        """Partition correlation templates by calibrated transform cost without L2 coarse-band caps.
+
+        Parameters
+        ----------
+        candidate_ns : Sequence[int]
+            Candidate power-of-two FFT block lengths to evaluate.
+
+        Returns
+        -------
+        tuple
+            ``(groups, order)`` matching ``_corr_partition``'s layout format.
+        """
+        from ._layout import _corr_block_costs
+        from .device import parse as _parse_device
+        counts = np.asarray(self.effective_data_counts, dtype=np.int64)
+        M = len(counts)
+        if M == 0:
+            return _corr_partition(counts, candidate_ns, self.max_batch_size, self.device)
+        order = np.argsort(counts, kind="stable")
+        Ls = counts[order]
+        ns = sorted(int(n) for n in candidate_ns)
+        is_gpu = _parse_device(self.device).kind == "gpu"
+        cap = int(self.max_batch_size) if self.max_batch_size is not None else M
+        # On CPU, reconstruct s1 = b + w*(3n/4) to cancel 3rd-point w(n) calibration jitter and
+        # the 8-block L3-vs-DRAM streaming step, subtracting a uniform write floor across n.
+        # On GPU, w(n) is measured over ~512K samples in VRAM and captures LDS spill above 8192.
+        group_per_samp = 0.0 if is_gpu else 6e-10
+        raw_costs = [(n, *_corr_block_costs(n, self.device)) for n in ns]
+        if is_gpu:
+            costs = raw_costs
+        else:
+            s1_list = [(n, a, b + w * (n - n // 4), n - n // 4) for n, a, b, w in raw_costs]
+            w_floor = 0.5 * min(s1 / v0 for _, _, s1, v0 in s1_list) if s1_list else 0.0
+            costs = [(n, a, max(0.0, s1 - w_floor * v0), 0.0) for n, a, s1, v0 in s1_list]
+        best = np.full(M + 1, np.inf)
+        best[0] = 0.0
+        arg: List[Tuple[int, int]] = [(0, 0)] * (M + 1)
+        for j in range(1, M + 1):
+            L = int(Ls[j - 1])
+            i0 = max(0, j - cap)
+            i = np.arange(i0, j)
+            span_count = j - i
+            for n, a, b_eff, w_eff in costs:
+                nv = n - L + 1
+                if nv < 1:
+                    continue
+                c = best[i0:j] + (a + group_per_samp * nv + span_count * (b_eff + w_eff * nv)) / nv
+                k = int(np.argmin(c))
+                if c[k] < best[j]:
+                    best[j] = c[k]
+                    arg[j] = (int(i[k]), n)
+        if not np.isfinite(best[M]):
+            return _corr_partition(counts, candidate_ns, self.max_batch_size, self.device)
+        groups = []
+        j = M
+        while j > 0:
+            i_prev, n_chosen = arg[j]
+            groups.append((i_prev, j, n_chosen, int(Ls[j - 1])))
+            j = i_prev
+        return groups[::-1], order
 
     def _build(self, raw_groups, order) -> None:
         """Groups, spectra and plans for one partition of the bank."""
@@ -3986,7 +4047,17 @@ class TimeDomainFilterBank:
         # 27 rows took ~400 ms against ~10 ms by runs.
         # A GPU-shared dest is zeroed on the device: host writes would pull its pages
         # back to the CPU (CUDA managed memory) only for the next kernel to fault them in.
-        gpu = getattr(g.get_correlation_plan(), '_gpu', None) if W.shape[0] else None
+        from .device import parse as _parse_device
+        need_gpu = (W.shape[0] > 0 or getattr(g, '_corr_plan', None) is not None
+                    or _parse_device(self.device).kind == 'gpu')
+        gpu = getattr(g.get_correlation_plan(), '_gpu', None) if need_gpu else None
+        if gpu is not None and settle:
+            q = getattr(gpu, 'queue', None)
+            if q is not None:
+                for prev in settle:
+                    if getattr(prev, 'queue', None) is q:
+                        gpu = prev
+                        break
         zero = gpu.zero_columns if gpu is not None else None
         if zero is not None:
             from ._shared import shared_view
@@ -4161,11 +4232,13 @@ class TimeDomainFilterBank:
             self._correlate_bank(ser, W, scales_arr, result, settle, support)
             ok = True
         finally:
-            for gpu in {id(x): x for x in settle}.values():
-                if ok and not wait:
-                    gpu.zero_columns_done(wait=False)
-                else:
-                    gpu.zero_columns_done()
+            gpus = list({id(x): x for x in settle}.values())
+            for gpu in gpus:
+                gpu.zero_columns_done(wait=False)
+            if not (ok and not wait):
+                for gpu in gpus:
+                    gpu.settle_writes()
+                    gpu._x_idle()
         return result
 
     def wait(self) -> None:
@@ -4334,11 +4407,13 @@ class TimeDomainFilterBank:
             ok = True
         finally:
             # Scales are applied on the host below, so a scaled call finishes its work here.
-            for gpu in {id(x): x for x in settle}.values():
-                if ok and not wait and scales is None:
-                    gpu.zero_columns_done(wait=False)
-                else:
-                    gpu.zero_columns_done()
+            gpus = list({id(x): x for x in settle}.values())
+            for gpu in gpus:
+                gpu.zero_columns_done(wait=False)
+            if not (ok and not wait and scales is None):
+                for gpu in gpus:
+                    gpu.settle_writes()
+                    gpu._x_idle()
         if scales is not None:
             np.multiply(result, sc[sel][:, None], out=result)
         return result
