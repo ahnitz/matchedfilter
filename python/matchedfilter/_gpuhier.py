@@ -137,6 +137,9 @@ def _rw_names(ntiers):
 class HierOps:
     """The hierarchical operations of _gpuexec.Executor (a mixin of it)."""
 
+    #: True on GPU backends whose packed half2 ALU throughput exceeds fp32 (RDNA, CUDA).
+    packed_fp16 = True
+
     #: Pair-count bound a coarse layout is timed at (synthetic data), and the screen size
     #: every candidate is first timed at (a pathological layout is dropped before a
     #: full-size dispatch of it can run long enough for the driver to reset the device).
@@ -212,7 +215,7 @@ class HierOps:
         """Whether a later gate tier at this band runs the one-bin refine's gate-only build,
         reporting the window's maximum alone (nbins word 0), rather than the one-bin election
         (tierb.slang MF_GATE_ONLY or peakTwoGate) -- measured per pair (_played "gateway")."""
-        if self._shipped("c16", band) and self._shipped("tier1_c16", band):
+        if self.packed_fp16 and self._shipped("c16", band) and self._shipped("tier1_c16", band):
             if band // 16 > self.subgroup_size:
                 return False
             return self._played("gateway", band) == "gate"
@@ -235,8 +238,8 @@ class HierOps:
         rng = np.random.default_rng(1)
         x = ((rng.standard_normal((pairs // ntm, band))
               + 1j * rng.standard_normal((pairs // ntm, band))) * 0.1).astype(np.complex64)
-        c16 = (self._shipped("c16", band) and self._shipped("tier1_c16", band)
-               and band // 16 <= self.subgroup_size)
+        c16 = (self.packed_fp16 and self._shipped("c16", band)
+               and self._shipped("tier1_c16", band) and band // 16 <= self.subgroup_size)
         drows = (x if self.inplace_feed else pack_half2(x)) if c16 else x
         trows = pack_half2(x[:ntm]) if c16 else x[:ntm]
         bufs = [self._x_alloc(drows.nbytes), self._x_alloc(trows.nbytes),
@@ -535,7 +538,7 @@ class HierOps:
         shifted = any(k0s)
         bands = tuple(b for b, _, _ in tiers)
         half = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
-        half1 = (len(bands) > 1 and self._shipped("c16", bands[1])
+        half1 = (len(bands) > 1 and self.packed_fp16 and self._shipped("c16", bands[1])
                  and self._shipped("tier1_c16", bands[1]))
         layout0 = self._coarse_layout(bands[0]) if half else None
         shift = bin_shift(binsize)

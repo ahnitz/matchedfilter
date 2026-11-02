@@ -69,8 +69,10 @@ struct Gate {
   float *d2;               /* [slot][element] |D|^2 (allocated only when debug != 0) */
   h16 *w1r, *w1i;          /* element split twiddles */
   int *live;               /* storage slots of the window's lags (run_max), cached per window */
-  h16 *gtre, *gtim;        /* one gathered template group (run_pairs) */
-  h16 *gdre, *gdim;        /* one gathered data group when pairs span distinct blocks */
+  h16 *trow_re, *trow_im;  /* [ntpad][m] contiguous per-template FP16 rows (lazy, run_pairs) */
+  int trow_ready;
+  h16 *gtre, *gtim;        /* one gathered template group (debug run_pairs) */
+  h16 *gdre, *gdim;        /* one gathered data group (debug run_pairs) */
   float *gt2, *gd2;
   size_t live_n, live_ws, live_we;
   vf *bR, *bI, *sR, *sI;
@@ -91,7 +93,8 @@ static void destroy(Gate *g) {
   free(g->tre); free(g->tim); free(g->tinv); free(g->tsum2);
   free(g->dre); free(g->dim); free(g->dinv); free(g->dsum2);
   free(g->w1r); free(g->w1i); free(g->bR); free(g->bI); free(g->sR); free(g->sI);
-  free(g->live); free(g->gtre); free(g->gtim); free(g->gt2);
+  free(g->live); free(g->trow_re); free(g->trow_im);
+  free(g->gtre); free(g->gtim); free(g->gt2);
   free(g->gdre); free(g->gdim); free(g->gd2);
   free(g->t2); free(g->d2);
   free(g);
@@ -161,6 +164,7 @@ static int set_template(Gate *g, int t, const float *spec) {
     if (g->t2) g->t2[base + k * AP_W] = pk;
   }
   g->tsum2[t] = (float)sum2;
+  g->trow_ready = 0;
   return 0;
 }
 
@@ -481,111 +485,251 @@ static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, con
   scan_max_window(g, pmax, m2_out);
 }
 
-/* Listed pairs (d0 + dsel[i], t0 + tsel[i]) across 8 FP16 SIMD lanes: full 8-pair runs sharing
-   one data slot use efft_prod_broadcast, while shorter runs pack up to 8 arbitrary (d, t) pairs
-   into gdre/gdim and gtre/gtim for efft_prod so sparse later tiers keep 8-lane occupancy.
-   When elect_lag != 0, each lane also elects its FP16 argmax lag in [ws, we). */
+/* Unrolled 8x8 FP16 register transpose directly into bR/bI slots (zero loops, zero stack spill). */
+static HWY_ATTR HWY_INLINE void transpose8_store(const vf *in, vf *dst) {
+  const vf a0 = hn::InterleaveWholeLower(AP_D, in[0], in[4]);
+  const vf a4 = hn::InterleaveWholeUpper(AP_D, in[0], in[4]);
+  const vf a1 = hn::InterleaveWholeLower(AP_D, in[1], in[5]);
+  const vf a5 = hn::InterleaveWholeUpper(AP_D, in[1], in[5]);
+  const vf a2 = hn::InterleaveWholeLower(AP_D, in[2], in[6]);
+  const vf a6 = hn::InterleaveWholeUpper(AP_D, in[2], in[6]);
+  const vf a3 = hn::InterleaveWholeLower(AP_D, in[3], in[7]);
+  const vf a7 = hn::InterleaveWholeUpper(AP_D, in[3], in[7]);
+
+  const vf b0 = hn::InterleaveWholeLower(AP_D, a0, a2);
+  const vf b2 = hn::InterleaveWholeUpper(AP_D, a0, a2);
+  const vf b1 = hn::InterleaveWholeLower(AP_D, a1, a3);
+  const vf b3 = hn::InterleaveWholeUpper(AP_D, a1, a3);
+  const vf b4 = hn::InterleaveWholeLower(AP_D, a4, a6);
+  const vf b6 = hn::InterleaveWholeUpper(AP_D, a4, a6);
+  const vf b5 = hn::InterleaveWholeLower(AP_D, a5, a7);
+  const vf b7 = hn::InterleaveWholeUpper(AP_D, a5, a7);
+
+  dst[0] = hn::InterleaveWholeLower(AP_D, b0, b1);
+  dst[1] = hn::InterleaveWholeUpper(AP_D, b0, b1);
+  dst[2] = hn::InterleaveWholeLower(AP_D, b2, b3);
+  dst[3] = hn::InterleaveWholeUpper(AP_D, b2, b3);
+  dst[4] = hn::InterleaveWholeLower(AP_D, b4, b5);
+  dst[5] = hn::InterleaveWholeUpper(AP_D, b4, b5);
+  dst[6] = hn::InterleaveWholeLower(AP_D, b6, b7);
+  dst[7] = hn::InterleaveWholeUpper(AP_D, b6, b7);
+}
+
+/* Lazily transpose [group][k][lane] templates into contiguous [t][k] FP16 rows for SIMD gather. */
+static int ensure_trow(Gate *g) {
+  if (g->trow_ready) return 0;
+  const size_t m = g->m;
+  const size_t total = (size_t)g->ntpad * m;
+  if (!g->trow_re) {
+    g->trow_re = (h16 *)ap_alloc64(total * sizeof(h16));
+    g->trow_im = (h16 *)ap_alloc64(total * sizeof(h16));
+    if (!g->trow_re || !g->trow_im) return -1;
+  }
+  const int ng = g->ntpad / AP_W;
+  for (int grp = 0; grp < ng; grp++) {
+    const h16 *sr = g->tre + (size_t)grp * m * AP_W;
+    const h16 *si = g->tim + (size_t)grp * m * AP_W;
+    for (size_t k0 = 0; k0 < m; k0 += AP_W) {
+      vf in_r[AP_W], in_i[AP_W], out_r[AP_W], out_i[AP_W];
+      for (int u = 0; u < AP_W; u++) {
+        in_r[u] = V_LOADU(sr + (k0 + (size_t)u) * AP_W);
+        in_i[u] = V_LOADU(si + (k0 + (size_t)u) * AP_W);
+      }
+      transpose8_store(in_r, out_r);
+      transpose8_store(in_i, out_i);
+      for (int l = 0; l < AP_W; l++) {
+        const int t = grp * AP_W + l;
+        V_STOREU(g->trow_re + (size_t)t * m + k0, out_r[l]);
+        V_STOREU(g->trow_im + (size_t)t * m + k0, out_i[l]);
+      }
+    }
+  }
+  g->trow_ready = 1;
+  return 0;
+}
+
+/* Listed pairs (d0 + dsel[i], t0 + tsel[i]) across 8 FP16 SIMD lanes: contiguous row loads
+   form conj(d * t) in registers and 8x8-transpose directly into bR/bI without intermediate
+   staging buffers. Storage-order scan_max_window gates every batch; scan_elect_window runs
+   only on batches with at least one survivor when elect_lag != 0. */
 static int run_pairs(Gate *g, int d0, int t0, const int *dsel, const int *tsel, int n,
-                     int nt_row, size_t ws, size_t we, int elect_lag, ap_peak *out) {
+                     int nt_row, size_t ws, size_t we, int elect_lag, float thr,
+                     int *dst_d, int *dst_t, ap_peak *out) {
   if (we > g->m) we = g->m;
   if (n <= 0) return 0;
   const size_t m = g->m;
-  if (!elect_lag && live_list(g, ws, we)) return -1;
-  if (!g->gtre) {
+  if (live_list(g, ws, we)) return -1;
+  if (!g->debug && ensure_trow(g)) return -1;
+  if (g->debug && !g->gtre) {
     g->gtre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
     g->gtim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
-    if (g->debug) g->gt2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
-    if (!g->gtre || !g->gtim || (g->debug && !g->gt2)) return -1;
+    g->gt2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
+    if (!g->gtre || !g->gtim || !g->gt2) return -1;
   }
-  alignas(16) float m2[AP_W], re[AP_W], im[AP_W], pw[AP_W];
+  const int compact = (dst_d != nullptr && dst_t != nullptr);
+  int npass = 0;
+  alignas(16) float m2[AP_W], re[AP_W], im[AP_W], pw[AP_W], sc_l[AP_W], mag_l[AP_W];
   alignas(16) int ix[AP_W];
   for (int i = 0; i < n;) {
     const int d_first = dsel[i];
     int same_run = 1;
     while (same_run < AP_W && i + same_run < n && dsel[i + same_run] == d_first) same_run++;
     const int batch = n - i < AP_W ? n - i : AP_W;
-    const int use_bcast = (same_run == batch);
+    const int one_d = (same_run == batch);
     float pmax = 0.f;
-    if (use_bcast) {
-      float tmax = 0.f;
+    if (!g->debug) {
+      /* Fused contiguous FP16 row gather + complex multiply + 8x8 transpose into bR/bI. */
+      const h16 *dr_l[AP_W], *di_l[AP_W], *tr_l[AP_W], *ti_l[AP_W];
       for (int l = 0; l < AP_W; l++) {
-        const int t = t0 + tsel[i + (l < batch ? l : batch - 1)];
-        tmax = fmaxf(tmax, g->tsum2[t]);
-        const size_t base = (size_t)(t / AP_W) * m * AP_W + (size_t)(t % AP_W);
+        const int u = l < batch ? l : batch - 1;
+        const int gd = d0 + dsel[i + u];
+        const int gt = t0 + tsel[i + u];
+        sc_l[l] = g->dinv[gd] * g->tinv[gt];
+        pmax = fmaxf(pmax, g->dsum2[gd] * g->tsum2[gt]);
+        dr_l[l] = g->dre + (size_t)gd * m;
+        di_l[l] = g->dim + (size_t)gd * m;
+        tr_l[l] = g->trow_re + (size_t)gt * m;
+        ti_l[l] = g->trow_im + (size_t)gt * m;
+      }
+      if (one_d) {
+        const h16 *HWY_RESTRICT dr0 = dr_l[0], *HWY_RESTRICT di0 = di_l[0];
+        for (size_t k0 = 0; k0 < m; k0 += AP_W) {
+          vf pr_in[AP_W], pi_in[AP_W];
+          const vf dR = V_LOADU(dr0 + k0), dI = V_LOADU(di0 + k0);
+          for (int l = 0; l < AP_W; l++) {
+            const vf tR = V_LOADU(tr_l[l] + k0), tI = V_LOADU(ti_l[l] + k0);
+            pr_in[l] = V_FMSUB(dR, tR, V_MUL(dI, tI));
+            pi_in[l] = V_FNMSUB(dR, tI, V_MUL(dI, tR));
+          }
+          const int slot0 = einp(&g->ea, (int)k0);
+          transpose8_store(pr_in, g->bR + slot0);
+          transpose8_store(pi_in, g->bI + slot0);
+        }
+      } else {
+        for (size_t k0 = 0; k0 < m; k0 += AP_W) {
+          vf pr_in[AP_W], pi_in[AP_W];
+          for (int l = 0; l < AP_W; l++) {
+            const vf dR = V_LOADU(dr_l[l] + k0), dI = V_LOADU(di_l[l] + k0);
+            const vf tR = V_LOADU(tr_l[l] + k0), tI = V_LOADU(ti_l[l] + k0);
+            pr_in[l] = V_FMSUB(dR, tR, V_MUL(dI, tI));
+            pi_in[l] = V_FNMSUB(dR, tI, V_MUL(dI, tR));
+          }
+          const int slot0 = einp(&g->ea, (int)k0);
+          transpose8_store(pr_in, g->bR + slot0);
+          transpose8_store(pi_in, g->bI + slot0);
+        }
+      }
+      efft((int)m, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
+    } else if (one_d) {
+      for (int l = 0; l < AP_W; l++) {
+        const int u = l < batch ? l : batch - 1;
+        const int gd = d0 + d_first;
+        const int gt = t0 + tsel[i + u];
+        sc_l[l] = g->dinv[gd] * g->tinv[gt];
+        const size_t base = (size_t)(gt / AP_W) * m * AP_W + (size_t)(gt % AP_W);
         const h16 *sr = g->tre + base, *si = g->tim + base;
-        if (g->debug) {
-          const float *s2 = g->t2 + base;
-          for (size_t e = 0; e < m; e++) {
-            g->gtre[e * AP_W + l] = sr[e * AP_W];
-            g->gtim[e * AP_W + l] = si[e * AP_W];
-            g->gt2[e * AP_W + l] = s2[e * AP_W];
-          }
-        } else {
-          for (size_t e = 0; e < m; e++) {
-            g->gtre[e * AP_W + l] = sr[e * AP_W];
-            g->gtim[e * AP_W + l] = si[e * AP_W];
-          }
+        const float *s2 = g->t2 + base;
+        for (size_t e = 0; e < m; e++) {
+          g->gtre[e * AP_W + l] = sr[e * AP_W];
+          g->gtim[e * AP_W + l] = si[e * AP_W];
+          g->gt2[e * AP_W + l] = s2[e * AP_W];
         }
       }
       const int gd = d0 + d_first;
       efft_prod_broadcast((int)m, g->dre + (size_t)gd * m, g->dim + (size_t)gd * m,
                           g->gtre, g->gtim, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
-      if (g->debug) {
-        parseval_group(g->d2 + (size_t)gd * m, g->gt2, m, pw);
-        for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pw[l]);
-      } else {
-        pmax = g->dsum2[gd] * tmax;
-      }
+      parseval_group(g->d2 + (size_t)gd * m, g->gt2, m, pw);
+      for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pw[l]);
     } else {
       if (!g->gdre) {
         g->gdre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
         g->gdim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
-        if (g->debug) g->gd2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
-        if (!g->gdre || !g->gdim || (g->debug && !g->gd2)) return -1;
+        g->gd2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
+        if (!g->gdre || !g->gdim || !g->gd2) return -1;
       }
       for (int l = 0; l < AP_W; l++) {
         const int u = l < batch ? l : batch - 1;
         const int gd = d0 + dsel[i + u];
         const int gt = t0 + tsel[i + u];
-        pmax = fmaxf(pmax, g->dsum2[gd] * g->tsum2[gt]);
+        sc_l[l] = g->dinv[gd] * g->tinv[gt];
         const h16 *dr = g->dre + (size_t)gd * m, *di = g->dim + (size_t)gd * m;
         const size_t base = (size_t)(gt / AP_W) * m * AP_W + (size_t)(gt % AP_W);
         const h16 *sr = g->tre + base, *si = g->tim + base;
-        if (g->debug) {
-          const float *d2 = g->d2 + (size_t)gd * m, *s2 = g->t2 + base;
-          double sp = 0.0;
-          for (size_t e = 0; e < m; e++) {
-            g->gdre[e * AP_W + l] = dr[e];
-            g->gdim[e * AP_W + l] = di[e];
-            g->gtre[e * AP_W + l] = sr[e * AP_W];
-            g->gtim[e * AP_W + l] = si[e * AP_W];
-            g->gd2[e * AP_W + l] = d2[e];
-            g->gt2[e * AP_W + l] = s2[e * AP_W];
-            sp += (double)d2[e] * (double)s2[e * AP_W];
-          }
-          pw[l] = (float)(sp * (double)m);
-        } else {
-          for (size_t e = 0; e < m; e++) {
-            g->gdre[e * AP_W + l] = dr[e];
-            g->gdim[e * AP_W + l] = di[e];
-            g->gtre[e * AP_W + l] = sr[e * AP_W];
-            g->gtim[e * AP_W + l] = si[e * AP_W];
-          }
+        const float *d2 = g->d2 + (size_t)gd * m, *s2 = g->t2 + base;
+        double sp = 0.0;
+        for (size_t e = 0; e < m; e++) {
+          g->gdre[e * AP_W + l] = dr[e];
+          g->gdim[e * AP_W + l] = di[e];
+          g->gtre[e * AP_W + l] = sr[e * AP_W];
+          g->gtim[e * AP_W + l] = si[e * AP_W];
+          g->gd2[e * AP_W + l] = d2[e];
+          g->gt2[e * AP_W + l] = s2[e * AP_W];
+          sp += (double)d2[e] * (double)s2[e * AP_W];
         }
+        pw[l] = (float)(sp * (double)m);
       }
-      if (g->debug) {
-        pmax = 0.f;
-        for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pw[l]);
-      }
+      for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pw[l]);
       efft_prod((int)m, g->gdre, g->gdim, g->gtre, g->gtim,
                 g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
     }
-    if (elect_lag) {
+
+    /* Fast storage-order window maximum first; elect lag only if a lane can reach thr. */
+    scan_max_window(g, pmax, m2);
+    const float thr_trig = elect_lag ? thr * 0.995f : thr;
+    unsigned fire_mask = 0u;
+    for (int l = 0; l < batch; l++) {
+      if (g->live_n == 0 || m2[l] == 0.f) {
+        mag_l[l] = 0.f;
+        continue;
+      }
+      const float mag = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc_l[l];
+      mag_l[l] = mag;
+      if (mag >= thr_trig) fire_mask |= (1u << l);
+    }
+
+    if (compact) {
+      if (fire_mask) {
+        if (elect_lag) scan_elect_window(g, ws, we, pmax, m2, ix, re, im);
+        for (int l = 0; l < batch; l++) {
+          if (!(fire_mask & (1u << l))) continue;
+          const int d = dsel[i + l], t = tsel[i + l];
+          if (elect_lag) {
+            const float sc = sc_l[l];
+            if (ix[l] < 0) {
+              if (out) {
+                ap_peak *o = out + (size_t)d * nt_row + t;
+                o->index = -1; o->re = o->im = o->magnitude = 0.f;
+              }
+              continue;
+            }
+            const float mag = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc;
+            if (mag < thr) continue;
+            if (out) {
+              ap_peak *o = out + (size_t)d * nt_row + t;
+              o->index = ix[l];
+              if (!isfinite(m2[l])) {
+                o->re = 3.402823e38f; o->im = 0.f; o->magnitude = 3.402823e38f;
+              } else {
+                o->re = re[l] * sc;
+                o->im = -im[l] * sc;
+                o->magnitude = mag;
+              }
+            }
+          } else if (out) {
+            ap_peak *o = out + (size_t)d * nt_row + t;
+            o->index = 0; o->re = o->im = 0.f; o->magnitude = mag_l[l];
+          }
+          dst_d[npass] = d;
+          dst_t[npass] = t;
+          npass++;
+        }
+      }
+    } else if (elect_lag && (fire_mask || thr <= 0.f)) {
       scan_elect_window(g, ws, we, pmax, m2, ix, re, im);
       for (int l = 0; l < batch; l++) {
         const int d = dsel[i + l], t = tsel[i + l];
         ap_peak *o = out + (size_t)d * nt_row + t;
-        const float sc = g->dinv[d0 + d] * g->tinv[t0 + t];
+        const float sc = sc_l[l];
         if (ix[l] < 0) {
           o->index = -1; o->re = o->im = o->magnitude = 0.f;
           continue;
@@ -598,25 +742,25 @@ static int run_pairs(Gate *g, int d0, int t0, const int *dsel, const int *tsel, 
           o->im = -im[l] * sc;
           o->magnitude = sqrtf(m2[l]) * sc;
         }
+        if (o->magnitude >= thr) npass++;
       }
     } else {
-      scan_max_window(g, pmax, m2);
       for (int l = 0; l < batch; l++) {
         const int d = dsel[i + l], t = tsel[i + l];
         ap_peak *o = out + (size_t)d * nt_row + t;
-        const float sc = g->dinv[d0 + d] * g->tinv[t0 + t];
-        if (g->live_n == 0 || m2[l] == 0.f) {
+        if (g->live_n == 0 || mag_l[l] == 0.f) {
           o->index = -1; o->re = o->im = o->magnitude = 0.f;
           continue;
         }
         o->index = 0;
         o->re = o->im = 0.f;
-        o->magnitude = !isfinite(m2[l]) ? 3.402823e38f : sqrtf(m2[l]) * sc;
+        o->magnitude = mag_l[l];
+        if (mag_l[l] >= thr) npass++;
       }
     }
     i += batch;
   }
-  return 0;
+  return npass;
 }
 
 static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap_peak *out) {
@@ -741,19 +885,23 @@ int ap_gate16_set_data(void *g, int d, const float *spec) {
 }
 
 int ap_gate16_run_pairs_lag(void *g, int d0, int t0, const int *dsel, const int *tsel, int n,
-                            int nt_row, size_t ws, size_t we, int elect_lag, ap_peak *out) {
+                            int nt_row, size_t ws, size_t we, int elect_lag, float thr,
+                            int *dst_d, int *dst_t, ap_peak *out) {
 #ifdef AP_GATE16
-  return g ? ap16::run_pairs((ap16::Gate *)g, d0, t0, dsel, tsel, n, nt_row, ws, we, elect_lag, out) : -1;
+  return g ? ap16::run_pairs((ap16::Gate *)g, d0, t0, dsel, tsel, n, nt_row, ws, we,
+                             elect_lag, thr, dst_d, dst_t, out)
+           : -1;
 #else
   (void)g; (void)d0; (void)t0; (void)dsel; (void)tsel; (void)n; (void)nt_row; (void)ws; (void)we;
-  (void)elect_lag; (void)out;
+  (void)elect_lag; (void)thr; (void)dst_d; (void)dst_t; (void)out;
   return -1;
 #endif
 }
 
 int ap_gate16_run_pairs(void *g, int d0, int t0, const int *dsel, const int *tsel, int n,
                         int nt_row, size_t ws, size_t we, ap_peak *out) {
-  return ap_gate16_run_pairs_lag(g, d0, t0, dsel, tsel, n, nt_row, ws, we, 0, out);
+  return ap_gate16_run_pairs_lag(g, d0, t0, dsel, tsel, n, nt_row, ws, we, 0, 0.f,
+                                 NULL, NULL, out);
 }
 
 int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we,

@@ -360,6 +360,7 @@ def test_metal_tier1_fp16_resolution_and_manifest():
     ctx = _mtlcompute.Context.__new__(_mtlcompute.Context)
     ctx.max_shared_memory = 32768
     ctx.name = "Apple M2"
+    assert ctx.packed_fp16 is False
 
     assert _mtlcompute._twt_entry("refineListedC16w") == ("refineListedC16", True)
     assert _mtlcompute._twt_entry("refineListedC16") == ("refineListedC16", False)
@@ -436,7 +437,7 @@ def test_gpu_tier1_fp16_chains_and_feeds(gpu_dev, chain, feed_mode, monkeypatch)
             cascade_band=b0, ct1=tmpl[:, :b1], raw_thr1=0.5, handle_out=hout)
         assert hout[0].key[8] == feed_mode
 
-    assert ("t1args" in hout[0].rec.buffers) == (b1 <= 512)
+    assert ("t1args" in hout[0].rec.buffers) == (b1 <= 512 and ctx.packed_fp16)
     hits = ref_i >= 0
     assert int(hits.sum()) >= 3
     np.testing.assert_array_equal(got_i[hits], ref_i[hits])
@@ -444,9 +445,10 @@ def test_gpu_tier1_fp16_chains_and_feeds(gpu_dev, chain, feed_mode, monkeypatch)
 
 
 @pytest.mark.parametrize("chain", [(64, 256), (128, 512)])
-def test_gpu_tier1_fp16_survivor_counts_and_overflow(gpu_dev, chain):
+def test_gpu_tier1_fp16_survivor_counts_and_overflow(gpu_dev, chain, monkeypatch):
     """Verify exact 0, 1, 3, 5, and 7 survivor counts (`NOPAIR` odd lanes) and FP16 overflow."""
     _, ctx = gpu_dev
+    monkeypatch.setattr(ctx, "packed_fp16", True)
     b0, b1 = chain
     n, nd, nt = 2048, 4, 8
     rng = np.random.default_rng(2200 + b1)
@@ -624,7 +626,9 @@ def test_gpu_tier1_fp16_shifted_bands_and_clustered_tier0(gpu_dev, monkeypatch):
 def test_gpu_tier1_fp16_direct_refine_and_overflow_fallback(gpu_dev, chain, monkeypatch):
     """Verify `HierarchicalFilter` with `set_taps` (`use_direct=True`) elects coarse lags in FP16
     Tier 1 and falls back cleanly to `fbSurv` on an FP16-overflowing glitch block."""
-    dev_str, _ = gpu_dev
+    dev_str, ctx = gpu_dev
+    monkeypatch.setattr(type(ctx), "packed_fp16", True)
+    monkeypatch.setattr(ctx, "packed_fp16", True)
     from matchedfilter.benchmark import _inspiral_power
     n, nt, nblocks = 2048, 16, 24
     rng = np.random.default_rng(5500 + chain[1])

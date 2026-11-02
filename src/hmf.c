@@ -25,7 +25,8 @@ int ap_gate16_run(void *g,int d0,int nd,int t0,int nt,size_t ws,size_t we,ap_pea
 int ap_gate16_run_pairs(void *g,int d0,int t0,const int *dsel,const int *tsel,int n,int nt_row,
                         size_t ws,size_t we,ap_peak *out);
 int ap_gate16_run_pairs_lag(void *g,int d0,int t0,const int *dsel,const int *tsel,int n,int nt_row,
-                            size_t ws,size_t we,int elect_lag,ap_peak *out);
+                            size_t ws,size_t we,int elect_lag,float thr,
+                            int *dst_d,int *dst_t,ap_peak *out);
 
 #define HMF_MAX_DIRECT_BINS 4
 #define HMF_COARSE_SUBBINS 16
@@ -2004,7 +2005,7 @@ static int hmf_q15_prepare_data(ap_hmf_plan *p,hmf_tier *tr,int ql){
    stay fixed even when its position in the execution order changes. */
 static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
                           const int *ds,const int *ts,int count,size_t start,size_t end,
-                          int use_q15,int elect_g16_lag,int16_t *qlag){
+                          int use_q15,int elect_g16_lag,int16_t *qlag,int *dst_d,int *dst_t){
   const size_t r=p->n/tr->m;
   size_t lo=start/r, hi=(end+r-1)/r+1;      /* as ap_hmf_run: one coarse sample past each end */
   if(lo>0) lo--;
@@ -2020,11 +2021,12 @@ static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
   }
   /* A Q15 tier's decision per listed pair goes to p->qpass[j] (free once the first tier's
      survivors are compacted), with optional coarse argmax lag in qlag[j]; an FP16 or FP32
-     tier's maximum goes to its cebuf. */
+     tier's maximum goes to its cebuf (with optional direct survivor compaction on FP16). */
   if(use_q15)
     return ap_mf_q15_pairs_lag(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL,qlag);
   if(use_g16)
-    return ap_gate16_run_pairs_lag(tr->g16,d0,t0,ds,ts,count,nt,lo,hi,elect_g16_lag,tr->cebuf);
+    return ap_gate16_run_pairs_lag(tr->g16,d0,t0,ds,ts,count,nt,lo,hi,elect_g16_lag,tr->thr,
+                                   dst_d,dst_t,tr->cebuf);
   return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi>lo?hi-lo:1,tr->thr,
                                 tr->cebuf,NULL,lo,hi,nt);
 }
@@ -2185,8 +2187,14 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                                    NULL,NULL,p->qpass,qlag,tr->qscr) < 0)
             return -1;
         }
+      } else if(!use_q15 && tr->g16 && fast_sparse && checked_d && checked_t
+                && !p->dump && !p->trace){
+        nnext = run_gate_pairs(p,tr,d0,t0,nt,checked_d,checked_t,nfire,start,end,
+                               use_q15,elect_last,qlag,tr->fire_d,tr->fire_t);
+        if(nnext < 0) return -1;
+        q15_direct_fire = 2;
       } else if(run_gate_pairs(p,tr,d0,t0,nt,checked_d,checked_t,nfire,start,end,
-                               use_q15,elect_last,qlag)<0){
+                               use_q15,elect_last,qlag,NULL,NULL)<0){
         return -1;
       }
       if(use_q15){
