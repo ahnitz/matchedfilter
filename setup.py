@@ -123,7 +123,7 @@ SOURCES = (
     + [(s, CXX + ARCH, DEFS) for s in HWY_SRC]   # same baseline, or the
                                                  # dispatch tables disagree
     + [(s, BASE + ARCH, []) for s in ("src/matchfilt.c", "src/hmf.c", "src/dispatch.c",
-                                      "src/fft_accel.c", "python/matchedfilter/_core.c")]
+                                      "python/matchedfilter/_core.c")]
 )
 
 
@@ -163,8 +163,6 @@ class BuildExt(build_ext):
             self.get_ext_fullpath(ext.name),
             libraries=["m"] + HWY_LIBS,
             library_dirs=HWY_LIBDIRS,
-            # vDSP for the block forward where it is faster (src/fft_accel.c).
-            extra_postargs=["-framework", "Accelerate"] if sys.platform == "darwin" else [],
             debug=self.debug,
             target_lang="c++",     # kernel.cc and Highway's own sources
         )

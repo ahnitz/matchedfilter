@@ -27,29 +27,6 @@ def price_once(memo, mkey, file_key, measure, read):
     return hit
 
 
-#: n -> whether the hierarchical series' block forward runs through the platform FFT
-#: (vDSP on macOS): priced once per n (_cpu_forward_platform), kept in MF_COST_FILE.
-_CPU_FWD_PFFT = {}
-
-
-def _cpu_forward_platform(n):
-    """Whether the block forward at n is cheaper through the platform FFT. Both transforms
-    are timed once on this size (_core.forward_cost: copy with 1/n and transform, best of a
-    few repetitions) and the cheaper is kept ("cpu-fft|n|cpu" in MF_COST_FILE). Their
-    results differ by fp32 rounding only, so this is a price, not a contest: a trial over
-    whole calls dilutes a transform that is ~11% of a call below the shared tie margin
-    (_choice.TIE), which kept the slower transform in half of fresh files."""
-    n = int(n)
-
-    def measure():
-        native, platform = _core.forward_cost(n)
-        hit = bool(platform > 0 and platform < native)
-        return hit, {"platform": hit, "seconds": {"engine": native, "platform": platform}}
-    return price_once(_CPU_FWD_PFFT, n, "cpu-fft|%d|cpu" % n, measure,
-                      lambda r: bool(r["platform"]) if isinstance(r, dict) and "platform" in r
-                      else None)
-
-
 #: (backend, gate kind) key -> ticks per lag x tap of the direct refine (_direct_lagtap).
 _DIRECT_LAGTAP = {}
 

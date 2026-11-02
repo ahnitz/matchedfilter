@@ -249,9 +249,8 @@ def _plan_state(bank):
         for name in ("plan", "_flat_plan"):
             pl = getattr(g, name, None)
             if pl is not None:
-                out.append("%s n=%d chain=%s q15=%s pfft=%s" % (
-                    name, g.n, getattr(pl, "_chain", None), getattr(pl, "_q15", None),
-                    getattr(pl, "_pfft", None)))
+                out.append("%s n=%d chain=%s q15=%s" % (
+                    name, g.n, getattr(pl, "_chain", None), getattr(pl, "_q15", None)))
     return "; ".join(out)
 
 

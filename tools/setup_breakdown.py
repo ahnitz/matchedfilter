@@ -68,7 +68,7 @@ def main():
             (H, "set_reference", "HF set_reference (rest)"),
             (TD, "_choose_layout", "block layout"), (TD, "_build", "bank build"),
             (lay, "_corr_block_costs", "correlation pricing"),
-            (pr, "_cpu_forward_platform", "forward/direct pricing"), (pr, "_direct_lagtap", "forward/direct pricing"),
+            (pr, "_direct_lagtap", "forward/direct pricing"),
             (TD, "__init__", "bank init (rest)"), (TD, "set_reference", "bank set_reference (rest)"),
             ]:
         wrap(owner, name, part)

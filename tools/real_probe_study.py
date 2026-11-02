@@ -219,7 +219,7 @@ def prepare(file, args, mf, td, np, seed_path, seed):
         baseline_bank_output_sha256=[hashlib.sha256(a.tobytes()).hexdigest()
                                      for a in baseline_result],
         baseline_q15_lock=lock,
-        forward_platform=bool(p._pfft), execution_policy=dict(p._execution_policy),
+        execution_policy=dict(p._execution_policy),
         full_layout_sha256=[hashlib.sha256(a.tobytes()).hexdigest() for a in layout])
     return bank, p, ep, series, layout, provenance
 
