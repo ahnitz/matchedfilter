@@ -55,8 +55,13 @@ void ap_fft_forward_scaled_gm(ap_plan *p, const float *in, size_t have_floats, s
                               float scale, float *re, float *im, float *scratch);
 int  ap_fft_forward_batch(ap_plan *p, const float *const *srcs, const size_t *haves, int cnt,
                           float scale, float *const *outs);
+int  ap_fft_forward_batch_prefix(ap_plan *p, const float *const *srcs, const size_t *haves,
+                                 int cnt, float scale, size_t out_bins, float *const *outs);
 int  ap_fft_real_batch(ap_plan *p, const float *const *srcs, const size_t *haves, size_t stride,
                        int cnt, float scale, const float *rtw, int mirror, float *const *outs);
+int  ap_fft_quad_pair_batch(ap_plan *p, const float *const *zsrcs, const size_t *haves, int cnt,
+                            float scale, const float *rtw, float *const *out_re,
+                            float *const *out_im);
 int  ap_fft_backward_batch(ap_plan *p, const float *const *srcs, size_t have_bins, int cnt,
                            float *const *outs);
 void ap_fft_backward_padded(ap_plan *p, const float *in, size_t have_bins, float *out);
@@ -219,5 +224,13 @@ int ap_q15_data(const ap_plan *p, const float *re, const float *im, int n1, int 
                 int16_t *qd, float *scale_out);
 int ap_q15_lanethr(const ap_plan *p, float threshold, const float *qds, int qds_stride,
                    const float *qts, float margin, int nomargin, int16_t *out);
+int ap_q15_data_band_on(const ap_plan *p, size_t n, const float *spec, size_t k0, size_t khi,
+                        int16_t *qdr, int16_t *qdi, float *scale_out);
+int ap_q15_pairs_batch_on(const ap_plan *p, size_t n, const int16_t *qdm, const float *qds,
+                          const int16_t *qtm, const float *qts, int d0, int t0,
+                          const int *dsel, const int *tsel, int npairs,
+                          float threshold, int nomargin, size_t start, size_t end,
+                          int *dst_d, int *dst_t, unsigned char *pass_out,
+                          int16_t *lag_out, void *scratch);
 
 #endif

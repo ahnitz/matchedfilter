@@ -89,10 +89,23 @@ int ap_fft_forward_batch(ap_plan *p,const float *const *srcs,const size_t *haves
   if(!p || !p->be->fft_forward_batch) return -1;
   return p->be->fft_forward_batch(p->h,srcs,haves,cnt,scale,outs);
 }
+int ap_fft_forward_batch_prefix(ap_plan *p,const float *const *srcs,const size_t *haves,int cnt,
+                                float scale,size_t out_bins,float *const *outs){
+  if(!p) return -1;
+  if(p->be->fft_forward_batch_prefix)
+    return p->be->fft_forward_batch_prefix(p->h,srcs,haves,cnt,scale,out_bins,outs);
+  if(!p->be->fft_forward_batch) return -1;
+  return p->be->fft_forward_batch(p->h,srcs,haves,cnt,scale,outs);
+}
 int ap_fft_real_batch(ap_plan *p,const float *const *srcs,const size_t *haves,size_t stride,
                       int cnt,float scale,const float *rtw,int mirror,float *const *outs){
   if(!p || !p->be->fft_real_batch) return -1;
   return p->be->fft_real_batch(p->h,srcs,haves,stride,cnt,scale,rtw,mirror,outs);
+}
+int ap_fft_quad_pair_batch(ap_plan *p,const float *const *zsrcs,const size_t *haves,int cnt,
+                           float scale,const float *rtw,float *const *out_re,float *const *out_im){
+  if(!p || !p->be->fft_quad_pair_batch) return -1;
+  return p->be->fft_quad_pair_batch(p->h,zsrcs,haves,cnt,scale,rtw,out_re,out_im);
 }
 int ap_fft_backward_batch(ap_plan *p,const float *const *srcs,size_t have_bins,int cnt,
                           float *const *outs){
@@ -402,4 +415,24 @@ int ap_q15_screen_gather(const ap_plan *p, const int16_t *const *drp, const int1
      !lanethr || !bits || !scratch) return -1;
   return b->q15_screen_gather(p->n,drp,dip,trp,tip,cnt,start,end,lanethr,bits,lanemax,laneidx,
                               scratch);
+}
+
+int ap_q15_data_band_on(const ap_plan *p, size_t n, const float *spec, size_t k0, size_t khi,
+                        int16_t *qdr, int16_t *qdi, float *scale_out){
+  const ap_backend *b=be_of(p);
+  if(!b || !b->q15_data_band || !spec || !qdr || !qdi || !scale_out) return -1;
+  return b->q15_data_band(n,spec,k0,khi,qdr,qdi,scale_out);
+}
+
+int ap_q15_pairs_batch_on(const ap_plan *p, size_t n, const int16_t *qdm, const float *qds,
+                          const int16_t *qtm, const float *qts, int d0, int t0,
+                          const int *dsel, const int *tsel, int npairs,
+                          float threshold, int nomargin, size_t start, size_t end,
+                          int *dst_d, int *dst_t, unsigned char *pass_out,
+                          int16_t *lag_out, void *scratch){
+  const ap_backend *b=be_of(p);
+  if(!b || !b->q15_pairs_batch || !qdm || !qds || !qtm || !qts || !scratch) return -1;
+  if(npairs>0 && (!dsel || !tsel || (!dst_d && !pass_out))) return -1;
+  return b->q15_pairs_batch(n,qdm,qds,qtm,qts,d0,t0,dsel,tsel,npairs,threshold,nomargin,
+                            start,end,dst_d,dst_t,pass_out,lag_out,scratch);
 }

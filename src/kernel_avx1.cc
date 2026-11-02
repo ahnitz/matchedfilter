@@ -50,7 +50,7 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.create_pairbatch = k::create_small;
     be.broadcast_data = k::broadcast_data;
     be.binmax_prod_threshold = k::binmax_prod_threshold;
-    be.split_store = k::split_store;     /* its vector path needs w == the plan's 8 lanes */
+    be.split_store = k::split_store_fast; /* its vector path needs w == the plan's 8 lanes */
     be.scale_load = k::scale_load;
     be.lanes_transpose = k::lanes_transpose;
     be.fft_forward_batch = k::fft_forward_batch;
@@ -79,6 +79,10 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.q15_lanethr = k::q15_lanethr;
     be.q15_data_contig = k::q15_data_contig;
     be.q15_screen_gather = k::q15_screen_gather;
+    be.fft_quad_pair_batch = k::fft_quad_pair_batch;
+    be.q15_data_band = k::q15_data_band;
+    be.q15_pairs_batch = k::q15_pairs_batch;
+    be.fft_forward_batch_prefix = k::fft_forward_batch_prefix;
     ready = 1;
   }
   return &be;
