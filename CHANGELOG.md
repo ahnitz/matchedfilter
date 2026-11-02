@@ -202,6 +202,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- The platform FFT (2039868e): macOS no longer transforms through Accelerate's vDSP, and
+  `MatchedFilter.set_platform_fft` / `HierarchicalMatchedFilter.set_platform_fft` are gone
+  with it (src/fft_accel.c and its pricing). Every platform runs the library's own
+  transforms, one code path to tune. The M2's fine stage is 3% faster, since the forward
+  priced through vDSP lost to the batched forward. The middle correlation is 47% slower
+  (48.5 to 71.2 s on test27; steady time 6.4% longer), since vDSP's transforms are 1.44x
+  ours at n = 2048 and about 2.2x at 32k-64k. The kernel work since then is closing that gap.
 - `MF_COARSE_RAW` (the GPU fp16 tier always reports its own statistic).
 - `MF_GPU_FUSE_INTERLEAVE` (the fused interleave depth is gone).
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
