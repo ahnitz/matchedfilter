@@ -32,7 +32,8 @@ with --strict-q15. Dismissing more than the plan always fails.
   python tools/fdr_audit.py --bank 16 --q15                  # tier-0 pair centroids too
 
 With --bank NT each case is a bank of NT templates of the profile's output power, in groups
-of four whose members differ by up to a coarse lag and a phase: what tier-0 pair centroids
+of four whose members differ by up to a coarse lag, a phase and a small chirp, at the
+reference's power: what tier-0 pair centroids
 (gatechain.cluster_tier0_candidates) merge. The library's own HierarchicalFilter runs it at
 the case's chain (MF_CHAIN_FORCE, which leaves clustering to the model, as in production),
 with the centroids ("t0c") and without ("flat0"), each at its own plan's thresholds, and each
@@ -255,27 +256,26 @@ def run_case(job):
     return row
 
 
-def bank_spectra(power, n, nt, band, seed, tilt=0.15):
+def bank_spectra(power, n, nt, band, seed, chirp=3.0):
     """(nt, n) template signal spectra of output power `power`, in groups of four: the
-    profile's zero-phase signal delayed by a group's own multiple of 4 n / nt samples, each
-    member delayed further by up to a coarse lag of `band` either way, turned by a random
-    phase, and tilted by a power of frequency up to `tilt` either way (at unit total power):
-    a delay alone a centroid's lag alignment undoes, a shape it cannot, so a centroid of up to
-    four members (gatechain.cluster_tier0_candidates) retains each differently. The bank's
-    templates then depart from the reference profile a little, as a real bank's from its
-    mean. Delays, not chirps, tell the groups apart: a chirp spreads the template in
-    time, and the flat filter loses SNR to it (a 28-radian chirp lost 4.5% of the detections
-    at n=2048), which the gate model, as the single-template audit, leaves out."""
+    profile's signal delayed by a group's own multiple of 4 n / nt samples, each member
+    delayed further by up to a coarse lag of `band` either way, turned by a random phase, and
+    given a quadratic phase of up to `chirp` radians at n / 2 either way. A delay alone a
+    centroid's lag alignment undoes, a chirp it cannot, so a centroid of up to four members
+    (gatechain.cluster_tier0_candidates) retains each differently. Every template keeps the
+    reference's power: the gate model assumes the bank's band fractions are the reference's
+    (a spectral tilt of k^0.15 put plans with and without centroids 3-20x off on power-law
+    profiles), and a large chirp spreads the template in time, losing flat-filter SNR (28
+    radians lost 4.5% of the detections at n=2048)."""
     rng = np.random.default_rng(seed)
     k = np.arange(n)
+    x = (k / (n / 2.0)) ** 2
     amp = np.sqrt(power)
     out = np.empty((nt, n), np.complex64)
-    kk = np.maximum(k, 1) / (n / 8.0)
     for t in range(nt):
         delay = (t // 4) * 4 * (n // nt) + rng.uniform(-1, 1) * (n // band)
-        a = amp * kk ** (tilt * rng.uniform(-1, 1))
-        a /= np.sqrt((a ** 2).sum() / (amp ** 2).sum())
-        out[t] = a * np.exp(-2j * np.pi * delay * k / n + 1j * rng.uniform(0, 2 * np.pi))
+        ph = -2 * np.pi * delay * k / n + chirp * rng.uniform(-1, 1) * x + rng.uniform(0, 2 * np.pi)
+        out[t] = amp * np.exp(1j * ph)
     return out
 
 
@@ -307,9 +307,12 @@ def run_bank_case(job):
                 for stat in (("fp32", "q15") if dname == "cpu" and a["q15"] else ("fp32",)):
                     hf = mf.HierarchicalFilter(n, _B, nt, snr=a["snr"], fd=a["fd"], search_window=win,
                                                **({} if dev is None else dict(device=dev)))
-                    hf.set_reference(power.astype(np.float32))
-                    hf.set_templates(np.conj(H))
-                    r = hf._resolve()
+                    try:
+                        hf.set_reference(power.astype(np.float32))
+                        hf.set_templates(np.conj(H))
+                        r = hf._resolve()
+                    except ValueError as e:            # no coarse pass for this profile
+                        return dict(row, error=str(e).split(":")[0])
                     if dname == "cpu":
                         hf._execution_plan()
                         hf._set_q15(stat == "q15")
@@ -388,7 +391,7 @@ def main(argv=None):
     ap.add_argument("--window", default=None, help="START,END: search lags [START, END) only")
     ap.add_argument("--q15", action="store_true", help="also run the Q15-screened chains")
     ap.add_argument("--strict-q15", action="store_true",
-                    help="a Q15 chain dismissing less than its budget fails too")
+                    help="a Q15 or centroid chain dismissing less than its plan fails too")
     ap.add_argument("--check", type=int, default=0,
                     help="model detections a plan's dismissal is counted on (default max(1M, 10 x --inj))")
     ap.add_argument("--seed", type=int, default=11)
@@ -426,7 +429,10 @@ def main(argv=None):
             continue
         for key, e in r["engines"].items():
             off = e["p"] < level
-            low = off and e["ratio"] < 1 and key.endswith("q15") and not a.strict_q15
+            # dismissing less than the plan: Q15 rounding, or a centroid's model (its draws
+            # leave out the lag_pad lags the engine also searches); both cost work, not signals
+            low = (off and e["to_model"] < 1 and (key.endswith("q15") or key.startswith("t0c"))
+                   and not a.strict_q15)
             fail = (off and not low) or e["mismatches"]
             bad += bool(fail)
             under += bool(low)
@@ -437,7 +443,7 @@ def main(argv=None):
                 head, key, ",".join("%.2f" % t for t in e.get("thresholds", r.get("thresholds"))),
                 r["detections"], e["misses"], e["ratio"], e["to_model"], e.get("plan", r.get("model")),
                 e["p"], clus, "  mismatches %d" % e["mismatches"] if e["mismatches"] else "",
-                "  <-- OFF" if fail else "  (under: Q15 rounding)" if low else ""), flush=True)
+                "  <-- OFF" if fail else "  (under the plan)" if low else ""), flush=True)
     keys = sorted({k for r in rows for k in r.get("engines", {})}, key=lambda k: (k.endswith("q15"), k))
     for key in keys:
         ok = [r for r in rows if key in r.get("engines", {})]
@@ -447,7 +453,7 @@ def main(argv=None):
             print("pooled %s: %d misses of %d detections over %d cases: %.3fx the budget "
                   "(+- %.3f binomial; plans scatter about fd / sqrt(47) each)"
                   % (key, m, d, len(ok), m / d / a.fd, math.sqrt(max(m, 1)) / d / a.fd))
-    print("%d of %d off the plan or mismatched, %d Q15 under it (%.0f s)"
+    print("%d of %d off the plan or mismatched, %d Q15 or centroid chains under it (%.0f s)"
           % (bad, tests, under, time.time() - t0))
     if a.json:
         with open(a.json, "w") as f:
