@@ -901,10 +901,8 @@ class HierarchicalFilter(MatchedFilter):
                                 self._pending_ref, self.n, snr, self.fd,
                                 ntemplates=self.ntemplates,
                                 cost=base_cm.with_tier0_cluster({b0: ratio}), max_tiers=tiers,
-                                window=self.search_window)
-                            return min((q["cost"] for q in plans_r
-                                        if len(q["chain"]) >= 2 and q["chain"][0] == b0),
-                                       default=float("inf"))
+                                window=self.search_window, first=b0)
+                            return min((q["cost"] for q in plans_r), default=float("inf"))
 
                         def k4_can_win(cl_k2, limit=limit, bound=bound):
                             # Pass 2 merges pairs of Pass-1 centroids: at least half remain
