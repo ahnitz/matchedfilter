@@ -53,6 +53,20 @@ def _check(jobs):
     return sum(len(r.snr) for r in got)
 
 
+def _same_follow_up(want, got):
+    """A device follow-up batch's result equals the call made alone: its indices exactly, its
+    values to a few ulp. Metal compiles the follow-up kernels with fast math
+    (_mtlcompute._ieee_kernel), and a batch and a lone call run different kernels, which round
+    apart by up to 3.9e-7 relative (an M2, 2026-11-01); a stale buffer or a wrong template
+    differs by O(1)."""
+    for f in want._fields:
+        w, g = np.asarray(getattr(want, f)), np.asarray(getattr(got, f))
+        if np.issubdtype(w.dtype, np.inexact):
+            np.testing.assert_allclose(g, w, rtol=1e-6, atol=0)
+        else:
+            np.testing.assert_array_equal(g, w)
+
+
 def test_replayed_calls_match_full_calls(monkeypatch):
     rng, banks = _setup(monkeypatch)
     S = 1 << 17
@@ -189,8 +203,7 @@ def test_pooled_follow_up_workspaces_in_flight(monkeypatch):
     got = [f.result() for f in f2 + f1]
     want = [b.filter_series(x, **kw) for b, x, kw in j2 + j1]
     for r1, r2 in zip(want, got):
-        for f in r1._fields:
-            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+        _same_follow_up(r1, r2)
 
 
 def test_staged_series_in_flight(monkeypatch):
@@ -464,8 +477,7 @@ def test_device_followups_track_their_buffers(monkeypatch, new_alloc):
         many = TimeDomainFilterBank.filter_series_many(jobs)
         direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
         for r1, r2 in zip(direct, many):
-            for f in r1._fields:
-                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+            _same_follow_up(r1, r2)
     assert calls, "the device follow-up path was not taken"
 
 
@@ -494,8 +506,7 @@ def test_device_followups_in_flight(monkeypatch):
     got = [f.result() for f in f2 + f1]              # second batch collected first
     want = [b.filter_series(x, **kw) for b, x, kw in j2 + j1]
     for r1, r2 in zip(want, got):
-        for f in r1._fields:
-            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+        _same_follow_up(r1, r2)
 
 
 def test_device_followups_steady_state_allocates_nothing(monkeypatch):
@@ -540,8 +551,7 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
             on[0] = False
         for (b, x, kw), r2 in zip(jobs, many):
             r1 = b.filter_series(x, **kw)
-            for f in r1._fields:
-                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+            _same_follow_up(r1, r2)
 
     for r in rows:
         _fill(rng, r, S)

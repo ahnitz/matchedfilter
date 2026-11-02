@@ -103,7 +103,7 @@ def test_quadrature_taps_through_the_hierarchy(pack, device):
 
 
 @pytest.mark.parametrize("pack", [False, True])
-def test_a_real_series_is_transformed_at_half_size_exactly(pack):
+def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
     """A CPU hierarchical bank given a real series transforms its blocks as real ones
     (half-size transforms giving the full spectrum, ap_hmf_set_real_series): the same
     triggers and values, to float rounding, as the same series widened to complex."""
@@ -120,11 +120,21 @@ def test_a_real_series_is_transformed_at_half_size_exactly(pack):
         pos = 20000 + j * (L - 40000) // 6
         x[pos:pos + c] += 25.0 * np.real(taps[i, :c][::-1]) / np.linalg.norm(taps[i, :c])
 
+    # The same decisions for both: a joint trial timing each bank apart may lock other arms
+    # (block size, Q15 screen), and without one the block size is priced from timed
+    # calibrations, so on a loaded runner the two banks took different block sizes and so
+    # different bin grids (2046 triggers against 2047; peaks hundreds of samples apart).
+    # Hence no trials, one block size, and no direct refine: its prices are timed apart for a
+    # real and a complex series, and refining around the last tier's coarse lag it reports the
+    # excursion there where a whole-block transform reports the bin's largest.
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+
     def run(real):
         # One chain for both (in Hz): a chain chosen per bank from timed calibrations may
         # differ between the two, and two chains may dismiss different borderline pairs.
         bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
-                                    pack_templates=pack, binsize=2048,
+                                    pack_templates=pack, binsize=2048, fft_lengths=(2048,),
                                     coarse_band_hz=(128.0, 256.0))
         bank.set_reference(w, delta_f=df)
         r = bank.filter_series(x if real else x.astype(np.complex64))
