@@ -262,13 +262,6 @@ size_t ap_hmf_nbins(const ap_hmf_plan *p, size_t binsize, size_t start, size_t e
  * reference: they become stale, and a run over a stale template fails until it is
  * set again (no unscaled copy is kept to rescale them from). */
 int    ap_hmf_set_reference(ap_hmf_plan *p, const float *power);
-/* Input noise PSD per frequency bin (length n, finite, nonnegative, positive sum),
- * or NULL to clear. When active, each template t's coarse band fraction f_{t,i}
- * is weighted by psd[k] * |H_t[k]|^2 and load_tiers normalizes each template t by
- * 1 / sqrt(f_{t,i}) so every template has unit coarse noise variance across tiers,
- * even when ap_hmf_set_reference is also set. Marks loaded templates stale and
- * clears Tier-0 clusters. */
-int    ap_hmf_set_input_psd(ap_hmf_plan *p, const float *psd);
 /* Ingest, as ap_mf_set_data: spec (n interleaved complex float32) is copied, so the
    caller's buffer may be reused or freed once this returns. */
 int    ap_hmf_set_data    (ap_hmf_plan *p, int d, const float *spec);
