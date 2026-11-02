@@ -2489,10 +2489,11 @@ def _cached_band_offsets(p, sig_p, n, floor):
 
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
-                 ntemplates=None, nsamp=None, tier0_clusters=None):
+                 ntemplates=None, nsamp=None, tier0_clusters=None, first=None):
     """Price every chain and return (best, all plans sorted by cost): plan_chain's plans,
     ranked by their searched cost, (None, []) when none can be planned. nsamp: the
-    detections to draw (default: model_draws').
+    detections to draw (default: model_draws'). first: price only the chains of two or more
+    tiers whose first tier is this band (a bound on one tier-0 band needs no others).
 
     Cached like the draws it is built from: by profile signature, and reused for
     profiles within the cosine similarity gatemodel applies to them.
@@ -2516,7 +2517,8 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         extra = extra + (("t0", tuple(sorted(t0_map.items()))),)
     params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
               # ntemplates prices the feed
-              None if not getattr(cost, "feed", None) else int(ntemplates or 0)) + extra
+              None if not getattr(cost, "feed", None) else int(ntemplates or 0),
+              None if first is None else int(first)) + extra
     key = (sig_p,) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -2528,14 +2530,15 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         return hit
     offsets_map = dict(zip(c_bands, k0_cand))
     out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp,
-                        bands=bands, offsets_by_band=offsets_map, tier0_clusters=t0_map)
+                        bands=bands, offsets_by_band=offsets_map, tier0_clusters=t0_map,
+                        first=first)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
-                  nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None):
+                  nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None, first=None):
     p = _norm_profile(power, n)
     if bands is None:
         bands = usable_bands(p, n, floor)
@@ -2587,6 +2590,8 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
 
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
+        if first is not None and (len(chain) < 2 or chain[0] != first):
+            continue
         offs = tuple(offsets_by_band[b] for b in chain)
         if len(chain) > 1 and chain[0] in t0_draws:
             sig_use, noise_use, memo_use, lags_use = t0_draws[chain[0]]
