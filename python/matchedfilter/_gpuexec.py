@@ -1126,32 +1126,42 @@ class Executor(HierOps):
         from ._gpuhost import FollowupUnsupported, assemble_followups, followup_layout
         groups, layout = followup_layout(jobs, self)
         if not groups:
-            return lambda: []
+            return lambda: assemble_followups(layout, lambda gw: None)
         prior = holder.__dict__.pop("followups_inflight", None)
         if prior is not None:
             prior()                       # its records' tables and outputs are rewritten below
         runs, places = [], {}
-        for gw in groups:
-            n, nbins, m = gw["n"], gw["nbins"], int(gw["rows"].size)
-            tv, sv = shared_view(gw["plan"]._gtmpl, self), shared_view(gw["alloc"], self)
-            if tv is None or sv is None or not self._x_has_kernel("items", n) or n > 65536:
-                raise FollowupUnsupported("templates or series outside this device's reach, "
-                                          "or no refineItems build for n=%d" % n)
-            cap = 1 << max(6, (max(m, 1) - 1).bit_length())
-            shape = (n, nbins, cap)
-            place = places[shape] = places.get(shape, -1) + 1
-            rec, offs = self._followup_record(("followups",) + shape + (place,), n, nbins, cap)
-            tab = np.zeros(offs[-1] // 4, np.uint32)
-            tab[offs[0] // 4:offs[0] // 4 + m] = gw["rows"]
-            tab[offs[1] // 4:offs[1] // 4 + 6 * m] = gw["entries"].ravel()
-            tab[offs[2] // 4:offs[2] // 4 + cap] = np.arange(cap, dtype=np.uint32)
-            tab[offs[3] // 4:offs[3] // 4 + 3] = (m, 1, 1)
-            self._x_upload(rec.buffers["tab"], tab, None)
-            bs = gw["bs"]
-            binds = {"series": sv, "tmpl": tv, "fwd": (gw["nser"], gw["code"]),
-                     "items": (int(gw["plan"]._gtmpl.shape[0]), bs,
-                               bin_shift(bs) & 0xFFFFFFFF, nbins, 0)}
-            runs.append((rec, binds, gw))
+        held = set()
+        self._exec_hold = held
+        try:
+            for gw in groups:
+                n, nbins, m = gw["n"], gw["nbins"], int(gw["rows"].size)
+                tstage = gw["tstage"]
+                ntmpl = int(tstage.shape[0])
+                sv = shared_view(gw["alloc"], self)
+                if sv is None or not self._x_has_kernel("items", n) or n > 65536:
+                    raise FollowupUnsupported("series outside this device's reach, "
+                                              "or no refineItems build for n=%d" % n)
+                min_cap = max(64, (1 << 19) // max(n, 1))
+                cap = max(min_cap, 1 << max(6, (max(m, 1) - 1).bit_length()))
+                min_tcap = max(16, (1 << 16) // max(n, 1))
+                tcap = max(min_tcap, 1 << max(4, (max(ntmpl, 1) - 1).bit_length()))
+                shape = (n, nbins, cap, tcap)
+                place = places[shape] = places.get(shape, -1) + 1
+                rkey = ("followups",) + shape + (place,)
+                rec, offs, tab = self._followup_record(rkey, n, nbins, cap, tcap)
+                held.add(rkey)
+                tab[offs[0] // 4:offs[0] // 4 + m] = gw["rows"]
+                tab[offs[1] // 4:offs[1] // 4 + 6 * m] = gw["entries"].ravel()
+                tab[offs[3] // 4:offs[3] // 4 + 3] = (m, 1, 1)
+                self._x_upload(rec.buffers["tab"], tab, None)
+                self._x_upload(rec.buffers["tmpl"], tstage, None)
+                bs = gw["bs"]
+                binds = {"series": sv, "fwd": (gw["nser"], gw["code"]),
+                         "items": (ntmpl, bs, bin_shift(bs) & 0xFFFFFFFF, nbins, 0)}
+                runs.append((rec, binds, gw))
+        finally:
+            del self._exec_hold
         reads = set()
         for rec, binds, _ in runs:
             reads |= self._reads(rec, binds)
@@ -1194,10 +1204,11 @@ class Executor(HierOps):
                 prior()
             del holder.followup_owner
 
-    def _followup_record(self, key, n, nbins, cap):
+    def _followup_record(self, key, n, nbins, cap, tcap):
         """(record, table offsets) of a follow-up group (submit_followups): its tables --
         rows, entries, the identity list the listed forward walks, and the row count as
-        indirect arguments -- share one upload buffer."""
+        indirect arguments -- share one upload buffer, and its unique template rows share
+        a dedicated template upload buffer."""
         align = max(16, int(self.storage_offset_alignment))
         offs, at = [], 0
         for nbytes in (4 * cap, 24 * cap, 4 * cap, 16):      # entries: six words (refineItems)
@@ -1205,11 +1216,13 @@ class Executor(HierOps):
             at = -(-(at + nbytes) // align) * align
         offs.append(at)
         table = self._exec_table()
+        htabs = self.__dict__.setdefault("_followup_tabs", {})
         rec = table.get(key)
         if rec is None:
-            self._exec_room(cap * n * 8 + cap * nbins * 12 + align)
+            self._exec_room((cap + tcap) * n * 8 + cap * nbins * 12 + align)
             rec = Record()
             tab = self._exec_buffer(rec, "tab", nbytes=at, upload=True)
+            tmpl = self._exec_buffer(rec, "tmpl", nbytes=tcap * n * 8, upload=True)
             spec = self._exec_buffer(rec, "spec", nbytes=cap * n * 8)
             # Peak values, then indices, in one buffer: one readback.
             vbytes = -(-cap * nbins * 8 // align) * align
@@ -1218,19 +1231,22 @@ class Executor(HierOps):
             bi = rec.buffers["idx"] = self._x_section(out, vbytes, cap * nbins * 4)
             rows, ent, ids, args = (self._x_section(tab, o, b) for o, b in
                                     zip(offs, (4 * cap, 24 * cap, 4 * cap, 16)))
+            host_tab = np.zeros(at // 4, np.uint32)
+            host_tab[offs[2] // 4:offs[2] // 4 + cap] = np.arange(cap, dtype=np.uint32)
+            htabs[key] = host_tab
             lst = self._x_list("followups")
             lst.barrier()                 # after writes in flight to the series (a middle stage)
             lst.listed(self._x_kernel("fwd_listed", n), args, cap,
                        [Arg("series"), rows, spec, ids, args], (Arg("fwd", 2),))
             lst.barrier()
             lst.listed(self._x_kernel("items", n), args, cap,
-                       [spec, Arg("tmpl"), bi, bv, ent, args], (Arg("items", 5),))
+                       [spec, tmpl, bi, bv, ent, args], (Arg("items", 5),))
             lst.barrier()
             lst.readback(out, vbytes + cap * nbins * 4)
             rec.native = lst.end()
             table[key] = rec
         self._cache_touch(key)
-        return rec, offs
+        return rec, offs, htabs[key]
 
     # ---- grouped hierarchical calls -----------------------------------------------------
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
