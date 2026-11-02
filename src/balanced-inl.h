@@ -1319,14 +1319,17 @@ static HWY_NOINLINE MF_FWD_SECTION void fft_forward_scaled_gm(
 }
 
 /* Forward transform of cnt (1 .. AP_W) complex blocks in parallel across SIMD lanes on a
-   small (element-transform) plan: each block scaled by `scale`, zero-padded past haves[l] to N,
-   transformed in register/L1D via small_efft, and written interleaved to outs[l]. */
-static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *const *srcs,
-                                                         const size_t *haves, int cnt,
-                                                         float scale, float *const *outs) {
+   small (element-transform) plan, writing only bins [0, out_bins) (full N when out_bins == 0
+   or out_bins >= N). On 8-lane targets at N = 2048, out_bins = 1024 decomposes Pass 2's
+   length-64 rows into 2x codelet(32) + half-butterfly into an L1D-resident [32][8] tile,
+   skipping the upper butterfly half and the 266 KB bR/bI writeback + strided reload. */
+static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch_prefix(
+    void *vp, const float *const *srcs, const size_t *haves, int cnt,
+    float scale, size_t out_bins, float *const *outs) {
   BP *p = (BP *)vp;
   if (!p || !p->small || cnt < 1 || cnt > AP_W) return -1;
   const size_t N = p->N, W = (size_t)AP_W;
+  const size_t ob = (out_bins == 0 || out_bins > N) ? N : out_bins;
   const vf vs = V_SET1(scale), vz = V_ZERO();
   int full_batch = (cnt == AP_W);
   if (full_batch) {
@@ -1389,10 +1392,87 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *
       }
     }
   }
+  if constexpr (AP_W == 8) {
+    if (N == 2048 && ob == 1024 && p->a1 == 64 && p->a2 == 32) {
+      const int st = p->ea.st;
+      for (size_t e1 = 0; e1 < 64; e1++)
+        codelet(32, p->bR + e1, p->bI + e1, p->sR + e1, p->sI + e1, st);
+      /* Row k2p = 16 of p->w1r/w1i stores W_2048^{16 * e1}, so even indices 2 * k1 equal W_64^{k1}. */
+      const float *tw64r = p->w1r + 16 * 64;
+      const float *tw64i = p->w1i + 16 * 64;
+      alignas(64) vf er[32], ei[32], orr[32], oii[32], sr[32], si[32];
+      for (size_t k2_0 = 0; k2_0 < 32; k2_0 += W) {
+        for (size_t u = 0; u < W; u++) {
+          const size_t k2p = k2_0 + u;
+          const vf *xr = p->bR + k2p * (size_t)st;
+          const vf *xi = p->bI + k2p * (size_t)st;
+          const float *twr = p->w1r + k2p * 64;
+          const float *twi = p->w1i + k2p * 64;
+          if (k2p == 0) {
+            for (int m = 0; m < 32; m++) {
+              er[m]  = xr[2 * m];     ei[m]  = xi[2 * m];
+              orr[m] = xr[2 * m + 1]; oii[m] = xi[2 * m + 1];
+            }
+          } else {
+            for (int m = 0; m < 32; m++) {
+              const int e0 = 2 * m, e1 = 2 * m + 1;
+              const vf wr0 = V_SET1(twr[e0]), wi0 = V_SET1(twi[e0]);
+              const vf wr1 = V_SET1(twr[e1]), wi1 = V_SET1(twi[e1]);
+              er[m]  = V_FMSUB(xr[e0], wr0, V_MUL(xi[e0], wi0));
+              ei[m]  = V_FMADD(xr[e0], wi0, V_MUL(xi[e0], wr0));
+              orr[m] = V_FMSUB(xr[e1], wr1, V_MUL(xi[e1], wi1));
+              oii[m] = V_FMADD(xr[e1], wi1, V_MUL(xi[e1], wr1));
+            }
+          }
+          codelet(32, er, ei, sr, si, 1);
+          codelet(32, orr, oii, sr, si, 1);
+          for (int k1 = 0; k1 < 32; k1++) {
+            const vf wr = V_SET1(tw64r[2 * k1]), wi = V_SET1(tw64i[2 * k1]);
+            const vf tr_v = V_FMSUB(orr[k1], wr, V_MUL(oii[k1], wi));
+            const vf ti_v = V_FMADD(orr[k1], wi, V_MUL(oii[k1], wr));
+            p->sR[(size_t)k1 * W + u] = V_ADD(er[k1], tr_v);
+            p->sI[(size_t)k1 * W + u] = V_ADD(ei[k1], ti_v);
+          }
+        }
+        if (cnt == AP_W) {
+          for (size_t k1 = 0; k1 < 32; k1++) {
+            vf or_out[AP_W], oi_out[AP_W];
+            V_TRANSPOSE(p->sR + k1 * W, or_out);
+            V_TRANSPOSE(p->sI + k1 * W, oi_out);
+            const size_t k0 = k1 * 32 + k2_0;
+            for (int l = 0; l < AP_W; l++) v_inter(outs[l] + 2 * k0, or_out[l], oi_out[l]);
+          }
+        } else {
+          for (size_t k1 = 0; k1 < 32; k1++) {
+            vf or_out[AP_W], oi_out[AP_W];
+            V_TRANSPOSE(p->sR + k1 * W, or_out);
+            V_TRANSPOSE(p->sI + k1 * W, oi_out);
+            const size_t k0 = k1 * 32 + k2_0;
+            for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_out[l], oi_out[l]);
+          }
+        }
+      }
+      return 0;
+    }
+  }
   small_efft(p);
-  if (cnt == AP_W) {
+  const size_t ob_vec = ob & ~(W - 1);
+  if (cnt == AP_W && !p->ea.single && (size_t)(p->ea.m2mask + 1) >= W) {
+    const int st = p->ea.st;
+    for (size_t k0 = 0; k0 < ob_vec; k0 += W) {
+      vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
+      const int base_e = eidx(&p->ea, (int)k0);
+      for (int u = 0; u < AP_W; u++) {
+        kr[u] = p->bR[base_e + u * st];
+        ki[u] = p->bI[base_e + u * st];
+      }
+      V_TRANSPOSE(kr, or_);
+      V_TRANSPOSE(ki, oi);
+      for (int l = 0; l < AP_W; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
+    }
+  } else if (cnt == AP_W) {
     /* Full SIMD batch output: compile-time AP_W bounds keep or_/oi in registers across v_inter. */
-    for (size_t k0 = 0; k0 < N; k0 += W) {
+    for (size_t k0 = 0; k0 < ob_vec; k0 += W) {
       vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
       for (int u = 0; u < AP_W; u++) {
         const int e = eidx(&p->ea, (int)(k0 + (size_t)u));
@@ -1404,7 +1484,7 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *
       for (int l = 0; l < AP_W; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
     }
   } else {
-    for (size_t k0 = 0; k0 < N; k0 += W) {
+    for (size_t k0 = 0; k0 < ob_vec; k0 += W) {
       vf kr[AP_W], ki[AP_W], or_[AP_W], oi[AP_W];
       for (int u = 0; u < AP_W; u++) {
         const int e = eidx(&p->ea, (int)(k0 + (size_t)u));
@@ -1416,7 +1496,23 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *
       for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_[l], oi[l]);
     }
   }
+  for (size_t k = ob_vec; k < ob; k++) {
+    const int e = eidx(&p->ea, (int)k);
+    float r[AP_W], i[AP_W];
+    V_STOREU(r, p->bR[e]);
+    V_STOREU(i, p->bI[e]);
+    for (int l = 0; l < cnt; l++) {
+      outs[l][2 * k]     = r[l];
+      outs[l][2 * k + 1] = i[l];
+    }
+  }
   return 0;
+}
+
+static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch(void *vp, const float *const *srcs,
+                                                         const size_t *haves, int cnt,
+                                                         float scale, float *const *outs) {
+  return fft_forward_batch_prefix(vp, srcs, haves, cnt, scale, 0, outs);
 }
 
 /* Backward transform of cnt (1 .. AP_W) complex spectra in parallel across SIMD lanes on a
@@ -1667,105 +1763,10 @@ static HWY_NOINLINE MF_FWD_SECTION void fft_backward_padded(void *vp, const floa
   }
 }
 
-/* Forward transform + real_split of cnt (1 .. AP_W) real blocks of length n = 2 * p->N in
-   parallel across SIMD lanes on a half-size small plan (h = p->N): vertical real_split computes
-   bins k and h - k together without deinterleave or vector reversal, then transposes positive
-   bins 0 .. h (and negative mirror bins h + 1 .. n - 1 when mirror != 0) into outs[l]. */
-static HWY_NOINLINE MF_FWD_SECTION int fft_real_batch(void *vp, const float *const *srcs,
-                                                      const size_t *haves, size_t stride,
-                                                      int cnt, float scale, const float *rtw,
-                                                      int mirror, float *const *outs) {
-  BP *p = (BP *)vp;
-  if (!p || !p->small || cnt < 1 || cnt > AP_W) return -1;
+static HWY_INLINE int real_split_vertical(BP *p, int cnt, const float *rtw, int mirror,
+                                          float *const *outs) {
   const size_t h = p->N, n = 2 * h, q = h / 2, W = (size_t)AP_W;
-  const size_t st = stride ? stride : 1;
-  const vf vs = V_SET1(scale), vz = V_ZERO(), half = V_SET1(0.5f), sg = V_SIGNMASK();
-  int full_batch = (cnt == AP_W);
-  if (full_batch) {
-    for (int l = 0; l < AP_W; l++)
-      if (haves[l] < n) { full_batch = 0; break; }
-  }
-  size_t j0 = 0;
-  if (full_batch && st == 1) {
-    for (; j0 < h; j0 += W) {
-      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
-      for (int l = 0; l < AP_W; l++) {
-        vf a, b;
-        v_deint(srcs[l] + 2 * j0, &a, &b);
-        rr[l] = V_MUL(a, vs);
-        ri[l] = V_MUL(b, vs);
-      }
-      V_TRANSPOSE(rr, tr);
-      V_TRANSPOSE(ri, ti);
-      const int slot0 = einp(&p->ea, (int)j0);
-      for (int u = 0; u < AP_W; u++) {
-        p->bR[slot0 + u] = tr[u];
-        p->bI[slot0 + u] = ti[u];
-      }
-    }
-  } else if (full_batch && st == 2) {
-    for (; j0 + W < h; j0 += W) {
-      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
-      for (int l = 0; l < AP_W; l++) {
-        vf a0, b0, a1, b1;
-        v_deint(srcs[l] + 4 * j0, &a0, &b0);
-        v_deint(srcs[l] + 4 * j0 + 2 * W, &a1, &b1);
-        v_deint_vec(V_MUL(a0, vs), V_MUL(a1, vs), &rr[l], &ri[l]);
-      }
-      V_TRANSPOSE(rr, tr);
-      V_TRANSPOSE(ri, ti);
-      const int slot0 = einp(&p->ea, (int)j0);
-      for (int u = 0; u < AP_W; u++) {
-        p->bR[slot0 + u] = tr[u];
-        p->bI[slot0 + u] = ti[u];
-      }
-    }
-  }
-  for (; j0 < h; j0 += W) {
-    vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
-    for (int l = 0; l < cnt; l++) {
-      const size_t hv = haves[l] < n ? haves[l] : n;
-      if (st == 1 && 2 * (j0 + W) <= hv) {
-        vf a, b;
-        v_deint(srcs[l] + 2 * j0, &a, &b);
-        rr[l] = V_MUL(a, vs);
-        ri[l] = V_MUL(b, vs);
-      } else if (st == 2 && 2 * (j0 + W) <= hv) {
-        vf a0, b0, a1, b1;
-        v_deint(srcs[l] + 4 * j0, &a0, &b0);
-        if (__builtin_expect(2 * (j0 + W) < hv, 1))
-          v_deint(srcs[l] + 4 * j0 + 2 * W, &a1, &b1);
-        else
-          v_deint(srcs[l] + 4 * j0 + 2 * W - 1, &b1, &a1);
-        v_deint_vec(V_MUL(a0, vs), V_MUL(a1, vs), &rr[l], &ri[l]);
-      } else if (2 * j0 >= hv) {
-        rr[l] = vz;
-        ri[l] = vz;
-      } else {
-        float sr[AP_W] = {0}, si[AP_W] = {0};
-        const float *s = srcs[l];
-        for (size_t u = 0; u < W; u++) {
-          const size_t i0 = 2 * (j0 + u), i1 = i0 + 1;
-          if (i0 < hv) sr[u] = s[i0 * st] * scale;
-          if (i1 < hv) si[u] = s[i1 * st] * scale;
-        }
-        rr[l] = V_LOADU(sr);
-        ri[l] = V_LOADU(si);
-      }
-    }
-    for (int l = cnt; l < AP_W; l++) {
-      rr[l] = vz;
-      ri[l] = vz;
-    }
-    V_TRANSPOSE(rr, tr);
-    V_TRANSPOSE(ri, ti);
-    const int slot0 = einp(&p->ea, (int)j0);
-    for (int u = 0; u < AP_W; u++) {
-      p->bR[slot0 + u] = tr[u];
-      p->bI[slot0 + u] = ti[u];
-    }
-  }
-  small_efft(p);
+  const vf vz = V_ZERO(), half = V_SET1(0.5f), sg = V_SIGNMASK();
   /* Vertical real_split across AP_W blocks: when h >= 2*W, fuse split + transpose in paired
      W-bin chunks (k0 and r0 = h - k0 - W) so the h-vector sR/sI round-trip stays in L1D/regs. */
   if (h >= 2 * W) {
@@ -1926,6 +1927,280 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_real_batch(void *vp, const float *con
     outs[l][2 * h + 1] = 0.0f;
   }
   return 0;
+}
+
+/* Load W strided real pairs (s[4*u], s[4*u + 2]) * scale from 4*W contiguous floats without
+   extracting and discarding the interleaved odd quadrature lane. */
+static HWY_INLINE void v_load_stride2_deint(const float *s, vf vs, vf *re, vf *im) {
+#if defined(AP_SIMD_AVX1)
+  const __m256 u0 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s)),
+                                         _mm_loadu_ps(s + 16), 1);
+  const __m256 u1 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s + 4)),
+                                         _mm_loadu_ps(s + 20), 1);
+  const __m256 u2 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s + 8)),
+                                         _mm_loadu_ps(s + 24), 1);
+  const __m256 u3 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s + 12)),
+                                         _mm_loadu_ps(s + 28), 1);
+  const __m256 p01 = _mm256_shuffle_ps(u0, u1, 0x88);
+  const __m256 p23 = _mm256_shuffle_ps(u2, u3, 0x88);
+  *re = _mm256_mul_ps(_mm256_shuffle_ps(p01, p23, 0x88), vs);
+  *im = _mm256_mul_ps(_mm256_shuffle_ps(p01, p23, 0xdd), vs);
+#elif HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
+  const __m256 u0 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s)),
+                                         _mm_loadu_ps(s + 16), 1);
+  const __m256 u1 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s + 4)),
+                                         _mm_loadu_ps(s + 20), 1);
+  const __m256 u2 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s + 8)),
+                                         _mm_loadu_ps(s + 24), 1);
+  const __m256 u3 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(s + 12)),
+                                         _mm_loadu_ps(s + 28), 1);
+  const __m256 p01 = _mm256_shuffle_ps(u0, u1, 0x88);
+  const __m256 p23 = _mm256_shuffle_ps(u2, u3, 0x88);
+  *re = V_MUL(vf{_mm256_shuffle_ps(p01, p23, 0x88)}, vs);
+  *im = V_MUL(vf{_mm256_shuffle_ps(p01, p23, 0xdd)}, vs);
+#else
+  const size_t W = (size_t)AP_W;
+  const vf e01 = hn::ConcatEven(AP_D, V_LOADU(s + W), V_LOADU(s));
+  const vf e23 = hn::ConcatEven(AP_D, V_LOADU(s + 3 * W), V_LOADU(s + 2 * W));
+  *re = V_MUL(hn::ConcatEven(AP_D, e23, e01), vs);
+  *im = V_MUL(hn::ConcatOdd(AP_D, e23, e01), vs);
+#endif
+}
+
+/* Load 2*W interleaved complex64 samples z[0 .. 2*W) and split into scaled (re, im) pairs
+   for both the even quadrature lane (x_re) and the odd quadrature lane (x_im). */
+static HWY_INLINE void v_load_quad_deint(const float *z, vf vs, vf *re_e, vf *im_e,
+                                         vf *re_o, vf *im_o) {
+#if defined(AP_SIMD_AVX1)
+  const __m256 u0 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z)),
+                                         _mm_loadu_ps(z + 16), 1);
+  const __m256 u1 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z + 4)),
+                                         _mm_loadu_ps(z + 20), 1);
+  const __m256 u2 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z + 8)),
+                                         _mm_loadu_ps(z + 24), 1);
+  const __m256 u3 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z + 12)),
+                                         _mm_loadu_ps(z + 28), 1);
+  const __m256 e01 = _mm256_shuffle_ps(u0, u1, 0x88);
+  const __m256 e23 = _mm256_shuffle_ps(u2, u3, 0x88);
+  const __m256 o01 = _mm256_shuffle_ps(u0, u1, 0xdd);
+  const __m256 o23 = _mm256_shuffle_ps(u2, u3, 0xdd);
+  *re_e = _mm256_mul_ps(_mm256_shuffle_ps(e01, e23, 0x88), vs);
+  *im_e = _mm256_mul_ps(_mm256_shuffle_ps(e01, e23, 0xdd), vs);
+  *re_o = _mm256_mul_ps(_mm256_shuffle_ps(o01, o23, 0x88), vs);
+  *im_o = _mm256_mul_ps(_mm256_shuffle_ps(o01, o23, 0xdd), vs);
+#elif HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
+  const __m256 u0 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z)),
+                                         _mm_loadu_ps(z + 16), 1);
+  const __m256 u1 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z + 4)),
+                                         _mm_loadu_ps(z + 20), 1);
+  const __m256 u2 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z + 8)),
+                                         _mm_loadu_ps(z + 24), 1);
+  const __m256 u3 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(z + 12)),
+                                         _mm_loadu_ps(z + 28), 1);
+  const __m256 e01 = _mm256_shuffle_ps(u0, u1, 0x88);
+  const __m256 e23 = _mm256_shuffle_ps(u2, u3, 0x88);
+  const __m256 o01 = _mm256_shuffle_ps(u0, u1, 0xdd);
+  const __m256 o23 = _mm256_shuffle_ps(u2, u3, 0xdd);
+  *re_e = V_MUL(vf{_mm256_shuffle_ps(e01, e23, 0x88)}, vs);
+  *im_e = V_MUL(vf{_mm256_shuffle_ps(e01, e23, 0xdd)}, vs);
+  *re_o = V_MUL(vf{_mm256_shuffle_ps(o01, o23, 0x88)}, vs);
+  *im_o = V_MUL(vf{_mm256_shuffle_ps(o01, o23, 0xdd)}, vs);
+#else
+  const size_t W = (size_t)AP_W;
+  vf e0, o0, e1, o1;
+  v_deint(z, &e0, &o0);
+  v_deint(z + 2 * W, &e1, &o1);
+  v_deint_vec(V_MUL(e0, vs), V_MUL(e1, vs), re_e, im_e);
+  v_deint_vec(V_MUL(o0, vs), V_MUL(o1, vs), re_o, im_o);
+#endif
+}
+
+/* Forward transform + real_split of cnt (1 .. AP_W) real blocks of length n = 2 * p->N in
+   parallel across SIMD lanes on a half-size small plan (h = p->N): vertical real_split computes
+   bins k and h - k together without deinterleave or vector reversal, then transposes positive
+   bins 0 .. h (and negative mirror bins h + 1 .. n - 1 when mirror != 0) into outs[l]. */
+static HWY_NOINLINE MF_FWD_SECTION int fft_real_batch(void *vp, const float *const *srcs,
+                                                      const size_t *haves, size_t stride,
+                                                      int cnt, float scale, const float *rtw,
+                                                      int mirror, float *const *outs) {
+  BP *p = (BP *)vp;
+  if (!p || !p->small || cnt < 1 || cnt > AP_W) return -1;
+  const size_t h = p->N, n = 2 * h, W = (size_t)AP_W;
+  const size_t st = stride ? stride : 1;
+  const vf vs = V_SET1(scale), vz = V_ZERO();
+  int full_batch = (cnt == AP_W);
+  if (full_batch) {
+    for (int l = 0; l < AP_W; l++)
+      if (haves[l] < n) { full_batch = 0; break; }
+  }
+  size_t j0 = 0;
+  if (full_batch && st == 1) {
+    for (; j0 < h; j0 += W) {
+      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+      for (int l = 0; l < AP_W; l++) {
+        vf a, b;
+        v_deint(srcs[l] + 2 * j0, &a, &b);
+        rr[l] = V_MUL(a, vs);
+        ri[l] = V_MUL(b, vs);
+      }
+      V_TRANSPOSE(rr, tr);
+      V_TRANSPOSE(ri, ti);
+      const int slot0 = einp(&p->ea, (int)j0);
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = tr[u];
+        p->bI[slot0 + u] = ti[u];
+      }
+    }
+  } else if (full_batch && st == 2) {
+    for (; j0 + W < h; j0 += W) {
+      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+      for (int l = 0; l < AP_W; l++) {
+        v_load_stride2_deint(srcs[l] + 4 * j0, vs, &rr[l], &ri[l]);
+      }
+      V_TRANSPOSE(rr, tr);
+      V_TRANSPOSE(ri, ti);
+      const int slot0 = einp(&p->ea, (int)j0);
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = tr[u];
+        p->bI[slot0 + u] = ti[u];
+      }
+    }
+  }
+  for (; j0 < h; j0 += W) {
+    vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+    for (int l = 0; l < cnt; l++) {
+      const size_t hv = haves[l] < n ? haves[l] : n;
+      if (st == 1 && 2 * (j0 + W) <= hv) {
+        vf a, b;
+        v_deint(srcs[l] + 2 * j0, &a, &b);
+        rr[l] = V_MUL(a, vs);
+        ri[l] = V_MUL(b, vs);
+      } else if (st == 2 && 2 * (j0 + W) <= hv) {
+        if (__builtin_expect(2 * (j0 + W) < hv, 1)) {
+          v_load_stride2_deint(srcs[l] + 4 * j0, vs, &rr[l], &ri[l]);
+        } else {
+          vf a0, b0, a1, b1;
+          v_deint(srcs[l] + 4 * j0, &a0, &b0);
+          v_deint(srcs[l] + 4 * j0 + 2 * W - 1, &b1, &a1);
+          v_deint_vec(V_MUL(a0, vs), V_MUL(a1, vs), &rr[l], &ri[l]);
+        }
+      } else if (2 * j0 >= hv) {
+        rr[l] = vz;
+        ri[l] = vz;
+      } else {
+        float sr[AP_W] = {0}, si[AP_W] = {0};
+        const float *s = srcs[l];
+        for (size_t u = 0; u < W; u++) {
+          const size_t i0 = 2 * (j0 + u), i1 = i0 + 1;
+          if (i0 < hv) sr[u] = s[i0 * st] * scale;
+          if (i1 < hv) si[u] = s[i1 * st] * scale;
+        }
+        rr[l] = V_LOADU(sr);
+        ri[l] = V_LOADU(si);
+      }
+    }
+    for (int l = cnt; l < AP_W; l++) {
+      rr[l] = vz;
+      ri[l] = vz;
+    }
+    V_TRANSPOSE(rr, tr);
+    V_TRANSPOSE(ri, ti);
+    const int slot0 = einp(&p->ea, (int)j0);
+    for (int u = 0; u < AP_W; u++) {
+      p->bR[slot0 + u] = tr[u];
+      p->bI[slot0 + u] = ti[u];
+    }
+  }
+  small_efft(p);
+  return real_split_vertical(p, cnt, rtw, mirror, outs);
+}
+
+/* Fused quadrature complex-pair forward transform: cnt (1 .. AP_W/2) blocks of an interleaved
+   complex64 series z = x_re + i x_im of length n = 2 * p->N are loaded once per block, packing
+   x_re into lanes 0 .. cnt-1 and x_im into lanes cnt .. 2*cnt-1 of one small_efft(h) + vertical
+   real_split pass, writing non-negative bins 0 .. h into out_re[l] and out_im[l]. */
+static HWY_NOINLINE MF_FWD_SECTION int fft_quad_pair_batch(void *vp, const float *const *zsrcs,
+                                                           const size_t *haves, int cnt,
+                                                           float scale, const float *rtw,
+                                                           float *const *out_re,
+                                                           float *const *out_im) {
+  BP *p = (BP *)vp;
+  constexpr int H = AP_W / 2;
+  if (!p || !p->small || H < 1 || cnt < 1 || cnt > H) return -1;
+  const size_t h = p->N, n = 2 * h, W = (size_t)AP_W;
+  const vf vs = V_SET1(scale), vz = V_ZERO();
+  int full_batch = (cnt == H);
+  if (full_batch) {
+    for (int l = 0; l < H; l++)
+      if (haves[l] < n) { full_batch = 0; break; }
+  }
+  size_t j0 = 0;
+  if (full_batch) {
+    for (; j0 < h; j0 += W) {
+      vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+      for (int l = 0; l < H; l++) {
+        v_load_quad_deint(zsrcs[l] + 4 * j0, vs, &rr[l], &ri[l], &rr[H + l], &ri[H + l]);
+      }
+      V_TRANSPOSE(rr, tr);
+      V_TRANSPOSE(ri, ti);
+      const int slot0 = einp(&p->ea, (int)j0);
+      for (int u = 0; u < AP_W; u++) {
+        p->bR[slot0 + u] = tr[u];
+        p->bI[slot0 + u] = ti[u];
+      }
+    }
+  }
+  for (; j0 < h; j0 += W) {
+    vf rr[AP_W], ri[AP_W], tr[AP_W], ti[AP_W];
+    for (int l = 0; l < cnt; l++) {
+      const size_t hv = haves[l] < n ? haves[l] : n;
+      if (2 * (j0 + W) <= hv) {
+        v_load_quad_deint(zsrcs[l] + 4 * j0, vs, &rr[l], &ri[l], &rr[cnt + l], &ri[cnt + l]);
+      } else if (2 * j0 >= hv) {
+        rr[l] = vz;
+        ri[l] = vz;
+        rr[cnt + l] = vz;
+        ri[cnt + l] = vz;
+      } else {
+        float sr_e[AP_W] = {0}, si_e[AP_W] = {0};
+        float sr_o[AP_W] = {0}, si_o[AP_W] = {0};
+        const float *z = zsrcs[l];
+        for (size_t u = 0; u < W; u++) {
+          const size_t i0 = 2 * (j0 + u), i1 = i0 + 1;
+          if (i0 < hv) {
+            sr_e[u] = z[2 * i0] * scale;
+            sr_o[u] = z[2 * i0 + 1] * scale;
+          }
+          if (i1 < hv) {
+            si_e[u] = z[2 * i1] * scale;
+            si_o[u] = z[2 * i1 + 1] * scale;
+          }
+        }
+        rr[l] = V_LOADU(sr_e);
+        ri[l] = V_LOADU(si_e);
+        rr[cnt + l] = V_LOADU(sr_o);
+        ri[cnt + l] = V_LOADU(si_o);
+      }
+    }
+    for (int l = 2 * cnt; l < AP_W; l++) {
+      rr[l] = vz;
+      ri[l] = vz;
+    }
+    V_TRANSPOSE(rr, tr);
+    V_TRANSPOSE(ri, ti);
+    const int slot0 = einp(&p->ea, (int)j0);
+    for (int u = 0; u < AP_W; u++) {
+      p->bR[slot0 + u] = tr[u];
+      p->bI[slot0 + u] = ti[u];
+    }
+  }
+  small_efft(p);
+  float *outs[AP_W];
+  for (int l = 0; l < cnt; l++) {
+    outs[l] = out_re[l];
+    outs[cnt + l] = out_im[l];
+  }
+  return real_split_vertical(p, 2 * cnt, rtw, 0, outs);
 }
 
 
@@ -3390,6 +3665,63 @@ int binmax_split(void *vp,const float*inr,const float*ini,size_t binsize,
 /* The back end for this target.  foreach_target.h compiles this file once per
    ISA and HWY_EXPORT/HWY_DYNAMIC_DISPATCH in kernel.cc picks one at run time,
    so nothing here needs a name that says which width it was built at. */
+/* SIMD-vectorised natural-order (n1 <= 0) path before delegating group-major layouts to
+   loads-inl.h's split_store (whose n1 <= 0 fallback is scalar). */
+static void split_store_fast(const float *HWY_RESTRICT x, float *HWY_RESTRICT re,
+                             float *HWY_RESTRICT im, size_t n, int conj,
+                             int n1, int n2, int w){
+  if(n1 <= 0){
+    size_t k = 0;
+#if defined(AP_SIMD_AVX1) || (HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2)
+    if(!conj){
+      for(; k + 8 <= n; k += 8){
+        const float *p = x + 2 * k;
+        const __m256 e128 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(p)),
+                                                 _mm_loadu_ps(p + 8), 1);
+        const __m256 o128 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(p + 4)),
+                                                 _mm_loadu_ps(p + 12), 1);
+        _mm256_storeu_ps(re + k, _mm256_shuffle_ps(e128, o128, 0x88));
+        _mm256_storeu_ps(im + k, _mm256_shuffle_ps(e128, o128, 0xDD));
+      }
+    } else {
+      const __m256 sg256 = _mm256_set1_ps(-0.0f);
+      for(; k + 8 <= n; k += 8){
+        const float *p = x + 2 * k;
+        const __m256 e128 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(p)),
+                                                 _mm_loadu_ps(p + 8), 1);
+        const __m256 o128 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(p + 4)),
+                                                 _mm_loadu_ps(p + 12), 1);
+        _mm256_storeu_ps(re + k, _mm256_shuffle_ps(e128, o128, 0x88));
+        _mm256_storeu_ps(im + k, _mm256_xor_ps(_mm256_shuffle_ps(e128, o128, 0xDD), sg256));
+      }
+    }
+#else
+    if(!conj){
+      for(; k + (size_t)AP_W <= n; k += (size_t)AP_W){
+        vf vr, vi;
+        v_deint(x + 2 * k, &vr, &vi);
+        V_STOREU(re + k, vr);
+        V_STOREU(im + k, vi);
+      }
+    } else {
+      const vf sg = V_SIGNMASK();
+      for(; k + (size_t)AP_W <= n; k += (size_t)AP_W){
+        vf vr, vi;
+        v_deint(x + 2 * k, &vr, &vi);
+        V_STOREU(re + k, vr);
+        V_STOREU(im + k, V_XOR(vi, sg));
+      }
+    }
+#endif
+    for(; k < n; k++){
+      re[k] = x[2 * k];
+      im[k] = conj ? -x[2 * k + 1] : x[2 * k + 1];
+    }
+    return;
+  }
+  split_store(x, re, im, n, conj, n1, n2, w);
+}
+
 #if !defined(AP_SIMD_AVX1)
 const ap_backend *Backend(void){
   static const ap_backend be = {
@@ -3404,12 +3736,15 @@ const ap_backend *Backend(void){
 #else
     nullptr,
 #endif
-    q15_screen_perm, q15_slab8, split_store, scale_load, lanes_transpose,
+    q15_screen_perm, q15_slab8, split_store_fast, scale_load, lanes_transpose,
     fft_forward_batch, fft_real_batch, fft_forward_scaled, corr_prod_window,
     q15_sumsq, q15_data, q15_lanethr,
     fft_backward_batch, fft_backward_padded, binmax_prod_gather_lanes,
     fft_forward_scaled_gm, corr_prod_window_multi, corr_tile_slots,
-    q15_data_contig, q15_screen_gather
+    q15_data_contig, q15_screen_gather,
+    fft_quad_pair_batch,
+    q15_data_band, q15_pairs_batch,
+    fft_forward_batch_prefix
   };
   return &be;
 }
