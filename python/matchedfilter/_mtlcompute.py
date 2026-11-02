@@ -540,6 +540,8 @@ class Context(Executor, InputUploads):
     #: shared_buffer() may hand back a view inside an allocation (one row of a device-
     #: resident middle output); every binding adds its offset.
     shared_views = True
+    #: Apple AGX executes fp16 at the fp32 rate (no 2x packed half2 throughput win).
+    packed_fp16 = False
     _timing = False
 
     def _x_peaks(self, out):
