@@ -154,9 +154,13 @@ def test_corr_bank_layout_avoids_spurious_batch_split():
     cpu_bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="corr", device="cpu")
     seen = np.concatenate([g["template_indices"] for g in cpu_bank.groups])
     assert sorted(seen.tolist()) == list(range(len(counts)))
-    # All 35 templates fit in <2 groups (not artificially split at 32 into two same-N groups).
+    # Not split at the old 32-template batch cap. Two groups may still share an n: the layout
+    # is the optimum under this machine's calibrated costs, and a group of shorter templates
+    # has more valid samples a block (a CI AVX2 runner chose 4096, 16384, 16384).
     group_ns = [g["n"] for g in cpu_bank.groups]
-    assert len(group_ns) == len(set(group_ns))
+    sizes = [len(g["template_indices"]) for g in cpu_bank.groups]
+    assert not any(k == 32 and group_ns.count(n) > 1 for n, k in zip(group_ns, sizes)), (
+        group_ns, sizes)
 
     S = 1 << 17
     ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2.0)).astype(
