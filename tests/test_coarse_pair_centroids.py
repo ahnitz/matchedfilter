@@ -694,3 +694,28 @@ def test_pair_scores_match_a_direct_evaluation():
             if top[1] - top[0] > 1e-4 * top[1]:
                 assert bs[a, b] == int(np.argmax(g)), (a, b)
 
+
+def test_pass2_runs_only_when_asked_and_a_skipped_one_is_built_later(monkeypatch):
+    """cluster_tier0_candidates asks pass2 with the k <= 2 bank before Pass 2 and skips Pass 2
+    when told; a filter that skipped it on the chain choice's bound builds the k <= 4 bank when
+    asked again without one, as a direct call would."""
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    n, nt, b0 = 2048, 16, 128
+    power, _, bank = _make_quad_correlated_bank(n, nt, b0, chain_drift=0.12, seed=6061)
+    full = gc.cluster_tier0_candidates(bank, power, n, b0, max_arity=4)
+    assert full[0] is not None and full[1] is not None
+    seen = []
+    k2, k4 = gc.cluster_tier0_candidates(bank, power, n, b0, max_arity=4,
+                                         pass2=lambda cl: seen.append(cl) or False)
+    assert k4 is None and len(seen) == 1 and seen[0] is k2
+    np.testing.assert_array_equal(k2.members, full[0].members)
+
+    hf = mf.HierarchicalFilter(n, ndata=2, ntemplates=nt, snr=5.5, fd=0.01)
+    hf.set_reference(power)
+    hf.set_templates(bank)
+    hf._tier0_cand_cache = {}             # set_templates chose a chain, which built them all
+    assert hf._tier0_candidates_for_band(b0, pass2=lambda cl: False)[1] is None
+    again = hf._tier0_candidates_for_band(b0)
+    assert again[1] is not None
+    np.testing.assert_array_equal(again[1].members, full[1].members)
+    np.testing.assert_array_equal(again[1].specs, full[1].specs)

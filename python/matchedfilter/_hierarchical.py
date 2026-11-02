@@ -329,26 +329,35 @@ class HierarchicalFilter(MatchedFilter):
             return np.ascontiguousarray(src(), dtype=np.complex64)
         return None
 
-    def _tier0_candidates_for_band(self, band, templates=None):
-        """Lazily build `(cl_k2, cl_k4)` candidate Tier-0 clusters for `band`."""
+    def _tier0_candidates_for_band(self, band, templates=None, pass2=None):
+        """Lazily build `(cl_k2, cl_k4)` candidate Tier-0 clusters for `band`. `pass2`, when
+        given, decides from the `k <= 2` bank whether the `k <= 4` one is built
+        (gatechain.cluster_tier0_candidates); a later call without it builds what was
+        skipped."""
         if not self._tier0_cluster_eligible():
             return None, None
         b = int(band)
-        if b in self._tier0_cand_cache:
-            return self._tier0_cand_cache[b]
+        got = self._tier0_cand_cache.get(b)
+        if got is not None and (got[2] or pass2 is not None):
+            return got[0], got[1]
         usable = _gatechain.usable_bands(self._pending_ref, self.n)
         if len(usable) < 2 or b not in usable[:-1]:
-            self._tier0_cand_cache[b] = (None, None)
+            self._tier0_cand_cache[b] = (None, None, True)
             return None, None
         tmpl = self._templates_for_clustering() if templates is None else templates
         if tmpl is None:
             return None, None
         k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
-        cands = _gatechain.cluster_tier0_candidates(
-            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=4
+        built = []
+        def wants_pass2(cl_k2):
+            built.append(pass2 is None or bool(pass2(cl_k2)))
+            return built[-1]
+        cl_k2, cl_k4 = _gatechain.cluster_tier0_candidates(
+            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=4, pass2=wants_pass2
         )
-        self._tier0_cand_cache[b] = cands
-        return cands
+        # complete unless Pass 2 was skipped on pass2's word
+        self._tier0_cand_cache[b] = (cl_k2, cl_k4, not built or built[-1])
+        return cl_k2, cl_k4
 
     def _tier0_cluster_for_band(self, band, templates=None, forced_chain=None):
         """Lazily compute and memoize `Tier0Cluster` (or `None`) for `band` under `_pending_ref`."""
@@ -885,13 +894,33 @@ class HierarchicalFilter(MatchedFilter):
                         limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
                         if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
                             continue
-                        cl_k2, cl_k4 = self._tier0_candidates_for_band(b0, templates=tmpl)
+                        def bound(ratio, b0=b0):
+                            # the cheapest chain from b0 with tier 0 at this centroid ratio
+                            # and no loss of signal (alpha 1, no lag padding): a lower bound
+                            _, plans_r = _gatechain.choose_chain(
+                                self._pending_ref, self.n, snr, self.fd,
+                                ntemplates=self.ntemplates,
+                                cost=base_cm.with_tier0_cluster({b0: ratio}), max_tiers=tiers,
+                                window=self.search_window)
+                            return min((q["cost"] for q in plans_r
+                                        if len(q["chain"]) >= 2 and q["chain"][0] == b0),
+                                       default=float("inf"))
+
+                        def k4_can_win(cl_k2, limit=limit, bound=bound):
+                            # Pass 2 merges pairs of Pass-1 centroids: at least half remain
+                            nt = int(cl_k2.members.size)
+                            nc2 = int(cl_k2.offsets.size) - 1
+                            r4 = max(0.25, round(math.ceil(nc2 / 2) / nt * 20.0) / 20.0)
+                            return bound(r4) < limit
+
+                        cl_k2, cl_k4 = self._tier0_candidates_for_band(b0, templates=tmpl,
+                                                                       pass2=k4_can_win)
                         cands = []
-                        if cl_k2 is not None:
+                        if cl_k2 is not None and bound(cl_k2.ratio) < limit:
                             cands.append(cl_k2)
                         if cl_k4 is not None and (
                             cl_k2 is None or cl_k4.ratio <= cl_k2.ratio - 0.05 + 1e-9
-                        ):
+                        ) and bound(cl_k4.ratio) < limit:
                             cands.append(cl_k4)
                         best_cand = None
                         best_cand_b0_cost = uncl_by_b0[b0]
