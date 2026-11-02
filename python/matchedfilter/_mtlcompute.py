@@ -74,7 +74,7 @@ def _ieee_kernel(stem):
 def _twt_entry(entry):
     """(entry without its twiddle suffix, True when a coarse entry asks for the fp16 twiddle
     table): "coarse16p4t2w" builds coarse16p4t2's library with MF_COARSE_TWT=1."""
-    if entry.startswith("coarse16") and entry.endswith("w"):
+    if (entry.startswith("coarse16") or entry == "refineListedC16w") and entry.endswith("w"):
         return entry[:-1], True
     return entry, False
 
@@ -528,7 +528,9 @@ def _function(entry):
     listed refine is refine_bounded.slang's on every target (tools/kernel_variants.py)."""
     if entry.startswith("coarse16"):
         return "fusedTierB"
-    return "refineListedBounded" if entry == "refineListed" else entry
+    if entry in ("refineListed", "refineListedC16", "refineListedC16w"):
+        return "refineListedBounded"
+    return entry
 
 
 class Context(Executor, InputUploads):
@@ -707,6 +709,8 @@ class Context(Executor, InputUploads):
             return "markblocks"
         if entry == "refineDirect":
             return "refine_td"
+        if entry == "refineListedC16":
+            return "refine_%d_c16" % n
         if entry.startswith("coarse16"):
             return "tierb_%d_c16%s" % (n, entry[len("coarse16"):])
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
@@ -1060,6 +1064,9 @@ class Context(Executor, InputUploads):
             entry = ("coarse16" + coarse_stem(n, c["ppg"], c["tile"])[len("tierb_%d_c16" % n):]
                      + ("w" if c.get("twt") else ""))
             pso = self.pipeline(n, entry, macros=macros)
+        elif name == "tier1_c16":
+            pso = self.pipeline(n, "refineListedC16w" if c.get("twt", 1) else "refineListedC16",
+                                macros=macros)
         elif name in ("tier", "tier1", "refine", "refine1"):
             pso = self.pipeline(n, "refineListed", name.endswith("1"), macros=macros,
                                 gate=bool(c.get("gate")))
@@ -1091,6 +1098,8 @@ class Context(Executor, InputUploads):
             return _shipped("compactc")
         if name == "tier1":
             return _shipped("refine_%d_onebin" % n)
+        if name == "tier1_c16":
+            return _shipped("refine_%d_c16" % n)
         if name == "fwd_tier0":
             return _shipped("forward_tier0_%d" % n)
         if name == "items":

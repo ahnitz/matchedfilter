@@ -1813,6 +1813,12 @@ class Context(Executor, InputUploads):
                 ("coarse16", n, c["ppg"], c["tile"]), filename, _NBIND, _PUSH_BYTES,
                 data_stride=stride, row_windows=rowwin, subgroup=c.get("sg", 0),
                 data_scale=c.get("scale", 0), coarse_twt=c.get("twt", 1))
+        if name == "tier1_c16":
+            filename = "refine_%d_c16.spv" % n
+            return self._build_pipeline(
+                ("refine", filename), filename, 6, 32,
+                data_stride=stride, row_windows=rowwin, subgroup=self._fit_subgroup(n),
+                data_scale=c.get("scale", 0), coarse_twt=c.get("twt", 1))
         if name in ("tier", "tier1", "refine", "refine1"):
             # refineListedBounded (refine_bounded.slang): data, tmpl, idx, val, survivors and
             # their count, then the row-window table (binding 6).
@@ -1865,6 +1871,8 @@ class Context(Executor, InputUploads):
             return _spv_shipped("compactc")
         if name == "tier1":
             return _spv_shipped("refine_%d_onebin" % n) or _spv_shipped("refine_%d_onebin_lds32" % n)
+        if name == "tier1_c16":
+            return _spv_shipped("refine_%d_c16" % n)
         if name == "fwd_tier0":
             return _spv_shipped("forward_tier0_%d" % n)
         if name == "items":
