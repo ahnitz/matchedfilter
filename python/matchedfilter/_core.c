@@ -2327,8 +2327,11 @@ static PyTypeObject RootType={
   .tp_doc="Root(n): the root stage of a hierarchical search, to a real series of n samples",
 };
 
+int ap_tier0_pair_scores(const float *ur, const float *ui, const float *sr, const float *si,
+                         const double *v, long long mc, long long len, long long nsh,
+                         float *r2, int32_t *bs);                       /* src/tier0.cc */
 /* tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence
-   over an m_c-template chunk without multi-threaded BLAS wakeup overhead. */
+   over an m_c-template chunk without multi-threaded BLAS wakeup overhead (src/tier0.cc). */
 static PyObject *M_tier0_pair_scores(PyObject *self,PyObject *args){
   (void)self;
   Py_buffer ur={0},ui={0},sr={0},si={0},vc={0},r2={0},bs={0};
@@ -2369,73 +2372,16 @@ static PyObject *M_tier0_pair_scores(PyObject *self,PyObject *args){
     if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pair_scores: invalid buffer shapes or dtypes");
     return NULL;
   }
-  float *Br=NULL, *Bi=NULL;
-  if(mc>=2){
-    const size_t nbuf=(size_t)nsh*(size_t)mc*(size_t)len;
-    Br=(float*)ap_alloc64(nbuf*sizeof(float));
-    Bi=(float*)ap_alloc64(nbuf*sizeof(float));
-    if(!Br || !Bi){
-      free(Br); free(Bi);
-      for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
-      return PyErr_NoMemory();
-    }
-  }
-  const float * restrict Urp=(const float*)ur.buf;
-  const float * restrict Uip=(const float*)ui.buf;
-  const float * restrict Srp=(const float*)sr.buf;
-  const float * restrict Sip=(const float*)si.buf;
-  const double * restrict Vcp=(const double*)vc.buf;
-  float * restrict R2p=(float*)r2.buf;
-  int32_t * restrict Bsp=(int32_t*)bs.buf;
+  const float *Urp=(const float*)ur.buf, *Uip=(const float*)ui.buf;
+  const float *Srp=(const float*)sr.buf, *Sip=(const float*)si.buf;
+  const double *Vcp=(const double*)vc.buf;
+  int rc;
   Py_BEGIN_ALLOW_THREADS
-  memset(R2p,0,(size_t)mc*(size_t)mc*sizeof(float));
-  memset(Bsp,0,(size_t)mc*(size_t)mc*sizeof(int32_t));
-  if(mc>=2){
-    for(Py_ssize_t s=0;s<nsh;s++){
-      const float * restrict sr_row=Srp+(size_t)s*(size_t)len;
-      const float * restrict si_row=Sip+(size_t)s*(size_t)len;
-      for(Py_ssize_t b=0;b<mc;b++){
-        const float * restrict ur_b=Urp+(size_t)b*(size_t)len;
-        const float * restrict ui_b=Uip+(size_t)b*(size_t)len;
-        float * restrict br_sb=Br+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
-        float * restrict bi_sb=Bi+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
-        for(Py_ssize_t k=0;k<len;k++){
-          const float srk=sr_row[k], sik=si_row[k], urk=ur_b[k], uik=ui_b[k];
-          br_sb[k]=srk*urk-sik*uik;
-          bi_sb[k]=srk*uik+sik*urk;
-        }
-      }
-    }
-    for(Py_ssize_t a=0;a<mc;a++){
-      const double va=Vcp[a];
-      const float * restrict ur_a=Urp+(size_t)a*(size_t)len;
-      const float * restrict ui_a=Uip+(size_t)a*(size_t)len;
-      for(Py_ssize_t b=a+1;b<mc;b++){
-        const double vb=Vcp[b];
-        const double vmin = va<vb ? va : vb;
-        const double vmax = va>vb ? va : vb;
-        if(vmin < 0.85*vmax) continue;
-        float best_r2=-1.f;
-        int32_t best_idx=0;
-        for(Py_ssize_t s=0;s<nsh;s++){
-          const float * restrict br_sb=Br+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
-          const float * restrict bi_sb=Bi+((size_t)s*(size_t)mc+(size_t)b)*(size_t)len;
-          float re=0.f, im=0.f;
-          for(Py_ssize_t k=0;k<len;k++){
-            re += ur_a[k]*br_sb[k] + ui_a[k]*bi_sb[k];
-            im += ui_a[k]*br_sb[k] - ur_a[k]*bi_sb[k];
-          }
-          const float val=re*re+im*im;
-          if(val>best_r2){ best_r2=val; best_idx=(int32_t)s; }
-        }
-        R2p[(size_t)a*(size_t)mc+(size_t)b]=best_r2;
-        Bsp[(size_t)a*(size_t)mc+(size_t)b]=best_idx;
-      }
-    }
-  }
+  rc=ap_tier0_pair_scores(Urp,Uip,Srp,Sip,Vcp,(long long)mc,(long long)len,(long long)nsh,
+                          (float*)r2.buf,(int32_t*)bs.buf);
   Py_END_ALLOW_THREADS
-  free(Br); free(Bi);
   for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
+  if(rc) return PyErr_NoMemory();
   Py_RETURN_NONE;
 }
 

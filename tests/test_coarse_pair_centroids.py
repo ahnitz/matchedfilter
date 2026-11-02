@@ -656,3 +656,41 @@ def test_k4_quad_bank_empirical_fdr_respects_budget(monkeypatch):
     assert pval >= 1e-3, f"k=4 empirical FDR {miss}/{det} = {miss / det:.4f} > {fd} (p={pval:.2e})"
 
 
+
+
+def test_pair_scores_match_a_direct_evaluation():
+    """_core.tier0_pair_scores (src/tier0.cc) returns, for every pair a < b of a chunk whose
+    variances agree within 15%, the largest |sum_k conj(U_a) U_b S_s|^2 over the shifts and the
+    first shift reaching it; every other entry is 0. A chunk of 21 templates is not a whole
+    number of vectors on any target, so the padding is exercised too."""
+    rng = np.random.default_rng(77)
+    mc, L, R = 21, 96, 3
+    U = (rng.standard_normal((mc, L)) + 1j * rng.standard_normal((mc, L))) / np.sqrt(2 * L)
+    U[1::3] = 0.95 * U[0] + 0.05 * U[1::3]                   # a few strongly coherent pairs
+    U[5] *= 1.5                                               # variance 2.25x: never scored
+    dls = np.arange(-R, R + 1)
+    order = np.argsort(np.abs(dls), kind="stable")
+    S = np.exp(-2j * np.pi * dls[order, None] * np.arange(L)[None, :] / (L * R))
+    v = np.sum(np.abs(U) ** 2, axis=1)
+    Ur, Ui = (np.ascontiguousarray(x, np.float32) for x in (U.real, U.imag))
+    Sr, Si = (np.ascontiguousarray(x, np.float32) for x in (S.real, S.imag))
+    r2 = np.full((mc, mc), -7.0, np.float32)
+    bs = np.full((mc, mc), -7, np.int32)
+    _core.tier0_pair_scores(Ur, Ui, Sr, Si, v.astype(np.float64), r2, bs)
+
+    U64 = Ur.astype(np.float64) + 1j * Ui
+    S64 = Sr.astype(np.float64) + 1j * Si
+    G = np.abs(np.einsum("ak,sk,bk->sab", U64.conj(), S64, U64)) ** 2
+    for a in range(mc):
+        for b in range(mc):
+            scored = b > a and min(v[a], v[b]) >= 0.85 * max(v[a], v[b])
+            if not scored:
+                assert r2[a, b] == 0 and bs[a, b] == 0, (a, b)
+                continue
+            g = G[:, a, b]
+            assert r2[a, b] == pytest.approx(g.max(), rel=1e-5), (a, b)
+            # the first shift reaching the largest score, wherever the largest is clear
+            top = np.sort(g)[-2:]
+            if top[1] - top[0] > 1e-4 * top[1]:
+                assert bs[a, b] == int(np.argmax(g)), (a, b)
+
