@@ -7,6 +7,7 @@ helpers for the parts that must agree across backends. See docs/cross-platform-r
 section 3.1 for the layer this is growing into.
 """
 
+from collections import OrderedDict
 import numpy as np
 
 from ._errors import UnsupportedSize
@@ -299,22 +300,72 @@ class FollowupUnsupported(Exception):
     """Device follow-ups cannot take this batch; the caller runs it on the host."""
 
 
+def _gpu_ctx_of(bank, g):
+    """Return a GPU executor context on ``g``'s device without loading full bank spectra."""
+    ctx = bank.__dict__.get("_followup_gpu_ctx")
+    if ctx is not None:
+        return ctx
+    bank._groups
+    plan = g._plan
+    if plan is not None:
+        return getattr(plan, "_gpu", None)
+    from .device import parse as _parse_device
+    if g.device is None or _parse_device(g.device).kind != "gpu":
+        return None
+    return getattr(g.get_single_plan(0), "_gpu", None)
+
+
+def _followup_owner_ctx(bank, g):
+    """Return the device's live follow-up GPU context or attach a fresh sibling to ``bank``."""
+    pctx = _gpu_ctx_of(bank, g)
+    if pctx is None:
+        return None
+    holder = getattr(pctx, "_device_state", None)
+    if holder is not None:
+        ref = holder.__dict__.get("followup_owner")
+        owner = ref() if ref is not None else None
+        if owner is not None:
+            return owner
+    ctx = bank.__dict__.get("_followup_gpu_ctx")
+    if ctx is None:
+        from .device import parse as _parse_device
+        ctx = type(pctx)(_parse_device(g.device).index)
+        bank._followup_gpu_ctx = ctx
+    return ctx
+
+
+def _followup_job_ok(bank, g, ser, bstarts):
+    """Return True when ``(bank, g, ser, bstarts)`` is eligible for ``submit_followups``."""
+    from ._shared import containing, containing_samples
+    if not isinstance(ser, np.ndarray):
+        return False
+    if bstarts.size and int(bstarts.max()) + g.n > ser.size:
+        return False
+    ctx = _gpu_ctx_of(bank, g)
+    if ctx is None:
+        return False
+    if ser.dtype == np.complex64:
+        return containing(np.ascontiguousarray(ser), ctx) is not None
+    if ser.dtype == np.float32:
+        return containing_samples(ser, ctx) is not None
+    return False
+
+
 def followup_layout(jobs, ctx, max_rows=None):
     """(groups, layout) for single-template follow-up jobs [(bank, series, kwargs)], each a
     filter_series(series, windows=, binsize=, threshold=0, template_index=) call.
 
-    groups: one dict per work group with plan, n, bs, alloc (the series allocation, as
-    complex64), code and nser (the forward's sample layout and length in its units:
-    seriesSample), rows (uint32 block starts in those units), entries ((rows, 5) uint32) and
-    nbins (the widest window's bin count, rounded up to a power of two so few shapes occur).
+    groups: one dict per coalesced work group (n, bs, series allocation, layout code) with
+    tstage (compact complex64 upload rows), n, bs, alloc, code, nser, rows, entries, and nbins.
     A real series is read in place: contiguous floats, or one lane of a complex row.
     layout: per job (group, starts, window starts, window ends, first entry, template group,
-    local template, global template). Raises FollowupUnsupported when a job is not such a
-    call, is not on ctx's device, has a series that is not device memory, has a block
-    reading past its series (the host path pads with zeros), or a group passes max_rows."""
+    local template, global template, windows, phases). Raises FollowupUnsupported when a job
+    is not such a call, is not on ctx's device, has a series that is not device memory, has a
+    block reading past its series (the host path pads with zeros), or a group passes max_rows."""
     from ._shared import _same_device, containing, containing_samples
     from ._windows import _normalize_windows, _window_bin_phases, _window_layout
     groups = {}
+    cold_by_group = {}
     layout = []
     for (bank, ser, kw) in jobs:
         kw = kw or {}
@@ -322,19 +373,51 @@ def followup_layout(jobs, ctx, max_rows=None):
         if ti is None or kw.get("threshold") is None or float(kw["threshold"]) != 0.0 \
                 or set(kw) - {"windows", "binsize", "threshold", "template_index"}:
             raise FollowupUnsupported("not a threshold-0 single-template call")
+        bank._groups
+        if ti < 0 or ti >= bank.n_templates:
+            raise FollowupUnsupported("template_index out of range")
         g, tl = bank._template_map[ti]
+        aligned = kw.get("binsize") is not None or bank.binsize is not None
         bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
-        if bs >= g.n:
-            raise FollowupUnsupported("binsize spans a block")
+        if bs < 1:
+            raise FollowupUnsupported("invalid binsize")
         S = len(ser)
-        W = _normalize_windows(kw["windows"], S)
-        st, ws, we = _window_layout(g, W, S)
-        # The window's bins (filter_series): each block's bins numbered from its window's grid.
-        ph = _window_bin_phases(W, st, ws, bs)
-        ph = np.zeros(st.size, np.uint32) if ph is None else ph
-        plan = g.get_flat_plan()
-        pctx = getattr(plan, "_gpu", None)
-        if pctx is None or not _same_device(pctx, ctx) or plan._gtmpl is None:
+        w_arg = kw.get("windows")
+        if w_arg is None or (
+            type(w_arg) is slice and (w_arg.step is None or w_arg.step == 1)
+            and (w_arg.start is None or type(w_arg.start) is int)
+            and (w_arg.stop is None or type(w_arg.stop) is int)
+        ):
+            v0, v1 = (0, S) if w_arg is None else w_arg.indices(S)[:2]
+            if v1 <= v0:
+                W = np.empty((0, 2), dtype=np.int64)
+                st = ws = we = np.empty(0, dtype=np.int64)
+                ph = np.zeros(0, dtype=np.uint32)
+            else:
+                W = np.array([[v0, v1]], dtype=np.int64)
+                step = g.n_valid
+                c_bad = g.c_bad
+                fidx = max(0, (v0 - c_bad) // step)
+                st = np.arange(fidx * step, min(S, v1 - c_bad), step, dtype=np.int64)
+                if st.size:
+                    bvt0 = st + c_bad
+                    rs = np.maximum(v0, bvt0)
+                    re = np.minimum(v1, bvt0 + step)
+                    ws = rs - st
+                    we = re - st
+                    ph = (((rs - v0) % bs).astype(np.uint32)
+                          if aligned else np.zeros(st.size, dtype=np.uint32))
+                else:
+                    ws = we = st
+                    ph = np.zeros(0, dtype=np.uint32)
+        else:
+            W = _normalize_windows(w_arg, S)
+            st, ws, we = _window_layout(g, W, S)
+            # The window's bins (filter_series): each block's bins numbered from its window's grid.
+            ph = _window_bin_phases(W, st, ws, bs) if aligned else None
+            ph = np.zeros(st.size, np.uint32) if ph is None else ph
+        pctx = _gpu_ctx_of(bank, g)
+        if pctx is None or not _same_device(pctx, ctx):
             raise FollowupUnsupported("not a plan on this device")
         ser = np.asarray(ser)
         if ser.dtype == np.complex64:
@@ -355,21 +438,39 @@ def followup_layout(jobs, ctx, max_rows=None):
             raise FollowupUnsupported("series is neither complex64 nor float32")
         if st.size and int(st.max()) + g.n > ser.size:
             raise FollowupUnsupported("a block reads past the series")
-        # One group per (template group, binsize, series allocation and layout): a group
-        # searching two detectors' allocations is two groups, not one per combination.
-        gw = groups.setdefault((id(plan), bs, id(alloc), code), dict(
-            plan=plan, n=g.n, bs=bs, alloc=alloc, code=code, nser=nser, rows=[], entries=[],
-            nent=0))
-        # The job's blocks as arrays (one row and one entry per block): a segment's
-        # follow-ups are ~1000 blocks.
         k = int(st.size)
+        if k == 0:
+            layout.append((None, st, ws, we, 0, g, tl, ti, W, ph))
+            continue
+        # Coalesce across leaf template groups sharing (n, binsize, series allocation, layout):
+        # a two-detector segment becomes two groups instead of one per active leaf bank.
+        gw = groups.setdefault((g.n, bs, id(alloc), code), dict(
+            n=g.n, bs=bs, alloc=alloc, code=code, nser=nser, rows=[], entries=[],
+            nent=0, tmap={}, trows=[]))
         first = gw["nent"]
         if max_rows is not None and first + k > max_rows:
             raise FollowupUnsupported("too many rows")
+        tkey = (id(g), int(tl))
+        tslot = gw["tmap"].get(tkey)
+        if tslot is None:
+            tslot = len(gw["trows"])
+            gw["tmap"][tkey] = tslot
+            hcache = g.__dict__.setdefault("_followup_host_spec", OrderedDict())
+            tl_i = int(tl)
+            sp = hcache.get(tl_i)
+            if sp is not None:
+                hcache.move_to_end(tl_i)
+                gw["trows"].append(sp)
+            else:
+                gw["trows"].append(None)
+                cold_g = cold_by_group.get(id(g))
+                if cold_g is None:
+                    cold_g = cold_by_group[id(g)] = (g, OrderedDict())
+                cold_g[1].setdefault(tl_i, []).append((gw, tslot))
         gw["rows"].append(np.asarray(st, np.int64) + base)
         ent = np.empty((k, 6), np.int64)               # refineItems' six words
         ent[:, 0] = first + np.arange(k)
-        ent[:, 1] = tl
+        ent[:, 1] = tslot
         ent[:, 2] = np.minimum(np.asarray(ws, np.int64), g.n)
         ent[:, 3] = np.minimum(np.asarray(we, np.int64), g.n)
         ent[:, 4] = ent[:, 0]
@@ -377,6 +478,20 @@ def followup_layout(jobs, ctx, max_rows=None):
         gw["entries"].append(ent)
         gw["nent"] = first + k
         layout.append((gw, st, ws, we, first, g, tl, ti, W, ph))
+
+    # Batch-transform all uncached template spectra per group in one C SIMD pass.
+    for g, tl_map in cold_by_group.values():
+        tls = list(tl_map.keys())
+        specs = np.ascontiguousarray(g.full_spectra(tls), dtype=np.complex64)
+        hcache = g._followup_host_spec
+        for row_k, tl_i in enumerate(tls):
+            sp = specs[row_k]
+            hcache[tl_i] = sp
+            for gw_ref, slot_idx in tl_map[tl_i]:
+                gw_ref["trows"][slot_idx] = sp
+        while len(hcache) > 512:
+            hcache.popitem(last=False)
+
     out = list(groups.values())
     for gw in out:
         e = (np.concatenate(gw["entries"]) if gw["entries"] else np.empty((0, 6), np.int64))
@@ -389,6 +504,9 @@ def followup_layout(jobs, ctx, max_rows=None):
         if nbins > MAX_BINS:
             raise FollowupUnsupported("window has too many bins")
         gw["nbins"] = nbins
+        trows = gw["trows"]
+        gw["tstage"] = (np.ascontiguousarray(np.stack(trows, axis=0), dtype=np.complex64)
+                        if trows else np.empty((0, gw["n"]), dtype=np.complex64))
     return out, layout
 
 
@@ -399,20 +517,32 @@ def assemble_followups(layout, read):
     from ._results import FilterResults
     from ._windows import _merge_window_bins
     reads = {}
+    empty = None
     out = []
     for gw, st, ws, we, first, g, tl, ti, W, ph in layout:
+        if gw is None:
+            if empty is None:
+                z64 = np.empty(0, dtype=np.int64)
+                empty = FilterResults(z64, z64, np.empty(0, dtype=np.complex64), z64, z64)
+            out.append(empty)
+            continue
         r = reads.get(id(gw))
         if r is None:
-            r = reads[id(gw)] = read(gw)
+            idx_g, val_g = read(gw)
+            r = reads[id(gw)] = (idx_g, val_g, np.arange(gw["nbins"])[None, :])
         k = int(st.size)
         idx = r[0][first:first + k]
         val = r[1][first:first + k]
-        bs, nbins = gw["bs"], gw["nbins"]
-        counts = ((we.astype(np.int64) - ws.astype(np.int64) + ph.astype(np.int64) + bs - 1)
-                  // bs)
-        hit = (idx >= 0) & (np.arange(nbins)[None, :] < counts[:, None])
-        res = window_results(hit, counts, st, idx, val, ti, g.n, by_count=not ph.any())
-        if ph.any():
+        bs = gw["bs"]
+        has_ph = bool(ph.any())
+        if has_ph:
+            counts = ((np.asarray(we, np.int64) - np.asarray(ws, np.int64)
+                       + ph.astype(np.int64) + bs - 1) // bs)
+        else:
+            counts = (np.asarray(we, np.int64) - np.asarray(ws, np.int64) + bs - 1) // bs
+        hit = (idx >= 0) & (r[2] < counts[:, None])
+        res = window_results(hit, counts, st, idx, val, ti, g.n, by_count=not has_ph)
+        if has_ph:
             # A bin a block edge cut is two partial bins: one per window bin (filter_series).
             res = FilterResults(*_merge_window_bins(W, bs, *res))
         out.append(res)
@@ -427,10 +557,17 @@ def submit_followups(jobs):
         return lambda: []
     try:
         bank, _, kw = jobs[0]
-        g, _ = bank._template_map[(kw or {}).get("template_index")]
-        ctx = getattr(g.get_flat_plan(), "_gpu", None)
+        bank._groups
+        kw = kw or {}
+        ti = kw.get("template_index")
+        if ti is None or ti < 0 or ti >= bank.n_templates:
+            return None
+        if kw.get("threshold") is None or float(kw["threshold"]) != 0.0:
+            return None
+        g, _ = bank._template_map[ti]
+        ctx = _followup_owner_ctx(bank, g)
         if ctx is None:
             return None
         return ctx.submit_followups(jobs)
-    except (FollowupUnsupported, KeyError, TypeError):
+    except (FollowupUnsupported, KeyError, IndexError, TypeError):
         return None

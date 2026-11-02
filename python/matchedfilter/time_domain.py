@@ -2005,6 +2005,7 @@ class TimeDomainFilterBank:
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
         done = TimeDomainFilterBank._items_batch(jobs, out)
+        done |= TimeDomainFilterBank._cpu_single_td_batch(jobs, out, skip=done)
         done |= TimeDomainFilterBank._cpu_sparse_batch(jobs, out, skip=done)
         try:
             for j, (bank, series, kw) in enumerate(jobs):
@@ -2028,7 +2029,7 @@ class TimeDomainFilterBank:
         from .device import parse as _parse_device
         if not _config.get("MF_GPU_ITEMS"):
             return set()
-        groups = {}
+        cands = []
         side = device = None
         for j, (bank, series, kw) in enumerate(jobs):
             kw = kw or {}
@@ -2036,13 +2037,20 @@ class TimeDomainFilterBank:
             if (ti is None or bank.engine != 'hier' or _parse_device(bank.device).kind != 'gpu'
                     or set(kw) - {"windows", "binsize", "threshold", "template_index"}):
                 continue
+            ti = int(ti)
+            if ti < 0 or ti >= bank.n_templates:
+                continue
             ser = series                     # widened only for the items path, below
-            S = len(ser)
-            W = _normalize_windows(kw.get("windows"), S)
+            if getattr(ser, "ndim", 1) != 1:
+                continue
             bank._groups
             g, ti_local = bank._template_map[ti]
+            aligned = kw.get("binsize") is not None or bank.binsize is not None
             bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
-            if bs >= g.n or W.shape[0] == 0:
+            if bs < 1:
+                continue
+            thr = bank.threshold if kw.get("threshold") is None else float(kw["threshold"])
+            if not np.isfinite(thr):
                 continue
             # Where the batch runs: the device trial's side (_settings "single"); a batch's
             # jobs on another device run per call.
@@ -2051,33 +2059,29 @@ class TimeDomainFilterBank:
                 side = _settings.setting("single", device)
             elif str(bank.device) != device:
                 continue
-            thr = bank.threshold if kw.get("threshold") is None else float(kw["threshold"])
-            bstarts, bws, bwe = bank._window_layout(g, W, S)
-            if bstarts.size == 0:
-                continue
-            # The window's bins (filter_series): each block's phase on its window's grid.
-            ph = _window_bin_phases(W, bstarts, bws, bs)
-            groups.setdefault((id(bank), id(g), bs, thr), []).append(
-                (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti, W, ph))
+            cands.append((j, bank, g, ser, kw, bs, thr, aligned, ti_local, ti))
+        if not cands:
+            return set()
         done = set()
-        if not groups:
-            return done
         if side == "cpu":
-            for members in groups.values():
-                for j, bank, *_ in members:
-                    bank._single_force = "cpu"
-                    try:
-                        out[j] = bank.filter_series(jobs[j][1], **(jobs[j][2] or {}))
-                    finally:
-                        del bank._single_force
-                    done.add(j)
+            cpu_idx = {c[0] for c in cands}
+            done |= TimeDomainFilterBank._cpu_single_td_batch(
+                jobs, out, skip=set(range(len(jobs))) - cpu_idx, force_cpu=True)
+            for j in sorted(cpu_idx - done):
+                bank = jobs[j][0]
+                bank._single_force = "cpu"
+                try:
+                    out[j] = bank.filter_series(jobs[j][1], **(jobs[j][2] or {}))
+                finally:
+                    del bank._single_force
+                done.add(j)
             return done
         # Threshold-0 follow-ups: every group's items as listed entries, all in one
         # submission (_gpuhost.submit_followups). None (past what the device path takes):
         # the per-group path below.
-        if _config.get("MF_DEVICE_FOLLOWUPS"):
-            fast = sorted(m[0] for (_, _, _, thr), members in groups.items() if thr == 0.0
-                          for m in members)
+        dev_follow = bool(_config.get("MF_DEVICE_FOLLOWUPS"))
+        if dev_follow:
+            fast = [c[0] for c in cands if c[6] == 0.0]
             if fast:
                 from ._gpuhost import submit_followups
                 collect = submit_followups([jobs[j] for j in fast])
@@ -2088,12 +2092,54 @@ class TimeDomainFilterBank:
                     for i, j in enumerate(fast):
                         out[j] = _Deferred(lambda c=collect, i=i: c()[i])
                         done.add(j)
-                    groups = {k: v for k, v in groups.items() if k[3] != 0.0}
+                    cands = [c for c in cands if c[0] not in done]
+                    if not cands:
+                        return done
+        groups = {}
+        for j, bank, g, ser, kw, bs, thr, aligned, ti_local, ti in cands:
+            S = len(ser)
+            W = _normalize_windows(kw.get("windows"), S)
+            if W.shape[0] == 0:
+                out[j] = _EMPTY_FILTER_RESULTS
+                done.add(j)
+                continue
+            bstarts, bws, bwe = bank._window_layout(g, W, S)
+            if bstarts.size == 0:
+                out[j] = _EMPTY_FILTER_RESULTS
+                done.add(j)
+                continue
+            # The window's bins (filter_series): each block's phase on its window's grid.
+            ph = _window_bin_phases(W, bstarts, bws, bs) if aligned else None
+            groups.setdefault((id(bank), id(g), bs, thr, aligned), []).append(
+                (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti, W, ph))
+        if not groups:
+            return done
+        if dev_follow:
+            from ._gpuhost import _followup_job_ok, submit_followups
+            fast_ok = sorted(
+                m[0] for (_, _, _, thr, _), members in groups.items() if thr == 0.0
+                for m in members
+                if _followup_job_ok(m[1], m[2], m[3], m[4])
+            )
+            if fast_ok:
+                collect = submit_followups([jobs[j] for j in fast_ok])
+                if collect is not None:
+                    from ._results import _Deferred
+                    for i, j in enumerate(fast_ok):
+                        out[j] = _Deferred(lambda c=collect, i=i: c()[i])
+                        done.add(j)
+                    groups = {
+                        k: [m for m in v if m[0] not in done]
+                        for k, v in groups.items()
+                    }
+                    groups = {k: v for k, v in groups.items() if v}
         # Submit every template group's items, then collect: a backend that can leaves each
         # submission in flight (wait=False), so the device runs them back to back.
         submitted = []
-        for (_, _, bs, thr), members in groups.items():
+        for (_, _, bs, thr, _), members in groups.items():
             g = members[0][2]
+            if bs >= g.n:
+                continue
             plan = g.get_flat_plan()
             res = plan._items_gpu([(_host_copy(ser, np.complex64), st, ws, we, tl, ph)
                                    for _, _, _, ser, st, ws, we, tl, _, _, ph in members],
@@ -2121,6 +2167,186 @@ class TimeDomainFilterBank:
                     res_j = FilterResults(*_merge_window_bins(W, bs, *res_j))
                 out[j] = res_j
                 done.add(j)
+        return done
+
+    @staticmethod
+    def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
+        """Execute eligible single-template CPU follow-up jobs in one C batch call.
+
+        Parameters
+        ----------
+        jobs : sequence of tuple
+            Sequence of ``(bank, series, kwargs)`` batch items.
+        out : list
+            Output result list populated at each handled job index.
+        skip : set of int, optional
+            Job indices already handled earlier in the batch.
+        force_cpu : bool, optional
+            When True, run GPU-bank jobs whose batch trial selected the CPU side.
+
+        Returns
+        -------
+        set of int
+            Indices of jobs whose ``FilterResults`` were written into ``out``.
+        """
+        if _core is None or not hasattr(_core, "td_followup_batch"):
+            return set()
+        from .device import parse as _parse_device
+        from ._filter import MatchedFilter
+        if getattr(MatchedFilter.run_series, "__qualname__", "") != "MatchedFilter.run_series":
+            return set()
+
+        done = set()
+        skip = skip or set()
+        c_jobs = []
+        job_meta = []
+
+        # Screen candidate single-template follow-up jobs and resolve cached tap/spectrum views.
+        for j, (bank, series, kw) in enumerate(jobs):
+            if j in skip:
+                continue
+            kw = kw or {}
+            ti = kw.get("template_index")
+            if (ti is None or bank.engine not in ("hier", "flat")
+                    or (set(kw) - {"windows", "binsize", "threshold", "template_index"})):
+                continue
+            if not force_cpu and _parse_device(bank.device).kind != "cpu":
+                continue
+            ti = int(ti)
+            if ti < 0 or ti >= bank.n_templates:
+                continue
+            thr_arg = kw.get("threshold")
+            thr = float(bank.threshold if thr_arg is None else thr_arg)
+            if not np.isfinite(thr):
+                continue
+
+            bank._groups
+            g, ti_local = bank._template_map[ti]
+            if bank.engine == "flat":
+                p_flat = g._plan
+                if p_flat is not None and (
+                    "run_series" in p_flat.__dict__
+                    or getattr(type(p_flat).run_series, "__qualname__", "") != "MatchedFilter.run_series"
+                ):
+                    continue
+            aligned = kw.get("binsize") is not None or bank.binsize is not None
+            bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
+            if bs < 1:
+                continue
+
+            # Preserve 1-D float32 and contiguous complex64 series without full-segment widening.
+            if (isinstance(series, np.ndarray) and series.ndim == 1
+                    and series.dtype == np.float32 and series.strides in ((4,), (8,))):
+                ser = series
+                s_kind = 1 if ser.strides == (4,) else 2
+            elif (isinstance(series, np.ndarray) and series.ndim == 1
+                  and series.dtype == np.complex64 and series.flags.c_contiguous):
+                ser = series
+                s_kind = 0
+            else:
+                ser = bank._input_series(series)
+                if ser.ndim != 1:
+                    continue
+                if ser.dtype == np.float32:
+                    s_kind = 2 if ser.strides == (8,) else 1
+                else:
+                    s_kind = 0
+
+            S = int(ser.size)
+            windows = kw.get("windows")
+            if windows is None:
+                if S <= 0:
+                    out[j] = _EMPTY_FILTER_RESULTS
+                    done.add(j)
+                    continue
+                W = (0, S)
+            elif (type(windows) is slice and (windows.step is None or windows.step == 1)
+                  and (windows.start is None or type(windows.start) is int)
+                  and (windows.stop is None or type(windows.stop) is int)):
+                v0, v1, _ = windows.indices(S)
+                if v1 <= v0:
+                    out[j] = _EMPTY_FILTER_RESULTS
+                    done.add(j)
+                    continue
+                W = (v0, v1)
+            else:
+                W = _normalize_windows(windows, S)
+                if W.shape[0] == 0:
+                    out[j] = _EMPTY_FILTER_RESULTS
+                    done.add(j)
+                    continue
+
+            cser = (ser if (s_kind == 2 or ser.flags.c_contiguous)
+                    else np.ascontiguousarray(ser))
+
+            # Fetch or populate per-template tap/spectrum cache on the group.
+            tcache = g.__dict__.get("_td_single_cache")
+            if tcache is None:
+                tcache = g._td_single_cache = OrderedDict()
+            entry = tcache.get(ti_local)
+            if entry is not None:
+                tcache.move_to_end(ti_local)
+            else:
+                src = (g._row_source.__defaults__[0]
+                       if getattr(g._row_source, "__defaults__", None) else None)
+                L = int(src["counts"][ti_local]) if (
+                    bank.rate_ratio == 1.0 and isinstance(src, dict)
+                    and "taps" in src and "counts" in src
+                ) else 0
+                if 1 <= L <= g.n:
+                    raw = src["taps"][ti_local, :L]
+                    if raw.dtype not in (np.float32, np.complex64) or not raw.flags.c_contiguous:
+                        raw = np.ascontiguousarray(
+                            raw, dtype=np.complex64 if np.iscomplexobj(raw) else np.float32)
+                    spec_buf = np.empty(g.n, dtype=np.complex64)
+                    entry = [True, L, raw, None, spec_buf, False]
+                else:
+                    spec_buf = np.array(
+                        g.full_spectra(slice(ti_local, ti_local + 1))[0],
+                        dtype=np.complex64, copy=True, order="C",
+                    )
+                    entry = [False, 0, None, None, spec_buf, True]
+                tcache[ti_local] = entry
+                while len(tcache) > 256:
+                    tcache.popitem(last=False)
+
+            c_jobs.append((
+                cser, s_kind, S, W, g.n, g.n_valid, g.c_bad, bs,
+                aligned, thr, entry[0], entry[1], entry[2], entry[3],
+                entry[4], entry[5], ti,
+            ))
+            job_meta.append((j, entry))
+
+        if not c_jobs or (len(c_jobs) < 2 and len(c_jobs) < len(jobs) and not force_cpu):
+            return done
+
+        # Settle any pending device writes once before reading host/shared buffers in C.
+        _settle_device_writes()
+
+        offs_ba, ti_ba, si_ba, snr_ba, bs_ba, bl_ba, rdy_ba = _core.td_followup_batch(c_jobs)
+        offs = np.frombuffer(offs_ba, dtype=np.int64)
+        ti_all = np.frombuffer(ti_ba, dtype=np.int64)
+        si_all = np.frombuffer(si_ba, dtype=np.int64)
+        snr_all = np.frombuffer(snr_ba, dtype=np.complex64)
+        bs_all = np.frombuffer(bs_ba, dtype=np.int64)
+        bl_all = np.frombuffer(bl_ba, dtype=np.int64)
+        rdy_all = np.frombuffer(rdy_ba, dtype=np.uint8)
+
+        # Update lazy spectrum readiness flags and slice per-job FilterResults views.
+        for k, (j, entry) in enumerate(job_meta):
+            if rdy_all[k]:
+                entry[5] = True
+            p0 = int(offs[k])
+            p1 = int(offs[k + 1])
+            if p0 == p1:
+                out[j] = _EMPTY_FILTER_RESULTS
+            else:
+                out[j] = FilterResults(
+                    ti_all[p0:p1], si_all[p0:p1], snr_all[p0:p1],
+                    bs_all[p0:p1], bl_all[p0:p1],
+                )
+            done.add(j)
+
         return done
 
     @staticmethod
