@@ -346,6 +346,29 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                     dl_list.extend(cdl)
         return a_list, b_list, dl_list
 
+    def _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad):
+        # Each member's retention as the engine meets it: the peak over the lags its padded
+        # window reaches (|lag| <= lag_pad R fine samples) of the centroid's overlap with the
+        # member, in the members' variance units (alpha = sqrt(v_c / v_t) |<c, u_t>|, unit
+        # c and u_t). The overlap at the one lag a member was aligned at when the centroid was
+        # built is a lower bound: the centroid blends members, and its cross-correlation with
+        # a member peaks elsewhere (k <= 4 members at 0.96 there met the engine at ~0.99).
+        cid = np.repeat(np.arange(offs_i32.size - 1), np.diff(offs_i32))
+        sizes = np.diff(offs_i32)[cid]
+        out = np.asarray(alphas_arr, dtype=np.float64).copy()
+        multi = np.flatnonzero(sizes > 1)
+        if multi.size == 0:
+            return out
+        t_m = mems_i32[multi]
+        B = bvecs_c64[cid[multi]].astype(np.complex128)
+        v_c = np.sum((B.real * B.real + B.imag * B.imag) * W[None, :], axis=1)
+        reach = min(R, int(lpad) * R)
+        taus = exp_all[R - reach:R + reach + 1]
+        prod = (W[None, :] * B.conj()) * (C[t_m] * inv_sqrt_v[t_m, None])
+        ov = np.max(np.abs(prod @ taus.T), axis=1) / np.sqrt(np.maximum(v_c, 1e-300))
+        out[t_m] = np.minimum(1.0, np.sqrt(v_c / v[t_m]) * ov)
+        return out
+
     def _pack_cluster(bvecs_c64, offs_i32, mems_i32, alphas_arr, max_dl):
         nc_out = int(offs_i32.size) - 1
         specs_out = np.zeros((nc_out, b0), dtype=np.complex64)
@@ -359,6 +382,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             if length > first:
                 specs_out[:, :length - first] = bvecs_c64[:, first:]
         lpad = int((max_dl + R - 1) // R) if max_dl > 0 else 0
+        alphas_arr = _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad)
         rat = round((nc_out / float(nt)) * 20.0) / 20.0
         raw_a = float(np.mean(alphas_arr) - 0.5 * np.std(alphas_arr))
         eff_a = max(0.5, min(1.0, math.floor(raw_a * 50.0 + 1e-9) / 50.0))
