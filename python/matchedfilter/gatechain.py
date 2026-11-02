@@ -120,7 +120,8 @@ def _band_slice(n, b, k0):
     return k0, min(k0 + int(b), int(n) // 2)
 
 
-def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4):
+def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4,
+                             pass2=None):
     """Build Pass-1 (``k <= 2``) and optional Pass-2 (``k <= max_arity``) Tier-0 centroid banks.
 
     Parameters
@@ -139,6 +140,11 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
     max_arity : int, optional
         Maximum cluster arity for Pass 2 in ``{2, 3, 4}`` (default ``4``).
+    pass2 : callable, optional
+        Called with the ``k <= 2`` bank once Pass 1 has built it; Pass 2 runs only when it
+        returns True (default ``None``: always). A caller that can bound what a ``k <= 4``
+        bank could buy (it merges pairs of Pass-1 centroids, so it keeps at least half of
+        them) skips Pass 2 where nothing it could build would win.
 
     Returns
     -------
@@ -458,7 +464,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     offsets[ci] = m_pos
 
     cl_k2 = _pack_cluster(band_vecs, offsets, members, alphas, max_abs_dl)
-    if cap_arity <= 2 or nc < 2:
+    if cap_arity <= 2 or nc < 2 or (pass2 is not None and not pass2(cl_k2)):
         return cl_k2, None
 
     # Pass 2: pair-of-pairs matching on Pass-1 centroids + 2-step minimax weight synthesis
