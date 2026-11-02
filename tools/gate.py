@@ -17,7 +17,8 @@ Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL)
                maximum to 2^-6, and a loud injection fails open
   fdr          `tools/fdr_audit.py`: every profile and chain at n = 2048 and 4096, over the
                whole block and a window, FP32 and Q15 tiers, dismisses its budget against
-               the flat filter, two-sided (`--fdr-inj` injections a case)
+               the flat filter, two-sided (`--fdr-inj` injections a case); and banks of 16
+               near-duplicate templates (`--bank 16`), tier-0 pair centroids on and off
   repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
                cost file make the same choices
   followups    test_call_plan + test_followup_batch, `--loops` times (a past race)
@@ -156,7 +157,7 @@ def fdr(g, args, device=None):
     own hierarchical filter beside the CPU's: the GPU fp16 tier's dismissal, one process)."""
     jobs = str(max(1, min(8, (os.cpu_count() or 2) - 2)))
     parts, rc_all, t_all = [], 0, 0.0
-    runs = [("block", []), ("window", ["--window", "192,1856"])]
+    runs = [("block", []), ("window", ["--window", "192,1856"]), ("bank", ["--bank", "16"])]
     if device:
         runs.append(("device", ["--device", device, "--jobs", "1"]))
     for tag, extra in runs:
