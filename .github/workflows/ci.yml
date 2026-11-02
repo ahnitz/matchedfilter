@@ -32,9 +32,12 @@ jobs:
     # One suite per job. Python never reaches the C kernels, and MF_ISA restricts the
     # process to one Highway target (B3), so the targets are spread across the Python
     # versions instead of crossed with them: the forced SSE4 and AVX2 jobs, and the
-    # widest target (AVX3 on an AVX-512 runner) on every Python, and AVX (SSE4 with its float
-    # kernels at 8 lanes, for AVX-without-AVX2 CPUs) on one. Each job's session
-    # names its backend in a notice and fails if it is not the one asked for.
+    # widest target (AVX3_DL on an Ice Lake or Zen 4 runner) on every Python, AVX (SSE4 with
+    # its float kernels at 8 lanes, for AVX-without-AVX2 CPUs) on one, and plain AVX3
+    # (Skylake-X, Cascade Lake), which the widest job never selects on a runner that has
+    # AVX-512, on one -- run only on a runner with AVX-512, said in a notice otherwise.
+    # Each job's session names its backend in a notice and fails if it is not the one
+    # asked for.
     name: test (${{ matrix.python }}, ${{ matrix.isa || 'widest' }}${{ matrix.sdist && ', sdist' || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -48,6 +51,7 @@ jobs:
           - {python: "3.13"}
           - {python: "3.13", isa: AVX}                       # the AVX1 back end (kernel_avx1.cc)
           - {python: "3.14"}
+          - {python: "3.14", isa: AVX3}                      # AVX-512 below AVX3_DL
           - {python: "3.15", isa: AVX2}
           - {python: "3.15"}
     env:
@@ -114,6 +118,9 @@ jobs:
             echo "collected in the checkout: $want; in the sdist: $have"
             [ "$want" = "$have" ] || { echo "::error::the sdist's tests differ from the checkout's ($have vs $want)"; exit 1; }
             python -m pytest -q tests -rs --durations=15
+          elif [ "$MF_ISA" = AVX3 ] && ! grep -qm1 avx512f /proc/cpuinfo; then
+            # MF_ISA=AVX3 is an import error without AVX-512 (kernel.cc apply_env)
+            echo "::notice title=CPU target::no AVX-512 on this runner: AVX3 job not run"
           else
             mkdir -p /tmp/run && cd /tmp/run
             python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs --durations=15
