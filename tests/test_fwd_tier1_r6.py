@@ -744,7 +744,6 @@ def test_gate16_sparse_later_tiers_and_calibration_key(monkeypatch):
     """Verify calibration cache tag bumps to g16s for FP16 CPU gates and exercise
     sparse later-tier gate16 execution when available on ARM64."""
     # Check calibration key separation when cpu_gate_kind() == "f16".
-    real_gate_kind = gatechain.cpu_gate_kind()
     sentinel = object()
     key = (1024, gatechain._CAL_TEMPLATES, _core.series_group(1024, 32), 32, 3, 0, "g16s")
     monkeypatch.setattr(gatechain, "cpu_gate_kind", lambda: "f16")
@@ -752,10 +751,7 @@ def test_gate16_sparse_later_tiers_and_calibration_key(monkeypatch):
     assert _calibration.calibrate_costs(1024, 64, blocks=32, reps=3, seed=0, group=32) is sentinel
     monkeypatch.undo()
 
-    if real_gate_kind != "f16":
-        return
-
-    # On ARM64 NEON, verify 2-tier and 3-tier chains with q15=False across sparse survivor counts.
+    # Verify 3-tier chains with q15=False (exercising gate16 on ARM64 NEON) across sparse survivor counts.
     n = 2048
     nt = 32
     nblocks = 16
@@ -767,9 +763,8 @@ def test_gate16_sparse_later_tiers_and_calibration_key(monkeypatch):
     taps = np.ascontiguousarray(np.fft.irfft(raw_spec, n=n, axis=1)[:, :tap_len], dtype=np.float32)
     taps /= np.linalg.norm(taps, axis=1, keepdims=True)
     counts_tap = np.full(nt, tap_len, dtype=np.int64)
-    specs_raw = np.empty((nt, n), dtype=np.complex64)
-    _core.taps_to_spectra(taps, counts_tap, n, tap_len, specs_raw)
-    specs = np.conj(specs_raw).astype(np.complex64)
+    specs = np.empty((nt, n), dtype=np.complex64)
+    _core.taps_to_spectra(taps, counts_tap, n, tap_len, specs)
     ref = np.ones(n, dtype=np.float32)
     step = n - tap_len
     nseries = (nblocks - 1) * step + n
@@ -780,6 +775,23 @@ def test_gate16_sparse_later_tiers_and_calibration_key(monkeypatch):
     ws = np.full(nblocks, tap_len, dtype=np.uint64)
     we = np.full(nblocks, n, dtype=np.uint64)
     bph = np.zeros(nblocks, dtype=np.uint32)
+
+    # Exact 100%-pass FP32 reference for peak lag and amplitude.
+    p_ref = _core.HMF(n, 1, nt, [128], 16, n)
+    p_ref.set_real_series(True)
+    p_ref.set_reference(ref)
+    p_ref.set_template_batch(0, specs)
+    p_ref.set_thresholds([0.0])
+    p_ref.set_q15(False)
+    ref_raw = _core.HMF.run_series_batch_sparse(
+        [(p_ref, ser, starts, ws, we, 0, nt, n - tap_len, 7.5, None, bph, 0)]
+    )[0]
+    ref_flat, ref_idx, ref_val, _ = _unpack_sparse(ref_raw)
+    target_row = 2 * nt + 9
+    ref_pos = np.where(ref_flat == target_row)[0]
+    assert len(ref_pos) == 1
+    expected_idx = int(ref_idx[ref_pos[0]])
+    expected_val = ref_val[ref_pos[0]]
 
     for use_direct in (False, True):
         p = _core.HMF(n, 1, nt, [128, 512, 1024], 16, n)
@@ -797,10 +809,10 @@ def test_gate16_sparse_later_tiers_and_calibration_key(monkeypatch):
         )[0]
         flat, idx, val, total = _unpack_sparse(res_raw)
         assert total >= 1
-        target_row = 2 * nt + 9
         pos = np.where(flat == target_row)[0]
         assert len(pos) == 1
-        assert idx[pos[0]] == 200 + tap_len // 2
+        assert int(idx[pos[0]]) == expected_idx
+        np.testing.assert_allclose(val[pos[0]], expected_val, rtol=5e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("k0s", [(0, 0), (19, 43)])

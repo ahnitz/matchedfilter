@@ -55,7 +55,7 @@ static void q15_tw32_build(void){
   }
 }
 
-static HWY_NOINLINE void q15_tw32_init_slow(void){
+[[maybe_unused]] static HWY_NOINLINE void q15_tw32_init_slow(void){
   pthread_once(&q15_tw32_once, q15_tw32_build);
   __atomic_store_n(&q15_tw32_ready, 1, __ATOMIC_RELEASE);
 }

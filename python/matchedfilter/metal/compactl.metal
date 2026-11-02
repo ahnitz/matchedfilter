@@ -12,7 +12,7 @@ struct EntryPointParams_0
 };
 
 
-#line 2061 "mm_64_compactListed.slang"
+#line 2063 "mm_64_compactListed.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -24,85 +24,85 @@ struct KernelContext_0
 };
 
 
-#line 2061
+#line 2063
 [[kernel]] void compactListed(uint3 gid_0 [[thread_position_in_grid]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_coarse_1 [[buffer(1)]], uint device* entryPointParams_survivors_1 [[buffer(2)]], uint device* entryPointParams_args_1 [[buffer(3)]], uint device* entryPointParams_list_1 [[buffer(4)]], uint device* entryPointParams_listArgs_1 [[buffer(5)]])
 {
 
-#line 2061
+#line 2063
     thread KernelContext_0 kernelContext_0;
 
-#line 2061
+#line 2063
     (&kernelContext_0)->entryPointParams_0 = entryPointParams_1;
 
-#line 2061
+#line 2063
     (&kernelContext_0)->entryPointParams_coarse_0 = entryPointParams_coarse_1;
 
-#line 2061
+#line 2063
     (&kernelContext_0)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 2061
+#line 2063
     (&kernelContext_0)->entryPointParams_args_0 = entryPointParams_args_1;
 
-#line 2061
+#line 2063
     (&kernelContext_0)->entryPointParams_list_0 = entryPointParams_list_1;
 
-#line 2061
+#line 2063
     (&kernelContext_0)->entryPointParams_listArgs_0 = entryPointParams_listArgs_1;
 
-#line 2069
+#line 2071
     uint k_0 = gid_0.x;
 
     bool _S1 = k_0 < entryPointParams_listArgs_1[int(0)];
 
-#line 2071
+#line 2073
     uint pair_0;
 
-#line 2071
+#line 2073
     if(_S1)
     {
 
-#line 2071
+#line 2073
         pair_0 = (&kernelContext_0)->entryPointParams_list_0[k_0];
 
-#line 2071
+#line 2073
     }
     else
     {
 
-#line 2071
+#line 2073
         pair_0 = 0U;
 
-#line 2071
+#line 2073
     }
 
-#line 2071
+#line 2073
     bool active_0;
     if(_S1)
     {
 
-#line 2072
+#line 2074
         active_0 = !((length(float2(*((&kernelContext_0)->entryPointParams_coarse_0+pair_0)) )) < ((&kernelContext_0)->entryPointParams_0->thr_0));
 
-#line 2072
+#line 2074
     }
     else
     {
 
-#line 2072
+#line 2074
         active_0 = false;
 
-#line 2072
+#line 2074
     }
 
-#line 2084
+#line 2086
     if(active_0)
     {
         uint slot_0 = atomic_fetch_add_explicit(((atomic_uint device*)((&kernelContext_0)->entryPointParams_args_0+int(0))), 1U, memory_order_relaxed);
         *((&kernelContext_0)->entryPointParams_survivors_0+slot_0) = pair_0;
 
-#line 2084
+#line 2086
     }
 
-#line 2090
+#line 2092
     return;
 }

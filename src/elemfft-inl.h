@@ -140,7 +140,7 @@ static inline int eprod_ok(int M){
 #undef AP_PROD_FN
 #undef AP_PROD_DATA_WIDTH
 
-static void efft(int M,vf*restrict X,vf*restrict Xi,vf*restrict S,vf*restrict Si,
+[[maybe_unused]] static void efft(int M,vf*restrict X,vf*restrict Xi,vf*restrict S,vf*restrict Si,
                  const float*restrict itwr,const float*restrict itwi){
   int M1,M2; efactor(M,&M1,&M2);
   if(M2==1){ codelet(M,X,Xi,S,Si,1); return; }

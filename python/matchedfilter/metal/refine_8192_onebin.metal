@@ -57,7 +57,7 @@ struct EntryPointParams_0
 };
 
 
-#line 808 "mm_8192_refineListed_onebin.slang"
+#line 810 "mm_8192_refineListed_onebin.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -143,29 +143,29 @@ float2 cmulConj_0(float2 a_0, float2 b_1)
 }
 
 
-#line 614
+#line 616
 void r4_0(float2 thread* a_1, float2 thread* b_2, float2 thread* c_0, float2 thread* d_1)
 {
     float2 t0_0 = *a_1 + *c_0;
 
-#line 616
+#line 618
     float2 t1_0 = *a_1 - *c_0;
 
-#line 616
+#line 618
     float2 t2_0 = *b_2 + *d_1;
 
-#line 616
+#line 618
     float2 t3_0 = *b_2 - *d_1;
     float2 j3_0 = float2(- t3_0.y, t3_0.x);
     *a_1 = t0_0 + t2_0;
 
-#line 618
+#line 620
     *b_2 = t1_0 + j3_0;
 
-#line 618
+#line 620
     *c_0 = t0_0 - t2_0;
 
-#line 618
+#line 620
     *d_1 = t1_0 - j3_0;
     return;
 }
@@ -192,7 +192,7 @@ float2 cmul_0(float2 a_2, float2 b_3)
 }
 
 
-#line 650
+#line 652
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
     float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
@@ -202,121 +202,121 @@ void dft16_0(array<float2, int(16)> thread* r_0)
     float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
     float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
 
-#line 657
+#line 659
     uint n1_0 = 0U;
     for(;;)
     {
 
-#line 658
+#line 660
         if(n1_0 < 4U)
         {
         }
         else
         {
 
-#line 658
+#line 660
             break;
         }
 
-#line 658
+#line 660
         r4_0(&(*r_0)[n1_0], &(*r_0)[n1_0 + 4U], &(*r_0)[n1_0 + 8U], &(*r_0)[n1_0 + 12U]);
 
-#line 658
+#line 660
         n1_0 = n1_0 + 1U;
 
-#line 658
+#line 660
     }
     (*r_0)[int(5)] = cmul_0((*r_0)[int(5)], W1_0);
 
-#line 659
+#line 661
     (*r_0)[int(9)] = cmul_0((*r_0)[int(9)], W2_0);
 
-#line 659
+#line 661
     (*r_0)[int(13)] = cmul_0((*r_0)[int(13)], W3_0);
     (*r_0)[int(6)] = cmul_0((*r_0)[int(6)], W2_0);
 
-#line 660
+#line 662
     (*r_0)[int(10)] = cmul_0((*r_0)[int(10)], W4_0);
 
-#line 660
+#line 662
     (*r_0)[int(14)] = cmul_0((*r_0)[int(14)], W6_0);
     (*r_0)[int(7)] = cmul_0((*r_0)[int(7)], W3_0);
 
-#line 661
+#line 663
     (*r_0)[int(11)] = cmul_0((*r_0)[int(11)], W6_0);
 
-#line 661
+#line 663
     (*r_0)[int(15)] = cmul_0((*r_0)[int(15)], W9_0);
 
-#line 661
+#line 663
     uint k2_0 = 0U;
     for(;;)
     {
 
-#line 662
+#line 664
         if(k2_0 < 4U)
         {
         }
         else
         {
 
-#line 662
+#line 664
             break;
         }
 
-#line 662
+#line 664
         uint _S14 = 4U * k2_0;
 
-#line 662
+#line 664
         r4_0(&(*r_0)[_S14], &(*r_0)[_S14 + 1U], &(*r_0)[_S14 + 2U], &(*r_0)[_S14 + 3U]);
 
-#line 662
+#line 664
         k2_0 = k2_0 + 1U;
 
-#line 662
+#line 664
     }
 
     float2 t_0 = (*r_0)[int(1)];
 
-#line 664
+#line 666
     (*r_0)[int(1)] = (*r_0)[int(4)];
 
-#line 664
+#line 666
     (*r_0)[int(4)] = t_0;
     float2 t_1 = (*r_0)[int(2)];
 
-#line 665
+#line 667
     (*r_0)[int(2)] = (*r_0)[int(8)];
 
-#line 665
+#line 667
     (*r_0)[int(8)] = t_1;
     float2 t_2 = (*r_0)[int(3)];
 
-#line 666
+#line 668
     (*r_0)[int(3)] = (*r_0)[int(12)];
 
-#line 666
+#line 668
     (*r_0)[int(12)] = t_2;
     float2 t_3 = (*r_0)[int(6)];
 
-#line 667
+#line 669
     (*r_0)[int(6)] = (*r_0)[int(9)];
 
-#line 667
+#line 669
     (*r_0)[int(9)] = t_3;
     float2 t_4 = (*r_0)[int(7)];
 
-#line 668
+#line 670
     (*r_0)[int(7)] = (*r_0)[int(13)];
 
-#line 668
+#line 670
     (*r_0)[int(13)] = t_4;
     float2 t_5 = (*r_0)[int(11)];
 
-#line 669
+#line 671
     (*r_0)[int(11)] = (*r_0)[int(14)];
 
-#line 669
+#line 671
     (*r_0)[int(14)] = t_5;
     return;
 }
@@ -424,89 +424,89 @@ uint computeWant_0(uint d_2, uint TB_0, uint len_0, uint blk_0, uint lane_0, uin
 }
 
 
-#line 625
+#line 627
 void dft2_0(array<float2, int(16)> thread* r_1, uint o_0)
 {
     float2 a_3 = (*r_1)[o_0];
 
-#line 627
+#line 629
     float2 b_4 = (*r_1)[o_0 + 1U];
 
-#line 627
+#line 629
     (*r_1)[o_0] = (*r_1)[o_0] + (*r_1)[o_0 + 1U];
 
-#line 627
+#line 629
     (*r_1)[o_0 + 1U] = a_3 - b_4;
     return;
 }
 
 
-#line 753
+#line 755
 void innermost_0(array<float2, int(16)> thread* r_2)
 {
 
-#line 753
+#line 755
     uint b_5 = 0U;
 
-#line 763
+#line 765
     for(;;)
     {
 
-#line 763
+#line 765
         if(b_5 < 8U)
         {
         }
         else
         {
 
-#line 763
+#line 765
             break;
         }
 
-#line 763
+#line 765
         dft2_0(r_2, b_5 * 2U);
 
-#line 763
+#line 765
         b_5 = b_5 + 1U;
 
-#line 763
+#line 765
     }
 
     return;
 }
 
 
-#line 881
+#line 883
 uint lgOf_0(uint i_1)
 {
 
-#line 881
+#line 883
     uint _S20;
 
-#line 881
+#line 883
     if(i_1 < 3U)
     {
 
-#line 881
+#line 883
         _S20 = 4U;
 
-#line 881
+#line 883
     }
     else
     {
 
-#line 881
+#line 883
         _S20 = 1U;
 
-#line 881
+#line 883
     }
 
-#line 881
+#line 883
     return _S20;
 }
 
 
-#line 883
+#line 885
 uint slotToIndex_0(uint slot_0)
 {
 
@@ -515,1479 +515,1479 @@ uint slotToIndex_0(uint slot_0)
 
     uint x_1 = slot_0 >> lg_0;
 
-#line 887
+#line 889
     uint lg_1 = lgOf_0(2U);
 
     uint x_2 = x_1 >> lg_1;
 
-#line 887
+#line 889
     uint lg_2 = lgOf_0(1U);
 
-#line 887
+#line 889
     uint lg_3 = lgOf_0(0U);
 
-#line 892
+#line 894
     return (((((((0U << lg_0) | (slot_0 & ((1U << lg_0) - 1U))) << lg_1) | (x_1 & ((1U << lg_1) - 1U))) << lg_2) | (x_2 & ((1U << lg_2) - 1U))) << lg_3) | ((x_2 >> lg_2) & ((1U << lg_3) - 1U));
 }
 
 
-#line 2346
+#line 2348
 [[kernel]] void refineListedBounded(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], int device* entryPointParams_peakIdx_1 [[buffer(3)]], packed_float2 device* entryPointParams_peakVal_1 [[buffer(4)]], uint device* entryPointParams_survivors_1 [[buffer(5)]], uint device* entryPointParams_count_1 [[buffer(6)]], uint device* entryPointParams_rowWin_1 [[buffer(7)]])
 {
 
-#line 2346
+#line 2348
     uint k2_1;
 
-#line 2346
+#line 2348
     uint _S21;
 
-#line 2346
+#line 2348
     uint _S22;
 
-#line 2346
+#line 2348
     uint _S23;
 
-#line 2346
+#line 2348
     uint _S24;
 
-#line 2346
+#line 2348
     uint _S25;
 
-#line 2346
+#line 2348
     uint _S26;
 
-#line 2346
+#line 2348
     thread KernelContext_0 kernelContext_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_0 = entryPointParams_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_peakIdx_0 = entryPointParams_peakIdx_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_peakVal_0 = entryPointParams_peakVal_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_count_0 = entryPointParams_count_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->entryPointParams_rowWin_0 = entryPointParams_rowWin_1;
 
-#line 2346
+#line 2348
     threadgroup array<uint, int(8192)> stg_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->stg_0 = &stg_1;
 
-#line 2346
+#line 2348
     (&kernelContext_1)->_binPhase_0 = 0U;
 
-#line 2357
+#line 2359
     uint _S27 = entryPointParams_count_1[int(0)];
 
-#line 2357
+#line 2359
     uint i_2 = gid_0.x;
 
-#line 2388
+#line 2390
     for(;;)
     {
 
-#line 2388
+#line 2390
         if(i_2 < _S27)
         {
         }
         else
         {
 
-#line 2388
+#line 2390
             break;
         }
 
-#line 2389
+#line 2391
         (&kernelContext_1)->_stgBase_0 = 0U;
         uint pair_0 = (&kernelContext_1)->entryPointParams_survivors_0[i_2];
 
-#line 2390
+#line 2392
         thread uint ws_0 = (&kernelContext_1)->entryPointParams_0->winStart_0;
 
-#line 2390
+#line 2392
         thread uint we_0 = (&kernelContext_1)->entryPointParams_0->winEnd_0;
         uint _S28 = pair_0 / (&kernelContext_1)->entryPointParams_0->ntmpl_0;
 
-#line 2391
+#line 2393
         rowWindow_0(_S28, &ws_0, &we_0, (&kernelContext_1)->entryPointParams_rowWin_0, &kernelContext_1);
         uint _S29 = lid_0.x;
 
-#line 2392
+#line 2394
         uint _S30 = ws_0;
 
-#line 2392
+#line 2394
         uint _S31 = we_0;
 
-#line 2392
+#line 2394
         uint _S32 = (&kernelContext_1)->entryPointParams_0->ntmpl_0;
 
-#line 2392
+#line 2394
         uint _S33 = (&kernelContext_1)->entryPointParams_0->thrBits_0;
 
-#line 2392
+#line 2394
         for(;;)
         {
 
-#line 2392
+#line 2394
             for(;;)
             {
 
-#line 2392
+#line 2394
                 (&kernelContext_1)->_tid_0 = _S29;
 
-#line 2392
+#line 2394
                 uint _S34 = pair_0 / _S32;
 
-#line 2392
+#line 2394
                 uint _S35 = pair_0 % _S32;
 
-#line 2392
+#line 2394
                 thread array<float2, int(16)> r_3;
 
-#line 2392
+#line 2394
                 uint n2_0 = 0U;
 
-#line 2392
+#line 2394
                 for(;;)
                 {
 
-#line 2392
+#line 2394
                     if(n2_0 < 16U)
                     {
                     }
                     else
                     {
 
-#line 2392
+#line 2394
                         break;
                     }
 
-#line 2392
+#line 2394
                     uint idx_0 = _S29 + 512U * n2_0;
 
-#line 2392
+#line 2394
                     uint _S36 = mfDataStrideFlag_0();
 
-#line 2392
+#line 2394
                     if(_S36 != 0U)
                     {
 
-#line 2392
+#line 2394
                         uint _S37 = mfDataStrideFlag_0();
 
-#line 2392
+#line 2394
                         k2_1 = _S37;
 
-#line 2392
+#line 2394
                     }
                     else
                     {
 
-#line 2392
+#line 2394
                         k2_1 = 8192U;
 
-#line 2392
+#line 2394
                     }
 
-#line 2392
+#line 2394
                     r_3[n2_0] = cmulConj_0(cload_0((&kernelContext_1)->entryPointParams_data_0, _S34 * k2_1 + idx_0), cload_0((&kernelContext_1)->entryPointParams_tmpl_0, _S35 * 8192U + idx_0));
 
-#line 2392
+#line 2394
                     n2_0 = n2_0 + 1U;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 for(;;)
                 {
 
-#line 2392
+#line 2394
                     for(;;)
                     {
 
-#line 2392
+#line 2394
                         for(;;)
                         {
 
-#line 2392
+#line 2394
                             for(;;)
                             {
 
-#line 2392
+#line 2394
                                 uint lgTB_0 = firstbithigh_0(512U);
 
-#line 2392
+#line 2394
                                 _S21 = lgTB_0;
 
-#line 2392
+#line 2394
                                 uint lgLn_0 = firstbithigh_0(8192U);
 
-#line 2392
+#line 2394
                                 uint blk_1 = _S29 >> lgTB_0;
 
-#line 2392
+#line 2394
                                 uint lane_1 = _S29 & 511U;
 
-#line 2392
+#line 2394
                                 dft16_0(&r_3);
 
-#line 2392
+#line 2394
                                 float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_1) / 8192.0f);
 
-#line 2392
+#line 2394
                                 float _S38 = tw_0.x;
 
-#line 2392
+#line 2394
                                 float _S39 = tw_0.y;
 
-#line 2392
+#line 2394
                                 k2_1 = 0U;
 
-#line 2392
+#line 2394
                                 float cr_0 = 1.0f;
 
-#line 2392
+#line 2394
                                 float ci_0 = 0.0f;
 
-#line 2392
+#line 2394
                                 for(;;)
                                 {
 
-#line 2392
+#line 2394
                                     if(k2_1 < 16U)
                                     {
                                     }
                                     else
                                     {
 
-#line 2392
+#line 2394
                                         break;
                                     }
 
-#line 2392
+#line 2394
                                     r_3[k2_1] = cmul_0(r_3[k2_1], float2(cr_0, ci_0));
 
-#line 2392
+#line 2394
                                     float nr_0 = cr_0 * _S38 - ci_0 * _S39;
 
-#line 2392
+#line 2394
                                     float _S40 = cr_0 * _S39 + ci_0 * _S38;
 
-#line 2392
+#line 2394
                                     k2_1 = k2_1 + 1U;
 
-#line 2392
+#line 2394
                                     cr_0 = nr_0;
 
-#line 2392
+#line 2394
                                     ci_0 = _S40;
 
-#line 2392
+#line 2394
                                 }
 
-#line 2392
+#line 2394
                                 uint per_1 = 16U / max(512U, 1U);
 
-#line 2392
+#line 2394
                                 uint _S41 = max(32U, 1U);
 
-#line 2392
+#line 2394
                                 _S22 = _S41;
 
-#line 2392
+#line 2394
                                 uint blk2_1 = _S29 / _S41;
 
-#line 2392
+#line 2394
                                 uint lane2_1 = _S29 % _S41;
 
-#line 2392
+#line 2394
                                 for(;;)
                                 {
 
-#line 2392
+#line 2394
                                     uint _S42 = (1U << lgTB_0) - 1U;
 
-#line 2392
+#line 2394
                                     _S23 = _S42;
 
-#line 2392
+#line 2394
                                     uint _S43 = (1U << lgLn_0) - 1U;
 
-#line 2392
+#line 2394
                                     thread array<uint, int(16)> src_0;
 
-#line 2392
+#line 2394
                                     uint d_3 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_3 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         uint p_0 = computeWant_0(d_3, 512U, 8192U, blk_1, lane_1, per_1, _S41, 512U, blk2_1, lane2_1);
 
-#line 2392
+#line 2394
                                         uint rem_0 = p_0 & _S43;
 
-#line 2392
+#line 2394
                                         src_0[d_3] = (rem_0 >> lgTB_0) * 512U + ((p_0 >> lgLn_0) << lgTB_0) + (rem_0 & _S42);
 
-#line 2392
+#line 2394
                                         d_3 = d_3 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     thread array<float, int(16)> xr_0;
 
-#line 2392
+#line 2394
                                     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint j_1 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(j_1 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + j_1 * 512U + (&kernelContext_1)->_tid_0] = (as_type<uint>((r_3[j_1].x)));
 
-#line 2392
+#line 2394
                                         j_1 = j_1 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint d_4 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_4 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         xr_0[d_4] = (as_type<float>(((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + src_0[d_4]])));
 
-#line 2392
+#line 2394
                                         d_4 = d_4 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint j_2 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(j_2 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + j_2 * 512U + (&kernelContext_1)->_tid_0] = (as_type<uint>((r_3[j_2].y)));
 
-#line 2392
+#line 2394
                                         j_2 = j_2 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint d_5 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_5 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         r_3[d_5] = float2(xr_0[d_5], (as_type<float>(((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + src_0[d_5]]))));
 
-#line 2392
+#line 2394
                                         d_5 = d_5 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     break;
                                 }
 
-#line 2392
+#line 2394
                                 break;
                             }
 
-#line 2392
+#line 2394
                             break;
                         }
 
-#line 2392
+#line 2394
                         for(;;)
                         {
 
-#line 2392
+#line 2394
                             for(;;)
                             {
 
-#line 2392
+#line 2394
                                 uint lgTB_1 = firstbithigh_0(32U);
 
-#line 2392
+#line 2394
                                 _S24 = lgTB_1;
 
-#line 2392
+#line 2394
                                 uint blk_2 = _S29 >> lgTB_1;
 
-#line 2392
+#line 2394
                                 uint lane_2 = _S29 & 31U;
 
-#line 2392
+#line 2394
                                 dft16_0(&r_3);
 
-#line 2392
+#line 2394
                                 float2 tw_1 = mfTwiddle_0(6.28318548202514648f * float(lane_2) / 512.0f);
 
-#line 2392
+#line 2394
                                 float _S44 = tw_1.x;
 
-#line 2392
+#line 2394
                                 float _S45 = tw_1.y;
 
-#line 2392
+#line 2394
                                 uint k2_2 = 0U;
 
-#line 2392
+#line 2394
                                 float cr_1 = 1.0f;
 
-#line 2392
+#line 2394
                                 float ci_1 = 0.0f;
 
-#line 2392
+#line 2394
                                 for(;;)
                                 {
 
-#line 2392
+#line 2394
                                     if(k2_2 < 16U)
                                     {
                                     }
                                     else
                                     {
 
-#line 2392
+#line 2394
                                         break;
                                     }
 
-#line 2392
+#line 2394
                                     r_3[k2_2] = cmul_0(r_3[k2_2], float2(cr_1, ci_1));
 
-#line 2392
+#line 2394
                                     float nr_1 = cr_1 * _S44 - ci_1 * _S45;
 
-#line 2392
+#line 2394
                                     float _S46 = cr_1 * _S45 + ci_1 * _S44;
 
-#line 2392
+#line 2394
                                     k2_2 = k2_2 + 1U;
 
-#line 2392
+#line 2394
                                     cr_1 = nr_1;
 
-#line 2392
+#line 2394
                                     ci_1 = _S46;
 
-#line 2392
+#line 2394
                                 }
 
-#line 2392
+#line 2394
                                 uint per_2 = 16U / _S22;
 
-#line 2392
+#line 2394
                                 uint _S47 = max(2U, 1U);
 
-#line 2392
+#line 2394
                                 _S25 = _S47;
 
-#line 2392
+#line 2394
                                 uint blk2_2 = _S29 / _S47;
 
-#line 2392
+#line 2394
                                 uint lane2_2 = _S29 % _S47;
 
-#line 2392
+#line 2394
                                 for(;;)
                                 {
 
-#line 2392
+#line 2394
                                     uint _S48 = (1U << lgTB_1) - 1U;
 
-#line 2392
+#line 2394
                                     _S26 = _S48;
 
-#line 2392
+#line 2394
                                     thread array<uint, int(16)> src_1;
 
-#line 2392
+#line 2394
                                     uint d_6 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_6 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         uint p_1 = computeWant_0(d_6, 32U, 512U, blk_2, lane_2, per_2, _S47, 32U, blk2_2, lane2_2);
 
-#line 2392
+#line 2394
                                         uint rem_1 = p_1 & _S23;
 
-#line 2392
+#line 2394
                                         src_1[d_6] = (rem_1 >> lgTB_1) * 512U + ((p_1 >> _S21) << lgTB_1) + (rem_1 & _S48);
 
-#line 2392
+#line 2394
                                         d_6 = d_6 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     thread array<float, int(16)> xr_1;
 
-#line 2392
+#line 2394
                                     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint j_3 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(j_3 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + j_3 * 512U + (&kernelContext_1)->_tid_0] = (as_type<uint>((r_3[j_3].x)));
 
-#line 2392
+#line 2394
                                         j_3 = j_3 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint d_7 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_7 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         xr_1[d_7] = (as_type<float>(((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + src_1[d_7]])));
 
-#line 2392
+#line 2394
                                         d_7 = d_7 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint j_4 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(j_4 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + j_4 * 512U + (&kernelContext_1)->_tid_0] = (as_type<uint>((r_3[j_4].y)));
 
-#line 2392
+#line 2394
                                         j_4 = j_4 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint d_8 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_8 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         r_3[d_8] = float2(xr_1[d_8], (as_type<float>(((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + src_1[d_8]]))));
 
-#line 2392
+#line 2394
                                         d_8 = d_8 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     break;
                                 }
 
-#line 2392
+#line 2394
                                 break;
                             }
 
-#line 2392
+#line 2394
                             break;
                         }
 
-#line 2392
+#line 2394
                         for(;;)
                         {
 
-#line 2392
+#line 2394
                             for(;;)
                             {
 
-#line 2392
+#line 2394
                                 uint lgTB_2 = firstbithigh_0(2U);
 
-#line 2392
+#line 2394
                                 uint blk_3 = _S29 >> lgTB_2;
 
-#line 2392
+#line 2394
                                 uint lane_3 = _S29 & 1U;
 
-#line 2392
+#line 2394
                                 dft16_0(&r_3);
 
-#line 2392
+#line 2394
                                 float2 tw_2 = mfTwiddle_0(6.28318548202514648f * float(lane_3) / 32.0f);
 
-#line 2392
+#line 2394
                                 float _S49 = tw_2.x;
 
-#line 2392
+#line 2394
                                 float _S50 = tw_2.y;
 
-#line 2392
+#line 2394
                                 uint k2_3 = 0U;
 
-#line 2392
+#line 2394
                                 float cr_2 = 1.0f;
 
-#line 2392
+#line 2394
                                 float ci_2 = 0.0f;
 
-#line 2392
+#line 2394
                                 for(;;)
                                 {
 
-#line 2392
+#line 2394
                                     if(k2_3 < 16U)
                                     {
                                     }
                                     else
                                     {
 
-#line 2392
+#line 2394
                                         break;
                                     }
 
-#line 2392
+#line 2394
                                     r_3[k2_3] = cmul_0(r_3[k2_3], float2(cr_2, ci_2));
 
-#line 2392
+#line 2394
                                     float nr_2 = cr_2 * _S49 - ci_2 * _S50;
 
-#line 2392
+#line 2394
                                     float _S51 = cr_2 * _S50 + ci_2 * _S49;
 
-#line 2392
+#line 2394
                                     k2_3 = k2_3 + 1U;
 
-#line 2392
+#line 2394
                                     cr_2 = nr_2;
 
-#line 2392
+#line 2394
                                     ci_2 = _S51;
 
-#line 2392
+#line 2394
                                 }
 
-#line 2392
+#line 2394
                                 uint per_3 = 16U / _S25;
 
-#line 2392
+#line 2394
                                 uint _S52 = max(0U, 1U);
 
-#line 2392
+#line 2394
                                 uint blk2_3 = _S29 / _S52;
 
-#line 2392
+#line 2394
                                 uint lane2_3 = _S29 % _S52;
 
-#line 2392
+#line 2394
                                 for(;;)
                                 {
 
-#line 2392
+#line 2394
                                     uint _S53 = (1U << lgTB_2) - 1U;
 
-#line 2392
+#line 2394
                                     thread array<uint, int(16)> src_2;
 
-#line 2392
+#line 2394
                                     uint d_9 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_9 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         uint p_2 = computeWant_0(d_9, 2U, 32U, blk_3, lane_3, per_3, _S52, 2U, blk2_3, lane2_3);
 
-#line 2392
+#line 2394
                                         uint rem_2 = p_2 & _S26;
 
-#line 2392
+#line 2394
                                         src_2[d_9] = (rem_2 >> lgTB_2) * 512U + ((p_2 >> _S24) << lgTB_2) + (rem_2 & _S53);
 
-#line 2392
+#line 2394
                                         d_9 = d_9 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     thread array<float, int(16)> xr_2;
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint j_5 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(j_5 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + j_5 * 512U + (&kernelContext_1)->_tid_0] = (as_type<uint>((r_3[j_5].x)));
 
-#line 2392
+#line 2394
                                         j_5 = j_5 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint d_10 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_10 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         xr_2[d_10] = (as_type<float>(((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + src_2[d_10]])));
 
-#line 2392
+#line 2394
                                         d_10 = d_10 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint j_6 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(j_6 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + j_6 * 512U + (&kernelContext_1)->_tid_0] = (as_type<uint>((r_3[j_6].y)));
 
-#line 2392
+#line 2394
                                         j_6 = j_6 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
-                                    simdgroup_barrier(metal::mem_flags::mem_threadgroup);
+#line 2394
+                                    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                                     uint d_11 = 0U;
 
-#line 2392
+#line 2394
                                     for(;;)
                                     {
 
-#line 2392
+#line 2394
                                         if(d_11 < 16U)
                                         {
                                         }
                                         else
                                         {
 
-#line 2392
+#line 2394
                                             break;
                                         }
 
-#line 2392
+#line 2394
                                         r_3[d_11] = float2(xr_2[d_11], (as_type<float>(((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + src_2[d_11]]))));
 
-#line 2392
+#line 2394
                                         d_11 = d_11 + 1U;
 
-#line 2392
+#line 2394
                                     }
 
-#line 2392
+#line 2394
                                     break;
                                 }
 
-#line 2392
+#line 2394
                                 break;
                             }
 
-#line 2392
+#line 2394
                             break;
                         }
 
-#line 2392
+#line 2394
                         break;
                     }
 
-#line 2392
+#line 2394
                     innermost_0(&r_3);
 
-#line 2392
+#line 2394
                     break;
                 }
 
-#line 2392
+#line 2394
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                 float2 _S54 = float2(0.0f, 0.0f);
 
-#line 2392
+#line 2394
                 bool _S55;
 
-#line 2392
+#line 2394
                 if(_S30 == 0U)
                 {
 
-#line 2392
+#line 2394
                     _S55 = _S31 >= 8192U;
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     _S55 = false;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 uint winner_0;
 
-#line 2392
+#line 2394
                 uint threadBestBits_0;
 
-#line 2392
+#line 2394
                 uint threadBestSlot_0;
 
-#line 2392
+#line 2394
                 bool live_0;
 
-#line 2392
+#line 2394
                 float2 threadBestVal_0;
 
-#line 2392
+#line 2394
                 if(_S55)
                 {
 
-#line 2392
+#line 2394
                     winner_0 = 0U;
 
-#line 2392
+#line 2394
                     threadBestBits_0 = _S33;
 
-#line 2392
+#line 2394
                     threadBestSlot_0 = 4294967295U;
 
-#line 2392
+#line 2394
                     threadBestVal_0 = _S54;
 
-#line 2392
+#line 2394
                     for(;;)
                     {
 
-#line 2392
+#line 2394
                         if(winner_0 < 16U)
                         {
                         }
                         else
                         {
 
-#line 2392
+#line 2394
                             break;
                         }
 
-#line 2392
+#line 2394
                         float _rx_0 = r_3[winner_0].x;
 
-#line 2392
+#line 2394
                         float _ry_0 = r_3[winner_0].y;
 
-#line 2392
+#line 2394
                         uint magBits_0 = (as_type<uint>((_rx_0 * _rx_0 + _ry_0 * _ry_0)));
 
-#line 2392
+#line 2394
                         if(magBits_0 > threadBestBits_0)
                         {
 
-#line 2392
+#line 2394
                             uint _S56 = _S29 * 16U + winner_0;
 
-#line 2392
+#line 2394
                             float2 _S57 = float2(_rx_0, _ry_0);
 
-#line 2392
+#line 2394
                             threadBestBits_0 = magBits_0;
 
-#line 2392
+#line 2394
                             threadBestSlot_0 = _S56;
 
-#line 2392
+#line 2394
                             threadBestVal_0 = _S57;
 
-#line 2392
+#line 2394
                         }
 
-#line 2392
+#line 2394
                         winner_0 = winner_0 + 1U;
 
-#line 2392
+#line 2394
                     }
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     winner_0 = 0U;
 
-#line 2392
+#line 2394
                     threadBestBits_0 = _S33;
 
-#line 2392
+#line 2394
                     threadBestSlot_0 = 4294967295U;
 
-#line 2392
+#line 2394
                     threadBestVal_0 = _S54;
 
-#line 2392
+#line 2394
                     for(;;)
                     {
 
-#line 2392
+#line 2394
                         if(winner_0 < 16U)
                         {
                         }
                         else
                         {
 
-#line 2392
+#line 2394
                             break;
                         }
 
-#line 2392
+#line 2394
                         uint _S58 = _S29 * 16U + winner_0;
 
-#line 2392
+#line 2394
                         uint idx_1 = slotToIndex_0(_S58);
 
-#line 2392
+#line 2394
                         if(idx_1 >= _S30)
                         {
 
-#line 2392
+#line 2394
                             live_0 = idx_1 < _S31;
 
-#line 2392
+#line 2394
                         }
                         else
                         {
 
-#line 2392
+#line 2394
                             live_0 = false;
 
-#line 2392
+#line 2394
                         }
 
-#line 2392
+#line 2394
                         float _rx_1 = r_3[winner_0].x;
 
-#line 2392
+#line 2394
                         float _ry_1 = r_3[winner_0].y;
 
-#line 2392
+#line 2394
                         uint magBits_1;
 
-#line 2392
+#line 2394
                         if(live_0)
                         {
 
-#line 2392
+#line 2394
                             magBits_1 = (as_type<uint>((_rx_1 * _rx_1 + _ry_1 * _ry_1)));
 
-#line 2392
+#line 2394
                         }
                         else
                         {
 
-#line 2392
+#line 2394
                             magBits_1 = 0U;
 
-#line 2392
+#line 2394
                         }
 
-#line 2392
+#line 2394
                         if(magBits_1 > threadBestBits_0)
                         {
 
-#line 2392
+#line 2394
                             float2 _S59 = float2(_rx_1, _ry_1);
 
-#line 2392
+#line 2394
                             threadBestBits_0 = magBits_1;
 
-#line 2392
+#line 2394
                             threadBestSlot_0 = _S58;
 
-#line 2392
+#line 2394
                             threadBestVal_0 = _S59;
 
-#line 2392
+#line 2394
                         }
 
-#line 2392
+#line 2394
                         winner_0 = winner_0 + 1U;
 
-#line 2392
+#line 2394
                     }
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 bool _S60 = _S29 == 0U;
 
-#line 2392
+#line 2394
                 if(_S60)
                 {
 
-#line 2392
+#line 2394
                     (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0] = _S33;
 
-#line 2392
+#line 2394
                     (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + 1U] = 4294967295U;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                 uint wm_0 = simd_max(threadBestBits_0);
 
-#line 2392
+#line 2394
                 bool _S61 = simd_is_first();
 
-#line 2392
+#line 2394
                 if(_S61)
                 {
 
-#line 2392
+#line 2394
                     live_0 = wm_0 > _S33;
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     live_0 = false;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 if(live_0)
                 {
 
-#line 2392
+#line 2394
                     uint _S62 = atomic_fetch_max_explicit(((atomic_uint threadgroup*)(&(*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0])), wm_0, memory_order_relaxed);
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                 bool _S63;
 
-#line 2392
+#line 2394
                 if(threadBestBits_0 > _S33)
                 {
 
-#line 2392
+#line 2394
                     _S63 = threadBestBits_0 == (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0];
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     _S63 = false;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 if(_S63)
                 {
 
-#line 2392
+#line 2394
                     winner_0 = threadBestSlot_0;
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     winner_0 = 4294967295U;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 uint waveWinner_0 = simd_min(winner_0);
 
-#line 2392
+#line 2394
                 bool _S64 = simd_is_first();
 
-#line 2392
+#line 2394
                 bool _S65;
 
-#line 2392
+#line 2394
                 if(_S64)
                 {
 
-#line 2392
+#line 2394
                     _S65 = waveWinner_0 != 4294967295U;
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     _S65 = false;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 if(_S65)
                 {
 
-#line 2392
+#line 2394
                     uint _S66 = atomic_fetch_min_explicit(((atomic_uint threadgroup*)(&(*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + 1U])), waveWinner_0, memory_order_relaxed);
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2392
+#line 2394
                 bool _S67;
 
-#line 2392
+#line 2394
                 if(threadBestSlot_0 == (*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + 1U])
                 {
 
-#line 2392
+#line 2394
                     _S67 = threadBestSlot_0 != 4294967295U;
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     _S67 = false;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 if(_S67)
                 {
 
-#line 2392
+#line 2394
                     *((&kernelContext_1)->entryPointParams_peakIdx_0+pair_0) = int(slotToIndex_0(threadBestSlot_0));
 
-#line 2392
+#line 2394
                     *((&kernelContext_1)->entryPointParams_peakVal_0+pair_0) = packed_float2(threadBestVal_0) ;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 bool _S68;
 
-#line 2392
+#line 2394
                 if(_S60)
                 {
 
-#line 2392
+#line 2394
                     _S68 = ((*(&kernelContext_1)->stg_0)[(&kernelContext_1)->_stgBase_0 + 1U]) == 4294967295U;
 
-#line 2392
+#line 2394
                 }
                 else
                 {
 
-#line 2392
+#line 2394
                     _S68 = false;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 if(_S68)
                 {
 
-#line 2392
+#line 2394
                     *((&kernelContext_1)->entryPointParams_peakIdx_0+pair_0) = int(-1);
 
-#line 2392
+#line 2394
                     *((&kernelContext_1)->entryPointParams_peakVal_0+pair_0) = packed_float2(_S54) ;
 
-#line 2392
+#line 2394
                 }
 
-#line 2392
+#line 2394
                 break;
             }
 
-#line 2392
+#line 2394
             break;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 2388
+#line 2390
         i_2 = i_2 + (&kernelContext_1)->entryPointParams_0->gridSize_0;
 
-#line 2388
+#line 2390
     }
 
-#line 2397
+#line 2399
     return;
 }
