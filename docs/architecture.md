@@ -88,7 +88,6 @@ Highway's `foreach_target.h`, so one build holds a copy per SIMD target and
 | `td-inl.h` | The direct (time-domain) refine: correlation at a few lags around a survivor's coarse peak. |
 | `kernel_avx1.cc`, `simd-avx1.h` | The `AVX` back end: SSE4's kernels with the float paths at 8 lanes, for CPUs with AVX but not AVX2. |
 | `gauss.cc` | Counter-based normal draws for the gate model's simulation, identical on every ISA. |
-| `fft_accel.c` | The block forward through the platform FFT where one exists (vDSP on macOS); absent elsewhere. |
 
 CI checks that the generated codelet headers match their generators (`generated-files` job
 in `.github/workflows/ci.yml`).
