@@ -150,9 +150,14 @@ Production length (dev2, two runs an arm, slot order rotating, one session):
 | GPU first segment | 35.6 s | 22.2-23.3 s | 9.7-10.8 s |
 | GPU whole job | 109-110 s | 97-99 s | 88-98 s |
 
-On the CPU the centroids now cost 8 s of setup instead of 21 s, and the job is 10% faster
-than without them (3.5% before). Fine triggers are unchanged (37823-37828, the scatter of
-runs with live trials).
+These change setup only: the steady rate is main's, which with the centroids is 1.29x their
+absence on the CPU (91.7 against 118.3 s for 27 segments). What changed is how soon that
+rate is paid for: 8 s of setup instead of 21 s, about 8 segments instead of 21. A 28-segment
+ladder is a short job -- its whole-job time is 10% below the centroid-free one's (3.5%
+before) -- and a long one approaches the steady 1.29x. On the GPU the steady effect is
+within the trials' scatter (1.15x for the centroids in this session, flat the day before;
+the asymmetric follow-ups alone vary 1.2-2.3 s with the trials' outcomes). Fine triggers are
+unchanged (37823-37828, the scatter of runs with live trials).
 
 ### Budget
 
@@ -180,11 +185,15 @@ thresholds, 0.0022, is an alpha-1 model's (0.0020). Two parts:
 ## Open
 
 - The rest of the centroids' setup (8 s on the CPU, 13 s on the GPU), and the CHAIN decision count with them on.
-- The GPU's centroid choice: priced as a gain, a whole-job loss (about 9 s a job on dev2). It should be a
-  trial arm, or the GPU price should count the follow-ups it adds.
+- The GPU's centroid choice: priced as a gain; at 28 segments a whole-job loss of about 9 s
+  on dev2, and a steady effect not yet resolved from the trials' scatter (measure with
+  settled cost files). It should be a trial arm, or the GPU price should count the
+  follow-ups it adds.
 - Heterogeneous banks against the single-profile gate model, which set_input_psd was
   meant to address. How far production banks' leaves depart from their reference is not
   measured.
 - Thresholds solved against the members' mixture of retentions (above).
 - Metal rounds a device follow-up batch and the same call alone apart by a few ulp (fast
   math, different kernels); the tests now compare values to 1e-6.
+- Tiled and untiled CPU middle-to-fine runs give SNRs a few ulp apart on some CI runners
+  (every index equal; bit-identical on dev2); test_tiled_middle_fine compares them to 1e-6.

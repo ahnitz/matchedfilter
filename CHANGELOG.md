@@ -251,7 +251,8 @@ Alpha releases may change the API. Pin a version for reproducible work.
 - The tier-0 centroids' setup on the test27 job: 21 -> 8 s on the CPU, 26 -> 13 s on the
   GPU (dev2). The pair scorer runs under Highway's dispatch (5.5x at AVX-512), and a bound
   after the first matching pass skips the second, and the pricing, of bands that cannot win.
-  The CPU job with them is 10% faster than without (it was 3.5%). docs/review-rounds-1-6.md.
+  Their steady rate is unchanged (1.29x their absence on the CPU); they now pay for their
+  setup after about 8 segments instead of 21. docs/review-rounds-1-6.md.
 - Optimisation rounds 1-6 (f8fe1443..a52ced2e, 40 commits: Q15 screens, forward and middle
   correlation kernels, sparse batches, L3 tiling, GPU register use and subgroup exchanges,
   the centroids). On the test27 production job on dev2's GPU the steady segments took 14%
