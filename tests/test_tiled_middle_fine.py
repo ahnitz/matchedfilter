@@ -12,8 +12,11 @@ def _decisions_fixed(monkeypatch):
     """Every run here gates as every other: with measured choices on, a joint trial times the
     reference and the tiled run apart and may lock other arms in each (block size, Q15
     screen), and hierarchical peaks depend on them -- 84 peaks against 86 on a CI runner,
-    with tiling exact. The model's choices are deterministic, so they hold the comparison."""
+    with tiling exact. The model's choices hold the comparison; the direct refine is off as
+    well, since each plan times its own price and two plans of one call can choose apart
+    (the same 84 against 86 with autotuning off, CI 3.11, 2026-11-02)."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "0")
 
 
 def _reference_profile(n_bins=16385, delta_f=1.0 / 16.0):
