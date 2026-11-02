@@ -82,8 +82,7 @@ struct ap_hmf_plan {
   float *dcopy;               /* [nd][2n]: ap_hmf_set_data's own copy of each data spectrum */
   int sparse;                 /* ap_hmf_set_sparse: rows that do not fire write counts only */
   char *dready,*tready,*dmirrored;
-  float *input_psd;           /* [k]: optional per-bin input noise PSD (ap_hmf_set_input_psd) */
-  int ref_on,psd_on;
+  int ref_on;
   long pairs,trig;
   unsigned long long c_ref,c_fill;
   unsigned long long c_series;      /* whole ap_hmf_run_series calls: transforms, ingest, tiers, refine */
@@ -278,7 +277,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   free(p->rtw);
   ap_accel_destroy(p->accel);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dcopy);
-  free(p->dready); free(p->dmirrored); free(p->tready); free(p->input_psd);
+  free(p->dready); free(p->dmirrored); free(p->tready);
   if(p->twiddles) free(p->twiddles);
   if(p->tw_scratch) free(p->tw_scratch);
   if(p->tmpls_half) free(p->tmpls_half);
@@ -718,7 +717,7 @@ int ap_hmf_set_thresholds(ap_hmf_plan *p,const float *thr,int ntiers){
 static int load_tiers(ap_hmf_plan *p,int t,const float *spec){
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
-    double f=p->psd_on ? tr->fpow[t] : (p->ref_on ? tr->ref_f : tr->fpow[t]);
+    double f=p->ref_on ? tr->ref_f : tr->fpow[t];
     double scale=f>0 ? 1/sqrt(f) : 0;
     if(tr->k0 == 0){
       for(size_t k=0;k<2*tr->m;k++) tr->scratch[k]=(float)(spec[k]*scale);
@@ -788,26 +787,6 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
   for(int t=0;t<p->nt;t++) if(p->tready[t]==1) p->tready[t]=2;
   return 0;
 }
-int ap_hmf_set_input_psd(ap_hmf_plan *p,const float *psd){
-  if(!p) return -1;
-  if(psd){
-    double total=0;
-    for(size_t k=0;k<p->n;k++){
-      if(!isfinite(psd[k]) || psd[k]<0) return -1;
-      total+=psd[k];
-    }
-    if(total<=0) return -1;
-    if(!p->input_psd){
-      p->input_psd=malloc(p->n*sizeof(float));
-      if(!p->input_psd) return -1;
-    }
-    memcpy(p->input_psd,psd,p->n*sizeof(float));
-    p->psd_on=1;
-  } else p->psd_on=0;
-  ap_hmf_clear_tier0_clusters(p);
-  for(int t=0;t<p->nt;t++) if(p->tready[t]==1) p->tready[t]=2;
-  return 0;
-}
 int ap_hmf_set_sparse(ap_hmf_plan *p,int on){
   if(!p) return -1;
   p->sparse=on?1:0;
@@ -865,28 +844,22 @@ int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
     if(ap_mf_set_template(p->full,t,spec)) return -1;
   }
   double total=0,low[AP_HMF_MAX_TIERS]={0};
-  const float *psd=p->psd_on ? p->input_psd : NULL;
   if(p->is_dif && p->hermitian){
-    double w0=psd ? (double)psd[0] : 1.0;
-    double wn=psd ? (double)psd[p->k] : 1.0;
-    double dc_pow=w0*(double)spec[0]*(double)spec[0];
-    double nyq_pow=wn*(double)spec[1]*(double)spec[1];
-    double pair_pow=0.0;
+    double dc_pow=(double)spec[0]*(double)spec[0];
+    double nyq_pow=(double)spec[1]*(double)spec[1];
+    double pos_pow=0.0;
     for(size_t k=1;k<p->k;k++){
       double re=spec[2*k],im=spec[2*k+1];
-      double rsq=re*re+im*im;
-      double p_pos=(psd ? (double)psd[k] : 1.0)*rsq;
-      double p_neg=(psd ? (double)psd[p->n-k] : 1.0)*rsq;
-      pair_pow+=p_pos+p_neg;
+      double pwr=re*re+im*im;
+      pos_pow+=pwr;
       for(int i=0;i<p->ntiers;i++)
-        if(k>=p->tier[i].k0 && k<tier_khi(p,&p->tier[i])) low[i]+=p_pos;
+        if(k>=p->tier[i].k0 && k<tier_khi(p,&p->tier[i])) low[i]+=pwr;
     }
-    total=dc_pow+nyq_pow+pair_pow;
+    total=dc_pow+nyq_pow+2.0*pos_pow;
     for(int i=0;i<p->ntiers;i++) if(p->tier[i].k0==0) low[i]+=dc_pow;
   } else {
     for(size_t k=0;k<p->k;k++){
-      double re=spec[2*k],im=spec[2*k+1];
-      double power=(psd ? (double)psd[k] : 1.0)*(re*re+im*im);
+      double re=spec[2*k],im=spec[2*k+1],power=re*re+im*im;
       total+=power;
       for(int i=0;i<p->ntiers;i++)
         if(k>=p->tier[i].k0 && k<tier_khi(p,&p->tier[i])) low[i]+=power;
