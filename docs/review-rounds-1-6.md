@@ -123,17 +123,68 @@ property the code reads; chosen means picked by hand and not swept.
 | Pass-2 merge floor `max(0.84, rho_min - 0.05)`, alpha floor `0.88-0.93` | gatechain.py (88781d6e) | chosen |
 | Direct-refine price rounds of 100,000 ticks | src/hmf.c (review) | derived: puts a 1 us clock step under 1% of a round |
 
+## Follow-up: the centroids' setup and their unused budget (2026-11-02)
+
+### Setup
+
+Where the CPU job's 21 s of centroid setup went (cProfile, test27, 27 tops): the pair scorer
+in `cluster_tier0_candidates`, a plain C loop built for the SSE4 baseline, 12.4 s; the
+rest of the clustering 6 s; and half of all clusterings were of band 512 at n=2048, which
+no plan chose.
+
+- The scorer is a Highway kernel (src/tier0.cc): a 48-template chunk 1.28 -> 0.23 ms on
+  dev2 (AVX-512), 0.38 ms with AVX2, 0.82 ms with SSE4; same scores and winning shifts.
+- A band is admitted by a bound at the k <= 4 floor (ratio 0.25); band 512 passed it (47.7
+  against a winner of 51.7) and then cost 79-89. Pass 2 merges pairs of Pass-1 centroids,
+  so after Pass 1 the k <= 4 bank's ratio is at least half the Pass-1 one (0.30 there,
+  bound 57): Pass 2, and pricing any candidate whose own ratio's bound cannot win, are
+  skipped. The bounds price only the chains from that band (`choose_chain(first=b)`).
+
+Production length (dev2, two runs an arm, slot order rotating, one session):
+
+| | main (583e730f) | with these | centroids off |
+|---|---|---|---|
+| CPU prep | 80.8-81.4 s | 68.3-68.6 s | 60.4-60.5 s |
+| CPU steady | 91.4-92.1 s | 91.5-91.9 s | 118.2-118.4 s |
+| CPU whole job | 182-183 s | 169-170 s | 189 s |
+| GPU first segment | 35.6 s | 22.2-23.3 s | 9.7-10.8 s |
+| GPU whole job | 109-110 s | 97-99 s | 88-98 s |
+
+On the CPU the centroids now cost 8 s of setup instead of 21 s, and the job is 10% faster
+than without them (3.5% before). Fine triggers are unchanged (37823-37828, the scatter of
+runs with live trials).
+
+### Budget
+
+The centroids' plans leave budget unused: 0.55x pooled on the audit's banks. Most of it
+is the retention the thresholds are solved for. On the audit bank where it was largest
+(skewed_edge, 256,1024) the plan's alpha of 0.98 lowered tier 0's threshold from 5.19 to
+4.94 while the engine met its signals almost unattenuated: its dismissal at those
+thresholds, 0.0022, is an alpha-1 model's (0.0020). Two parts:
+
+- Members' retentions were each one's overlap at the lag it was aligned at when the
+  centroid was built; the engine takes the largest statistic over its padded lags, where a
+  blended centroid peaks elsewhere. They are now the peak over the reachable lags: never
+  lower, the audit's under-plan chains 27 -> 9, none off, and on test27 six of 120
+  clusterings' alpha rose from 0.96 to 0.98.
+- The rule collapsing members to one alpha (mean less half the spread, floored to 0.02) is
+  the rest. On test27, at each plan's thresholds, the plans dismiss 1.00x their budget at
+  their own alpha, 0.76x (0.47-1.06x) under the mixture of their members' retentions, 0.43x
+  at alpha 1. The member mean instead (floored to 0.01) cut the fine stage 3% and steady
+  time 2.6%, but put some plans at 1.20x under the mixture: not a bound, so not kept.
+  Thresholds solved against the members' mixture would meet the budget on average by
+  construction. That needs either the simulation to draw a retention per row (what
+  set_input_psd's `M_simulate` change did) or one simulation per retention bin (estimated
+  15-30 s of setup per job here, for about 2.4 s of steady time): not done.
+
 ## Open
 
-- The centroids' setup: 21 s on the CPU and 26 s on the GPU per job, paid every process.
-  Kept in the cost file, or made cheaper, the CPU's 23% steady gain would reach the job.
-- The GPU's centroid choice: priced as a gain, measured as a loss. It should be a trial
-  arm, or the GPU price should count the follow-ups it adds.
-- The CHAIN decision count with centroids on (2.7x on the CPU).
+- The rest of the centroids' setup (8 s on the CPU, 13 s on the GPU), and the CHAIN decision count with them on.
+- The GPU's centroid choice: priced as a gain, a whole-job loss (about 9 s a job on dev2). It should be a
+  trial arm, or the GPU price should count the follow-ups it adds.
 - Heterogeneous banks against the single-profile gate model, which set_input_psd was
   meant to address. How far production banks' leaves depart from their reference is not
   measured.
-- The centroids' conservative plans (0.55x the budget pooled): a tighter retention or a
-  model that draws the padded lags would buy cheaper chains.
+- Thresholds solved against the members' mixture of retentions (above).
 - Metal rounds a device follow-up batch and the same call alone apart by a few ulp (fast
   math, different kernels); the tests now compare values to 1e-6.
