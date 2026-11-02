@@ -211,10 +211,11 @@ class HierOps:
     def _gate_use(self, band):
         """Whether a later gate tier at this band runs the one-bin refine's gate-only build,
         reporting the window's maximum alone (nbins word 0), rather than the one-bin election
-        (tierb.slang MF_GATE_ONLY) -- the gate is its own build: compiled into the one-bin
-        refine it cost that kernel registers (102 -> 127 at n = 512 on the L40S) and its tier
-        15%. Measured per pair: gate 10-13% faster on the 8060S, 12-18% on the M2, the tier
-        halved on a RENOIR; within 1% on the L40S (_played "gateway")."""
+        (tierb.slang MF_GATE_ONLY or peakTwoGate) -- measured per pair (_played "gateway")."""
+        if self._shipped("c16", band) and self._shipped("tier1_c16", band):
+            if band // 16 > self.subgroup_size:
+                return False
+            return self._played("gateway", band) == "gate"
         if not (self._shipped("tier1", band) and self._shipped("tier1gate", band)):
             return False
         return self._played("gateway", band) == "gate"
@@ -234,23 +235,40 @@ class HierOps:
         rng = np.random.default_rng(1)
         x = ((rng.standard_normal((pairs // ntm, band))
               + 1j * rng.standard_normal((pairs // ntm, band))) * 0.1).astype(np.complex64)
-        bufs = [self._x_alloc(x.nbytes), self._x_alloc(ntm * band * 8),
+        c16 = (self._shipped("c16", band) and self._shipped("tier1_c16", band)
+               and band // 16 <= self.subgroup_size)
+        drows = (x if self.inplace_feed else pack_half2(x)) if c16 else x
+        trows = pack_half2(x[:ntm]) if c16 else x[:ntm]
+        bufs = [self._x_alloc(drows.nbytes), self._x_alloc(trows.nbytes),
                 self._x_alloc(pairs * 4), self._x_alloc(pairs * 8),
-                self._x_alloc(pairs * 4), self._x_alloc(16)]
-        bufs[0].write(x)
-        bufs[1].write(x[:ntm])
+                self._x_alloc(pairs * 4), self._x_alloc(16), self._x_alloc(16)]
+        bufs[0].write(drows)
+        bufs[1].write(trows)
         surv = np.arange(0, pairs, self._GATE_SURVIVORS, dtype=np.uint32)
         bufs[4].write(surv)
         bufs[5].write(np.array([surv.size, 1, 1, 0], np.uint32))
+        ppg = max(1, 1024 // band)
+        groups = -(-surv.size // (2 * ppg)) if c16 else surv.size
+        max_groups = -(-pairs // (2 * ppg)) if c16 else pairs
+        bufs[6].write(np.array([groups, 1, 1, 0], np.uint32))
         natives = []
 
         def time_way(way):
-            kern = self._x_kernel("tier1", band, dict(stride=0, rowwin=False,
-                                                      gate=(way == "gate")))
-            lst = self._x_list("gate timing")
-            lst.listed(kern, bufs[5], pairs, bufs,
-                       (ntm, 0, band, band, bin_shift(band) & 0xFFFFFFFF,
-                        0 if way == "gate" else 1, 0))
+            is_gate = (way == "gate")
+            if c16:
+                kern = self._x_kernel("tier1_c16", band,
+                                      dict(stride=band if self.inplace_feed else 0, scale=0,
+                                           rowwin=False, twt=1))
+                lst = self._x_list("gate timing")
+                lst.listed(kern, bufs[6], max_groups, bufs[:6],
+                           (ntm, 0, band, band, bin_shift(band) & 0xFFFFFFFF,
+                            0 if is_gate else 1, _bits(4.0) if is_gate else 0))
+            else:
+                kern = self._x_kernel("tier1", band, dict(stride=0, rowwin=False, gate=is_gate))
+                lst = self._x_list("gate timing")
+                lst.listed(kern, bufs[5], pairs, bufs[:6],
+                           (ntm, 0, band, band, bin_shift(band) & 0xFFFFFFFF,
+                            0 if is_gate else 1, 0))
             native = lst.end()
             natives.append(native)
             return self._x_time(native, {}, 2)
@@ -287,20 +305,26 @@ class HierOps:
         taps_arr = np.zeros((ntm, row_words), np.uint32)
         taps_arr[:, 0] = tap_count
         thr_bits = _bits(1e30)
+        surv = np.arange(0, pairs, 4, dtype=np.uint32)
+        nsurv = int(surv.size)
         bufs = [self._x_alloc(x.nbytes), self._x_alloc(starts_arr.nbytes),
                 self._x_alloc(taps_arr.nbytes), self._x_alloc(pairs * 4),
                 self._x_alloc(pairs * 8), self._x_alloc(pairs * 4), self._x_alloc(16),
                 self._x_alloc(pairs * 4), self._x_alloc(16), self._x_alloc(pairs * 4),
-                self._x_alloc(pairs * 8), self._x_alloc(ntm * n * 8)]
+                self._x_alloc(pairs * 8), self._x_alloc(ntm * n * 8),
+                self._x_alloc(nd * n * 8), self._x_alloc(nd * 4), self._x_alloc(16)]
         bufs[0].write(x)
         bufs[1].write(starts_arr)
         bufs[2].write(taps_arr)
         bufs[3].write(np.full(pairs, ce_idx, np.int32))
         bufs[4].write(np.ones(pairs, np.complex64))
-        bufs[5].write(np.arange(pairs, dtype=np.uint32))
-        bufs[6].write(np.array([pairs, 1, 1, 0], np.uint32))
+        bufs[5].write(np.pad(surv, (0, pairs - nsurv)))
+        bufs[6].write(np.array([nsurv, 1, 1, 0], np.uint32))
         bufs[8].write(np.array([0, 1, 1, 0], np.uint32))
         bufs[11].write(x[:ntm])
+        bufs[12].write(x)
+        bufs[13].write(np.arange(nd, dtype=np.uint32))
+        bufs[14].write(np.array([nd, 1, 1, 0], np.uint32))
         natives = []
 
         def time_kind(kind):
@@ -311,10 +335,16 @@ class HierOps:
                            (n, last_band, ntm, 0, series_length, series_layout, tap_meta, hw,
                             0xFFFFFFFF, 0, n, n, bin_shift(n) & 0xFFFFFFFF, 1, thr_bits))
             else:
+                if self._shipped("fwd_tier0", n):
+                    fkern = self._x_kernel("fwd_listed", n)
+                    lst.listed(fkern, bufs[14], nd,
+                               [bufs[0], bufs[1], bufs[12], bufs[13], bufs[14]],
+                               (series_length, series_layout))
+                    lst.barrier()
                 one = self._shipped("tier1", n)
                 kern = self._x_kernel("refine1" if one else "refine", n, dict(rowwin=False))
                 lst.listed(kern, bufs[6], pairs,
-                           [bufs[0], bufs[11], bufs[9], bufs[10], bufs[5], bufs[6]],
+                           [bufs[12], bufs[11], bufs[9], bufs[10], bufs[5], bufs[6]],
                            (ntm, 0, n, n, bin_shift(n) & 0xFFFFFFFF, 1, thr_bits))
             native = lst.end()
             natives.append(native)
@@ -323,7 +353,7 @@ class HierOps:
             out = screen([["td", "fft"]], time_kind, rounds=3)
             if not (out.get("fft", 0.0) > 0.0 and out.get("td", 0.0) > 0.0):
                 return 0.0
-            return (out["td"] / (pairs * m_lags * tap_count)) / (out["fft"] / pairs)
+            return (out["td"] / (nsurv * m_lags * tap_count)) / (out["fft"] / nsurv)
         finally:
             for native in natives:
                 self._x_release(native)
@@ -505,6 +535,8 @@ class HierOps:
         shifted = any(k0s)
         bands = tuple(b for b, _, _ in tiers)
         half = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
+        half1 = (len(bands) > 1 and self._shipped("c16", bands[1])
+                 and self._shipped("tier1_c16", bands[1]))
         layout0 = self._coarse_layout(bands[0]) if half else None
         shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
@@ -538,43 +570,53 @@ class HierOps:
                 feed = "tier0" if tier0_ok else "bands"
         use_direct = bool(want_direct and claim is not None)
         # Each tier's input and its stride: the spectra rows (n), the band rows, or packed.
-        ed = 0
-        et = 0
+        ed, et = 0, 0
+        ed1, et1 = 0, 0
         k0_extra = (k0s,) if shifted else ()
         cl_extra = (("cl", cl_sig),) if cl_sig is not None else ()
         storage_key = ("hierstore", n, bands, nd, nt, nbins, rw_key is not None,
                        dv is not None and data.ctypes.data, tv is not None and tmpl.ctypes.data,
                        slot if async_submit else None, *k0_extra, *cl_extra)
         uploads = self._input_uploads(storage_key, data, tmpl, upload_data, upload_tmpl)
-        if half:
+        if half or half1:
             held = self.__dict__.setdefault("_c16_template_exp", {})
-            if uploads[1] or storage_key not in held:
-                held[storage_key] = c16_template_exp(ct0)
-            et = held[storage_key]
-            ed = c16_data_exp(bands[0], tiers[0][2], et)
+            if half:
+                if uploads[1] or storage_key not in held:
+                    held[storage_key] = c16_template_exp(ct0)
+                et = held[storage_key]
+                ed = c16_data_exp(bands[0], tiers[0][2], et)
+            if half1:
+                key1 = (storage_key, 1)
+                if uploads[1] or key1 not in held:
+                    held[key1] = c16_template_exp(ct1)
+                et1 = held[key1]
+                ed1 = c16_data_exp(bands[1], tiers[1][2], et1)
         self._last_c16_scale = 2.0 ** (et + ed)         # tier-0 values / this = unscaled
+        self._last_c16_scale1 = 2.0 ** (et1 + ed1) if half1 else 1.0
         # How a sparse result is read (_sparse_way): a paired choice per call shape, played on
         # this call (Choice.play) when the call is waited on; each way has its own record.
         handles = {}
 
         def run(way, layout=layout0):
             gate = False if use_direct else (self._gate_use(bands[1]) if len(bands) > 1 else None)
+            t1_extra = ((half1, ed1),) if half1 else ()
             key = ("hier", n, bands, nd, nt, nbins, layout, gate, feed, use_direct, way,
-                   rw_key is not None, ed, storage_key, *k0_extra)
+                   rw_key is not None, ed, storage_key, *k0_extra, *t1_extra)
             table = self._exec_table()
             rec = table.get(key)
             fresh = rec is None
             if fresh:
                 rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
                                         ed, dv, tv, data, tmpl, claim, k0s,
-                                        use_direct=use_direct, cl_meta=cl_meta)
+                                        use_direct=use_direct, cl_meta=cl_meta,
+                                        half1=half1, ed1=ed1)
                 table[key] = rec
             self._cache_touch(key)
             self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
             # every way's record takes the call's inputs (a play runs each on this call)
             up = (True, True, *uploads[2:]) if fresh else uploads
             self._hier_upload(rec, storage_key, up, data, tmpl, tiers, half, et, slot,
-                              cl_meta=cl_meta)
+                              cl_meta=cl_meta, half1=half1, et1=et1)
             if rw is not None:
                 # Every row-window table in one upload, each at its section (_hier_record).
                 span = (self._section_offset(rec.buffers, "rw0")
@@ -590,10 +632,11 @@ class HierOps:
 
             binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
                                      et, rw is not None, layout, claim, data, k0s,
-                                     direct=direct if use_direct else None, cl_meta=cl_meta)
+                                     direct=direct if use_direct else None, cl_meta=cl_meta,
+                                     half1=half1, ed1=ed1, et1=et1)
             shape = (nd, nt, nbins)
             if handle_out is not None:
-                slots = self._call_slots(bands, half, sparse, use_direct=use_direct)
+                slots = self._call_slots(bands, half, sparse, use_direct=use_direct, half1=half1)
                 handles[way] = (HierHandle(
                     key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
                     tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
@@ -611,9 +654,9 @@ class HierOps:
         return res
 
     def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, half, et, slot,
-                     cl_meta=None):
+                     cl_meta=None, half1=False, et1=0):
         """Inputs found stale (_input_uploads): the spectra and templates where the record owns
-        them, and the tiers' templates -- the fp16 tier's packed at 2^et -- always."""
+        them, and the tiers' templates -- each fp16 tier's packed at its 2^et -- always."""
         if uploads[0] and "data" in rec.owned:
             self._x_upload(rec.buffers["data"], np.ascontiguousarray(data, np.complex64), slot)
         if uploads[0]:
@@ -623,8 +666,10 @@ class HierOps:
                 self._x_upload(rec.buffers["tmpl"], np.ascontiguousarray(tmpl, np.complex64),
                                slot)
             for i, (_, ct, _) in enumerate(tiers):
+                use_half = (half if i == 0 else half1)
+                texp = et if i == 0 else et1
                 self._x_upload(rec.buffers["ct%d" % i],
-                               pack_half2(pow2_scaled(ct, et)) if i == 0 and half
+                               pack_half2(pow2_scaled(ct, texp)) if use_half
                                else np.ascontiguousarray(ct, np.complex64), slot)
             if cl_meta is not None:
                 self._x_upload(rec.buffers["cloff"], cl_meta[1], slot)
@@ -632,7 +677,8 @@ class HierOps:
             self._uploaded["tmpl"][storage_key] = uploads[3]
 
     def _hier_record(self, key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw, ed, dv,
-                     tv, data, tmpl, claim, k0s=None, use_direct=False, cl_meta=None):
+                     tv, data, tmpl, claim, k0s=None, use_direct=False, cl_meta=None,
+                     half1=False, ed1=0):
         """Buffers and the recording of one call shape (see the module docstring)."""
         from ._coarse import coarse_launch
         from ._gpuexec import Arg, Record
@@ -645,16 +691,20 @@ class HierOps:
         out = pairs * nbins
         rowwin = rw is not None
         cb0 = 4 if half else 8
+        cb1 = 4 if half1 else 8
+        t1_ppg = (1024 // bands[1]) if half1 else 0
+        t1_shift = ((2 * t1_ppg).bit_length() - 1) if half1 else 0
         align = max(16, int(self.storage_offset_alignment))
+        count_step = max(32 if t1_shift else 16, align)
         estimate = (sum(a.nbytes for a, v in ((data, dv), (tmpl, tv)) if v is None)
-                    + sum((cb0 * b * nc if i == 0 else 8 * b * nt) for i, b in enumerate(bands))
+                    + sum((cb0 * b * nc if i == 0 else cb1 * b * nt) for i, b in enumerate(bands))
                     + pairs0 * 12 + pairs * (4 + (16 if last else 0)) + out * 12 + 64
                     + ((nc + 1 + nt) * 4 if cl_meta is not None else 0)
-                    + (nd * (bands[0] * cb0 + (bands[1] * 8 if last else 0))
+                    + (nd * (bands[0] * cb0 + (bands[1] * cb1 if last else 0))
                        if feed in ("tier0", "pack") else nd * max(bands) * 8 if feed == "bands"
                        else 0)
                     + (out * 16 if way == "compact" else 0)
-                    + (pairs * 4 + align if use_direct else 0))
+                    + (pairs * 4 + count_step if use_direct else 0))
         self._exec_room(estimate, [v for v in (dv, tv) if v is not None])
         rec = Record()
         buf = lambda name, nbytes, **kw: self._exec_buffer(rec, name, nbytes=nbytes, **kw)
@@ -663,7 +713,7 @@ class HierOps:
         for i, b in enumerate(bands):
             nti = nc if i == 0 else nt
             pi = pairs0 if i == 0 else pairs
-            buf("ct%d" % i, nti * b * (cb0 if i == 0 else 8), upload=True)
+            buf("ct%d" % i, nti * b * (cb0 if i == 0 else cb1), upload=True)
             buf("cidx%d" % i, pi * 4)
             buf("cval%d" % i, pi * 8)
             buf("surv%d" % i, pairs * 4, readback=i == last)
@@ -676,9 +726,12 @@ class HierOps:
         # row windows): a buffer each made 5 readbacks and 7 uploads a call where 1ccbbe4b's
         # CUDA path made 3 and 4, 12% of the L40S fine stage at n=4096.
         names = _count_names(len(bands), feed in ("tier0", "bands"), way == "compact", use_direct)
-        counts = buf("counts", align * len(names), readback=True)
+        counts = buf("counts", count_step * len(names), readback=True)
         for j, name in enumerate(names):
-            rec.buffers[name] = self._x_section(counts, j * align, 16)
+            rec.buffers[name] = self._x_section(
+                counts, j * count_step, 32 if (name == "args0" and t1_shift) else 16)
+        if t1_shift:
+            rec.buffers["t1args"] = self._x_section(counts, 16, 16)
         bi = buf("idx", out * 4, readback=True)
         bv = buf("val", out * 8, readback=True)
         if rowwin:
@@ -689,7 +742,7 @@ class HierOps:
                 rec.buffers[name] = self._x_section(rws, j * span, nd * 12)
         if feed in ("tier0", "pack"):
             buf("band0", nd * bands[0] * cb0)
-            buf("band1", nd * bands[1] * 8 if last else 16)
+            buf("band1", nd * bands[1] * cb1 if last else 16)
         elif feed == "bands":
             buf("bands", nd * max(bands) * 8)
         if feed in ("tier0", "bands"):
@@ -707,7 +760,7 @@ class HierOps:
         if feed == "tier0":
             lst.dispatch(self._x_kernel("fwd_tier0", n), nd,
                          [Arg("series"), Arg("starts"), B["band0"], B["band1"]],
-                         (Arg("tier0", 7),))
+                         (Arg("tier0", 8),))
             lst.barrier()
             lst.stamp("forward")
         elif feed == "bands":
@@ -719,8 +772,13 @@ class HierOps:
         # to "nothing".
         words = []
         for name in names:
-            words += [0, 0, 0, 0] if name == "count" else [0, 1, 1, 0]
-            words += [0] * (align // 4 - 4)
+            if name == "count":
+                head = [0, 0, 0, 0]
+            elif name == "args0" and t1_shift:
+                head = [0, 1, 1, 0, 0, 1, 1, 0]
+            else:
+                head = [0, 1, 1, 0]
+            words += head + [0] * (count_step // 4 - len(head))
         lst.update(counts, words)
         if feed in ("tier0", "bands"):
             lst.fill(B["flags"], 0)
@@ -730,20 +788,23 @@ class HierOps:
         lst.barrier()
         lst.stamp("fill")
         if feed == "pack":
-            # Each tier's band from the spectra: the fp16 tier's packed at its data scale.
+            # Each tier's band from the spectra: each fp16 tier's packed at its data scale.
             for i, b in enumerate(bands):
-                h = int(i == 0 and half)
+                h = int((i == 0 and half) or (i == 1 and half1))
+                dexp = ed if i == 0 else ed1
                 lst.dispatch(self._x_kernel("pack", n), (nd * b + 255) // 256,
                              [bd, B["band%d" % i]],
-                             (n, b, nd * b, h, _bits(2.0 ** ed if h else 1.0), k0s[i]))
+                             (n, b, nd * b, h, _bits(2.0 ** dexp if h else 1.0), k0s[i]))
             lst.barrier()
             lst.stamp("pack")
         # Tier inputs: (buffer, row stride in elements (0: the tier's own band), data scale
         # exponent applied as the tier reads it).
         if feed == "inplace":
-            src = [(bd, n, ed if (i == 0 and half) else 0) for i in range(len(bands))]
+            src = [(bd, n, ed if (i == 0 and half) else (ed1 if (i == 1 and half1) else 0))
+                   for i in range(len(bands))]
         elif feed == "bands":
-            src = [(B["bands"], max(bands), ed if (i == 0 and half) else 0)
+            src = [(B["bands"], max(bands),
+                    ed if (i == 0 and half) else (ed1 if (i == 1 and half1) else 0))
                    for i in range(len(bands))]
         else:                                   # tier0 or pack: the bands as written
             src = [(B["band0"], 0, 0)] + ([(B["band1"], 0, 0)] if last else [])
@@ -763,18 +824,25 @@ class HierOps:
                 if cl_meta is not None:
                     lst.dispatch(self._x_kernel("compactc", n), (pairs0 + 255) // 256,
                                  [S("cval0"), S("cloff"), S("clmem"), S("surv0"), S("args0")],
-                                 (Arg("compact0", 4),))
+                                 (Arg("compact0", 5),))
                 else:
                     lst.dispatch(self._x_kernel("compact", n), (pairs + 255) // 256,
                                  [S("cval0"), S("surv0"), S("args0")], (Arg("compact0", 3),))
             else:
-                one = self._shipped("tier1", b)
-                kern = self._x_kernel("tier1" if one else "tier", b,
-                                      dict(stride=stride, rowwin=rowwin,
-                                           gate=one and not use_direct and self._gate_use(b)))
-                lst.listed(kern, S("args0"), pairs,
-                           [sbuf, S("ct1"), S("cidx1"), S("cval1"), S("surv0"), S("args0")]
-                           + rws("rw1"), (Arg("tier", 7),))
+                if half1:
+                    kern = self._x_kernel("tier1_c16", b,
+                                          dict(stride=stride, scale=scale, rowwin=rowwin, twt=1))
+                    lst.listed(kern, S("t1args"), -(-pairs // (2 * t1_ppg)),
+                               [sbuf, S("ct1"), S("cidx1"), S("cval1"), S("surv0"), S("args0")]
+                               + rws("rw1"), (Arg("tier", 7),))
+                else:
+                    one = self._shipped("tier1", b)
+                    kern = self._x_kernel("tier1" if one else "tier", b,
+                                          dict(stride=stride, rowwin=rowwin,
+                                               gate=one and not use_direct and self._gate_use(b)))
+                    lst.listed(kern, S("args0"), pairs,
+                               [sbuf, S("ct1"), S("cidx1"), S("cval1"), S("surv0"), S("args0")]
+                               + rws("rw1"), (Arg("tier", 7),))
                 lst.barrier()
                 lst.stamp("coarse1")
                 lst.dispatch(self._x_kernel("compactl", n), (pairs + 255) // 256,
@@ -815,7 +883,7 @@ class HierOps:
             lst.barrier()
             lst.stamp("peaks")
         # What the host reads: the counts, then the peaks as `way` reads them.
-        lst.readback(counts, align * len(names))
+        lst.readback(counts, count_step * len(names))
         if dv is not None and way != "rows":
             # The survivors: the refine-block fraction every call on shared spectra notes.
             lst.readback(S(survs), pairs * 4)
@@ -832,7 +900,8 @@ class HierOps:
         return rec
 
     def _hier_binds(self, n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed, et,
-                    rowwin, layout, claim, data, k0s=None, direct=None, cl_meta=None):
+                    rowwin, layout, claim, data, k0s=None, direct=None, cl_meta=None,
+                    half1=False, ed1=0, et1=0):
         """The per-run words and bindings of a hier_peaks call."""
         from ._coarse import coarse_launch
         k0s = (0,) * len(tiers) if k0s is None else k0s
@@ -854,17 +923,25 @@ class HierOps:
                                0 if len(tiers) > 1 else 1, gate_bits)
         else:
             binds["coarse"] = (nc, start(cs), ce, csp, csh & 0xFFFFFFFF, 1, 0)
+        pack_shift = ((2048 // tiers[1][0]).bit_length() - 1) if half1 else 0
         if cl_meta is not None:
-            binds["compact0"] = (pairs0, nc, nt, _bits(thr0))
+            binds["compact0"] = (pairs0, nc, nt, _bits(thr0), pack_shift)
         else:
-            binds["compact0"] = (pairs, _bits(thr0), nbins)
+            binds["compact0"] = (pairs, _bits(thr0), pack_shift)
         if len(tiers) > 1:
             b1, _, thr1 = tiers[1]
             cs1, ce1, csp1, csh1 = coarse_span(n, b1, lo, hi)
-            # nbins 0 asks a one-bin build for the gate's decision alone, unless direct refine
-            # needs tier 1's elected coarse lag.
-            gate = False if direct is not None else self._gate_use(b1)
-            binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF, 0 if gate else 1, 0)
+            if half1:
+                thr1 = thr1 * (2.0 ** (et1 + ed1))
+                gate = False if direct is not None else self._gate_use(b1)
+                gate_bits1 = _bits(max(float(thr1), _TINY)) if gate else 0
+                binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF,
+                                 0 if gate_bits1 else 1, gate_bits1)
+            else:
+                # nbins 0 asks a one-bin build for the gate's decision alone, unless direct refine
+                # needs tier 1's elected coarse lag.
+                gate = False if direct is not None else self._gate_use(b1)
+                binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF, 0 if gate else 1, 0)
             # The pairs tier 0 dismissed hold zeros: the smallest normal float dismisses them.
             binds["compact1"] = (pairs, _bits(max(thr1, _TINY)), nbins)
         binds["refine"] = (nt, start(lo), hi, binsize, shift & 0xFFFFFFFF, nbins, _bits(t2))
@@ -874,7 +951,9 @@ class HierOps:
             binds["listed"] = (nser, code)
             b1 = tiers[1][0] if len(tiers) > 1 else 0
             k0_1 = k0s[1] if len(k0s) > 1 else 0
-            binds["tier0"] = (nser, b0, b1, _bits(2.0 ** ed if half else 1.0), k0s[0], k0_1, code)
+            scale1 = _bits(2.0 ** ed1) if (len(tiers) > 1 and half1) else 0
+            binds["tier0"] = (nser, b0, b1, _bits(2.0 ** ed if half else 1.0),
+                              scale1, k0s[0], k0_1, code)
             binds["bands"] = (nser, max(b for b, _, _ in tiers), k0s[0], code)
             if direct is not None:
                 taps_view, tap_meta, tmpl_offset, direct_hw, max_lag_tap = direct
@@ -976,7 +1055,7 @@ class HierOps:
                 and self._uploaded["tmpl"].get(h.storage) == h.tsig
                 and self._slot_values(h.slots) == h.values)
 
-    def _call_slots(self, bands, half, sparse, use_direct=False):
+    def _call_slots(self, bands, half, sparse, use_direct=False, half1=False):
         """The kernel slots a hier_peaks call over these bands consults: ((what, band,
         (default, alternative)), ...) (time_domain's device trial plays them)."""
         from ._gpuexec import SPARSE_WAYS
@@ -985,8 +1064,11 @@ class HierOps:
             pair = self._kernel_pair("coarse", bands[0])
             if pair[1] is not None:
                 out.append(("coarse", bands[0], self._slot_labels("coarse", bands[0], pair)))
-        if (not use_direct and len(bands) > 1 and self._shipped("tier1", bands[1])
-                and self._shipped("tier1gate", bands[1])):
+        can_gate1 = (not use_direct and len(bands) > 1
+                     and ((half1 and bands[1] // 16 <= self.subgroup_size)
+                          or (not half1 and self._shipped("tier1", bands[1])
+                              and self._shipped("tier1gate", bands[1]))))
+        if can_gate1:
             pair = self._kernel_pair("gateway", bands[1])
             if pair[1] is not None:
                 out.append(("gateway", bands[1], self._slot_labels("gateway", bands[1], pair)))

@@ -164,12 +164,12 @@ void refineDirect(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
             continue;
         }
 
-        // Non-finite or fail-open sentinel coarse values carry no reliable lag: fall back.
+        // Non-finite or fail-open sentinel coarse values (3.402823e38f = 0x7F7FFFFDu) carry no reliable lag: fall back.
         int ceIdx = cidx[pair];
         float2 ceVal = cval[pair];
         bool badCoarse = (ceIdx < 0)
-            || ((asuint(ceVal.x) & 0x7FFFFFFFu) >= 0x7F7FFFFFu)
-            || ((asuint(ceVal.y) & 0x7FFFFFFFu) >= 0x7F7FFFFFu);
+            || ((asuint(ceVal.x) & 0x7FFFFFFFu) >= 0x7F7FFFFDu)
+            || ((asuint(ceVal.y) & 0x7FFFFFFFu) >= 0x7F7FFFFDu);
         if (badCoarse) {
             if (tid == 0u) {
                 uint slot;

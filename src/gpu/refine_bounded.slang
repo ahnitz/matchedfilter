@@ -23,6 +23,36 @@ void refineListedBounded(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
 {
     CUDA_DATA_INIT
     uint total = count[0];
+#if COARSE16
+    if (total == 0u) return;
+    const uint pairsPerWG = 2u * PPG;
+#if PPG == 1
+    uint sub = 0u, tid = lid.x;
+    _stgBase = 0;
+#else
+    uint sub = lid.x / WG, tid = lid.x % WG;
+    _stgBase = sub * STGW;
+#endif
+    for (uint base = gid.x * pairsPerWG; base < total; base += gridSize * pairsPerWG) {
+        uint idxA = base + 2u * sub;
+        uint idxB = idxA + 1u;
+        uint pairA = (idxA < total) ? survivors[idxA] : NOPAIR;
+        uint pairB = (idxB < total) ? survivors[idxB] : NOPAIR;
+        uint refPairA = (pairA != NOPAIR) ? pairA : survivors[total - 1u];
+        uint refPairB = (pairB != NOPAIR) ? pairB : refPairA;
+        uint dA = refPairA / ntmpl, tA = refPairA % ntmpl;
+        uint dB = refPairB / ntmpl, tB = refPairB % ntmpl;
+        uint wsA = winStart, weA = winEnd, wsB = winStart, weB = winEnd;
+        rowWindow(dA, wsA, weA ROWWIN_ARG);
+        rowWindow(dB, wsB, weB ROWWIN_ARG);
+        filterTwoListed(pairA, pairB, dA, tA, dB, tB, tid, data, tmpl, peakIdx, peakVal,
+                        wsA, weA, wsB, weB, nbins, thrBits);
+#if defined(MF_VULKAN)
+        if (base + gridSize * pairsPerWG < total)
+            GroupMemoryBarrierWithGroupSync();
+#endif
+    }
+#else
     for (uint i = gid.x; i < total; i += gridSize) {
         _stgBase = 0;
         uint pair = survivors[i], ws = winStart, we = winEnd;
@@ -31,8 +61,10 @@ void refineListedBounded(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                    ws, we, binsize, binShift, nbins, thrBits ROWWIN_COARSE_ARG);
         GroupMemoryBarrierWithGroupSync();
     }
+#endif
 }
 
+#if !COARSE16
 // Follow-up items, sized on the device (CUDA). Each list entry is a (data row, template,
 // window) the host built (_gpuhost.followup_layout): six uints (d, t, lo, hi, out, phase).
 // The pair d*ntmpl + t is searched over [lo, hi) in bins of binsize numbered from
@@ -60,3 +92,4 @@ void refineItems(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         GroupMemoryBarrierWithGroupSync();
     }
 }
+#endif

@@ -883,6 +883,8 @@ class Context(Executor, InputUploads):
             return f"forward_{n}"
         if entry == "refineItems":
             return f"items_{n}"
+        if entry == "refineListed" and c16:
+            return f"refine_{n}_c16"
         if c16:
             p_s = f"p{ppg}" if ppg > 1 else ""
             t_s = f"t{tile}" if tile > 1 else ""
@@ -1047,6 +1049,9 @@ class Context(Executor, InputUploads):
             fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
                                    twt=bool(c.get("twt")))
             return fn, wg, 4, 1, (stride, scale)
+        if name == "tier1_c16":
+            fn, wg = self.pipeline(n, "refineListed", c16=True)
+            return fn, wg, 6, 1, (stride, scale)
         if name in ("tier", "tier1", "refine", "refine1"):
             fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"),
                                    gate=bool(c.get("gate")))
@@ -1079,6 +1084,8 @@ class Context(Executor, InputUploads):
             return _shipped("compactc") is not None
         if name == "tier1":
             return _shipped(f"refine_{n}_onebin") is not None
+        if name == "tier1_c16":
+            return _shipped(f"refine_{n}_c16") is not None
         if name == "fwd_tier0":
             return _shipped(f"forward_tier0_{n}") is not None
         if name == "items":
