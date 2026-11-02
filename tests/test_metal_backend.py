@@ -10,6 +10,7 @@ import sys
 
 import numpy as np
 import pytest
+from conftest import assert_same_follow_up
 
 import matchedfilter as mf
 from matchedfilter import _mtlcompute
@@ -463,6 +464,5 @@ def test_metal_follow_ups_across_allocations_are_one_submission(monkeypatch):
     batch = list(commits)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
     for r1, r2 in zip(direct, many):
-        for f in r1._fields:
-            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+        assert_same_follow_up(r1, r2)
     assert batch.count("followups") == 1 and "items" not in batch, batch
