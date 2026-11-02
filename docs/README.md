@@ -77,6 +77,9 @@ that and that every link resolves.
   (2026-10-29): the null of a paired round measured with an A/A arm (`MF_TRIAL_AA_LOG`) on
   dev2 and dev1, the current rule's false-switch rate, and the error and power of
   group-sequential sign, t and Wilcoxon rules, as support for the D8 decision.
+- [Review of optimisation rounds 1-6](review-rounds-1-6.md) (2026-11-01): f8fe1443..a52ced2e
+  measured at production length, the tier-0 centroids on and off, what the review changed,
+  and the origin of each new constant.
 - [Cleanup, robustness and CI plan](robustness-plan.md) (adopted 2026-10-21, with its log).
 - [Unification plan](unification-plan.md) (started 2026-10-15, with its log): the shared GPU
   host layer, accounting instead of cost tables, knobs instead of variants.
