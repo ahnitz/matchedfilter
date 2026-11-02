@@ -281,6 +281,21 @@ def gpu_context(backend):
     return M.Context(0)
 
 
+def assert_same_follow_up(want, got):
+    """A device follow-up batch's result (filter_series_many) equals the call made alone:
+    its indices exactly, its values to a few ulp. Metal compiles the follow-up kernels with
+    fast math (_mtlcompute._ieee_kernel), and a batch and a lone call run different kernels,
+    which round apart by up to 3.9e-7 relative (an M2, 2026-11-01); a stale buffer, a wrong
+    lane or a wrong template differs by O(1)."""
+    import numpy as np
+    for f in want._fields:
+        w, g = np.asarray(getattr(want, f)), np.asarray(getattr(got, f))
+        if np.issubdtype(w.dtype, np.inexact):
+            np.testing.assert_allclose(g, w, rtol=1e-6, atol=0, err_msg=f)
+        else:
+            np.testing.assert_array_equal(g, w, err_msg=f)
+
+
 def usable_gpu_reason():
     """Why there is no usable GPU, phrased so it does not mislead: a GPU that enumerated and
     failed the probe is named with its error, apart from there being no GPU at all."""
