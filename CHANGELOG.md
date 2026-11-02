@@ -6,6 +6,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Added
 
+- Tier-0 pair centroids (fe86f0ed, 5d02d1e3, 3f5fd63b, 88781d6e): on a multi-tier plan of four
+  or more templates, the model may gate tier 0 on lag- and phase-aligned centroids of up to
+  four templates, its thresholds solved for the centroid's retention, its survivors fanned
+  out to the members. CPU (FP32, FP16, Q15) and GPU (`compactPairsClustered`). Measured at
+  production length in docs/review-rounds-1-6.md: a CPU win, a GPU loss.
+- `TimeDomainFilterBank.correlate_and_filter_many` (e35458cb, f2c462f2): the CPU middle
+  correlation and leaf filtering in L3-sized cohorts, used by HierarchicalSearch and the
+  ladder when the cohort footprint fits.
+- A GPU direct time-domain refine (`refine_td.slang`, 1a04c4c0) and a multi-bin CPU one (up to
+  four output bins, cb68ae50), each priced against the transform refine.
+- The GPU FP16 listed tier-1 gate (a8667c9f) and an arbitrary-pair sparse Q15 screen
+  (`q15_screen_gather`, aa2e481d).
+- `tools/fdr_audit.py --bank NT`: the centroids against the flat filter, on banks of
+  near-duplicate templates through HierarchicalFilter, centroids on and off. The audit's
+  one-template banks and pinned chains never ran them.
+- An AVX3 CI job: with HWY_AVX3_DL enabled, AVX-512 runners select AVX3_DL, so plain AVX3 had
+  no coverage. It is skipped, with a notice, on a runner without AVX-512.
 - An AVX back end for CPUs with AVX but not AVX2 (Sandy and Ivy Bridge), which ran the
   4-lane SSE4 kernels because Highway has no AVX1 target. The float kernels (transforms,
   products, peak scans) run at 8 lanes on 256-bit AVX without FMA (src/simd-avx1.h,
@@ -231,6 +248,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Optimisation rounds 1-6 (f8fe1443..a52ced2e, 40 commits: Q15 screens, forward and middle
+  correlation kernels, sparse batches, L3 tiling, GPU register use and subgroup exchanges,
+  the centroids). On the test27 production job on dev2's GPU the steady segments took 14%
+  less time; the first segment took 20 s more, mostly the centroids' setup. On its CPU (one core) the steady segments took 37% less time and the
+whole job 18% less (222 to 182 s). See
+  docs/review-rounds-1-6.md, which also lists where each new constant comes from.
 - Setup of a hierarchical search: test27's 614 leaf banks over 27 references in one process,
   matchedfilter's share (beyond the banks' steady calls): dev2 22.9-29.9 -> 7.5 s,
   Haswell 209 -> 63-94 s, Ivy Bridge 239-426 -> 157-170 s. The reference's signature is
