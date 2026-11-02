@@ -229,9 +229,6 @@ class HierarchicalFilter(MatchedFilter):
             plan.set_hermitian(True)
         if getattr(self, "_q15", False) and not plan.set_q15(True):
             self._q15 = False
-        # The block forward's transform: a cost-model price (_cpu_forward_platform), not a
-        # trial -- its effect is under the shared rule's tie margin of a whole call.
-        self._pfft = _prices._cpu_forward_platform(self.n) and plan.set_platform_fft(True)
         taps = getattr(self, "_taps", None)
         if taps is not None:
             plan.set_taps(taps[0], taps[0].shape[1], taps[1], bool(taps[2]))

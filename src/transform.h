@@ -101,15 +101,6 @@ void ap_real_split_mirror_on(const ap_plan *p, float *X, size_t n);
 void ap_root_merge_on(const ap_plan *p, const float *D, const float *T, size_t k0, size_t k1,
                       float scale, const float *tw, size_t n, float *Z);
 
-/* The platform's FFT for the block forward (fft_accel.c): NULL where there is none. */
-typedef struct ap_accel ap_accel;
-ap_accel *ap_accel_create(size_t n);
-void ap_accel_destroy(ap_accel *a);
-void ap_accel_forward(ap_accel *a, const float *src, size_t have, float scale, float *out);
-int ap_accel_block(ap_accel *a, const float *src, size_t have, float scale);
-int ap_accel_corr(ap_accel *a, const float *dr, const float *di, const float *tr,
-                  const float *ti, size_t lo, size_t len, float *out);
-
 /* The widest CPU vector, in floats: lane arrays (a pair batch's bin phases) are this long. */
 #define AP_MAX_LANES 16
 

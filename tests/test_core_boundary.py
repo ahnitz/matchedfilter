@@ -62,7 +62,3 @@ def test_a_filter_object_cannot_be_initialised_twice(make):
         f.__init__(1024, 1, 1)
 
 
-def test_forward_cost_refuses_a_size_the_engine_does_not_support():
-    """It used to return 1e30 seconds -- a price a caller would store as "slow"."""
-    with pytest.raises(ValueError, match="not a size the engine supports"):
-        _core.forward_cost(1 << 40)

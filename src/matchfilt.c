@@ -75,10 +75,6 @@ struct ap_mf_plan {
   float *dsr,*dsi;            /* [n][pb] gathered data group, for pooled pairs */
   float *tmre,*tmim;          /* [ntpad][n] template-major copy for stride-1 survivor gathers */
   float *corrbuf;             /* [pb][n] full-output staging for pair batches */
-  ap_accel *accel;            /* platform FFT for the continuous correlation (fft_accel.c) */
-  int use_accel;              /* ap_mf_set_platform_fft: a cost-model candidate */
-  float *anr,*ani;            /* [nt][n] natural-order conjugated templates for it */
-  unsigned char *aready;      /* which rows of anr/ani are current */
   ap_peak *pkbuf;             /* [pb][nb] dense results, before placement      */
   size_t pkcap;
   /* Optional second layout, created only when an actual call can use it.
@@ -243,8 +239,6 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->rtw);
   free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->dsr);free(p->dsi);free(p->pkbuf);
   free(p->tmre);free(p->tmim);
-  ap_accel_destroy(p->accel);
-  free(p->anr); free(p->ani); free(p->aready);
   free(p->corrbuf);
   if(p->fft_fwd) ap_destroy(p->fft_fwd);
   if(p->fft_fwd_n) ap_destroy(p->fft_fwd_n);
@@ -292,47 +286,8 @@ int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
   return 0;
 }
 
-int ap_mf_set_platform_fft(ap_mf_plan *p, int on){
-  if(!p) return -1;
-  if(!on){ p->use_accel=0; return 0; }
-  /* Row-major templates are needed: the group-major layout without its copy is refused. */
-  if(p->pb && !p->tmre) return -1;
-  if(!p->accel) p->accel=ap_accel_create(p->n);
-  if(!p->accel) return -1;
-  if(!p->pb && !(p->anr && p->ani && p->aready)){
-    free(p->aready); p->aready=NULL;
-    if(alloc_pair(&p->anr,&p->ani,(size_t)p->nt*p->n*sizeof(float))) return -1;
-    p->aready=calloc((size_t)p->nt,1);
-    if(!p->aready){ free(p->anr); free(p->ani); p->anr=p->ani=NULL; return -1; }
-  }
-  p->use_accel=1;
-  return 0;
-}
-
-/* Template t in natural order (conjugated, as stored): the pair-batch plans keep one
-   (tmre); the others' rows are in the element order, undone once per template here. */
-static void accel_template(ap_mf_plan *p,int t,const float **tr,const float **ti){
-  const size_t n=p->n;
-  if(p->tmre){ *tr=p->tmre+(size_t)t*n; *ti=p->tmim+(size_t)t*n; return; }
-  float *nr=p->anr+(size_t)t*n, *ni=p->ani+(size_t)t*n;
-  if(!p->aready[t]){
-    const float *re=p->tre+(size_t)t*n, *im=p->tim+(size_t)t*n;
-    for(size_t k=0;k<n;k++){
-      size_t j=k;
-      if(p->gmajor){
-        size_t a=k%(size_t)p->n1, b=k/(size_t)p->n1;
-        j=(a/p->w)*p->n2*p->w+b*p->w+a%p->w;
-      }
-      nr[k]=re[j]; ni[k]=im[j];
-    }
-    p->aready[t]=1;
-  }
-  *tr=nr; *ti=ni;
-}
-
 int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec){
   if(!p||t<0||t>=p->nt) return -1;
-  if(p->aready) p->aready[t]=0;
   if(p->qtok) p->qtok[t]=0;
   if(p->qtmok) p->qtmok[t]=0;
   if(p->pb){
@@ -1163,7 +1118,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   }
   const size_t llc = llc_bytes();
   const size_t cache_lim = llc >= (16u<<20) ? llc/2 : (12u<<20);
-  if(mirror_dst && ((!W && !p->gmajor) || (p->use_accel && !p->real_series)
+  if(mirror_dst && ((!W && !p->gmajor)
      || nt >= p->nt
      || (size_t)nblocks * (2 * n * sizeof(float)) > cache_lim)){
     if(ap_mf_correlate_series_continuous(p, series, nseries, starts, nblocks,
@@ -1186,26 +1141,6 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;
-  }
-  if(p->use_accel && !p->real_series){
-    /* The whole block through the platform FFT: its spectrum in natural order, then per
-       template the product with the row-major (conjugated) copy and the inverse. The
-       engine's own data rows are in its element order, so they are not reused. */
-    for(int b=0;b<nblocks;b++){
-      const size_t start=starts[b];
-      const size_t blo=bounds?bounds[2*b]:lo, bhi=bounds?bounds[2*b+1]:hi;
-      if(start>=nseries||blo>=nseries-start) continue;
-      const size_t end=bhi<nseries-start?bhi:nseries-start;
-      size_t have=nseries-start; if(have>n) have=n;
-      if(ap_accel_block(p->accel,series+2*start,have,1.0f/(float)n)) return -1;
-      for(int t=0;t<nt;t++){
-        const float *tr,*ti;
-        accel_template(p,t0+t,&tr,&ti);
-        if(ap_accel_corr(p->accel,NULL,NULL,tr,ti,blo,end-blo,
-                         out+2*((size_t)t*nseries+start+blo))) return -1;
-      }
-    }
-    return 0;
   }
   ap_plan *fb=ensure_fwd_batch(p,p->real_series);
   const int W_fb=fb?ap_plan_lanes(fb):0;

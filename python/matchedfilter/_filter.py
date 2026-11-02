@@ -727,16 +727,8 @@ class MatchedFilter:
         return self._ensure()
 
     def _continuous_plan(self):
-        """The CPU plan for continuous correlation, on the transform the cost model chose
-        for this n (_CORR_PFFT: the platform FFT where it measured cheaper)."""
-        ep = self._execution_plan()
-        want = bool(_CORR_PFFT.get(self.n, False))
-        if self.__dict__.get("_pfft_on") != want:
-            ok = ep.set_platform_fft(want) if hasattr(ep, "set_platform_fft") else False
-            if want and not ok:
-                ep.set_platform_fft(False)
-            self._pfft_on = want
-        return ep
+        """The CPU plan for continuous correlation."""
+        return self._execution_plan()
 
     def nbins(self, binsize, window=None):
         binsize = int(binsize)
@@ -2252,6 +2244,3 @@ class CorrelationFilter(MatchedFilter):
         return self.run_series(series, starts, templates=templates, out=out)
 
 
-#: n -> whether continuous correlation at n runs through the platform FFT (vDSP on macOS):
-#: set by _layout._corr_block_costs, which prices both and keeps the cheaper.
-_CORR_PFFT = {}

@@ -108,7 +108,6 @@
  "test_pending_stats": 0.0,
  "test_performance": 0.0,
  "test_plan_diagnostics": 0.0,
- "test_platform_fft": 0.14,
  "test_pooled_broadcast": 1.98,
  "test_precision": 0.86,
  "test_prices": 0.0,

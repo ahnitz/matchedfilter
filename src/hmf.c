@@ -73,10 +73,6 @@ struct ap_hmf_plan {
   hmf_tier tier[AP_HMF_MAX_TIERS];
   ap_mf_plan *full;
   ap_plan *full_fft;
-  /* The platform FFT for the block forward (fft_accel.c): a candidate the autotuner
-     times against the engine's transform on real calls (ap_hmf_set_platform_fft). */
-  ap_accel *accel;
-  int use_accel;
   float *fwd,*spec;
   const float **dspec;
   float *dcopy;               /* [nd][2n]: ap_hmf_set_data's own copy of each data spectrum */
@@ -237,7 +233,6 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   if(p->full_fft && n>=64 && n<=hmf_fwd_pb_limit(p))
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
-  p->accel=ap_accel_create(n);           /* NULL where the platform has none */
   p->spec=ap_alloc64((size_t)grp*(2*n+16)*sizeof(float));
   p->dspec=calloc((size_t)p->nd,sizeof(*p->dspec));
   p->dtime=calloc((size_t)p->nd,sizeof(*p->dtime));
@@ -275,7 +270,6 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->fwd_cplx_batch) ap_destroy(p->fwd_cplx_batch);
   if(p->fwd_real_batch) ap_destroy(p->fwd_real_batch);
   free(p->rtw);
-  ap_accel_destroy(p->accel);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dcopy);
   free(p->dready); free(p->dmirrored); free(p->tready);
   if(p->twiddles) free(p->twiddles);
@@ -513,13 +507,6 @@ int ap_hmf_direct_stats(const ap_hmf_plan *p,long *pairs,long *lags,long *fft,
   if(fft) *fft=p->dir_fft;
   if(lagtap) *lagtap=p->dir_lagtap;
   if(fftpair) *fftpair=p->dir_fftpair;
-  return 0;
-}
-
-int ap_hmf_set_platform_fft(ap_hmf_plan *p,int on){
-  if(!p) return -1;
-  if(on && !p->accel) return -1;
-  p->use_accel=on?1:0;
   return 0;
 }
 
@@ -1041,7 +1028,7 @@ static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
   const size_t pblim=hmf_fwd_pb_limit(p);
   if(p->real_series && !p->fwd_real_batch && p->half_fft && n>=128 && n/2<=pblim)
     p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,n/2);
-  if(!p->real_series && !p->use_accel && !p->fwd_cplx_batch && p->full_fft && n>=64 && n<=pblim)
+  if(!p->real_series && !p->fwd_cplx_batch && p->full_fft && n>=64 && n<=pblim)
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   const size_t st_real = p->real_stride ? p->real_stride : 1;
   const int w_real = p->fwd_real_batch ? ap_plan_lanes(p->fwd_real_batch) : 0;
@@ -1070,7 +1057,7 @@ static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
         p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
       }
     }
-  } else if(!p->real_series && !p->use_accel && p->fwd_cplx_batch){
+  } else if(!p->real_series && p->fwd_cplx_batch){
     /* Band-limited/Hermitian plans (is_dif) and direct time-domain refine plans read only
        [0, n/2) in coarse gates, lazily completing [0, n) in hmf_refine_fft only on blocks whose
        survivor needs full-spectrum FFT refine. Unpacked FFT-refine plans emit all n bins in the
@@ -1125,11 +1112,7 @@ static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
        linear: scaling before is bit-for-bit the same as scaling after, which
        the fixtures check by reproducing pycbc's SNRs to 0.0e+00. */
     float *const sp=p->spec+(size_t)j*sstride;
-    if(p->use_accel){
-      ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
-    } else {
-      ap_fft_forward_scaled(p->full_fft,have ? series+2*s0 : series,2*have,1,1.0f/(float)n,sp);
-    }
+    ap_fft_forward_scaled(p->full_fft,have ? series+2*s0 : series,2*have,1,1.0f/(float)n,sp);
     p->dmirrored[j]=1;
     if(set_data_tiers(p,j,sp,1)) return -1;
     p->dtime[j]=have ? series+2*s0 : NULL; p->dhave[j]=have;
@@ -1451,14 +1434,14 @@ int ap_hmf_run_series_batch_sparse(ap_hmf_sparse_job *jobs,int njobs){
         /* Detect a paired strided quadrature lane on the same complex64 buffer so both lanes
            forward-transform per W-block mini-batch while cache lines are hot in L1/L2. */
         int qpeer=-1, qg=0;
-        if(lp->real_series && lp->real_stride==2 && !lp->use_accel){
+        if(lp->real_series && lp->real_stride==2){
           const size_t a_hi=ljb->start[b0[lead]+g-1]+lp->n;
           size_t best_lo=0;
           for(int k=c0;k<c1;k++){
             if(k==lead || b0[k]>=jobs[k].nblocks) continue;
             ap_hmf_sparse_job *kjb=&jobs[k];
             ap_hmf_plan *kp=kjb->p;
-            if(kp==lp || !kp->real_series || kp->real_stride!=2 || kp->use_accel
+            if(kp==lp || !kp->real_series || kp->real_stride!=2
                || kjb->nseries!=ljb->nseries
                || !(kjb->series==ljb->series+1 || ljb->series==kjb->series+1))
               continue;
@@ -1508,7 +1491,6 @@ int ap_hmf_run_series_batch_sparse(ap_hmf_sparse_job *jobs,int njobs){
             ap_hmf_plan *kp=kjb->p;
             const size_t kst=kp->real_stride ? kp->real_stride : 1u;
             if(kp->n!=cp->n || cur_g>kp->dgroup || kp->real_series!=cp->real_series || kst!=cst
-               || kp->use_accel!=cp->use_accel
                || ap_plan_lanes(kp->full_fft)!=ap_plan_lanes(cp->full_fft)
                || kjb->series!=cjb->series || kjb->nseries!=cjb->nseries) continue;
             if(!hmf_job_win_ok(kjb,b0[k],cur_g,nb0[k])) continue;

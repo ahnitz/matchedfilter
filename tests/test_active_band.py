@@ -293,10 +293,9 @@ def test_cpu_active_band_parity_across_targets_and_modes(monkeypatch):
                 assert hf.config == (128, 512)
                 assert hf.band_offsets[0] > 0 and hf.band_offsets[1] > 0
 
-                # Every reported survivor is MatchedFilter's peak, at its value to fp32 rounding,
-                # and the injections survive. (Bit-identical where both refine with one transform,
-                # as on x86; on macOS MatchedFilter's goes through Accelerate, a few ulp apart. A
-                # wrong active-band offset is off by far more.)
+                # Every reported survivor is MatchedFilter's peak, at its value to fp32 rounding
+                # (the two refine through different transforms on some targets), and the
+                # injections survive. A wrong active-band offset is off by far more.
                 got_mask = idx >= 0
                 assert np.array_equal(idx[got_mask], ref_idx[got_mask])
                 np.testing.assert_allclose(val[got_mask], ref_val[got_mask], rtol=1e-5, atol=1e-6)
@@ -340,7 +339,7 @@ def test_cpu_active_band_parity_across_targets_and_modes(monkeypatch):
     s_mask = s_idx >= 0
     assert np.any(s_mask)
     assert np.array_equal(s_idx[s_mask], ref_s_idx[s_mask])
-    # to fp32 rounding, as above (macOS's MatchedFilter transforms through Accelerate)
+    # to fp32 rounding, as above
     np.testing.assert_allclose(s_val[s_mask], ref_s_val[s_mask], rtol=1e-5, atol=1e-6)
 
     # Verify set_taps direct FIR refine agrees with FFT refine on active-band survivors.

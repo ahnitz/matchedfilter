@@ -422,10 +422,6 @@ static PyObject *MF_q15_screen(MFObject *self,PyObject *args){
   PyBuffer_Release(&bp);PyBuffer_Release(&bs);
   return PyLong_FromLong(r);
 }
-static PyObject *MF_set_platform_fft(MFObject *self,PyObject *args){
-  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
-  return PyBool_FromLong(ap_mf_set_platform_fft(self->p,on)==0);
-}
 static PyObject *MF_q15_lanes(MFObject *self,PyObject *unused){
   (void)unused; return PyLong_FromLong(ap_mf_q15_lanes(self->p));
 }
@@ -566,7 +562,6 @@ static PyObject *MF_nbins(MFObject *self,PyObject *args){
 }
 GUARDED(MFObject,MF_set_data)
 GUARDED(MFObject,MF_correlate_series_continuous_real)
-GUARDED(MFObject,MF_set_platform_fft)
 GUARDED(MFObject,MF_set_template)
 GUARDED(MFObject,MF_set_data_batch)
 GUARDED(MFObject,MF_set_template_batch)
@@ -582,7 +577,6 @@ GUARDED(MFObject,MF_q15_lanes)
 static PyMethodDef MF_methods[]={
   {"set_data",(PyCFunction)MF_set_data_g,METH_VARARGS,"set_data(i, buffer)"},
   {"correlate_series_continuous_real",(PyCFunction)MF_correlate_series_continuous_real_g,METH_VARARGS,"correlate_series_continuous_real(series_f32, starts, lo, hi, t0, nt, out_c64): the same of a real series, half-size block transforms"},
-  {"set_platform_fft",(PyCFunction)MF_set_platform_fft_g,METH_VARARGS,"set_platform_fft(on) -> True if correlate_series_continuous now runs through the platform FFT"},
   {"set_template",(PyCFunction)MF_set_template_g,METH_VARARGS,"set_template(i, buffer)"},
   {"set_data_batch",(PyCFunction)MF_set_data_batch_g,METH_VARARGS,"set_data_batch(i0, buffer)"},
   {"set_template_batch",(PyCFunction)MF_set_template_batch_g,METH_VARARGS,"set_template_batch(i0, buffer)"},
@@ -994,10 +988,6 @@ static PyObject *HMF_set_q15(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_q15(self->p,on)==0);
 }
-static PyObject *HMF_set_platform_fft(HMFObject *self,PyObject *args){
-  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
-  return PyBool_FromLong(ap_hmf_set_platform_fft(self->p,on)==0);
-}
 static PyObject *HMF_q15_stats(HMFObject *self,PyObject *unused){
   (void)unused; long passed=0; unsigned long long ticks=0;
   ap_hmf_q15_stats(self->p,&passed,&ticks);
@@ -1060,7 +1050,6 @@ static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
 }
 
 GUARDED(HMFObject,HMF_series_group)
-GUARDED(HMFObject,HMF_set_platform_fft)
 GUARDED(HMFObject,HMF_set_taps)
 GUARDED(HMFObject,HMF_set_real_series)
 GUARDED(HMFObject,HMF_set_direct)
@@ -1093,7 +1082,6 @@ GUARDED(HMFObject,HMF_tier_stats)
 GUARDED(HMFObject,HMF_tier_inputs)
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group_g,METH_NOARGS,"actual series block group"},
-  {"set_platform_fft",(PyCFunction)HMF_set_platform_fft_g,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
   {"set_taps",(PyCFunction)HMF_set_taps_g,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
   {"set_real_series",(PyCFunction)HMF_set_real_series_g,METH_VARARGS,"set_real_series(on, stride=1) -> True if run_series now reads real float32 series (half-size block transforms); stride 2 reads one lane of a complex series"},
   {"set_direct",(PyCFunction)HMF_set_direct_g,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
@@ -2184,44 +2172,6 @@ static PyObject *M_gate16(PyObject *self, PyObject *noargs){
 }
 
 
-/* forward_cost(n, reps) -> (engine s, platform s or -1): one block forward of n points as
-   the hierarchical series does it (copy with 1/n, transform), best of reps, both ways. */
-static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+1e-9*t.tv_nsec; }
-static PyObject *M_forward_cost(PyObject *self, PyObject *args){
-  (void)self; Py_ssize_t n; int reps=9;
-  if(!PyArg_ParseTuple(args,"n|i",&n,&reps)) return NULL;
-  if(n<16||(n&(n-1))){ PyErr_SetString(PyExc_ValueError,"n must be a power of two >= 16"); return NULL; }
-  if(!ap_supported((size_t)n)){
-    PyErr_Format(PyExc_ValueError,"forward_cost: n=%zd is not a size the engine supports",n);
-    return NULL;
-  }
-  ap_plan *fft=ap_create((size_t)n); ap_accel *a=ap_accel_create((size_t)n);
-  float *src=malloc(2*n*sizeof(float)), *tmp=malloc(2*n*sizeof(float)), *out=malloc(2*n*sizeof(float));
-  double bn=1e30, ba=1e30;
-  if(!fft||!src||!tmp||!out){
-    /* A plan or buffer that could not be allocated: no price, said so -- not 1e30 s,
-       which a caller would read as "the engine is slow" and store. */
-    free(src); free(tmp); free(out); ap_destroy(fft); ap_accel_destroy(a);
-    return PyErr_NoMemory();
-  }
-  {
-    Py_BEGIN_ALLOW_THREADS
-    for(Py_ssize_t k=0;k<2*n;k++) src[k]=(float)((k*2654435761u)%1000)*1e-3f;
-    const float inv=1.0f/(float)n;
-    for(int r=0;r<reps;r++){
-      double t0=now_s();
-      for(int i=0;i<8;i++){ for(Py_ssize_t k=0;k<2*n;k++) tmp[k]=src[k]*inv; ap_fft(fft,tmp,out,AP_FORWARD); }
-      double t1=now_s();
-      if(a) for(int i=0;i<8;i++) ap_accel_forward(a,src,(size_t)n,inv,out);
-      double t2=now_s();
-      if((t1-t0)/8<bn) bn=(t1-t0)/8;
-      if(a && (t2-t1)/8<ba) ba=(t2-t1)/8;
-    }
-    Py_END_ALLOW_THREADS
-  }
-  free(src); free(tmp); free(out); ap_destroy(fft); ap_accel_destroy(a);
-  return Py_BuildValue("(dd)", bn, a ? ba : -1.0);
-}
 
 
 /* gate16_max(N, data, templates, nt) -> float32 array of nt: the FP16 first gate's
@@ -3710,7 +3660,6 @@ static PyMethodDef methods[]={
   {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
-  {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16_max",M_gate16_max,METH_VARARGS,"gate16_max(N, data, templates, nt) -> bytes of nt float32 FP16 maxima (-1: not fired), or None"},
   {"price_direct",M_price_direct,METH_VARARGS,"price_direct(real_series=False, complex_taps=False) -> ticks per lag x tap of the direct refine's correlation"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
