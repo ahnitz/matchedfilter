@@ -615,7 +615,7 @@ static void stageA_split(BP*p,const float*inr,const float*ini,int conj){
    as the codelet strides. Other shapes retain the generic stage below. */
 static HWY_NOINLINE void stageA_prod_32_untabled(BP*p,const float*dr,const float*di,
                                                  const float*tr,const float*ti);
-static void stageA_prod_32(BP*p,const float*dr,const float*di,
+[[maybe_unused]] static void stageA_prod_32(BP*p,const float*dr,const float*di,
                             const float*tr,const float*ti){
   /* The 8-lane path below stores the corner turn straight from its own transform's
      output; other widths share stageA_tail. */
@@ -907,7 +907,7 @@ static HWY_NOINLINE MF_FWD_SECTION void stageA_scaled(BP*p,const float*in,size_t
 }
 
 /* Keep the specialized DAG out of the generic stage-B stack frame. */
-static HWY_NOINLINE void stageB_inplace32(BP*p,int b,vf**RR,vf**RI){
+[[maybe_unused]] static HWY_NOINLINE void stageB_inplace32(BP*p,int b,vf**RR,vf**RI){
   float *ar=p->ire+(size_t)b*32*AP_W;
   float *ai=p->iim+(size_t)b*32*AP_W;
   fftsr32_unit_inplace(ar,ai,p->sR,p->sI,1);

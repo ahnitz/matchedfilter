@@ -169,7 +169,7 @@ half2 dload_0(uint device* b_1, uint i_1)
 }
 
 
-#line 400
+#line 402
 void cmulconjs_0(half2 ar_0, half2 ai_0, half2 br_0, half2 bi_0, half2 thread* pr_0, half2 thread* pi_0)
 {
     *pr_0 = ar_0 * br_0 + ai_0 * bi_0;
@@ -178,113 +178,113 @@ void cmulconjs_0(half2 ar_0, half2 ai_0, half2 br_0, half2 bi_0, half2 thread* p
 }
 
 
-#line 412
+#line 414
 void r4s_0(array<half2, int(16)> thread* re_0, array<half2, int(16)> thread* im_0, uint a_0, uint b_2, uint c_0, uint d_1)
 {
     half2 t0r_0 = (*re_0)[a_0] + (*re_0)[c_0];
 
-#line 414
+#line 416
     half2 t0i_0 = (*im_0)[a_0] + (*im_0)[c_0];
     half2 t1r_0 = (*re_0)[a_0] - (*re_0)[c_0];
 
-#line 415
+#line 417
     half2 t1i_0 = (*im_0)[a_0] - (*im_0)[c_0];
     half2 t2r_0 = (*re_0)[b_2] + (*re_0)[d_1];
 
-#line 416
+#line 418
     half2 t2i_0 = (*im_0)[b_2] + (*im_0)[d_1];
     half2 t3r_0 = (*re_0)[b_2] - (*re_0)[d_1];
     half2 j3r_0 = - ((*im_0)[b_2] - (*im_0)[d_1]);
     (*re_0)[a_0] = t0r_0 + t2r_0;
 
-#line 419
+#line 421
     (*im_0)[a_0] = t0i_0 + t2i_0;
     (*re_0)[b_2] = t1r_0 + j3r_0;
 
-#line 420
+#line 422
     (*im_0)[b_2] = t1i_0 + t3r_0;
     (*re_0)[c_0] = t0r_0 - t2r_0;
 
-#line 421
+#line 423
     (*im_0)[c_0] = t0i_0 - t2i_0;
     (*re_0)[d_1] = t1r_0 - j3r_0;
 
-#line 422
+#line 424
     (*im_0)[d_1] = t1i_0 - t3r_0;
     return;
 }
 
 
-#line 391
+#line 393
 void cmulw_0(half2 thread* xr_0, half2 thread* xi_0, half wr_0, half wi_0)
 {
 
-#line 391
+#line 393
     half2 _S10 = half2(wr_0) ;
 
-#line 391
+#line 393
     half2 _S11 = half2(wi_0) ;
 
 
     half2 ni_0 = *xr_0 * _S11 + *xi_0 * _S10;
     *xr_0 = *xr_0 * _S10 - *xi_0 * _S11;
 
-#line 395
+#line 397
     *xi_0 = ni_0;
     return;
 }
 
 
-#line 425
+#line 427
 void swap2_0(array<half2, int(16)> thread* re_1, array<half2, int(16)> thread* im_1, uint p_1, uint q_0)
 {
 
     half2 t_0 = (*re_1)[p_1];
 
-#line 428
+#line 430
     (*re_1)[p_1] = (*re_1)[q_0];
 
-#line 428
+#line 430
     (*re_1)[q_0] = t_0;
     half2 t_1 = (*im_1)[p_1];
 
-#line 429
+#line 431
     (*im_1)[p_1] = (*im_1)[q_0];
 
-#line 429
+#line 431
     (*im_1)[q_0] = t_1;
     return;
 }
 
 
-#line 463
+#line 465
 void dft16s_0(array<half2, int(16)> thread* re_2, array<half2, int(16)> thread* im_2)
 {
 
-#line 463
+#line 465
     uint n1_0 = 0U;
 
     for(;;)
     {
 
-#line 465
+#line 467
         if(n1_0 < 4U)
         {
         }
         else
         {
 
-#line 465
+#line 467
             break;
         }
 
-#line 465
+#line 467
         r4s_0(re_2, im_2, n1_0, n1_0 + 4U, n1_0 + 8U, n1_0 + 12U);
 
-#line 465
+#line 467
         n1_0 = n1_0 + 1U;
 
-#line 465
+#line 467
     }
 
 
@@ -298,80 +298,80 @@ void dft16s_0(array<half2, int(16)> thread* re_2, array<half2, int(16)> thread* 
     cmulw_0(&(*re_2)[int(11)], &(*im_2)[int(11)], -0.70703125h, 0.70703125h);
     cmulw_0(&(*re_2)[int(15)], &(*im_2)[int(15)], -0.923828125h, -0.382568359375h);
 
-#line 476
+#line 478
     uint k2_0 = 0U;
     for(;;)
     {
 
-#line 477
+#line 479
         if(k2_0 < 4U)
         {
         }
         else
         {
 
-#line 477
+#line 479
             break;
         }
 
-#line 478
+#line 480
         uint _S12 = 4U * k2_0;
 
-#line 478
+#line 480
         r4s_0(re_2, im_2, _S12, _S12 + 1U, _S12 + 2U, _S12 + 3U);
 
-#line 477
+#line 479
         k2_0 = k2_0 + 1U;
 
-#line 477
+#line 479
     }
 
     swap2_0(re_2, im_2, 1U, 4U);
 
-#line 479
+#line 481
     swap2_0(re_2, im_2, 2U, 8U);
 
-#line 479
+#line 481
     swap2_0(re_2, im_2, 3U, 12U);
     swap2_0(re_2, im_2, 6U, 9U);
 
-#line 480
+#line 482
     swap2_0(re_2, im_2, 7U, 13U);
 
-#line 480
+#line 482
     swap2_0(re_2, im_2, 11U, 14U);
     return;
 }
 
 
-#line 463
+#line 465
 void dft16s_1(array<half2, int(16)> thread* re_3, array<half2, int(16)> thread* im_3)
 {
 
-#line 463
+#line 465
     uint n1_1 = 0U;
 
     for(;;)
     {
 
-#line 465
+#line 467
         if(n1_1 < 4U)
         {
         }
         else
         {
 
-#line 465
+#line 467
             break;
         }
 
-#line 465
+#line 467
         r4s_0(re_3, im_3, n1_1, n1_1 + 4U, n1_1 + 8U, n1_1 + 12U);
 
-#line 465
+#line 467
         n1_1 = n1_1 + 1U;
 
-#line 465
+#line 467
     }
 
 
@@ -385,47 +385,47 @@ void dft16s_1(array<half2, int(16)> thread* re_3, array<half2, int(16)> thread* 
     cmulw_0(&(*re_3)[int(11)], &(*im_3)[int(11)], -0.70703125h, 0.70703125h);
     cmulw_0(&(*re_3)[int(15)], &(*im_3)[int(15)], -0.923828125h, -0.382568359375h);
 
-#line 476
+#line 478
     uint k2_1 = 0U;
     for(;;)
     {
 
-#line 477
+#line 479
         if(k2_1 < 4U)
         {
         }
         else
         {
 
-#line 477
+#line 479
             break;
         }
 
-#line 478
+#line 480
         uint _S13 = 4U * k2_1;
 
-#line 478
+#line 480
         r4s_0(re_3, im_3, _S13, _S13 + 1U, _S13 + 2U, _S13 + 3U);
 
-#line 477
+#line 479
         k2_1 = k2_1 + 1U;
 
-#line 477
+#line 479
     }
 
     swap2_0(re_3, im_3, 1U, 4U);
 
-#line 479
+#line 481
     swap2_0(re_3, im_3, 2U, 8U);
 
-#line 479
+#line 481
     swap2_0(re_3, im_3, 3U, 12U);
     swap2_0(re_3, im_3, 6U, 9U);
 
-#line 480
+#line 482
     swap2_0(re_3, im_3, 7U, 13U);
 
-#line 480
+#line 482
     swap2_0(re_3, im_3, 11U, 14U);
     return;
 }
@@ -509,7 +509,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 607 "mm_256_refineListed_c16.slang"
+#line 609 "mm_256_refineListed_c16.slang"
 void innermostS_0(array<half2, int(16)> thread* re_4, array<half2, int(16)> thread* im_4)
 {
     dft16s_1(re_4, im_4);
@@ -520,4841 +520,4841 @@ void innermostS_0(array<half2, int(16)> thread* re_4, array<half2, int(16)> thre
 }
 
 
-#line 883
+#line 885
 uint lgOf_0(uint i_2)
 {
 
-#line 883
+#line 885
     uint _S18;
 
-#line 883
+#line 885
     if(i_2 < 1U)
     {
 
-#line 883
+#line 885
         _S18 = 4U;
 
-#line 883
+#line 885
     }
     else
     {
 
-#line 883
+#line 885
         if(i_2 == 1U)
         {
 
-#line 883
+#line 885
             _S18 = 4U;
 
-#line 883
+#line 885
         }
         else
         {
 
-#line 883
+#line 885
             _S18 = 1U;
 
-#line 883
+#line 885
         }
 
-#line 883
+#line 885
     }
 
-#line 883
+#line 885
     return _S18;
 }
 
 
-#line 885
+#line 887
 uint slotToIndex_0(uint slot_0)
 {
 
 
     uint lg_0 = lgOf_0(1U);
 
-#line 889
+#line 891
     uint lg_1 = lgOf_0(0U);
 
-#line 894
+#line 896
     return (((0U << lg_0) | (slot_0 & ((1U << lg_0) - 1U))) << lg_1) | ((slot_0 >> lg_0) & ((1U << lg_1) - 1U));
 }
 
 
-#line 487
+#line 489
 half2 mag2s_0(half2 re_5, half2 im_5)
 {
 
-#line 487
+#line 489
     return re_5 * re_5 + im_5 * im_5;
 }
 
 
-#line 2348
+#line 2350
 [[kernel]] void refineListedBounded(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], uint device* entryPointParams_data_1 [[buffer(1)]], uint device* entryPointParams_tmpl_1 [[buffer(2)]], int device* entryPointParams_peakIdx_1 [[buffer(3)]], packed_float2 device* entryPointParams_peakVal_1 [[buffer(4)]], uint device* entryPointParams_survivors_1 [[buffer(5)]], uint device* entryPointParams_count_1 [[buffer(6)]], uint device* entryPointParams_rowWin_1 [[buffer(7)]])
 {
 
-#line 2348
+#line 2350
     half2 db_0;
 
-#line 2348
+#line 2350
     uint _S19;
 
-#line 2348
+#line 2350
     uint _S20;
 
-#line 2348
+#line 2350
     uint _S21;
 
-#line 2348
+#line 2350
     uint _S22;
 
-#line 2348
+#line 2350
     uint _S23;
 
-#line 2348
+#line 2350
     thread KernelContext_0 kernelContext_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_0 = entryPointParams_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_peakIdx_0 = entryPointParams_peakIdx_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_peakVal_0 = entryPointParams_peakVal_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_count_0 = entryPointParams_count_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->entryPointParams_rowWin_0 = entryPointParams_rowWin_1;
 
-#line 2348
+#line 2350
     (&kernelContext_1)->_binPhase_0 = 0U;
 
-#line 2359
+#line 2361
     uint total_0 = entryPointParams_count_1[int(0)];
 
     if(total_0 == 0U)
     {
 
-#line 2361
+#line 2363
         return;
     }
 
-#line 2367
+#line 2369
     uint _S24 = lid_0.x;
 
-#line 2367
+#line 2369
     uint sub_0 = _S24 / 16U;
 
-#line 2367
+#line 2369
     uint _S25 = _S24 % 16U;
     (&kernelContext_1)->_stgBase_0 = sub_0 * 256U;
 
-#line 2368
+#line 2370
     uint base_0 = gid_0.x * 8U;
 
     for(;;)
     {
 
-#line 2370
+#line 2372
         if(base_0 < total_0)
         {
         }
         else
         {
 
-#line 2370
+#line 2372
             break;
         }
 
-#line 2371
+#line 2373
         uint idxA_0 = base_0 + 2U * sub_0;
         uint idxB_0 = idxA_0 + 1U;
 
-#line 2372
+#line 2374
         uint pairA_0;
         if(idxA_0 < total_0)
         {
 
-#line 2373
+#line 2375
             pairA_0 = (&kernelContext_1)->entryPointParams_survivors_0[idxA_0];
 
-#line 2373
+#line 2375
         }
         else
         {
 
-#line 2373
+#line 2375
             pairA_0 = 4294967295U;
 
-#line 2373
+#line 2375
         }
 
-#line 2373
+#line 2375
         uint pairB_0;
         if(idxB_0 < total_0)
         {
 
-#line 2374
+#line 2376
             pairB_0 = (&kernelContext_1)->entryPointParams_survivors_0[idxB_0];
 
-#line 2374
+#line 2376
         }
         else
         {
 
-#line 2374
+#line 2376
             pairB_0 = 4294967295U;
 
-#line 2374
+#line 2376
         }
         bool _S26 = pairA_0 != 4294967295U;
 
-#line 2375
+#line 2377
         uint refPairA_0;
 
-#line 2375
+#line 2377
         if(_S26)
         {
 
-#line 2375
+#line 2377
             refPairA_0 = pairA_0;
 
-#line 2375
+#line 2377
         }
         else
         {
 
-#line 2375
+#line 2377
             refPairA_0 = (&kernelContext_1)->entryPointParams_survivors_0[total_0 - 1U];
 
-#line 2375
+#line 2377
         }
         bool _S27 = pairB_0 != 4294967295U;
 
-#line 2376
+#line 2378
         uint refPairB_0;
 
-#line 2376
+#line 2378
         if(_S27)
         {
 
-#line 2376
+#line 2378
             refPairB_0 = pairB_0;
 
-#line 2376
+#line 2378
         }
         else
         {
 
-#line 2376
+#line 2378
             refPairB_0 = refPairA_0;
 
-#line 2376
+#line 2378
         }
         uint dA_0 = refPairA_0 / (&kernelContext_1)->entryPointParams_0->ntmpl_0;
 
-#line 2377
+#line 2379
         uint tA_0 = refPairA_0 % (&kernelContext_1)->entryPointParams_0->ntmpl_0;
         uint dB_0 = refPairB_0 / (&kernelContext_1)->entryPointParams_0->ntmpl_0;
 
-#line 2378
+#line 2380
         uint tB_0 = refPairB_0 % (&kernelContext_1)->entryPointParams_0->ntmpl_0;
         thread uint wsA_0 = (&kernelContext_1)->entryPointParams_0->winStart_0;
 
-#line 2379
+#line 2381
         thread uint weA_0 = (&kernelContext_1)->entryPointParams_0->winEnd_0;
 
-#line 2379
+#line 2381
         thread uint wsB_0 = (&kernelContext_1)->entryPointParams_0->winStart_0;
 
-#line 2379
+#line 2381
         thread uint weB_0 = (&kernelContext_1)->entryPointParams_0->winEnd_0;
 
-#line 2379
+#line 2381
         rowWindow_0(dA_0, &wsA_0, &weA_0, (&kernelContext_1)->entryPointParams_rowWin_0, &kernelContext_1);
 
-#line 2379
+#line 2381
         rowWindow_0(dB_0, &wsB_0, &weB_0, (&kernelContext_1)->entryPointParams_rowWin_0, &kernelContext_1);
 
 
         uint _S28 = wsA_0;
 
-#line 2382
+#line 2384
         uint _S29 = weA_0;
 
-#line 2382
+#line 2384
         uint _S30 = wsB_0;
 
-#line 2382
+#line 2384
         uint _S31 = weB_0;
 
-#line 2382
+#line 2384
         uint _S32 = (&kernelContext_1)->entryPointParams_0->nbins_0;
 
-#line 2382
+#line 2384
         uint _S33 = (&kernelContext_1)->entryPointParams_0->thrBits_0;
 
-#line 2382
+#line 2384
         for(;;)
         {
 
-#line 2382
+#line 2384
             thread array<half2, int(16)> re_6;
 
-#line 2382
+#line 2384
             thread array<half2, int(16)> im_6;
 
-#line 2382
+#line 2384
             uint _S34 = mfDataStrideFlag_0();
 
-#line 2382
+#line 2384
             uint _S35;
 
-#line 2382
+#line 2384
             if(_S34 != 0U)
             {
 
-#line 2382
+#line 2384
                 uint _S36 = mfDataStrideFlag_0();
 
-#line 2382
+#line 2384
                 _S35 = _S36;
 
-#line 2382
+#line 2384
             }
             else
             {
 
-#line 2382
+#line 2384
                 _S35 = 256U;
 
-#line 2382
+#line 2384
             }
 
-#line 2382
+#line 2384
             bool _S37 = dB_0 == dA_0;
 
-#line 2382
+#line 2384
             uint n2_0 = 0U;
 
-#line 2382
+#line 2384
             for(;;)
             {
 
-#line 2382
+#line 2384
                 if(n2_0 < 16U)
                 {
                 }
                 else
                 {
 
-#line 2382
+#line 2384
                     break;
                 }
 
-#line 2382
+#line 2384
                 uint k_0 = _S25 + 16U * n2_0;
 
-#line 2382
+#line 2384
                 half2 da_0 = dload_0((&kernelContext_1)->entryPointParams_data_0, dA_0 * _S35 + k_0);
 
-#line 2382
+#line 2384
                 if(_S37)
                 {
 
-#line 2382
+#line 2384
                     db_0 = da_0;
 
-#line 2382
+#line 2384
                 }
                 else
                 {
 
-#line 2382
+#line 2384
                     half2 _S38 = dload_0((&kernelContext_1)->entryPointParams_data_0, dB_0 * _S35 + k_0);
 
-#line 2382
+#line 2384
                     db_0 = _S38;
 
-#line 2382
+#line 2384
                 }
 
-#line 2382
+#line 2384
                 half2 ta_0 = cload_0((&kernelContext_1)->entryPointParams_tmpl_0, tA_0 * 256U + k_0);
 
-#line 2382
+#line 2384
                 half2 tb_0 = cload_0((&kernelContext_1)->entryPointParams_tmpl_0, tB_0 * 256U + k_0);
 
-#line 2382
+#line 2384
                 cmulconjs_0(half2(da_0.x, db_0.x), half2(da_0.y, db_0.y), half2(ta_0.x, tb_0.x), half2(ta_0.y, tb_0.y), &re_6[n2_0], &im_6[n2_0]);
 
-#line 2382
+#line 2384
                 n2_0 = n2_0 + 1U;
 
-#line 2382
+#line 2384
             }
 
-#line 2382
+#line 2384
             array<half2, int(16)> _S39 = re_6;
 
-#line 2382
+#line 2384
             array<half2, int(16)> _S40 = im_6;
 
-#line 2382
+#line 2384
             for(;;)
             {
 
-#line 2382
+#line 2384
                 thread array<half2, int(16)> _S41 = _S39;
 
-#line 2382
+#line 2384
                 thread array<half2, int(16)> _S42 = _S40;
 
-#line 2382
+#line 2384
                 (&kernelContext_1)->_tid_0 = _S25;
 
-#line 2382
+#line 2384
                 for(;;)
                 {
 
-#line 2382
+#line 2384
                     uint lgTB_0 = firstbithigh_0(16U);
 
-#line 2382
+#line 2384
                     uint lane_0 = _S25 & 15U;
 
-#line 2382
+#line 2384
                     dft16s_0(&_S41, &_S42);
 
-#line 2382
+#line 2384
                     uint _S43 = mfCoarseTwtFlag_0();
 
-#line 2382
+#line 2384
                     uint i_3;
 
-#line 2382
+#line 2384
                     if(_S43 != 0U)
                     {
 
-#line 2382
+#line 2384
                         i_3 = 0U;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             if(i_3 < 16U)
                             {
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 break;
                             }
 
-#line 2382
+#line 2384
                             uint _S44 = lane_0 * 16U + i_3;
 
-#line 2382
+#line 2384
                             cmulw_0(&_S41[i_3], &_S42[i_3], as_type<half>(ushort((COARSE_TWT_DATA_0[_S44]) & 65535U)), as_type<half>(ushort(((COARSE_TWT_DATA_0[_S44]) >> 16U) & 65535U)));
 
-#line 2382
+#line 2384
                             i_3 = i_3 + 1U;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                     }
                     else
                     {
 
-#line 2382
+#line 2384
                         float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_0) / 256.0f);
 
-#line 2382
+#line 2384
                         float _S45 = tw_0.x;
 
-#line 2382
+#line 2384
                         float _S46 = tw_0.y;
 
-#line 2382
+#line 2384
                         i_3 = 0U;
 
-#line 2382
+#line 2384
                         float cr_0 = 1.0f;
 
-#line 2382
+#line 2384
                         float ci_0 = 0.0f;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             if(i_3 < 16U)
                             {
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 break;
                             }
 
-#line 2382
+#line 2384
                             cmulw_0(&_S41[i_3], &_S42[i_3], half(cr_0), half(ci_0));
 
-#line 2382
+#line 2384
                             float nr_0 = cr_0 * _S45 - ci_0 * _S46;
 
-#line 2382
+#line 2384
                             float _S47 = cr_0 * _S46 + ci_0 * _S45;
 
-#line 2382
+#line 2384
                             i_3 = i_3 + 1U;
 
-#line 2382
+#line 2384
                             cr_0 = nr_0;
 
-#line 2382
+#line 2384
                             ci_0 = _S47;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                     }
 
-#line 2382
+#line 2384
                     uint per_0 = 16U / max(16U, 1U);
 
-#line 2382
+#line 2384
                     uint _S48 = max(1U, 1U);
 
-#line 2382
+#line 2384
                     uint blk2_0 = _S25 / _S48;
 
-#line 2382
+#line 2384
                     uint lane2_0 = _S25 % _S48;
 
-#line 2382
+#line 2384
                     for(;;)
                     {
 
-#line 2382
+#line 2384
                         uint _S49 = (&kernelContext_1)->_tid_0;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             thread array<uint, int(16)> t_2;
 
-#line 2382
+#line 2384
                             i_3 = 0U;
 
-#line 2382
+#line 2384
                             for(;;)
                             {
 
-#line 2382
+#line 2384
                                 if(i_3 < 16U)
                                 {
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     break;
                                 }
 
-#line 2382
+#line 2384
                                 t_2[i_3] = (uint(as_type<ushort>(_S41[i_3][0U])) & 65535U) | (uint(as_type<ushort>(_S41[i_3][1U])) << 16U);
 
-#line 2382
+#line 2384
                                 i_3 = i_3 + 1U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint shift_0 = lgTB_0 - 4U;
 
-#line 2382
+#line 2384
                             _S19 = shift_0;
 
-#line 2382
+#line 2384
                             uint _S50 = (_S49 >> shift_0) & 15U;
 
-#line 2382
+#line 2384
                             bool _S51 = (_S50 & 1U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S52;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S52 = t_2[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S52 = t_2[1U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S53 = 1U << shift_0;
 
-#line 2382
+#line 2384
                             _S20 = _S53;
 
-#line 2382
+#line 2384
                             uint partner_0 = (simd_shuffle_xor((_S52), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[0U] = partner_0;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[1U] = partner_0;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S54;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S54 = t_2[2U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S54 = t_2[3U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_1 = (simd_shuffle_xor((_S54), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[2U] = partner_1;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[3U] = partner_1;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S55;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S55 = t_2[4U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S55 = t_2[5U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_2 = (simd_shuffle_xor((_S55), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[4U] = partner_2;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[5U] = partner_2;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S56;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S56 = t_2[6U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S56 = t_2[7U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_3 = (simd_shuffle_xor((_S56), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[6U] = partner_3;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[7U] = partner_3;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S57;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S57 = t_2[8U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S57 = t_2[9U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_4 = (simd_shuffle_xor((_S57), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[8U] = partner_4;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[9U] = partner_4;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S58;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S58 = t_2[10U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S58 = t_2[11U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_5 = (simd_shuffle_xor((_S58), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[10U] = partner_5;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[11U] = partner_5;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S59;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S59 = t_2[12U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S59 = t_2[13U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_6 = (simd_shuffle_xor((_S59), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[12U] = partner_6;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[13U] = partner_6;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S60;
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 _S60 = t_2[14U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S60 = t_2[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_7 = (simd_shuffle_xor((_S60), ushort((_S53))));
 
-#line 2382
+#line 2384
                             if(_S51)
                             {
 
-#line 2382
+#line 2384
                                 t_2[14U] = partner_7;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[15U] = partner_7;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             bool _S61 = (_S50 & 2U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S62;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S62 = t_2[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S62 = t_2[2U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S63 = 2U << shift_0;
 
-#line 2382
+#line 2384
                             _S21 = _S63;
 
-#line 2382
+#line 2384
                             uint partner_8 = (simd_shuffle_xor((_S62), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[0U] = partner_8;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[2U] = partner_8;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S64;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S64 = t_2[1U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S64 = t_2[3U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_9 = (simd_shuffle_xor((_S64), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[1U] = partner_9;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[3U] = partner_9;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S65;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S65 = t_2[4U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S65 = t_2[6U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_10 = (simd_shuffle_xor((_S65), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[4U] = partner_10;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[6U] = partner_10;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S66;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S66 = t_2[5U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S66 = t_2[7U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_11 = (simd_shuffle_xor((_S66), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[5U] = partner_11;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[7U] = partner_11;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S67;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S67 = t_2[8U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S67 = t_2[10U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_12 = (simd_shuffle_xor((_S67), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[8U] = partner_12;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[10U] = partner_12;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S68;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S68 = t_2[9U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S68 = t_2[11U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_13 = (simd_shuffle_xor((_S68), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[9U] = partner_13;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[11U] = partner_13;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S69;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S69 = t_2[12U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S69 = t_2[14U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_14 = (simd_shuffle_xor((_S69), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[12U] = partner_14;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[14U] = partner_14;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S70;
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 _S70 = t_2[13U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S70 = t_2[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_15 = (simd_shuffle_xor((_S70), ushort((_S63))));
 
-#line 2382
+#line 2384
                             if(_S61)
                             {
 
-#line 2382
+#line 2384
                                 t_2[13U] = partner_15;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[15U] = partner_15;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             bool _S71 = (_S50 & 4U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S72;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S72 = t_2[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S72 = t_2[4U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S73 = 4U << shift_0;
 
-#line 2382
+#line 2384
                             _S22 = _S73;
 
-#line 2382
+#line 2384
                             uint partner_16 = (simd_shuffle_xor((_S72), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[0U] = partner_16;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[4U] = partner_16;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S74;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S74 = t_2[1U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S74 = t_2[5U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_17 = (simd_shuffle_xor((_S74), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[1U] = partner_17;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[5U] = partner_17;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S75;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S75 = t_2[2U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S75 = t_2[6U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_18 = (simd_shuffle_xor((_S75), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[2U] = partner_18;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[6U] = partner_18;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S76;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S76 = t_2[3U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S76 = t_2[7U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_19 = (simd_shuffle_xor((_S76), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[3U] = partner_19;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[7U] = partner_19;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S77;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S77 = t_2[8U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S77 = t_2[12U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_20 = (simd_shuffle_xor((_S77), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[8U] = partner_20;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[12U] = partner_20;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S78;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S78 = t_2[9U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S78 = t_2[13U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_21 = (simd_shuffle_xor((_S78), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[9U] = partner_21;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[13U] = partner_21;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S79;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S79 = t_2[10U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S79 = t_2[14U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_22 = (simd_shuffle_xor((_S79), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[10U] = partner_22;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[14U] = partner_22;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S80;
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 _S80 = t_2[11U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S80 = t_2[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_23 = (simd_shuffle_xor((_S80), ushort((_S73))));
 
-#line 2382
+#line 2384
                             if(_S71)
                             {
 
-#line 2382
+#line 2384
                                 t_2[11U] = partner_23;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[15U] = partner_23;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             bool _S81 = (_S50 & 8U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S82;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S82 = t_2[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S82 = t_2[8U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S83 = 8U << shift_0;
 
-#line 2382
+#line 2384
                             _S23 = _S83;
 
-#line 2382
+#line 2384
                             uint partner_24 = (simd_shuffle_xor((_S82), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[0U] = partner_24;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[8U] = partner_24;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S84;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S84 = t_2[1U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S84 = t_2[9U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_25 = (simd_shuffle_xor((_S84), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[1U] = partner_25;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[9U] = partner_25;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S85;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S85 = t_2[2U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S85 = t_2[10U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_26 = (simd_shuffle_xor((_S85), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[2U] = partner_26;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[10U] = partner_26;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S86;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S86 = t_2[3U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S86 = t_2[11U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_27 = (simd_shuffle_xor((_S86), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[3U] = partner_27;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[11U] = partner_27;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S87;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S87 = t_2[4U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S87 = t_2[12U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_28 = (simd_shuffle_xor((_S87), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[4U] = partner_28;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[12U] = partner_28;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S88;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S88 = t_2[5U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S88 = t_2[13U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_29 = (simd_shuffle_xor((_S88), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[5U] = partner_29;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[13U] = partner_29;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S89;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S89 = t_2[6U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S89 = t_2[14U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_30 = (simd_shuffle_xor((_S89), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[6U] = partner_30;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[14U] = partner_30;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S90;
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 _S90 = t_2[7U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S90 = t_2[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_31 = (simd_shuffle_xor((_S90), ushort((_S83))));
 
-#line 2382
+#line 2384
                             if(_S81)
                             {
 
-#line 2382
+#line 2384
                                 t_2[7U] = partner_31;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_2[15U] = partner_31;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint i_4 = 0U;
 
-#line 2382
+#line 2384
                             for(;;)
                             {
 
-#line 2382
+#line 2384
                                 if(i_4 < 16U)
                                 {
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     break;
                                 }
 
-#line 2382
+#line 2384
                                 _S41[i_4] = half2(as_type<half>(ushort((t_2[i_4]) & 65535U)), as_type<half>(ushort(((t_2[i_4]) >> 16U) & 65535U)));
 
-#line 2382
+#line 2384
                                 i_4 = i_4 + 1U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             break;
                         }
 
-#line 2382
+#line 2384
                         uint _S91 = (&kernelContext_1)->_tid_0;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             thread array<uint, int(16)> t_3;
 
-#line 2382
+#line 2384
                             uint i_5 = 0U;
 
-#line 2382
+#line 2384
                             for(;;)
                             {
 
-#line 2382
+#line 2384
                                 if(i_5 < 16U)
                                 {
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     break;
                                 }
 
-#line 2382
+#line 2384
                                 t_3[i_5] = (uint(as_type<ushort>(_S42[i_5][0U])) & 65535U) | (uint(as_type<ushort>(_S42[i_5][1U])) << 16U);
 
-#line 2382
+#line 2384
                                 i_5 = i_5 + 1U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S92 = (_S91 >> _S19) & 15U;
 
-#line 2382
+#line 2384
                             bool _S93 = (_S92 & 1U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S94;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S94 = t_3[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S94 = t_3[1U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_32 = (simd_shuffle_xor((_S94), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[0U] = partner_32;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[1U] = partner_32;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S95;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S95 = t_3[2U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S95 = t_3[3U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_33 = (simd_shuffle_xor((_S95), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[2U] = partner_33;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[3U] = partner_33;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S96;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S96 = t_3[4U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S96 = t_3[5U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_34 = (simd_shuffle_xor((_S96), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[4U] = partner_34;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[5U] = partner_34;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S97;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S97 = t_3[6U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S97 = t_3[7U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_35 = (simd_shuffle_xor((_S97), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[6U] = partner_35;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[7U] = partner_35;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S98;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S98 = t_3[8U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S98 = t_3[9U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_36 = (simd_shuffle_xor((_S98), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[8U] = partner_36;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[9U] = partner_36;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S99;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S99 = t_3[10U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S99 = t_3[11U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_37 = (simd_shuffle_xor((_S99), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[10U] = partner_37;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[11U] = partner_37;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S100;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S100 = t_3[12U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S100 = t_3[13U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_38 = (simd_shuffle_xor((_S100), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[12U] = partner_38;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[13U] = partner_38;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S101;
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 _S101 = t_3[14U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S101 = t_3[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_39 = (simd_shuffle_xor((_S101), ushort((_S20))));
 
-#line 2382
+#line 2384
                             if(_S93)
                             {
 
-#line 2382
+#line 2384
                                 t_3[14U] = partner_39;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[15U] = partner_39;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             bool _S102 = (_S92 & 2U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S103;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S103 = t_3[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S103 = t_3[2U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_40 = (simd_shuffle_xor((_S103), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[0U] = partner_40;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[2U] = partner_40;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S104;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S104 = t_3[1U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S104 = t_3[3U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_41 = (simd_shuffle_xor((_S104), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[1U] = partner_41;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[3U] = partner_41;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S105;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S105 = t_3[4U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S105 = t_3[6U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_42 = (simd_shuffle_xor((_S105), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[4U] = partner_42;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[6U] = partner_42;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S106;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S106 = t_3[5U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S106 = t_3[7U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_43 = (simd_shuffle_xor((_S106), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[5U] = partner_43;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[7U] = partner_43;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S107;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S107 = t_3[8U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S107 = t_3[10U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_44 = (simd_shuffle_xor((_S107), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[8U] = partner_44;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[10U] = partner_44;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S108;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S108 = t_3[9U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S108 = t_3[11U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_45 = (simd_shuffle_xor((_S108), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[9U] = partner_45;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[11U] = partner_45;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S109;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S109 = t_3[12U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S109 = t_3[14U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_46 = (simd_shuffle_xor((_S109), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[12U] = partner_46;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[14U] = partner_46;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S110;
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 _S110 = t_3[13U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S110 = t_3[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_47 = (simd_shuffle_xor((_S110), ushort((_S21))));
 
-#line 2382
+#line 2384
                             if(_S102)
                             {
 
-#line 2382
+#line 2384
                                 t_3[13U] = partner_47;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[15U] = partner_47;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             bool _S111 = (_S92 & 4U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S112;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S112 = t_3[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S112 = t_3[4U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_48 = (simd_shuffle_xor((_S112), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[0U] = partner_48;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[4U] = partner_48;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S113;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S113 = t_3[1U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S113 = t_3[5U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_49 = (simd_shuffle_xor((_S113), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[1U] = partner_49;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[5U] = partner_49;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S114;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S114 = t_3[2U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S114 = t_3[6U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_50 = (simd_shuffle_xor((_S114), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[2U] = partner_50;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[6U] = partner_50;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S115;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S115 = t_3[3U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S115 = t_3[7U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_51 = (simd_shuffle_xor((_S115), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[3U] = partner_51;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[7U] = partner_51;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S116;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S116 = t_3[8U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S116 = t_3[12U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_52 = (simd_shuffle_xor((_S116), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[8U] = partner_52;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[12U] = partner_52;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S117;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S117 = t_3[9U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S117 = t_3[13U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_53 = (simd_shuffle_xor((_S117), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[9U] = partner_53;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[13U] = partner_53;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S118;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S118 = t_3[10U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S118 = t_3[14U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_54 = (simd_shuffle_xor((_S118), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[10U] = partner_54;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[14U] = partner_54;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S119;
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 _S119 = t_3[11U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S119 = t_3[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_55 = (simd_shuffle_xor((_S119), ushort((_S22))));
 
-#line 2382
+#line 2384
                             if(_S111)
                             {
 
-#line 2382
+#line 2384
                                 t_3[11U] = partner_55;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[15U] = partner_55;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             bool _S120 = (_S92 & 8U) != 0U;
 
-#line 2382
+#line 2384
                             uint _S121;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S121 = t_3[0U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S121 = t_3[8U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_56 = (simd_shuffle_xor((_S121), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[0U] = partner_56;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[8U] = partner_56;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S122;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S122 = t_3[1U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S122 = t_3[9U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_57 = (simd_shuffle_xor((_S122), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[1U] = partner_57;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[9U] = partner_57;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S123;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S123 = t_3[2U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S123 = t_3[10U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_58 = (simd_shuffle_xor((_S123), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[2U] = partner_58;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[10U] = partner_58;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S124;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S124 = t_3[3U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S124 = t_3[11U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_59 = (simd_shuffle_xor((_S124), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[3U] = partner_59;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[11U] = partner_59;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S125;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S125 = t_3[4U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S125 = t_3[12U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_60 = (simd_shuffle_xor((_S125), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[4U] = partner_60;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[12U] = partner_60;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S126;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S126 = t_3[5U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S126 = t_3[13U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_61 = (simd_shuffle_xor((_S126), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[5U] = partner_61;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[13U] = partner_61;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S127;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S127 = t_3[6U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S127 = t_3[14U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_62 = (simd_shuffle_xor((_S127), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[6U] = partner_62;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[14U] = partner_62;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S128;
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 _S128 = t_3[7U];
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S128 = t_3[15U];
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint partner_63 = (simd_shuffle_xor((_S128), ushort((_S23))));
 
-#line 2382
+#line 2384
                             if(_S120)
                             {
 
-#line 2382
+#line 2384
                                 t_3[7U] = partner_63;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 t_3[15U] = partner_63;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint i_6 = 0U;
 
-#line 2382
+#line 2384
                             for(;;)
                             {
 
-#line 2382
+#line 2384
                                 if(i_6 < 16U)
                                 {
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     break;
                                 }
 
-#line 2382
+#line 2384
                                 _S42[i_6] = half2(as_type<half>(ushort((t_3[i_6]) & 65535U)), as_type<half>(ushort(((t_3[i_6]) >> 16U) & 65535U)));
 
-#line 2382
+#line 2384
                                 i_6 = i_6 + 1U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             break;
                         }
 
-#line 2382
+#line 2384
                         break;
                     }
 
-#line 2382
+#line 2384
                     break;
                 }
 
-#line 2382
+#line 2384
                 innermostS_0(&_S41, &_S42);
 
-#line 2382
+#line 2384
                 uint spanA_0;
 
-#line 2382
+#line 2384
                 uint spanB_0;
 
-#line 2382
+#line 2384
                 uint i_7;
 
-#line 2382
+#line 2384
                 uint ovAcc_0;
 
-#line 2382
+#line 2384
                 uint ovAcc_1;
 
-#line 2382
+#line 2384
                 uint ovAcc_2;
 
-#line 2382
+#line 2384
                 uint bb_0;
 
-#line 2382
+#line 2384
                 uint bb_1;
 
-#line 2382
+#line 2384
                 bool infLocalA_0;
 
-#line 2382
+#line 2384
                 bool infLocalB_0;
 
-#line 2382
+#line 2384
                 bool hitLocalA_0;
 
-#line 2382
+#line 2384
                 bool hitLocalB_0;
 
-#line 2382
+#line 2384
                 bool hitA_0;
 
-#line 2382
+#line 2384
                 bool hitB_0;
 
-#line 2382
+#line 2384
                 float2 _S129;
 
-#line 2382
+#line 2384
                 if(_S33 != 0U)
                 {
 
-#line 2382
+#line 2384
                     float _S130 = (as_type<float>((_S33)));
 
-#line 2382
+#line 2384
                     for(;;)
                     {
 
-#line 2382
+#line 2384
                         uint _S131 = slotToIndex_0(_S25 * 16U);
 
-#line 2382
+#line 2384
                         uint _S132 = _S131 - _S28;
 
-#line 2382
+#line 2384
                         if(_S29 > _S28)
                         {
 
-#line 2382
+#line 2384
                             spanA_0 = _S29 - _S28;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             spanA_0 = 0U;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         uint _S133 = _S131 - _S30;
 
-#line 2382
+#line 2384
                         if(_S31 > _S30)
                         {
 
-#line 2382
+#line 2384
                             spanB_0 = _S31 - _S30;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             spanB_0 = 0U;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         half2 _S134 = half2(float2(0.0f) );
 
-#line 2382
+#line 2384
                         i_7 = 0U;
 
-#line 2382
+#line 2384
                         db_0 = _S134;
 
-#line 2382
+#line 2384
                         ovAcc_0 = 0U;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             if(i_7 < 16U)
                             {
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 break;
                             }
 
-#line 2382
+#line 2384
                             uint si_0 = slotToIndex_0(i_7);
 
-#line 2382
+#line 2384
                             bool liveB_0 = (_S133 + si_0) < spanB_0;
 
-#line 2382
+#line 2384
                             half2 _S135 = _S41[i_7];
 
-#line 2382
+#line 2384
                             half2 _S136 = _S42[i_7];
 
-#line 2382
+#line 2384
                             half2 _S137 = mag2s_0(_S41[i_7], _S42[i_7]);
 
-#line 2382
+#line 2384
                             uint _S138 = (uint(as_type<ushort>(_S137[0U])) & 65535U) | (uint(as_type<ushort>(_S137[1U])) << 16U);
 
-#line 2382
+#line 2384
                             if((_S132 + si_0) < spanA_0)
                             {
 
-#line 2382
+#line 2384
                                 ovAcc_1 = _S138 & 65535U;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 ovAcc_1 = 0U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(liveB_0)
                             {
 
-#line 2382
+#line 2384
                                 ovAcc_2 = _S138 & 4294901760U;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 ovAcc_2 = 0U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint m_0 = ovAcc_1 | ovAcc_2;
 
-#line 2382
+#line 2384
                             half2 _S139 = max(db_0, half2(as_type<half>(ushort(m_0 & 65535U)), as_type<half>(ushort((m_0 >> 16U) & 65535U))));
 
-#line 2382
+#line 2384
                             uint ovAcc_3 = ovAcc_0 | (((((uint(as_type<ushort>(_S135[0U])) & 65535U) | (uint(as_type<ushort>(_S135[1U])) << 16U)) & 2080406528U) + 67109888U) | ((((uint(as_type<ushort>(_S136[0U])) & 65535U) | (uint(as_type<ushort>(_S136[1U])) << 16U)) & 2080406528U) + 67109888U));
 
-#line 2382
+#line 2384
                             i_7 = i_7 + 1U;
 
-#line 2382
+#line 2384
                             db_0 = _S139;
 
-#line 2382
+#line 2384
                             ovAcc_0 = ovAcc_3;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(spanA_0 == 0U)
                         {
 
-#line 2382
+#line 2384
                             ovAcc_1 = ovAcc_0 & 4294934527U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             ovAcc_1 = ovAcc_0;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(spanB_0 == 0U)
                         {
 
-#line 2382
+#line 2384
                             ovAcc_2 = ovAcc_1 & 2147483647U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             ovAcc_2 = ovAcc_1;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(_S32 == 0U)
                         {
 
-#line 2382
+#line 2384
                             uint _S140 = (uint(as_type<ushort>(db_0[0U])) & 65535U) | (uint(as_type<ushort>(db_0[1U])) << 16U);
 
-#line 2382
+#line 2384
                             float thr2_0 = _S130 * _S130;
 
-#line 2382
+#line 2384
                             if((ovAcc_2 & 32768U) != 0U)
                             {
 
-#line 2382
+#line 2384
                                 infLocalA_0 = true;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 infLocalA_0 = (_S140 & 31744U) == 31744U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if((ovAcc_2 & 2147483648U) != 0U)
                             {
 
-#line 2382
+#line 2384
                                 infLocalB_0 = true;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 infLocalB_0 = (_S140 & 2080374784U) == 2080374784U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(infLocalA_0)
                             {
 
-#line 2382
+#line 2384
                                 hitLocalA_0 = true;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 if((_S140 & 32767U) != 0U)
                                 {
 
-#line 2382
+#line 2384
                                     hitLocalA_0 = float(db_0.x) >= thr2_0;
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     hitLocalA_0 = false;
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(infLocalB_0)
                             {
 
-#line 2382
+#line 2384
                                 hitLocalB_0 = true;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 if((_S140 & 2147418112U) != 0U)
                                 {
 
-#line 2382
+#line 2384
                                     hitLocalB_0 = float(db_0.y) >= thr2_0;
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     hitLocalB_0 = false;
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(hitLocalA_0)
                             {
 
-#line 2382
+#line 2384
                                 bb_0 = 1U;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 bb_0 = 0U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(hitLocalB_0)
                             {
 
-#line 2382
+#line 2384
                                 bb_1 = 2U;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 bb_1 = 0U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S141 = bb_0 | bb_1;
 
-#line 2382
+#line 2384
                             uint _S142 = (simd_shuffle_xor((_S141), ushort((1U))));
 
-#line 2382
+#line 2384
                             uint hitBits_0 = _S141 | _S142;
 
-#line 2382
+#line 2384
                             uint _S143 = (simd_shuffle_xor((hitBits_0), ushort((2U))));
 
-#line 2382
+#line 2384
                             uint hitBits_1 = hitBits_0 | _S143;
 
-#line 2382
+#line 2384
                             uint _S144 = (simd_shuffle_xor((hitBits_1), ushort((4U))));
 
-#line 2382
+#line 2384
                             uint hitBits_2 = hitBits_1 | _S144;
 
-#line 2382
+#line 2384
                             uint _S145 = (simd_shuffle_xor((hitBits_2), ushort((8U))));
 
-#line 2382
+#line 2384
                             uint hitBits_3 = hitBits_2 | _S145;
 
-#line 2382
+#line 2384
                             if(_S25 == 0U)
                             {
 
-#line 2382
+#line 2384
                                 if(_S26)
                                 {
 
-#line 2382
+#line 2384
                                     packed_float2 device* _S146 = (&kernelContext_1)->entryPointParams_peakVal_0+pairA_0;
 
-#line 2382
+#line 2384
                                     if((hitBits_3 & 1U) != 0U)
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(3.40282306073709653e+38f, 0.0f);
 
-#line 2382
+#line 2384
                                     }
                                     else
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(0.0f, 0.0f);
 
-#line 2382
+#line 2384
                                     }
 
-#line 2382
+#line 2384
                                     *_S146 = packed_float2(_S129) ;
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                                 if(_S27)
                                 {
 
-#line 2382
+#line 2384
                                     packed_float2 device* _S147 = (&kernelContext_1)->entryPointParams_peakVal_0+pairB_0;
 
-#line 2382
+#line 2384
                                     if((hitBits_3 & 2U) != 0U)
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(3.40282306073709653e+38f, 0.0f);
 
-#line 2382
+#line 2384
                                     }
                                     else
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(0.0f, 0.0f);
 
-#line 2382
+#line 2384
                                     }
 
-#line 2382
+#line 2384
                                     *_S147 = packed_float2(_S129) ;
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             break;
                         }
 
-#line 2382
+#line 2384
                         uint bb_2 = ((uint(as_type<ushort>(db_0[0U])) & 65535U) | (uint(as_type<ushort>(db_0[1U])) << 16U)) & 2147450879U;
 
-#line 2382
+#line 2384
                         if((ovAcc_2 & 32768U) != 0U)
                         {
 
-#line 2382
+#line 2384
                             bb_0 = (bb_2 & 4294901760U) | 31744U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             bb_0 = bb_2;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if((ovAcc_2 & 2147483648U) != 0U)
                         {
 
-#line 2382
+#line 2384
                             bb_1 = (bb_0 & 65535U) | 2080374784U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             bb_1 = bb_0;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         uint other_0 = (simd_shuffle_xor((bb_1), ushort((1U))));
 
-#line 2382
+#line 2384
                         uint _S148 = (max(bb_1 & 65535U, other_0 & 65535U)) | (max(bb_1 & 4294901760U, other_0 & 4294901760U));
 
-#line 2382
+#line 2384
                         uint other_1 = (simd_shuffle_xor((_S148), ushort((2U))));
 
-#line 2382
+#line 2384
                         uint _S149 = (max(_S148 & 65535U, other_1 & 65535U)) | (max(_S148 & 4294901760U, other_1 & 4294901760U));
 
-#line 2382
+#line 2384
                         uint other_2 = (simd_shuffle_xor((_S149), ushort((4U))));
 
-#line 2382
+#line 2384
                         uint _S150 = (max(_S149 & 65535U, other_2 & 65535U)) | (max(_S149 & 4294901760U, other_2 & 4294901760U));
 
-#line 2382
+#line 2384
                         uint other_3 = (simd_shuffle_xor((_S150), ushort((8U))));
 
-#line 2382
+#line 2384
                         uint bb_3 = (max(_S150 & 65535U, other_3 & 65535U)) | (max(_S150 & 4294901760U, other_3 & 4294901760U));
 
-#line 2382
+#line 2384
                         if(_S25 == 0U)
                         {
 
-#line 2382
+#line 2384
                             bool infA_0 = (bb_3 & 31744U) == 31744U;
 
-#line 2382
+#line 2384
                             bool infB_0 = (bb_3 & 2080374784U) == 2080374784U;
 
-#line 2382
+#line 2384
                             float bA_0 = sqrt(float(as_type<half>(ushort(bb_3 & 65535U))));
 
-#line 2382
+#line 2384
                             float bB_0 = sqrt(float(as_type<half>(ushort((bb_3 >> 16U) & 65535U))));
 
-#line 2382
+#line 2384
                             if(infA_0)
                             {
 
-#line 2382
+#line 2384
                                 hitA_0 = true;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 if(bA_0 > 0.0f)
                                 {
 
-#line 2382
+#line 2384
                                     infLocalA_0 = bA_0 >= _S130;
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     infLocalA_0 = false;
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                                 hitA_0 = infLocalA_0;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(infB_0)
                             {
 
-#line 2382
+#line 2384
                                 hitB_0 = true;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 if(bB_0 > 0.0f)
                                 {
 
-#line 2382
+#line 2384
                                     infLocalA_0 = bB_0 >= _S130;
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     infLocalA_0 = false;
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                                 hitB_0 = infLocalA_0;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(_S26)
                             {
 
-#line 2382
+#line 2384
                                 packed_float2 device* _S151 = (&kernelContext_1)->entryPointParams_peakVal_0+pairA_0;
 
-#line 2382
+#line 2384
                                 if(infA_0)
                                 {
 
-#line 2382
+#line 2384
                                     _S129 = float2(3.40282306073709653e+38f, 0.0f);
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     if(hitA_0)
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(bA_0, 0.0f);
 
-#line 2382
+#line 2384
                                     }
                                     else
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(0.0f, 0.0f);
 
-#line 2382
+#line 2384
                                     }
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                                 *_S151 = packed_float2(_S129) ;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(_S27)
                             {
 
-#line 2382
+#line 2384
                                 packed_float2 device* _S152 = (&kernelContext_1)->entryPointParams_peakVal_0+pairB_0;
 
-#line 2382
+#line 2384
                                 if(infB_0)
                                 {
 
-#line 2382
+#line 2384
                                     _S129 = float2(3.40282306073709653e+38f, 0.0f);
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     if(hitB_0)
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(bB_0, 0.0f);
 
-#line 2382
+#line 2384
                                     }
                                     else
                                     {
 
-#line 2382
+#line 2384
                                         _S129 = float2(0.0f, 0.0f);
 
-#line 2382
+#line 2384
                                     }
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                                 *_S152 = packed_float2(_S129) ;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         break;
                     }
 
-#line 2382
+#line 2384
                 }
                 else
                 {
 
-#line 2382
+#line 2384
                     array<half2, int(16)> _S153 = _S41;
 
-#line 2382
+#line 2384
                     array<half2, int(16)> _S154 = _S42;
 
-#line 2382
+#line 2384
                     for(;;)
                     {
 
-#line 2382
+#line 2384
                         uint _S155 = slotToIndex_0(_S25 * 16U);
 
-#line 2382
+#line 2384
                         uint _S156 = _S155 - _S28;
 
-#line 2382
+#line 2384
                         if(_S29 > _S28)
                         {
 
-#line 2382
+#line 2384
                             spanA_0 = _S29 - _S28;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             spanA_0 = 0U;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         uint _S157 = _S155 - _S30;
 
-#line 2382
+#line 2384
                         if(_S31 > _S30)
                         {
 
-#line 2382
+#line 2384
                             spanB_0 = _S31 - _S30;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             spanB_0 = 0U;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         i_7 = 0U;
 
-#line 2382
+#line 2384
                         ovAcc_0 = 0U;
 
-#line 2382
+#line 2384
                         ovAcc_1 = 0U;
 
-#line 2382
+#line 2384
                         ovAcc_2 = 0U;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             if(i_7 < 16U)
                             {
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 break;
                             }
 
-#line 2382
+#line 2384
                             uint si_1 = slotToIndex_0(i_7);
 
-#line 2382
+#line 2384
                             bool liveB_1 = (_S157 + si_1) < spanB_0;
 
-#line 2382
+#line 2384
                             half2 mg_0 = mag2s_0(_S153[i_7], _S154[i_7]);
 
-#line 2382
+#line 2384
                             uint _S158 = (uint(as_type<ushort>(mg_0[0U])) & 65535U) | (uint(as_type<ushort>(mg_0[1U])) << 16U);
 
-#line 2382
+#line 2384
                             uint ovAcc_4 = ovAcc_0 | (((((uint(as_type<ushort>(_S153[i_7][0U])) & 65535U) | (uint(as_type<ushort>(_S153[i_7][1U])) << 16U)) & 2080406528U) + 67109888U) | ((((uint(as_type<ushort>(_S154[i_7][0U])) & 65535U) | (uint(as_type<ushort>(_S154[i_7][1U])) << 16U)) & 2080406528U) + 67109888U));
 
-#line 2382
+#line 2384
                             if((_S156 + si_1) < spanA_0)
                             {
 
-#line 2382
+#line 2384
                                 bb_0 = _S158 << 16U;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 bb_0 = 0U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S159 = 15U - i_7;
 
-#line 2382
+#line 2384
                             uint _S160 = max(ovAcc_1, bb_0 | _S159);
 
-#line 2382
+#line 2384
                             if(liveB_1)
                             {
 
-#line 2382
+#line 2384
                                 bb_1 = _S158 & 4294901760U;
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 bb_1 = 0U;
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             uint _S161 = max(ovAcc_2, bb_1 | _S159);
 
-#line 2382
+#line 2384
                             i_7 = i_7 + 1U;
 
-#line 2382
+#line 2384
                             ovAcc_0 = ovAcc_4;
 
-#line 2382
+#line 2384
                             ovAcc_1 = _S160;
 
-#line 2382
+#line 2384
                             ovAcc_2 = _S161;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         bool _S162 = spanA_0 != 0U;
 
-#line 2382
+#line 2384
                         if(_S162)
                         {
 
-#line 2382
+#line 2384
                             infLocalA_0 = (ovAcc_0 & 32768U) != 0U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             infLocalA_0 = false;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(infLocalA_0)
                         {
 
-#line 2382
+#line 2384
                             bb_0 = max(ovAcc_1, 2080374799U);
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             bb_0 = ovAcc_1;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         bool _S163 = spanB_0 != 0U;
 
-#line 2382
+#line 2384
                         if(_S163)
                         {
 
-#line 2382
+#line 2384
                             infLocalB_0 = (ovAcc_0 & 2147483648U) != 0U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             infLocalB_0 = false;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(infLocalB_0)
                         {
 
-#line 2382
+#line 2384
                             bb_1 = max(ovAcc_2, 2080374799U);
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             bb_1 = ovAcc_2;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         uint _S164 = (4095U - _S25) << 4U;
 
-#line 2382
+#line 2384
                         uint kA_0 = bb_0 | _S164;
 
-#line 2382
+#line 2384
                         uint kB_0 = bb_1 | _S164;
 
-#line 2382
+#line 2384
                         uint _S165 = (simd_shuffle_xor((kA_0), ushort((1U))));
 
-#line 2382
+#line 2384
                         uint _S166 = max(kA_0, _S165);
 
-#line 2382
+#line 2384
                         uint _S167 = (simd_shuffle_xor((kB_0), ushort((1U))));
 
-#line 2382
+#line 2384
                         uint _S168 = max(kB_0, _S167);
 
-#line 2382
+#line 2384
                         uint _S169 = (simd_shuffle_xor((_S166), ushort((2U))));
 
-#line 2382
+#line 2384
                         uint _S170 = max(_S166, _S169);
 
-#line 2382
+#line 2384
                         uint _S171 = (simd_shuffle_xor((_S168), ushort((2U))));
 
-#line 2382
+#line 2384
                         uint _S172 = max(_S168, _S171);
 
-#line 2382
+#line 2384
                         uint _S173 = (simd_shuffle_xor((_S170), ushort((4U))));
 
-#line 2382
+#line 2384
                         uint _S174 = max(_S170, _S173);
 
-#line 2382
+#line 2384
                         uint _S175 = (simd_shuffle_xor((_S172), ushort((4U))));
 
-#line 2382
+#line 2384
                         uint _S176 = max(_S172, _S175);
 
-#line 2382
+#line 2384
                         uint _S177 = (simd_shuffle_xor((_S174), ushort((8U))));
 
-#line 2382
+#line 2384
                         uint _S178 = max(_S174, _S177);
 
-#line 2382
+#line 2384
                         uint _S179 = (simd_shuffle_xor((_S176), ushort((8U))));
 
-#line 2382
+#line 2384
                         uint _S180 = max(_S176, _S179);
 
-#line 2382
+#line 2384
                         uint slotA_0 = 65535U - (_S178 & 65535U);
 
-#line 2382
+#line 2384
                         uint slotB_0 = 65535U - (_S180 & 65535U);
 
-#line 2382
+#line 2384
                         if(_S162)
                         {
 
-#line 2382
+#line 2384
                             hitLocalA_0 = (_S178 >> 16U) >= 31744U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             hitLocalA_0 = false;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(_S163)
                         {
 
-#line 2382
+#line 2384
                             hitLocalB_0 = (_S180 >> 16U) >= 31744U;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             hitLocalB_0 = false;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(hitLocalA_0)
                         {
 
-#line 2382
+#line 2384
                             hitA_0 = true;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             hitA_0 = (as_type<half>((ushort)((_S178 >> 16U)))) > (as_type<float>((_S33)));
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(hitLocalB_0)
                         {
 
-#line 2382
+#line 2384
                             hitB_0 = true;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             hitB_0 = (as_type<half>((ushort)((_S180 >> 16U)))) > (as_type<float>((_S33)));
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         uint wA_0 = slotA_0 >> 4U;
 
-#line 2382
+#line 2384
                         uint _S181 = slotA_0 & 15U;
 
-#line 2382
+#line 2384
                         uint wB_0 = slotB_0 >> 4U;
 
-#line 2382
+#line 2384
                         uint _S182 = slotB_0 & 15U;
 
-#line 2382
+#line 2384
                         half2 _S183 = half2(float2(0.0f) );
 
-#line 2382
+#line 2384
                         uint j_0 = 0U;
 
-#line 2382
+#line 2384
                         db_0 = _S183;
 
-#line 2382
+#line 2384
                         half2 selB_0 = _S183;
 
-#line 2382
+#line 2384
                         for(;;)
                         {
 
-#line 2382
+#line 2384
                             if(j_0 < 16U)
                             {
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 break;
                             }
 
-#line 2382
+#line 2384
                             if(j_0 == _S181)
                             {
 
-#line 2382
+#line 2384
                                 db_0 = half2(_S153[j_0].x, _S154[j_0].x);
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             if(j_0 == _S182)
                             {
 
-#line 2382
+#line 2384
                                 selB_0 = half2(_S153[j_0].y, _S154[j_0].y);
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             j_0 = j_0 + 1U;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         uint _S184 = (simd_shuffle_xor(((uint(as_type<ushort>(db_0[0U])) & 65535U) | (uint(as_type<ushort>(db_0[1U])) << 16U)), ushort((wA_0))));
 
-#line 2382
+#line 2384
                         half _S185 = as_type<half>(ushort(_S184 & 65535U));
 
-#line 2382
+#line 2384
                         half _S186 = as_type<half>(ushort((_S184 >> 16U) & 65535U));
 
-#line 2382
+#line 2384
                         uint _S187 = (simd_shuffle_xor(((uint(as_type<ushort>(selB_0[0U])) & 65535U) | (uint(as_type<ushort>(selB_0[1U])) << 16U)), ushort((wB_0))));
 
-#line 2382
+#line 2384
                         half _S188 = as_type<half>(ushort(_S187 & 65535U));
 
-#line 2382
+#line 2384
                         half _S189 = as_type<half>(ushort((_S187 >> 16U) & 65535U));
 
-#line 2382
+#line 2384
                         bool _S190 = _S25 == 0U;
 
-#line 2382
+#line 2384
                         bool _S191;
 
-#line 2382
+#line 2384
                         if(_S190)
                         {
 
-#line 2382
+#line 2384
                             _S191 = _S26;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             _S191 = false;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         int _S192;
 
-#line 2382
+#line 2384
                         if(_S191)
                         {
 
-#line 2382
+#line 2384
                             int device* _S193 = (&kernelContext_1)->entryPointParams_peakIdx_0+pairA_0;
 
-#line 2382
+#line 2384
                             if(hitA_0)
                             {
 
-#line 2382
+#line 2384
                                 _S192 = int(slotToIndex_0(slotA_0));
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S192 = int(-1);
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             *_S193 = _S192;
 
-#line 2382
+#line 2384
                             packed_float2 device* _S194 = (&kernelContext_1)->entryPointParams_peakVal_0+pairA_0;
 
-#line 2382
+#line 2384
                             if(hitLocalA_0)
                             {
 
-#line 2382
+#line 2384
                                 _S129 = float2(3.40282306073709653e+38f, 0.0f);
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 if(hitA_0)
                                 {
 
-#line 2382
+#line 2384
                                     _S129 = float2(float(_S185), float(_S186));
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     _S129 = float2(0.0f, 0.0f);
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             *_S194 = packed_float2(_S129) ;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         bool _S195;
 
-#line 2382
+#line 2384
                         if(_S190)
                         {
 
-#line 2382
+#line 2384
                             _S195 = _S27;
 
-#line 2382
+#line 2384
                         }
                         else
                         {
 
-#line 2382
+#line 2384
                             _S195 = false;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         if(_S195)
                         {
 
-#line 2382
+#line 2384
                             int device* _S196 = (&kernelContext_1)->entryPointParams_peakIdx_0+pairB_0;
 
-#line 2382
+#line 2384
                             if(hitB_0)
                             {
 
-#line 2382
+#line 2384
                                 _S192 = int(slotToIndex_0(slotB_0));
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 _S192 = int(-1);
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             *_S196 = _S192;
 
-#line 2382
+#line 2384
                             packed_float2 device* _S197 = (&kernelContext_1)->entryPointParams_peakVal_0+pairB_0;
 
-#line 2382
+#line 2384
                             if(hitLocalB_0)
                             {
 
-#line 2382
+#line 2384
                                 _S129 = float2(3.40282306073709653e+38f, 0.0f);
 
-#line 2382
+#line 2384
                             }
                             else
                             {
 
-#line 2382
+#line 2384
                                 if(hitB_0)
                                 {
 
-#line 2382
+#line 2384
                                     _S129 = float2(float(_S188), float(_S189));
 
-#line 2382
+#line 2384
                                 }
                                 else
                                 {
 
-#line 2382
+#line 2384
                                     _S129 = float2(0.0f, 0.0f);
 
-#line 2382
+#line 2384
                                 }
 
-#line 2382
+#line 2384
                             }
 
-#line 2382
+#line 2384
                             *_S197 = packed_float2(_S129) ;
 
-#line 2382
+#line 2384
                         }
 
-#line 2382
+#line 2384
                         break;
                     }
 
-#line 2382
+#line 2384
                 }
 
-#line 2382
+#line 2384
                 break;
             }
 
-#line 2382
+#line 2384
             break;
         }
 
-#line 2370
+#line 2372
         base_0 = base_0 + (&kernelContext_1)->entryPointParams_0->gridSize_0 * 8U;
 
-#line 2370
+#line 2372
     }
 
-#line 2399
+#line 2401
     return;
 }

@@ -341,7 +341,9 @@ uint mfShflXor(uint v, uint s);
 
 //: Subgroup-scoped staging barrier for exchange levels whose TB-thread blocks sit inside one
 //: subgroup (stage column = thread). On CUDA, CTAs narrower than a 32-lane warp fall back to
-//: the block barrier (bar.warp.sync -1 requires all 32 lanes active).
+//: the block barrier (bar.warp.sync -1 requires all 32 lanes active). On Metal, threadgroup
+//: staging always uses GroupMemoryBarrierWithGroupSync (simdgroup_barrier on mem_threadgroup
+//: races across unrolled staging stores on Apple AGX; COARSE16 uses shuffleTranspose16).
 #ifndef MF_SIMD_EXCHANGE
 #define MF_SIMD_EXCHANGE 1
 #endif
@@ -353,7 +355,7 @@ void mfWaveBarrier()
 #if defined(MF_CUDA)
     if (WG * PPG >= 32u) GroupMemoryBarrierWithWaveSync();
     else GroupMemoryBarrierWithGroupSync();
-#elif defined(MF_VULKAN) || defined(MF_METAL)
+#elif defined(MF_VULKAN)
     GroupMemoryBarrierWithWaveSync();
 #else
     GroupMemoryBarrierWithGroupSync();
