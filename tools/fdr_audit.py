@@ -29,6 +29,18 @@ with --strict-q15. Dismissing more than the plan always fails.
   python tools/fdr_audit.py --n 4096 --fd 1e-3 --inj 200000 --profiles aligo_o4_inspiral
   python tools/fdr_audit.py --chains auto --window 192,1856  # what chain selection picks
   python tools/fdr_audit.py --chains 256,512,1024 --q15 --json out.json
+  python tools/fdr_audit.py --bank 16 --q15                  # tier-0 pair centroids too
+
+With --bank NT each case is a bank of NT templates of the profile's output power, in groups
+of four whose members differ by up to a coarse lag and a phase: what tier-0 pair centroids
+(gatechain.cluster_tier0_candidates) merge. The library's own HierarchicalFilter runs it at
+the case's chain (MF_CHAIN_FORCE, which leaves clustering to the model, as in production),
+with the centroids ("t0c") and without ("flat0"), each at its own plan's thresholds, and each
+injection is of one template, searched by that template's row. A clustered plan's thresholds
+are solved for the cluster's conservative retention alpha; its modelled dismissal draws each
+member at its own retention (member_alphas), so a member alpha the engine does not attain,
+or a model that misprices them, is off the plan. Multi-tier chains only: a centroid is a
+tier-0 gate.
 
 Profiles: power laws "f^E" (power k^E in bins 1 .. n/2 - 1), "inspiral" (k^-7/3 with a
 low-frequency knee), and the shapes of tests/spectral_profiles.py. Chains: comma-separated
@@ -106,17 +118,19 @@ def binom_two_sided(x, n, p):
     return float(min(1.0, pm[pm <= pm[x] * (1 + 1e-9)].sum()))
 
 
-def modelled(power, n, chain, thresholds, snr, window, count, seed=9770):
+def modelled(power, n, chain, thresholds, snr, window, count, seed=9770, alpha0=1.0):
     """(dismissed, detections): of `count` detections of a model simulation independent of
     the plans' (seeds seed, seed + 1, ...: 2M detections each), those some tier of chain at
-    these thresholds dismisses."""
+    these thresholds dismisses. alpha0: the signal's retention at the first tier (a tier-0
+    centroid's member's)."""
     from matchedfilter import gatechain as gc
     bands = gc.usable_bands(power, n)
+    alphas = None if alpha0 >= 1.0 else tuple(alpha0 if b == chain[0] else 1.0 for b in bands)
     lost = total = 0
     step = 2000000
     for c in range(-(-int(count) // step)):
         C, F = gc.signal_draws(power, n, bands, snr, min(step, int(count) - c * step), seed=seed + c,
-                               window=window)
+                               window=window, alphas=alphas)
         det = F[:, 0] >= snr
         bad = np.zeros(int(det.sum()), bool)
         for b, t in zip(chain, thresholds):
@@ -135,6 +149,8 @@ def run_profile(job):
 def run_case(job):
     """One case: (profile, n, chain, args) -> its row."""
     name, n, chain, a = job
+    if a.get("bank"):
+        return run_bank_case(job)
     import matchedfilter as mf
     import matchedfilter._core as _core
     from matchedfilter import gatechain as gc
@@ -239,6 +255,127 @@ def run_case(job):
     return row
 
 
+def bank_spectra(power, n, nt, band, seed, tilt=0.15):
+    """(nt, n) template signal spectra of output power `power`, in groups of four: the
+    profile's zero-phase signal delayed by a group's own multiple of 4 n / nt samples, each
+    member delayed further by up to a coarse lag of `band` either way, turned by a random
+    phase, and tilted by a power of frequency up to `tilt` either way (at unit total power):
+    a delay alone a centroid's lag alignment undoes, a shape it cannot, so a centroid of up to
+    four members (gatechain.cluster_tier0_candidates) retains each differently. The bank's
+    templates then depart from the reference profile a little, as a real bank's from its
+    mean. Delays, not chirps, tell the groups apart: a chirp spreads the template in
+    time, and the flat filter loses SNR to it (a 28-radian chirp lost 4.5% of the detections
+    at n=2048), which the gate model, as the single-template audit, leaves out."""
+    rng = np.random.default_rng(seed)
+    k = np.arange(n)
+    amp = np.sqrt(power)
+    out = np.empty((nt, n), np.complex64)
+    kk = np.maximum(k, 1) / (n / 8.0)
+    for t in range(nt):
+        delay = (t // 4) * 4 * (n // nt) + rng.uniform(-1, 1) * (n // band)
+        a = amp * kk ** (tilt * rng.uniform(-1, 1))
+        a /= np.sqrt((a ** 2).sum() / (amp ** 2).sum())
+        out[t] = a * np.exp(-2j * np.pi * delay * k / n + 1j * rng.uniform(0, 2 * np.pi))
+    return out
+
+
+def run_bank_case(job):
+    """One --bank case: (profile, n, chain, args) -> its row, with an entry per filter and
+    tier-0 setting (t0c: the model's centroids, flat0: none) and per statistic."""
+    name, n, chain, a = job
+    import matchedfilter as mf
+    from matchedfilter import _hierarchical
+    power = profile(name, n)
+    win = None if a["window"] is None else tuple(a["window"])
+    ws, we = (0, n) if win is None else win
+    nt = int(a["bank"])
+    row = dict(profile=name, n=n, snr=a["snr"], fd=a["fd"], window=[ws, we], chain=list(chain),
+               bank=nt)
+    if len(chain) < 2:
+        return dict(row, error="one tier: no tier-0 centroid")
+    H = bank_spectra(power, n, nt, chain[0], [a["seed"], n, sum(map(ord, name))])
+    os.environ["MF_CHAIN_FORCE"] = "%d:%s" % (n, ",".join(map(str, chain)))
+    os.environ["MF_AUTOTUNE"] = "0"
+    flat = mf.MatchedFilter(n, ndata=_B, ntemplates=nt)
+    flat.set_templates(np.conj(H))
+    filters, plans = {}, {}
+    devices = [("cpu", None)] + ([("device", a["device"])] if a.get("device") else [])
+    for t0, on in (("t0c", True), ("flat0", False)):
+        _hierarchical._TIER0_PAIR_CENTROID = on
+        try:
+            for dname, dev in devices:
+                for stat in (("fp32", "q15") if dname == "cpu" and a["q15"] else ("fp32",)):
+                    hf = mf.HierarchicalFilter(n, _B, nt, snr=a["snr"], fd=a["fd"], search_window=win,
+                                               **({} if dev is None else dict(device=dev)))
+                    hf.set_reference(power.astype(np.float32))
+                    hf.set_templates(np.conj(H))
+                    r = hf._resolve()
+                    if dname == "cpu":
+                        hf._execution_plan()
+                        hf._set_q15(stat == "q15")
+                        if bool(hf._q15) != (stat == "q15"):
+                            continue                  # no Q15 screen for this chain here
+                    if tuple(hf._chain) != tuple(chain):
+                        return dict(row, error="MF_CHAIN_FORCE not honoured: %s" % (hf._chain,))
+                    cl = hf._active_tier0_cluster()
+                    key = "%s %s %s" % (t0, "cpu" if dname == "cpu" else "dev", stat)
+                    filters[key] = hf
+                    plans[key] = dict(thresholds=[float(x) for x in r.thresholds],
+                                      clusters=0 if cl is None else int(cl.specs.shape[0]),
+                                      alpha=None if cl is None else float(cl.alpha),
+                                      member_alphas=None if cl is None or cl.member_alphas is None
+                                      else [float(x) for x in cl.member_alphas])
+        finally:
+            _hierarchical._TIER0_PAIR_CENTROID = True
+    # each plan's modelled dismissal: templates injected uniformly, member t at its retention
+    count = a["check"] or max(1000000, 10 * a["inj"])
+    for key, pl in plans.items():
+        al = pl["member_alphas"] or [pl["alpha"] or 1.0] * nt
+        lost = tot = 0
+        for v in sorted(set(round(x, 4) for x in al)):
+            w = sum(1 for x in al if round(x, 4) == v)
+            l_, t_ = modelled(power, n, chain, pl["thresholds"], a["snr"], win,
+                              max(100000, count * w // nt), alpha0=min(1.0, v))
+            lost += l_ * w / t_
+            tot += w
+        pl["model"] = lost / tot          # the plan's modelled dismissal, a share
+    rng = np.random.default_rng([a["seed"], n, nt, sum(map(ord, name))])
+    k = np.arange(n)
+    det = 0
+    miss = dict.fromkeys(filters, 0)
+    mismatch = dict.fromkeys(filters, 0)
+    rows_ = np.arange(_B)
+    for _ in range(max(1, a["inj"] // _B)):
+        which = rng.integers(0, nt, _B)
+        lag = rng.uniform(ws, we, _B)
+        D = (a["snr"] * H[which] * np.exp(2j * np.pi * (n - lag)[:, None] * k[None, :] / n)
+             + (rng.standard_normal((_B, n)) + 1j * rng.standard_normal((_B, n)))).astype(np.complex64)
+        flat.set_data(D)
+        zf = np.abs(flat.run(binsize=we - ws, threshold=0.0, window=(ws, we))["value"][rows_, which, 0])
+        hit = zf >= a["snr"]
+        det += int(hit.sum())
+        for key, hf in filters.items():
+            hf.set_data(D)
+            p = hf.run(window=(ws, we), binsize=we - ws, threshold=a["snr"])[rows_, which, 0]
+            got = (p["index"] >= 0) & (np.abs(p["value"]) >= a["snr"])
+            miss[key] += int((hit & ~got).sum())
+            both = hit & got
+            mismatch[key] += int((np.abs(np.abs(p["value"][both]) - zf[both]) > 1e-3 * zf[both]).sum())
+    row["detections"] = det
+    row["engines"] = {}
+    for key, pl in plans.items():
+        qm = pl["model"]
+        mdet = count
+        mlost = int(round(qm * mdet))
+        both = miss[key] + mlost
+        share = det / float(det + mdet)
+        pv = binom_two_sided(miss[key], both, share) if both else 1.0
+        row["engines"][key] = dict(pl, misses=miss[key], ratio=miss[key] / max(det, 1) / a["fd"],
+                                   to_model=miss[key] / max(det, 1) / qm if qm > 0 else float("nan"),
+                                   plan=qm / a["fd"], p=pv, mismatches=mismatch[key])
+    return row
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -257,6 +394,9 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--device", default=None,
                     help="also run the device's hierarchical filter (gpu:0: the fp16 coarse gate)")
+    ap.add_argument("--bank", type=int, default=0,
+                    help="NT: audit banks of NT templates in groups of four near-duplicates through "
+                         "HierarchicalFilter, tier-0 pair centroids on and off (see above)")
     ap.add_argument("--alpha", type=float, default=1e-3, help="family-wise level over the cases")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--json", default=None, help="write every row here")
@@ -264,7 +404,7 @@ def main(argv=None):
     names = a.profiles.split(",") if a.profiles else default_profiles()
     win = None if a.window is None else [int(x) for x in a.window.split(",")]
     opts = dict(snr=a.snr, fd=a.fd, inj=a.inj, window=win, q15=a.q15, seed=a.seed, check=a.check,
-                device=a.device)
+                device=a.device, bank=a.bank)
     # one job per (profile, n): its chains share the model's check draws
     jobs = [(nm, n, chains_for(a.chains, n), opts) for n in a.n for nm in names]
     t0 = time.time()
@@ -286,16 +426,20 @@ def main(argv=None):
             continue
         for key, e in r["engines"].items():
             off = e["p"] < level
-            low = off and e["ratio"] < 1 and key == "q15" and not a.strict_q15
+            low = off and e["ratio"] < 1 and key.endswith("q15") and not a.strict_q15
             fail = (off and not low) or e["mismatches"]
             bad += bool(fail)
             under += bool(low)
-            print("%s %-4s thr [%s] det %6d miss %5d  %.2fx budget  %.2fx plan (plan %.2fx)  p %.3g%s%s" % (
-                head, key, ",".join("%.2f" % t for t in r["thresholds"]), r["detections"], e["misses"],
-                e["ratio"], e["to_model"], r["model"], e["p"],
-                "  mismatches %d" % e["mismatches"] if e["mismatches"] else "",
+            clus = ("  %d centroids, alpha %.2f (members %.2f-%.2f)" % (
+                e["clusters"], e["alpha"], min(e["member_alphas"] or [e["alpha"]]),
+                max(e["member_alphas"] or [e["alpha"]])) if e.get("clusters") else "")
+            print("%s %-4s thr [%s] det %6d miss %5d  %.2fx budget  %.2fx plan (plan %.2fx)  p %.3g%s%s%s" % (
+                head, key, ",".join("%.2f" % t for t in e.get("thresholds", r.get("thresholds"))),
+                r["detections"], e["misses"], e["ratio"], e["to_model"], e.get("plan", r.get("model")),
+                e["p"], clus, "  mismatches %d" % e["mismatches"] if e["mismatches"] else "",
                 "  <-- OFF" if fail else "  (under: Q15 rounding)" if low else ""), flush=True)
-    for key in ("fp32", "q15"):
+    keys = sorted({k for r in rows for k in r.get("engines", {})}, key=lambda k: (k.endswith("q15"), k))
+    for key in keys:
         ok = [r for r in rows if key in r.get("engines", {})]
         if ok:
             m = sum(r["engines"][key]["misses"] for r in ok)
