@@ -12,6 +12,7 @@
 #include "env.h"
 #include "matchedfilter.h"
 #include "transform.h"
+#include "q15.h"
 
 /* The FP16 first gate (gate16.cc): an upper bound on the FP32 tier's peak magnitude per
    pair, on ARM with FP16 vectors; unavailable elsewhere (and with MF_GATE16=0). */
@@ -23,9 +24,14 @@ int ap_gate16_set_data(void *g,int d,const float *spec);
 int ap_gate16_run(void *g,int d0,int nd,int t0,int nt,size_t ws,size_t we,ap_peak *out);
 int ap_gate16_run_pairs(void *g,int d0,int t0,const int *dsel,const int *tsel,int n,int nt_row,
                         size_t ws,size_t we,ap_peak *out);
+int ap_gate16_run_pairs_lag(void *g,int d0,int t0,const int *dsel,const int *tsel,int n,int nt_row,
+                            size_t ws,size_t we,int elect_lag,ap_peak *out);
 
 #define HMF_MAX_DIRECT_BINS 4
 #define HMF_COARSE_SUBBINS 16
+#define HMF_PEND_MF  1u
+#define HMF_PEND_G16 2u
+#define HMF_PEND_Q15 4u
 
 /* One coarse tier of the gate chain. Tier i runs on the survivors of tier i-1
    (tier 0 on every pair); the survivors of the last tier get the full refine. */
@@ -47,6 +53,9 @@ typedef struct {
   int q15;                        /* a later tier gating on the listed Q15 screen
                                      (ap_mf_q15_pairs), with the screen on */
   int last_q15;                   /* this call ran on the listed Q15 screen */
+  int16_t *qdm,*qtm;              /* [nd][2*m+32], [nt][2*m+32] Q15 rows for tiers i>0 */
+  float *qds,*qts;                /* [nd], [nt] Q15 scales for tiers i>0 */
+  void *qscr;                     /* Q15 gather scratch for tiers i>0 */
 } hmf_tier;
 
 struct ap_hmf_plan {
@@ -146,6 +155,18 @@ int ap_hmf_effective_group(size_t n,int requested){
   return grp;
 }
 
+/* Pairbatch forward FFT limit: 8-lane/16-lane x86 targets with Q15 lanes and 32-register
+   ARM64 NEON run pairbatch small transforms up to h = 2048; 16-register SSE4 stays at 512. */
+static inline size_t hmf_fwd_pb_limit(const ap_hmf_plan *p){
+  const int w=ap_plan_lanes(p->full_fft);
+  if(w>=16) return 2048u;
+  if(w>=8 && p->ntiers>0 && ap_mf_q15_lanes(p->tier[0].mf)>0) return 2048u;
+#if defined(__aarch64__)
+  if(w>=4) return 2048u;
+#endif
+  return 512u;
+}
+
 ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
                                  const size_t *bands,int ntiers,int series_group){
   if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)
@@ -192,10 +213,10 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     for(int i=0;i<ntiers;i++){
       hmf_tier *tr=&p->tier[i];
       tr->m=bands[i]; tr->thr=-1;
-      if((size_t)ntmpl>=min_ntmpl && tr->m<=pblim) tr->mf=ap_mf_create_pairbatch(tr->m,p->nd,ntmpl);
+      const size_t pblim_i = (pbmax<0 && i>0 && lw>=8) ? 1024u : pblim;
+      if((size_t)ntmpl>=min_ntmpl && tr->m<=pblim_i) tr->mf=ap_mf_create_pairbatch(tr->m,p->nd,ntmpl);
       if(!tr->mf) tr->mf=ap_mf_create(tr->m,p->nd,ntmpl);
-      /* The first tier sees every pair; it is the one worth halving (see gate16.cc). */
-      if(i==0 && ap_gate16_available()) tr->g16=ap_gate16_create(tr->m,p->nd,ntmpl);
+      if(ap_gate16_available()) tr->g16=ap_gate16_create(tr->m,p->nd,ntmpl);
       tr->scratch=ap_alloc64(2*tr->m*sizeof(float));
       tr->fpow=calloc((size_t)ntmpl,sizeof(float));
       tr->cebuf=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
@@ -205,10 +226,15 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
       if(!tr->mf||!tr->scratch||!tr->fpow||!tr->cebuf||!tr->pending||!tr->fire_d||!tr->fire_t){
         ap_hmf_destroy(p); return NULL;
       }
+      if(i>0 && ap_mf_q15_lanes(tr->mf)>0){
+        tr->qtm=ap_alloc64((size_t)ntmpl*(2*tr->m+32)*sizeof(int16_t));
+        tr->qts=calloc((size_t)ntmpl,sizeof(float));
+        if(!tr->qtm||!tr->qts){ ap_hmf_destroy(p); return NULL; }
+      }
     }
   }
   p->full_fft=ap_create(n);
-  if(p->full_fft && n>=64 && n<=(ap_plan_lanes(p->full_fft)>=16 ? 2048u : 512u))
+  if(p->full_fft && n>=64 && n<=hmf_fwd_pb_limit(p))
     p->fwd_cplx_batch=ap_create_pairbatch_like(p->full_fft,n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
   p->accel=ap_accel_create(n);           /* NULL where the platform has none */
@@ -242,6 +268,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
     if(tr->g16) ap_gate16_destroy(tr->g16);
     free(tr->scratch); free(tr->fpow); free(tr->cebuf); free(tr->pending);
     free(tr->fire_d); free(tr->fire_t);
+    free(tr->qdm); free(tr->qtm); free(tr->qds); free(tr->qts); free(tr->qscr);
   }
   ap_destroy(p->full_fft);
   if(p->half_fft) ap_destroy(p->half_fft);
@@ -592,6 +619,10 @@ static int ingest_tier_data_target(const ap_hmf_plan *p,hmf_tier *tr,ap_mf_plan 
   if(to_g16 && g16 && ap_gate16_set_data(g16,d,src)) return -1;
   return 0;
 }
+static inline void hmf_set_pending(hmf_tier *tr,int d,unsigned char mask){
+  if((tr->pending[d]!=0) != (mask!=0)) tr->npending += mask ? 1 : -1;
+  tr->pending[d]=mask;
+}
 static int ingest_tier_data(ap_hmf_plan *p,hmf_tier *tr,int d,const float *spec,
                             int to_mf,int to_g16){
   if(tr == &p->tier[0] && p->tier0_clustered){
@@ -624,12 +655,13 @@ int ap_hmf_set_band_offsets(ap_hmf_plan *p,const size_t *k0s,int ntiers){
       if(p->dmirrored[d] && p->dspec[d]==p->dcopy+(size_t)d*row){
         for(int i=0;i<p->ntiers;i++){
           hmf_tier *tr=&p->tier[i];
+          const unsigned char qbit = tr->qtm ? HMF_PEND_Q15 : 0u;
           if(i==0 && tr->g16 && !p->q15){
             if(ingest_tier_data(p,tr,d,p->dcopy+(size_t)d*row,0,1)) return -1;
-            if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+            hmf_set_pending(tr,d,(unsigned char)(HMF_PEND_MF | qbit));
           } else {
             if(ingest_tier_data(p,tr,d,p->dcopy+(size_t)d*row,1,1)) return -1;
-            if(tr->pending[d]){ tr->pending[d]=0; tr->npending--; }
+            hmf_set_pending(tr,d,qbit);
           }
         }
       }
@@ -673,6 +705,35 @@ static int load_tiers(ap_hmf_plan *p,int t,const float *spec){
     }
     if(ap_mf_set_template(tr->mf,t,tr->scratch)) return -1;
     if(tr->g16 && ap_gate16_set_template(tr->g16,t,tr->scratch)) return -1;
+    if(tr->qtm){
+      double ss=0.0, amax=0.0;
+      for(size_t k=0;k<tr->m;k++){
+        const float rf=tr->scratch[2*k], imf=-tr->scratch[2*k+1];
+        const double r=(double)rf, im=(double)imf;
+        ss += r*r + im*im;
+        if(fabs(r)>amax) amax=fabs(r);
+        if(fabs(im)>amax) amax=fabs(im);
+      }
+      double sc = !isfinite(ss) ? -1.0 : 0.0;
+      if(sc==0.0 && ss>0.0){
+        sc = AP_Q15_TNORM(tr->m) / sqrt(ss);
+        if(sc*amax > 32767.0) sc = 32767.0 / amax;
+      }
+      int16_t *qr = tr->qtm + (size_t)t*(2*tr->m+32), *qi = qr + tr->m;
+      if(!(sc > 0.0)){
+        memset(qr,0,2*tr->m*sizeof(int16_t));
+      } else {
+        for(size_t k=0;k<tr->m;k++){
+          const float rf=tr->scratch[2*k], imf=-tr->scratch[2*k+1];
+          double vr=nearbyint((double)rf*sc), vi=nearbyint((double)imf*sc);
+          if(vr>32767.0) vr=32767.0; else if(vr<-32767.0) vr=-32767.0;
+          if(vi>32767.0) vi=32767.0; else if(vi<-32767.0) vi=-32767.0;
+          qr[k]=(int16_t)vr;
+          qi[k]=(int16_t)vi;
+        }
+      }
+      tr->qts[t]=(float)sc;
+    }
   }
   return 0;
 }
@@ -725,17 +786,23 @@ static int set_data_tiers(ap_hmf_plan *p,int d,const float *spec,int eager){
   p->dspec[d]=spec; p->dready[d]=0;
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
+    const unsigned char qbit = tr->qtm ? HMF_PEND_Q15 : 0u;
     if(i>=eager){
-      if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+      hmf_set_pending(tr,d,(unsigned char)(HMF_PEND_MF | (tr->g16 ? HMF_PEND_G16 : 0u) | qbit));
       continue;
     }
     if(i==0 && tr->g16 && !p->q15){
       if(ingest_tier_data(p,tr,d,spec,0,1)) return -1;
-      if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+      hmf_set_pending(tr,d,HMF_PEND_MF);
+      continue;
+    }
+    if(i==0 && p->q15 && tr->g16){
+      if(ingest_tier_data(p,tr,d,spec,1,0)) return -1;
+      hmf_set_pending(tr,d,HMF_PEND_G16);
       continue;
     }
     if(ingest_tier_data(p,tr,d,spec,1,1)) return -1;
-    if(tr->pending[d]){ tr->pending[d]=0; tr->npending--; }
+    hmf_set_pending(tr,d,qbit);
   }
   return 0;
 }
@@ -820,7 +887,7 @@ static int hmf_sync_unclustered_tier0(ap_hmf_plan *p,int d0,int nd){
   for(int d=d0;d<d0+nd;d++){
     if(p->tier0_uncl_pend[d]){
       if(p->dspec[d]){
-        const int to_mf=(p->q15 || !tr->g16 || !tr->pending[d]) ? 1 : 0;
+        const int to_mf=(p->q15 || !tr->g16 || !(tr->pending[d] & HMF_PEND_MF)) ? 1 : 0;
         if(ingest_tier_data_target(p,tr,tr->mf,tr->g16,d,p->dspec[d],to_mf,1)) return -1;
       }
       p->tier0_uncl_pend[d]=0;
@@ -908,7 +975,7 @@ int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
           ap_hmf_clear_tier0_clusters(p);
           return -1;
         }
-        if(!to_mf && !tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+        if(!to_mf) hmf_set_pending(tr,d,HMF_PEND_MF);
       }
     }
   }
@@ -934,7 +1001,7 @@ int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
       const double a=2.0*3.14159265358979323846*(double)k/(double)p->n;
       p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
     }
-    if(h>=64 && h<=(ap_plan_lanes(p->full_fft)>=16 ? 2048u : 512u))
+    if(h>=64 && h<=hmf_fwd_pb_limit(p))
       p->fwd_real_batch=ap_create_pairbatch_like(p->full_fft,h);
   }
   p->real_series=on?1:0;
@@ -960,17 +1027,6 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   float * restrict Z=p->fwd+n;               /* the h-point transform */
   ap_fft_forward_scaled(p->half_fft,have ? x+s0*st : x,have,st,inv,Z);
   ap_real_split_pos_on(p->half_fft,Z,p->rtw,n,sp);
-}
-
-/* Pairbatch forward FFT limit: 16-lane AVX3 and 8-lane AVX2 (with integer Q15 lanes)
-   have fast full-width shuffles up to 2048; AVX1 (no 256-bit integer shuffles) and
-   4-lane targets stay capped at 512. */
-static inline size_t hmf_fwd_pb_limit(const ap_hmf_plan *p){
-  const int w=ap_plan_lanes(p->full_fft);
-  if(w>=16) return 2048u;
-  if(w>=8 && p->ntiers>0 && ap_mf_q15_lanes(p->tier[0].mf)>0 &&
-     strcmp(ap_plan_backend(p->full_fft),"AVX")!=0) return 2048u;
-  return 512u;
 }
 
 /* Transform blocks start[b0 .. b0+g) of series into p->spec slots 0 .. g-1 and ingest tier 0. */
@@ -1011,8 +1067,15 @@ static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
       }
     }
   } else if(!p->real_series && !p->use_accel && p->fwd_cplx_batch){
+    /* Band-limited/Hermitian plans (is_dif) and direct time-domain refine plans read only
+       [0, n/2) in coarse gates, lazily completing [0, n) in hmf_refine_fft only on blocks whose
+       survivor needs full-spectrum FFT refine. Unpacked FFT-refine plans emit all n bins in the
+       SIMD batch to avoid per-block scalar re-transforms and keep refine calibration clean. */
     const int W = ap_plan_lanes(p->fwd_cplx_batch);
     const float inv = 1.0f/(float)n;
+    const int half_prefix = n>=256u && (p->is_dif || (p->direct && p->taps));
+    const size_t out_bins = half_prefix ? n/2u : n;
+    const unsigned char full_done = half_prefix ? 0u : 1u;
     for(int j=0; j<g; j+=W){
       const int cnt = g-j<W ? g-j : W;
       const float *srcs[AP_MAX_LANES];
@@ -1026,9 +1089,10 @@ static int hmf_forward_slab(ap_hmf_plan *p,const float *series,size_t nseries,
         haves[l]=have;
         outs[l]=p->spec+(size_t)(j+l)*sstride;
       }
-      if(ap_fft_forward_batch(p->fwd_cplx_batch,srcs,haves,cnt,inv,outs)<0) return -1;
+      if(ap_fft_forward_batch_prefix(p->fwd_cplx_batch,srcs,haves,cnt,inv,out_bins,outs)<0)
+        return -1;
       for(int l=0; l<cnt; l++){
-        p->dmirrored[j+l]=1;
+        p->dmirrored[j+l]=full_done;
         if(set_data_tiers(p,j+l,outs[l],1)) return -1;
         p->dtime[j+l]=haves[l] ? srcs[l] : NULL; p->dhave[j+l]=haves[l];
       }
@@ -1134,68 +1198,121 @@ static int hmf_slab_len(const ap_hmf_sparse_job *jb,int b0,size_t nb0){
   return g;
 }
 
-/* Transform two packed strided real lanes (even/odd floats of one complex64 series) per
-   W-block mini-batch so the second lane hits L1/L2 before template sweeps evict the input. */
-static int hmf_forward_slab_quad_pair(ap_hmf_plan *pa,const float *sa,
-                                      ap_hmf_plan *pb,const float *sb,
-                                      size_t nseries,const size_t *start,int b0,int g){
-  const size_t n=pa->n;
+static int hmf_forward_real_minibatch(ap_hmf_plan *p,const float *series,size_t nseries,
+                                      const size_t *start,int b0,int j,int cnt){
+  const size_t n=p->n;
   const size_t sstride=2u*n+16u;
+  const size_t st=p->real_stride ? p->real_stride : 1u;
+  const float inv=1.0f/(float)n;
+  const float *srcs[AP_MAX_LANES];
+  size_t haves[AP_MAX_LANES];
+  float *outs[AP_MAX_LANES];
+  for(int l=0;l<cnt;l++){
+    const size_t s0=start[b0+j+l];
+    size_t have = s0<nseries ? nseries-s0 : 0;
+    if(have>n) have=n;
+    srcs[l]=have ? series+s0*st : series;
+    haves[l]=have;
+    outs[l]=p->spec+(size_t)(j+l)*sstride;
+  }
+  const unsigned long long t0=ap_ticks();
+  if(ap_fft_real_batch(p->fwd_real_batch,srcs,haves,st,cnt,inv,p->rtw,0,outs)<0) return -1;
+  for(int l=0;l<cnt;l++){
+    p->dmirrored[j+l]=0;
+    if(set_data_tiers(p,j+l,outs[l],1)) return -1;
+    p->dtime[j+l]=haves[l] ? srcs[l] : NULL;
+    p->dhave[j+l]=haves[l];
+  }
+  p->c_series += ap_ticks()-t0;
+  return 0;
+}
+
+/* Transform two packed strided real lanes (even/odd floats of one complex64 series) together
+   while shared cache lines stay hot in L1/L2: identical block starts fuse into single-load
+   ap_fft_quad_pair_batch calls, while unequal block starts interleave W-block mini-batches
+   before either fine bank sweeps its template spectra. */
+static int hmf_forward_slab_quad_pair(ap_hmf_plan *pa,const float *sa,
+                                      const size_t *start_a,int b0a,int ga,
+                                      ap_hmf_plan *pb,const float *sb,
+                                      const size_t *start_b,int b0b,int gb,
+                                      size_t nseries){
+  const size_t na=pa->n, nb=pb->n;
   const size_t pblim_a=hmf_fwd_pb_limit(pa);
   const size_t pblim_b=hmf_fwd_pb_limit(pb);
-  if(!pa->fwd_real_batch && pa->half_fft && n>=128 && n/2<=pblim_a)
-    pa->fwd_real_batch=ap_create_pairbatch_like(pa->full_fft,n/2);
-  if(!pb->fwd_real_batch && pb->half_fft && n>=128 && n/2<=pblim_b)
-    pb->fwd_real_batch=ap_create_pairbatch_like(pb->full_fft,n/2);
-  const int wa = pa->fwd_real_batch ? ap_plan_lanes(pa->fwd_real_batch) : 0;
-  const int wb = pb->fwd_real_batch ? ap_plan_lanes(pb->fwd_real_batch) : 0;
-  if(!(wa>0 && wa==wb && n<=4096)){
-    const unsigned long long t0=ap_ticks();
-    if(hmf_forward_slab(pa,sa,nseries,start,b0,g)<0) return -1;
-    const unsigned long long t1=ap_ticks();
-    pa->c_series += t1-t0;
-    if(hmf_forward_slab(pb,sb,nseries,start,b0,g)<0) return -1;
-    pb->c_series += ap_ticks()-t1;
+  if(!pa->fwd_real_batch && pa->half_fft && na>=128 && na/2<=pblim_a)
+    pa->fwd_real_batch=ap_create_pairbatch_like(pa->full_fft,na/2);
+  if(!pb->fwd_real_batch && pb->half_fft && nb>=128 && nb/2<=pblim_b)
+    pb->fwd_real_batch=ap_create_pairbatch_like(pb->full_fft,nb/2);
+  const int wa = (pa->fwd_real_batch && na<=4096) ? ap_plan_lanes(pa->fwd_real_batch) : 0;
+  const int wb = (pb->fwd_real_batch && nb<=4096) ? ap_plan_lanes(pb->fwd_real_batch) : 0;
+  if(na==nb && ga==gb && wa>=2 && wa==wb && (sb==sa+1 || sa==sb+1)
+     && memcmp(start_a+b0a,start_b+b0b,(size_t)ga*sizeof(size_t))==0){
+    const size_t sstride=2u*na+16u;
+    const int H = wa / 2;
+    const int swap = (sa == sb + 1);
+    const float *zbase = swap ? sb : sa;
+    const float inv = 1.0f/(float)na;
+    for(int j=0;j<ga;j+=H){
+      const int cnt = ga-j<H ? ga-j : H;
+      const float *zsrcs[AP_MAX_LANES], *srca[AP_MAX_LANES], *srcb[AP_MAX_LANES];
+      size_t haves[AP_MAX_LANES];
+      float *outa[AP_MAX_LANES], *outb[AP_MAX_LANES];
+      for(int l=0;l<cnt;l++){
+        const size_t s0=start_a[b0a+j+l];
+        size_t have = s0<nseries ? nseries-s0 : 0;
+        if(have>na) have=na;
+        zsrcs[l]=have ? zbase+2u*s0 : zbase;
+        srca[l]=have ? sa+2u*s0 : sa;
+        srcb[l]=have ? sb+2u*s0 : sb;
+        haves[l]=have;
+        outa[l]=pa->spec+(size_t)(j+l)*sstride;
+        outb[l]=pb->spec+(size_t)(j+l)*sstride;
+      }
+      const unsigned long long t0=ap_ticks();
+      if(ap_fft_quad_pair_batch(pa->fwd_real_batch,zsrcs,haves,cnt,inv,pa->rtw,
+                                swap ? outb : outa,swap ? outa : outb)<0)
+        return -1;
+      const unsigned long long t1=ap_ticks();
+      const unsigned long long dt = t1 - t0;
+      pa->c_series += dt / 2u;
+      pb->c_series += dt - dt / 2u;
+      for(int l=0;l<cnt;l++){
+        pa->dmirrored[j+l]=0;
+        if(set_data_tiers(pa,j+l,outa[l],1)) return -1;
+        pa->dtime[j+l]=haves[l] ? srca[l] : NULL; pa->dhave[j+l]=haves[l];
+      }
+      const unsigned long long t2=ap_ticks();
+      pa->c_series += t2-t1;
+      for(int l=0;l<cnt;l++){
+        pb->dmirrored[j+l]=0;
+        if(set_data_tiers(pb,j+l,outb[l],1)) return -1;
+        pb->dtime[j+l]=haves[l] ? srcb[l] : NULL; pb->dhave[j+l]=haves[l];
+      }
+      pb->c_series += ap_ticks()-t2;
+    }
     return 0;
   }
-  const int W = wa;
-  const float inv = 1.0f/(float)n;
-  for(int j=0;j<g;j+=W){
-    const int cnt = g-j<W ? g-j : W;
-    const float *srca[AP_MAX_LANES], *srcb[AP_MAX_LANES];
-    size_t haves[AP_MAX_LANES];
-    float *outa[AP_MAX_LANES], *outb[AP_MAX_LANES];
-    for(int l=0;l<cnt;l++){
-      const size_t s0=start[b0+j+l];
-      size_t have = s0<nseries ? nseries-s0 : 0;
-      if(have>n) have=n;
-      srca[l]=have ? sa+2u*s0 : sa;
-      srcb[l]=have ? sb+2u*s0 : sb;
-      haves[l]=have;
-      outa[l]=pa->spec+(size_t)(j+l)*sstride;
-      outb[l]=pb->spec+(size_t)(j+l)*sstride;
+  if(wa>0 && wb>0 && (sb==sa+1 || sa==sb+1)){
+    int ja=0, jb=0;
+    while(ja<ga || jb<gb){
+      if(ja<ga && (jb>=gb || start_a[b0a+ja]<=start_b[b0b+jb])){
+        const int cnt = ga-ja<wa ? ga-ja : wa;
+        if(hmf_forward_real_minibatch(pa,sa,nseries,start_a,b0a,ja,cnt)<0) return -1;
+        ja+=cnt;
+      } else {
+        const int cnt = gb-jb<wb ? gb-jb : wb;
+        if(hmf_forward_real_minibatch(pb,sb,nseries,start_b,b0b,jb,cnt)<0) return -1;
+        jb+=cnt;
+      }
     }
-    const unsigned long long t0=ap_ticks();
-    if(ap_fft_real_batch(pa->fwd_real_batch,srca,haves,2,cnt,inv,pa->rtw,0,outa)<0) return -1;
-    const unsigned long long t1=ap_ticks();
-    pa->c_series += t1-t0;
-    if(ap_fft_real_batch(pb->fwd_real_batch,srcb,haves,2,cnt,inv,pb->rtw,0,outb)<0) return -1;
-    const unsigned long long t2=ap_ticks();
-    pb->c_series += t2-t1;
-    for(int l=0;l<cnt;l++){
-      pa->dmirrored[j+l]=0;
-      if(set_data_tiers(pa,j+l,outa[l],1)) return -1;
-      pa->dtime[j+l]=haves[l] ? srca[l] : NULL; pa->dhave[j+l]=haves[l];
-    }
-    const unsigned long long t3=ap_ticks();
-    pa->c_series += t3-t2;
-    for(int l=0;l<cnt;l++){
-      pb->dmirrored[j+l]=0;
-      if(set_data_tiers(pb,j+l,outb[l],1)) return -1;
-      pb->dtime[j+l]=haves[l] ? srcb[l] : NULL; pb->dhave[j+l]=haves[l];
-    }
-    pb->c_series += ap_ticks()-t3;
+    return 0;
   }
+  const unsigned long long t0=ap_ticks();
+  if(hmf_forward_slab(pa,sa,nseries,start_a,b0a,ga)<0) return -1;
+  const unsigned long long t1=ap_ticks();
+  pa->c_series += t1-t0;
+  if(hmf_forward_slab(pb,sb,nseries,start_b,b0b,gb)<0) return -1;
+  pb->c_series += ap_ticks()-t1;
   return 0;
 }
 
@@ -1329,92 +1446,101 @@ int ap_hmf_run_series_batch_sparse(ap_hmf_sparse_job *jobs,int njobs){
 
         /* Detect a paired strided quadrature lane on the same complex64 buffer so both lanes
            forward-transform per W-block mini-batch while cache lines are hot in L1/L2. */
-        int qpeer=-1;
+        int qpeer=-1, qg=0;
         if(lp->real_series && lp->real_stride==2 && !lp->use_accel){
+          const size_t a_hi=ljb->start[b0[lead]+g-1]+lp->n;
+          size_t best_lo=0;
           for(int k=c0;k<c1;k++){
-            if(k==lead || b0[k]+g>jobs[k].nblocks) continue;
+            if(k==lead || b0[k]>=jobs[k].nblocks) continue;
             ap_hmf_sparse_job *kjb=&jobs[k];
             ap_hmf_plan *kp=kjb->p;
             if(kp==lp || !kp->real_series || kp->real_stride!=2 || kp->use_accel
-               || kp->n!=lp->n || g>kp->dgroup || kjb->nseries!=ljb->nseries
+               || kjb->nseries!=ljb->nseries
                || !(kjb->series==ljb->series+1 || ljb->series==kjb->series+1))
               continue;
-            if(!hmf_job_win_ok(kjb,b0[k],g,nb0[k])) continue;
-            if(memcmp(kjb->start+b0[k],ljb->start+b0[lead],(size_t)g*sizeof(size_t))!=0) continue;
-            qpeer=k;
-            break;
+            const size_t k_lo=kjb->start[b0[k]];
+            if(k_lo>=a_hi) continue;
+            const int kg=hmf_slab_len(kjb,b0[k],nb0[k]);
+            if(kg<0) goto fail;
+            if(kp->n==lp->n && kg==g
+               && memcmp(kjb->start+b0[k],ljb->start+b0[lead],(size_t)g*sizeof(size_t))==0){
+              qpeer=k; qg=kg;
+              break;
+            }
+            if(qpeer<0 || k_lo<best_lo){
+              qpeer=k; qg=kg; best_lo=k_lo;
+            }
           }
         }
 
         if(qpeer>=0){
           ap_hmf_sparse_job *qjb=&jobs[qpeer];
-          if(hmf_forward_slab_quad_pair(lp,ljb->series,qjb->p,qjb->series,
-                                        ljb->nseries,ljb->start,b0[lead],g)<0) goto fail;
+          if(hmf_forward_slab_quad_pair(lp,ljb->series,ljb->start,b0[lead],g,
+                                        qjb->p,qjb->series,qjb->start,b0[qpeer],qg,
+                                        ljb->nseries)<0) goto fail;
         } else {
           const unsigned long long t_fwd=ap_ticks();
           if(hmf_forward_slab(lp,ljb->series,ljb->nseries,ljb->start,b0[lead],g)<0) goto fail;
           lp->c_series += ap_ticks()-t_fwd;
         }
 
-        if(hmf_run_sparse_slab(ljb,&caps[lead],b0[lead],g,nb0[lead],slab_pk,slab_cnt)<0){
-          for(int j=0;j<g;j++) lp->dtime[j]=NULL;
-          if(qpeer>=0) for(int j=0;j<g;j++) jobs[qpeer].p->dtime[j]=NULL;
-          goto fail;
-        }
-
-        /* Share lead's L2-hot forward spectra with any cluster peer on identical block starts. */
-        const size_t sstride=2u*lp->n+16u;
-        const size_t lst=lp->real_stride ? lp->real_stride : 1u;
-        for(int k=c0;k<c1;k++){
-          if(k==lead || k==qpeer || b0[k]+g>jobs[k].nblocks) continue;
-          ap_hmf_sparse_job *kjb=&jobs[k];
-          ap_hmf_plan *kp=kjb->p;
-          const size_t kst=kp->real_stride ? kp->real_stride : 1u;
-          if(kp->n!=lp->n || g>kp->dgroup || kp->real_series!=lp->real_series || kst!=lst
-             || kp->use_accel!=lp->use_accel
-             || ap_plan_lanes(kp->full_fft)!=ap_plan_lanes(lp->full_fft)
-             || kjb->series!=ljb->series || kjb->nseries!=ljb->nseries) continue;
-          if(!hmf_job_win_ok(kjb,b0[k],g,nb0[k])) continue;
-          if(memcmp(kjb->start+b0[k],ljb->start+b0[lead],(size_t)g*sizeof(size_t))!=0) continue;
-
-          if(kp!=lp){
-            const unsigned long long t_sh=ap_ticks();
-            for(int j=0;j<g;j++){
-              kp->dmirrored[j]=lp->dmirrored[j];
-              if(set_data_tiers(kp,j,lp->spec+(size_t)j*sstride,1)){
-                for(int u=0;u<=j;u++){ kp->dtime[u]=NULL; kp->dspec[u]=NULL; kp->dready[u]=0; }
-                for(int u=0;u<g;u++) lp->dtime[u]=NULL;
-                if(qpeer>=0) for(int u=0;u<g;u++) jobs[qpeer].p->dtime[u]=NULL;
-                goto fail;
-              }
-              kp->dtime[j]=lp->dtime[j]; kp->dhave[j]=lp->dhave[j];
-            }
-            kp->c_series += ap_ticks()-t_sh;
-          }
-          const int rc=hmf_run_sparse_slab(kjb,&caps[k],b0[k],g,nb0[k],slab_pk,slab_cnt);
-          if(kp!=lp){
-            for(int j=0;j<g;j++){
-              lp->dmirrored[j] |= kp->dmirrored[j];
-              kp->dtime[j]=NULL; kp->dspec[j]=NULL; kp->dready[j]=0;
-            }
-          }
-          if(rc<0){
-            for(int u=0;u<g;u++) lp->dtime[u]=NULL;
-            if(qpeer>=0) for(int u=0;u<g;u++) jobs[qpeer].p->dtime[u]=NULL;
+        for(int pass_q=0;pass_q<(qpeer>=0 ? 2 : 1);pass_q++){
+          const int cur_idx = pass_q==0 ? lead : qpeer;
+          const int cur_g   = pass_q==0 ? g : qg;
+          ap_hmf_sparse_job *cjb=&jobs[cur_idx];
+          ap_hmf_plan *cp=cjb->p;
+          if(hmf_run_sparse_slab(cjb,&caps[cur_idx],b0[cur_idx],cur_g,nb0[cur_idx],
+                                 slab_pk,slab_cnt)<0){
+            for(int j=0;j<cur_g;j++) cp->dtime[j]=NULL;
+            if(pass_q==0 && qpeer>=0) for(int j=0;j<qg;j++) jobs[qpeer].p->dtime[j]=NULL;
             goto fail;
           }
-          b0[k]+=g;
-        }
-        for(int j=0;j<g;j++) lp->dtime[j]=NULL;
-        b0[lead]+=g;
+          /* Share owner's L2-hot forward spectra with any cluster peer on identical block starts. */
+          const size_t sstride=2u*cp->n+16u;
+          const size_t cst=cp->real_stride ? cp->real_stride : 1u;
+          for(int k=c0;k<c1;k++){
+            if(k==lead || k==qpeer || b0[k]+cur_g>jobs[k].nblocks) continue;
+            ap_hmf_sparse_job *kjb=&jobs[k];
+            ap_hmf_plan *kp=kjb->p;
+            const size_t kst=kp->real_stride ? kp->real_stride : 1u;
+            if(kp->n!=cp->n || cur_g>kp->dgroup || kp->real_series!=cp->real_series || kst!=cst
+               || kp->use_accel!=cp->use_accel
+               || ap_plan_lanes(kp->full_fft)!=ap_plan_lanes(cp->full_fft)
+               || kjb->series!=cjb->series || kjb->nseries!=cjb->nseries) continue;
+            if(!hmf_job_win_ok(kjb,b0[k],cur_g,nb0[k])) continue;
+            if(memcmp(kjb->start+b0[k],cjb->start+b0[cur_idx],(size_t)cur_g*sizeof(size_t))!=0)
+              continue;
 
-        if(qpeer>=0){
-          ap_hmf_sparse_job *qjb=&jobs[qpeer];
-          ap_hmf_plan *qp=qjb->p;
-          const int qrc=hmf_run_sparse_slab(qjb,&caps[qpeer],b0[qpeer],g,nb0[qpeer],slab_pk,slab_cnt);
-          for(int j=0;j<g;j++) qp->dtime[j]=NULL;
-          if(qrc<0) goto fail;
-          b0[qpeer]+=g;
+            if(kp!=cp){
+              const unsigned long long t_sh=ap_ticks();
+              for(int j=0;j<cur_g;j++){
+                kp->dmirrored[j]=cp->dmirrored[j];
+                if(set_data_tiers(kp,j,cp->spec+(size_t)j*sstride,1)){
+                  for(int u=0;u<=j;u++){ kp->dtime[u]=NULL; kp->dspec[u]=NULL; kp->dready[u]=0; }
+                  for(int u=0;u<cur_g;u++) cp->dtime[u]=NULL;
+                  if(pass_q==0 && qpeer>=0) for(int u=0;u<qg;u++) jobs[qpeer].p->dtime[u]=NULL;
+                  goto fail;
+                }
+                kp->dtime[j]=cp->dtime[j]; kp->dhave[j]=cp->dhave[j];
+              }
+              kp->c_series += ap_ticks()-t_sh;
+            }
+            const int rc=hmf_run_sparse_slab(kjb,&caps[k],b0[k],cur_g,nb0[k],slab_pk,slab_cnt);
+            if(kp!=cp){
+              for(int j=0;j<cur_g;j++){
+                cp->dmirrored[j] |= kp->dmirrored[j];
+                kp->dtime[j]=NULL; kp->dspec[j]=NULL; kp->dready[j]=0;
+              }
+            }
+            if(rc<0){
+              for(int u=0;u<cur_g;u++) cp->dtime[u]=NULL;
+              if(pass_q==0 && qpeer>=0) for(int u=0;u<qg;u++) jobs[qpeer].p->dtime[u]=NULL;
+              goto fail;
+            }
+            b0[k]+=cur_g;
+          }
+          for(int j=0;j<cur_g;j++) cp->dtime[j]=NULL;
+          b0[cur_idx]+=cur_g;
         }
       }
     }
@@ -1444,13 +1570,27 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       size_t binsize, float threshold,
                       ap_peak *peaks, int *counts, size_t start, size_t end){
   if(nfire <= 0) return 0;
-  /* Complete negative-frequency bins on any real-series block whose survivor reaches FFT refine. */
+  /* Complete negative-frequency bins on any block whose survivor reaches FFT refine. */
   if(p->real_series){
     for(int j = 0; j < nfire; j++){
       const int idx = d0 + fire_d[j];
       if(!p->dmirrored[idx]){
         if(!p->dspec[idx]) return -1;
         ap_real_split_mirror_on(p->full_fft, (float *)p->dspec[idx], p->n);
+        p->dmirrored[idx] = 1;
+      }
+    }
+  } else if(!p->is_dif || p->hermitian){
+    for(int j = 0; j < nfire; j++){
+      const int idx = d0 + fire_d[j];
+      if(!p->dmirrored[idx]){
+        if(!p->dspec[idx]) return -1;
+        float *sp = (float *)p->dspec[idx];
+        if(p->dtime[idx] && p->dhave[idx] > 0)
+          ap_fft_forward_scaled(p->full_fft, p->dtime[idx], 2 * p->dhave[idx], 1,
+                                1.0f / (float)p->n, sp);
+        else
+          memset(sp, 0, 2 * p->n * sizeof(float));
         p->dmirrored[idx] = 1;
       }
     }
@@ -1718,6 +1858,13 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
     }
   }
   if(ns>0 && ncb>1){
+    for(int k=0;tr->npending && k<ns;k++){
+      const int gd=d0+p->dfd[k];
+      if(tr->pending[gd] & HMF_PEND_MF){
+        if(ingest_tier_data(p,tr,gd,p->dspec[gd],1,0)) return -1;
+        hmf_set_pending(tr,gd,(unsigned char)(tr->pending[gd] & ~HMF_PEND_MF));
+      }
+    }
     const size_t need=(size_t)ns*(size_t)ncb;
     if(p->dir_sub_cap<need){
       ap_peak *buf=ap_alloc64(need*sizeof(ap_peak));
@@ -1780,7 +1927,12 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
           }
         }
         if(!need_corr){
-          if(ap_mf_correlate(tr->mf,d0+d,1,t0+t,1,tr->scratch)){ corr_ok=0; break; }
+          const int gd=d0+d;
+          if(tr->pending[gd] & HMF_PEND_MF){
+            if(ingest_tier_data(p,tr,gd,p->dspec[gd],1,0)){ corr_ok=0; break; }
+            hmf_set_pending(tr,gd,(unsigned char)(tr->pending[gd] & ~HMF_PEND_MF));
+          }
+          if(ap_mf_correlate(tr->mf,gd,1,t0+t,1,tr->scratch)){ corr_ok=0; break; }
           need_corr=1;
         }
         long bk=-1;
@@ -1832,27 +1984,47 @@ static void reject_row(ap_hmf_plan *p,ap_peak *peaks,int *counts,size_t row,size
   if(p->prof) p->c_fill += ap_ticks()-f0;
 }
 
+static int hmf_q15_prepare_data(ap_hmf_plan *p,hmf_tier *tr,int ql){
+  if(tr->qdm) return 0;
+  const size_t stride = 2*tr->m + 32;
+  const size_t qbytes = (size_t)p->nd * stride * sizeof(int16_t);
+  tr->qdm = ap_alloc64(qbytes);
+  tr->qds = calloc((size_t)p->nd, sizeof(float));
+  tr->qscr = ap_alloc64(ap_q15_scratch_bytes(tr->m, ql));
+  if(!tr->qdm || !tr->qds || !tr->qscr){
+    free(tr->qdm); free(tr->qds); free(tr->qscr);
+    tr->qdm=NULL; tr->qds=NULL; tr->qscr=NULL;
+    return -1;
+  }
+  memset(tr->qdm, 0, qbytes);
+  return 0;
+}
+
 /* Evaluate an already selected pair list. Logical gate identity and thresholds
    stay fixed even when its position in the execution order changes. */
 static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
                           const int *ds,const int *ts,int count,size_t start,size_t end,
-                          int use_q15,int16_t *qlag){
+                          int use_q15,int elect_g16_lag,int16_t *qlag){
   const size_t r=p->n/tr->m;
   size_t lo=start/r, hi=(end+r-1)/r+1;      /* as ap_hmf_run: one coarse sample past each end */
   if(lo>0) lo--;
   if(hi>tr->m) hi=tr->m;
+  const int use_g16 = (!use_q15 && tr->g16 != NULL);
+  const unsigned char pend_bit = use_g16 ? HMF_PEND_G16 : HMF_PEND_MF;
   for(int j=0;tr->npending && j<count;j++){
     const int d=d0+ds[j];
-    if(tr->pending[d]){
-      if(ingest_tier_data(p,tr,d,p->dspec[d],1,0)) return -1;
-      tr->pending[d]=0; tr->npending--;
+    if(tr->pending[d] & pend_bit){
+      if(ingest_tier_data(p,tr,d,p->dspec[d],!use_g16,use_g16)) return -1;
+      hmf_set_pending(tr,d,(unsigned char)(tr->pending[d] & ~pend_bit));
     }
   }
   /* A Q15 tier's decision per listed pair goes to p->qpass[j] (free once the first tier's
-     survivors are compacted), with optional coarse argmax lag in qlag[j]; an FP32 tier's
-     maximum goes to its cebuf. */
+     survivors are compacted), with optional coarse argmax lag in qlag[j]; an FP16 or FP32
+     tier's maximum goes to its cebuf. */
   if(use_q15)
     return ap_mf_q15_pairs_lag(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL,qlag);
+  if(use_g16)
+    return ap_gate16_run_pairs_lag(tr->g16,d0,t0,ds,ts,count,nt,lo,hi,elect_g16_lag,tr->cebuf);
   return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi>lo?hi-lo:1,tr->thr,
                                 tr->cebuf,NULL,lo,hi,nt);
 }
@@ -1899,11 +2071,13 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     tr->last_q15 = 0;
     const int *checked_d=fire_d,*checked_t=fire_t;
     int nchecked=i==0 ? nd*nt : nfire;
-    if(i==0 && (p->q15 || !tr->g16) && tr->npending){
+    if(i==0 && tr->npending){
+      const int use_g16_0 = (!p->q15 && tr->g16 != NULL);
+      const unsigned char pbit0 = use_g16_0 ? HMF_PEND_G16 : HMF_PEND_MF;
       for(int d=d0;d<d0+nd;d++)
-        if(tr->pending[d]){
-          if(ingest_tier_data(p,tr,d,p->dspec[d],1,0)) return -1;
-          tr->pending[d]=0; tr->npending--;
+        if(tr->pending[d] & pbit0){
+          if(ingest_tier_data(p,tr,d,p->dspec[d],!use_g16_0,use_g16_0)) return -1;
+          hmf_set_pending(tr,d,(unsigned char)(tr->pending[d] & ~pbit0));
         }
     }
     unsigned long long t_0=ap_ticks();
@@ -1911,6 +2085,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     int16_t *qlag=NULL;
     int use_q15=0;
     int q15_direct_fire=0;
+    int nnext=0;
     if(i==0 && p->q15){
       /* The screen is the first tier: a pair passes when its int16 maximum reaches the
          tier's threshold, and no float run of the tier follows.  Like every tier it answers
@@ -1970,30 +2145,97 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(ap_gate16_run(tr->g16,d0,nd,t0,nt,cstart,cend,tr->cebuf)<0) return -1;
       } else if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
     } else {
+      int ql = 0;
       if(tr->q15){
-        const int ql = ap_mf_q15_lanes(tr->mf);
+        ql = ap_mf_q15_lanes(tr->mf);
         /* Arbitrary-pair Q15 gather pools survivors directly across SIMD lanes without
            slab or template-group bucketing; switch once nfire exceeds one FP32 vector (ql/2). */
         const long min_q15 = ql > 1 ? ql / 2 + 1 : 1;
         use_q15 = ql > 0 && nfire >= min_q15;
       }
-      qlag = (use_q15 && i==p->ntiers-1 && p->direct && p->taps) ? p->qidx : NULL;
-      if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end,use_q15,qlag)<0) return -1;
-      if(use_q15){ tr->lagged = (qlag != NULL); tr->last_q15 = 1; }
+      const int elect_last = (i==p->ntiers-1 && p->direct && p->taps) ? 1 : 0;
+      qlag = (use_q15 && elect_last) ? p->qidx : NULL;
+      if(use_q15 && tr->qtm){
+        if(hmf_q15_prepare_data(p,tr,ql)) return -1;
+        const size_t stride = 2*tr->m + 32;
+        const size_t khi = tier_khi(p,tr);
+        for(int j=0;tr->npending && j<nfire;j++){
+          const int gd=d0+checked_d[j];
+          if(tr->pending[gd] & HMF_PEND_Q15){
+            int16_t *qdr = tr->qdm + (size_t)gd * stride;
+            if(ap_q15_data_band_on(p->full_fft,tr->m,p->dspec[gd],tr->k0,khi,
+                                   qdr,qdr+tr->m,&tr->qds[gd]))
+              return -1;
+            hmf_set_pending(tr,gd,(unsigned char)(tr->pending[gd] & ~HMF_PEND_Q15));
+          }
+        }
+        if(fast_sparse && checked_d && checked_t){
+          nnext = ap_q15_pairs_batch_on(p->full_fft,tr->m,tr->qdm,tr->qds,tr->qtm,tr->qts,
+                                        d0,t0,checked_d,checked_t,nfire,thr,1,cstart,cend,
+                                        tr->fire_d,tr->fire_t,NULL,qlag,tr->qscr);
+          if(nnext < 0) return -1;
+          if(qlag){
+            for(int k=0;k<nnext;k++)
+              tr->cebuf[(size_t)tr->fire_d[k]*nt + tr->fire_t[k]].index = qlag[k];
+          }
+          q15_direct_fire = 2;
+        } else {
+          if(ap_q15_pairs_batch_on(p->full_fft,tr->m,tr->qdm,tr->qds,tr->qtm,tr->qts,
+                                   d0,t0,checked_d,checked_t,nfire,thr,1,cstart,cend,
+                                   NULL,NULL,p->qpass,qlag,tr->qscr) < 0)
+            return -1;
+        }
+      } else if(run_gate_pairs(p,tr,d0,t0,nt,checked_d,checked_t,nfire,start,end,
+                               use_q15,elect_last,qlag)<0){
+        return -1;
+      }
+      if(use_q15){
+        tr->lagged = (qlag != NULL);
+        tr->last_q15 = 1;
+      } else if(tr->g16){
+        tr->lagged = elect_last;
+      }
     }
     tr->ticks += ap_ticks()-t_0;
-    int nnext=0;
     const long first_pair=p->pairs;
     if(i==0) p->pairs+=(long)nd*nt;
-    if(q15_direct_fire){
+    if(q15_direct_fire == 1){
       nnext = nchecked;
+    } else if(q15_direct_fire == 2){
+      /* Survivors already compacted directly into tr->fire_d, tr->fire_t. */
+    } else if(i>0 && use_q15 && fast_sparse && checked_d && checked_t){
+      /* Fast 8-byte SWAR scan of p->qpass in incoming (d, t) order without touching cebuf. */
+      const unsigned char * restrict qp = p->qpass;
+      int * restrict dst_d = tr->fire_d;
+      int * restrict dst_t = tr->fire_t;
+      int j=0;
+      for(;j+8<=nchecked;j+=8){
+        uint64_t w;
+        memcpy(&w,qp+j,sizeof w);
+        if(!w) continue;
+        uint64_t m=(w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
+                   & 0x8080808080808080ULL;
+        while(m){
+          const int idx=j+(__builtin_ctzll(m)>>3);
+          const int d=checked_d[idx], t=checked_t[idx];
+          if(qlag) tr->cebuf[(size_t)d*nt+t].index=qlag[idx];
+          dst_d[nnext]=d; dst_t[nnext]=t; nnext++;
+          m&=m-1;
+        }
+      }
+      for(;j<nchecked;j++){
+        if(!qp[j]) continue;
+        const int d=checked_d[j], t=checked_t[j];
+        if(qlag) tr->cebuf[(size_t)d*nt+t].index=qlag[j];
+        dst_d[nnext]=d; dst_t[nnext]=t; nnext++;
+      }
     } else for(int j=0;j<nchecked;j++){
       const int d = checked_d ? checked_d[j] : j/nt;
       const int t = checked_t ? checked_t[j] : j%nt;
       const size_t row=(size_t)d*nt+t;
       const ap_peak ce = qstat ? (ap_peak){.index=0,
                                            .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
-                               : tr->cebuf[row];
+                               : (use_q15 ? (ap_peak){0,0.f,0.f,0.f} : tr->cebuf[row]);
       int fire = qstat || (use_q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
       if(i==0 && fire){
         /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
@@ -2049,12 +2291,14 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
   tr->lagged=0;
   tr->last_q15=0;
 
-  if((p->q15 || !p->tier0_g16) && tr->npending){
+  if(tr->npending){
+    const int use_g16_0 = (!p->q15 && p->tier0_g16 != NULL);
+    const unsigned char pbit0 = use_g16_0 ? HMF_PEND_G16 : HMF_PEND_MF;
     for(int d=d0;d<d0+nd;d++){
-      if(tr->pending[d]){
-        if(ingest_tier_data_target(p,tr,p->tier0_mf,p->tier0_g16,d,p->dspec[d],1,0)) return -1;
-        tr->pending[d]=0;
-        tr->npending--;
+      if(tr->pending[d] & pbit0){
+        if(ingest_tier_data_target(p,tr,p->tier0_mf,p->tier0_g16,d,p->dspec[d],!use_g16_0,use_g16_0))
+          return -1;
+        hmf_set_pending(tr,d,(unsigned char)(tr->pending[d] & ~pbit0));
       }
     }
   }

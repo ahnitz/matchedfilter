@@ -75,18 +75,18 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
     # one asked for: a model measured at a forced group stored under the default's key was
     # adopted by every later process at the default group.
     group = _core.series_group(int(n), group)
-    # The FP16 first gate (ARM, gate16.cc) changes what tier 0 costs: priced and cached
-    # apart from the FP32 gate, so neither is ranked with the other's numbers.
+    # The FP16 gate (ARM, gate16.cc) changes what tier 0 and sparse later tiers cost: priced
+    # and cached apart from the FP32 gate, so neither is ranked with the other's numbers.
     g16 = _gc.cpu_gate_kind() == "f16"
     how = (int(blocks), int(reps), int(seed))
-    key = (int(n), nt, group) + how + (("g16",) if g16 else ())
+    key = (int(n), nt, group) + how + (("g16s",) if g16 else ())
     if key in _gc._COSTS:
         return _gc._COSTS[key]
     path = _gc._cost_file()
     # A model made without the Q15 screen's prices (an older build, or a back end without
     # it) must not be reused by one that has it, or the screen is never priced. The default
     # calls' key is the one their models have always been stored under.
-    skey = ("%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15s" if not g16 and _gc._q15_band(64) else "")
+    skey = ("%d,%d,%d" % key[:3] + (",g16s" if g16 else "") + (",q15s" if not g16 and _gc._q15_band(64) else "")
             + ("" if how == (_CAL_BLOCKS, _CAL_REPS, _CAL_SEED) else ",b%d,r%d,s%d" % how))
     if path is not None:
         cm = _gc._stored_cost_model(path, skey)

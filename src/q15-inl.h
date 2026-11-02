@@ -1020,18 +1020,296 @@ static HWY_INLINE void q15_prod_gather_n(const int16_t *const *drp, const int16_
     qcodelet(M2, X + e1, Xi + e1, M1 + 1);
 }
 
+template<int M1, int M2>
+static HWY_INLINE void q15_row_lag_step(const qtw_table *tw, size_t k2,
+                                        vq *xr, vq *xi, long lo, long hi,
+                                        vq *m0p, vq *m1p, vq *ix0p, vq *ix1p){
+  const vq vstep = Q_SET1(2 * M2);
+  vq m0 = *m0p, m1 = *m1p, ix0 = *ix0p, ix1 = *ix1p;
+  qcodelet_tw(M1, xr, xi, 1, tw->re + k2 * (size_t)M1, tw->im + k2 * (size_t)M1);
+  long k1 = lo;
+  vq j0 = Q_SET1((int)k2 + M2 * (int)lo);
+  vq j1 = Q_SET1((int)k2 + M2 * (int)(lo + 1));
+  for(; k1 + 1 < hi; k1 += 2){
+    const vq a = xr[k1], b = xi[k1], c = xr[k1 + 1], d = xi[k1 + 1];
+    const vq s0 = Q_ADDS(Q_MUL(a, a), Q_MUL(b, b));
+    const vq s1 = Q_ADDS(Q_MUL(c, c), Q_MUL(d, d));
+    const qmask u0 = Q_MASK_OR(Q_GT(s0, m0), Q_MASK_AND(Q_EQ(s0, m0), Q_LT(j0, ix0)));
+    const qmask u1 = Q_MASK_OR(Q_GT(s1, m1), Q_MASK_AND(Q_EQ(s1, m1), Q_LT(j1, ix1)));
+    m0 = Q_MAX(m0, s0);
+    m1 = Q_MAX(m1, s1);
+    ix0 = Q_SEL(u0, j0, ix0);
+    ix1 = Q_SEL(u1, j1, ix1);
+    j0 = Q_ADD(j0, vstep);
+    j1 = Q_ADD(j1, vstep);
+  }
+  if(k1 < hi){
+    const vq a = xr[k1], b = xi[k1];
+    const vq s0 = Q_ADDS(Q_MUL(a, a), Q_MUL(b, b));
+    const qmask u0 = Q_MASK_OR(Q_GT(s0, m0), Q_MASK_AND(Q_EQ(s0, m0), Q_LT(j0, ix0)));
+    m0 = Q_MAX(m0, s0);
+    ix0 = Q_SEL(u0, j0, ix0);
+  }
+  *m0p = m0; *m1p = m1; *ix0p = ix0; *ix1p = ix1;
+}
+
+template<int M1, int MODE>
+static HWY_INLINE void q15_row_twmax_step(const qtw_table *tw, size_t k2,
+                                          const vq *xr, const vq *xi,
+                                          long lo, long hi, vq *mm){
+  const qtw_elem *twr = tw->re + k2 * (size_t)M1;
+  const qtw_elem *twi = tw->im + k2 * (size_t)M1;
+  if constexpr (M1 == 8) {
+    if constexpr (MODE == 0) qsr8_twmax_middle(xr, xi, 1, twr, twi, lo, hi, mm);
+    else                     qsr8_twmax(xr, xi, 1, twr, twi, lo, hi, mm);
+  } else if constexpr (M1 == 16) {
+    if constexpr (MODE == 0)      qsr16_twmax_middle(xr, xi, 1, twr, twi, lo, hi, mm);
+    else if constexpr (MODE == 1) qsr16_twmax_wide(xr, xi, 1, twr, twi, lo, hi, mm);
+    else                          qsr16_twmax(xr, xi, 1, twr, twi, lo, hi, mm);
+  } else {
+    if constexpr (MODE == 0)      qsr32_twmax_middle(xr, xi, 1, twr, twi, lo, hi, mm);
+    else if constexpr (MODE == 1) qsr32_twmax_wide(xr, xi, 1, twr, twi, lo, hi, mm);
+    else                          qsr32_twmax(xr, xi, 1, twr, twi, lo, hi, mm);
+  }
+}
+
+template<int M1, int M2>
+static HWY_INLINE int q15_win_mode(size_t ws, size_t we){
+  if constexpr (M1 == 8) {
+    return (ws <= 2 * (size_t)M2 && we >= 6 * (size_t)M2) ? 0 : 2;
+  } else if constexpr (M1 == 16) {
+    if(ws <= 2 * (size_t)M2 && we >= 14 * (size_t)M2) return 0;
+    if(ws <= 4 * (size_t)M2 && we >= 12 * (size_t)M2) return 1;
+    return 2;
+  } else {
+    if(ws <= 4 * (size_t)M2 && we >= 28 * (size_t)M2) return 0;
+    if(ws <= 8 * (size_t)M2 && we >= 24 * (size_t)M2) return 1;
+    return 2;
+  }
+}
+
+/* On 32-lane AVX-512 at M1 == 32 (N = 512, 1024), X + Xi would occupy 68-135 KB and
+   spill out of L1D three times. Running Pass-1 qcodelet(M2) per lane before corner-turn
+   and transposing one active k2 row at a time into a 4 KB stack row buffer keeps Pass 2
+   100% L1D-resident with bit-identical Q15 rounding. */
+template<int IDX, int M1, int M2>
+static HWY_NOINLINE int q15_screen_gather_row_fused_n(
+    const int16_t *const *drp, const int16_t *const *dip,
+    const int16_t *const *trp, const int16_t *const *tip,
+    int cnt, size_t ws, size_t we, const int16_t *lanethr,
+    uint64_t *bits, int16_t *lanemax, int16_t *laneidx){
+  constexpr size_t N = (size_t)M1 * (size_t)M2;
+  if(we > N) we = N;
+  constexpr int PSTRIDE = (M2 & 1) ? M2 : (M2 + 1);
+  alignas(64) vq pbuf_r[AP_QW * PSTRIDE];
+  alignas(64) vq pbuf_i[AP_QW * PSTRIDE];
+  for(int l = 0; l < cnt; l++){
+    if(l + 2 < cnt){
+      __builtin_prefetch(trp[l + 2], 0, 1);
+      __builtin_prefetch(tip[l + 2], 0, 1);
+    }
+    const int16_t *dr0 = drp[l], *di0 = dip[l];
+    const int16_t *tr0 = trp[l], *ti0 = tip[l];
+    vq *pr = pbuf_r + (size_t)l * PSTRIDE;
+    vq *pi = pbuf_i + (size_t)l * PSTRIDE;
+    for(int e2 = 0; e2 < M2; e2++){
+      const size_t off = (size_t)e2 * (size_t)M1;
+      const vq dR = Q_LOADU(dr0 + off), dI = Q_LOADU(di0 + off);
+      const vq tR = Q_LOADU(tr0 + off), tI = Q_LOADU(ti0 + off);
+      pr[e2] = Q_MLSH(Q_MUL(dR, tR), dI, tI);
+      pi[e2] = Q_MLAH(Q_MUL(dR, tI), dI, tR);
+    }
+    qcodelet(M2, pr, pi, 1);
+  }
+  for(int lp = cnt; lp < AP_QW; lp++){
+    memcpy(pbuf_r + (size_t)lp * PSTRIDE, pbuf_r + (size_t)(cnt - 1) * PSTRIDE, M2 * sizeof(vq));
+    memcpy(pbuf_i + (size_t)lp * PSTRIDE, pbuf_i + (size_t)(cnt - 1) * PSTRIDE, M2 * sizeof(vq));
+  }
+
+  alignas(64) vq Xrow[M1], Xirow[M1];
+  const qtw_table *tw = q15_tw_fast<IDX>();
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
+  if(laneidx){
+    const vq vneg1 = Q_SET1(-1);
+    vq m0 = vneg1, m1 = vneg1, ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
+    for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+      const long lo = (long)((wso - k2) / (size_t)M2);
+      const long hi = (long)((weo - k2) / (size_t)M2);
+      if(lo >= hi) continue;
+      q15_store_block_col<M1>(pbuf_r, PSTRIDE, (int)k2, 0, Xrow);
+      q15_store_block_col<M1>(pbuf_i, PSTRIDE, (int)k2, 0, Xirow);
+      q15_row_lag_step<M1, M2>(tw, k2, Xrow, Xirow, lo, hi, &m0, &m1, &ix0, &ix1);
+    }
+    const qmask u1 = Q_MASK_OR(Q_GT(m1, m0), Q_MASK_AND(Q_EQ(m1, m0), Q_LT(ix1, ix0)));
+    const vq mx_raw = Q_MAX(m0, m1);
+    const vq ix = Q_SEL(Q_GT(mx_raw, vneg1), Q_SEL(u1, ix1, ix0), vneg1);
+    Q_STOREU(laneidx, ix);
+    const vq mx = Q_MAX(mx_raw, Q_ZERO());
+    if(lanemax) Q_STOREU(lanemax, mx);
+    *bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
+  } else {
+    vq mm[2] = {Q_ZERO(), Q_ZERO()};
+    const int mode = q15_win_mode<M1, M2>(ws, we);
+    if(mode == 0){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        q15_store_block_col<M1>(pbuf_r, PSTRIDE, (int)k2, 0, Xrow);
+        q15_store_block_col<M1>(pbuf_i, PSTRIDE, (int)k2, 0, Xirow);
+        q15_row_twmax_step<M1, 0>(tw, k2, Xrow, Xirow, lo, hi, mm);
+      }
+    } else if(mode == 1){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        q15_store_block_col<M1>(pbuf_r, PSTRIDE, (int)k2, 0, Xrow);
+        q15_store_block_col<M1>(pbuf_i, PSTRIDE, (int)k2, 0, Xirow);
+        q15_row_twmax_step<M1, 1>(tw, k2, Xrow, Xirow, lo, hi, mm);
+      }
+    } else {
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        if(lo >= hi) continue;
+        q15_store_block_col<M1>(pbuf_r, PSTRIDE, (int)k2, 0, Xrow);
+        q15_store_block_col<M1>(pbuf_i, PSTRIDE, (int)k2, 0, Xirow);
+        q15_row_twmax_step<M1, 2>(tw, k2, Xrow, Xirow, lo, hi, mm);
+      }
+    }
+    const vq mx = Q_MAX(mm[0], mm[1]);
+    if(lanemax) Q_STOREU(lanemax, mx);
+    *bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
+  }
+  if(cnt < 64) *bits &= (((uint64_t)1 << cnt) - 1u);
+  return 0;
+}
+
+#if !defined(AP_SIMD_AVX1) && AP_QW == 8
+/* On 8-lane targets (ARM64 NEON, SSE4), each 8-element column strip fits one 8-lane
+   group directly: run Pass-1 qcodelet(M2) at unit stride in a 4-8 KB L1D buffer, transpose
+   active k2 rows into contiguous row-major Tbuf, and run Pass 2 in place without copies. */
+template<int IDX, int M1, int M2>
+static HWY_NOINLINE int q15_screen_gather_grp8_n(
+    const int16_t *const *drp, const int16_t *const *dip,
+    const int16_t *const *trp, const int16_t *const *tip,
+    int cnt, size_t ws, size_t we, const int16_t *lanethr,
+    uint64_t *bits, int16_t *lanemax, int16_t *laneidx, void *scratch){
+  constexpr size_t N = (size_t)M1 * (size_t)M2;
+  if(we > N) we = N;
+  constexpr int CSTRIPS = M1 / 8;
+  constexpr int P8_STRIDE = M2 + 1;
+  alignas(64) vq pbuf8_r[8 * P8_STRIDE];
+  alignas(64) vq pbuf8_i[8 * P8_STRIDE];
+  vq *Tbuf_r = (vq *)scratch;
+  vq *Tbuf_i = Tbuf_r + (size_t)M1 * (size_t)M2;
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
+
+  for(int cs = 0; cs < CSTRIPS; cs++){
+    const size_t c0 = (size_t)cs * 8;
+    for(int j = 0; j < 8; j++){
+      const int16_t *drl = drp[j] + c0, *dil = dip[j] + c0;
+      const int16_t *trl = trp[j] + c0, *til = tip[j] + c0;
+      vq *pr = pbuf8_r + (size_t)j * P8_STRIDE;
+      vq *pi = pbuf8_i + (size_t)j * P8_STRIDE;
+      for(int e2 = 0; e2 < M2; e2++){
+        const size_t off = (size_t)e2 * (size_t)M1;
+        const vq dR = Q_LOADU(drl + off), dI = Q_LOADU(dil + off);
+        const vq tR = Q_LOADU(trl + off), tI = Q_LOADU(til + off);
+        pr[e2] = Q_MLSH(Q_MUL(dR, tR), dI, tI);
+        pi[e2] = Q_MLAH(Q_MUL(dR, tI), dI, tR);
+      }
+      qcodelet(M2, pr, pi, 1);
+    }
+    for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+      const long lo = (long)((wso - k2) / (size_t)M2);
+      const long hi = (long)((weo - k2) / (size_t)M2);
+      if(lo >= hi) continue;
+      vq *dst_r = Tbuf_r + k2 * (size_t)M1 + c0;
+      vq *dst_i = Tbuf_i + k2 * (size_t)M1 + c0;
+      vq ur[8], ui[8];
+      for(int m = 0; m < 8; m++) ur[m] = pbuf8_r[(size_t)m * P8_STRIDE + k2];
+      q15_transpose8_inlane(ur);
+      for(int m = 0; m < 8; m++) dst_r[m] = ur[m];
+      for(int m = 0; m < 8; m++) ui[m] = pbuf8_i[(size_t)m * P8_STRIDE + k2];
+      q15_transpose8_inlane(ui);
+      for(int m = 0; m < 8; m++) dst_i[m] = ui[m];
+    }
+  }
+
+  const qtw_table *tw = q15_tw_fast<IDX>();
+  if(laneidx){
+    const vq vneg1 = Q_SET1(-1);
+    vq m0 = vneg1, m1 = vneg1, ix0 = Q_SET1(32767), ix1 = Q_SET1(32767);
+    for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+      const long lo = (long)((wso - k2) / (size_t)M2);
+      const long hi = (long)((weo - k2) / (size_t)M2);
+      if(lo >= hi) continue;
+      q15_row_lag_step<M1, M2>(tw, k2, Tbuf_r + k2 * (size_t)M1, Tbuf_i + k2 * (size_t)M1,
+                               lo, hi, &m0, &m1, &ix0, &ix1);
+    }
+    const qmask u1 = Q_MASK_OR(Q_GT(m1, m0), Q_MASK_AND(Q_EQ(m1, m0), Q_LT(ix1, ix0)));
+    const vq mx_raw = Q_MAX(m0, m1);
+    const vq ix = Q_SEL(Q_GT(mx_raw, vneg1), Q_SEL(u1, ix1, ix0), vneg1);
+    Q_STOREU(laneidx, ix);
+    const vq mx = Q_MAX(mx_raw, Q_ZERO());
+    if(lanemax) Q_STOREU(lanemax, mx);
+    *bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
+  } else {
+    vq mm[2] = {Q_ZERO(), Q_ZERO()};
+    const int mode = q15_win_mode<M1, M2>(ws, we);
+    if(mode == 0){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        q15_row_twmax_step<M1, 0>(tw, k2, Tbuf_r + k2 * (size_t)M1, Tbuf_i + k2 * (size_t)M1,
+                                  lo, hi, mm);
+      }
+    } else if(mode == 1){
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        q15_row_twmax_step<M1, 1>(tw, k2, Tbuf_r + k2 * (size_t)M1, Tbuf_i + k2 * (size_t)M1,
+                                  lo, hi, mm);
+      }
+    } else {
+      for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+        const long lo = (long)((wso - k2) / (size_t)M2);
+        const long hi = (long)((weo - k2) / (size_t)M2);
+        if(lo >= hi) continue;
+        q15_row_twmax_step<M1, 2>(tw, k2, Tbuf_r + k2 * (size_t)M1, Tbuf_i + k2 * (size_t)M1,
+                                  lo, hi, mm);
+      }
+    }
+    const vq mx = Q_MAX(mm[0], mm[1]);
+    if(lanemax) Q_STOREU(lanemax, mx);
+    *bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
+  }
+  if(cnt < 64) *bits &= (((uint64_t)1 << cnt) - 1u);
+  return 0;
+}
+#endif
+
 template<int IDX, int M1, int M2>
 static HWY_NOINLINE int q15_screen_gather_n(const int16_t *const *drp, const int16_t *const *dip,
                                             const int16_t *const *trp, const int16_t *const *tip,
                                             int cnt, size_t ws, size_t we, const int16_t *lanethr,
                                             uint64_t *bits, int16_t *lanemax, int16_t *laneidx,
                                             void *scratch){
+  if constexpr (AP_QW == 32 && M1 == 32) {
+    return q15_screen_gather_row_fused_n<IDX, M1, M2>(drp, dip, trp, tip, cnt, ws, we, lanethr,
+                                                      bits, lanemax, laneidx);
+  }
+#if !defined(AP_SIMD_AVX1) && AP_QW == 8
+  return q15_screen_gather_grp8_n<IDX, M1, M2>(drp, dip, trp, tip, cnt, ws, we, lanethr,
+                                               bits, lanemax, laneidx, scratch);
+#else
   vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
   q15_prod_gather_n<M1, M2>(drp, dip, trp, tip, X, Xi);
   const qtw_table *tw = q15_tw_fast<IDX>();
   const int r = q15_finish_n<M1, M2, true>(tw, X, Xi, ws, we, lanethr, bits, lanemax, laneidx);
   if(cnt < 64) *bits &= (((uint64_t)1 << cnt) - 1u);
   return r;
+#endif
 }
 
 static int q15_screen_gather(size_t N, const int16_t *const *drp, const int16_t *const *dip,
@@ -1406,11 +1684,63 @@ static HWY_NOINLINE MF_Q15PREP_SECTION void q15_data_contig(
   }
 }
 
-/* Vectorised int16 lane thresholds across AP_QW lanes (qds_stride == 0 broadcasts qds[0]).
-   Kept in the hot text section alongside q15_screen because matchfilt.c invokes it per batch. */
-static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
-                                     int qds_stride, const float *qts,
-                                     float margin, int nomargin, int16_t *out){
+static HWY_INLINE void q15_deint_slice(const float *HWY_RESTRICT src,
+                                       float *HWY_RESTRICT re, float *HWY_RESTRICT im,
+                                       size_t len){
+  size_t k = 0;
+#if defined(AP_SIMD_AVX1) || (HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2)
+  for(; k + 8 <= len; k += 8){
+    const float *p = src + 2 * k;
+    const __m256 e128 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(p)),
+                                             _mm_loadu_ps(p + 8), 1);
+    const __m256 o128 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(p + 4)),
+                                             _mm_loadu_ps(p + 12), 1);
+    _mm256_storeu_ps(re + k, _mm256_shuffle_ps(e128, o128, 0x88));
+    _mm256_storeu_ps(im + k, _mm256_shuffle_ps(e128, o128, 0xDD));
+  }
+#else
+  for(; k + (size_t)AP_W <= len; k += (size_t)AP_W){
+    vf vr, vi;
+    v_deint(src + 2 * k, &vr, &vi);
+    V_STOREU(re + k, vr);
+    V_STOREU(im + k, vi);
+  }
+#endif
+  for(; k < len; k++){
+    re[k] = src[2 * k];
+    im[k] = src[2 * k + 1];
+  }
+}
+
+/* Deinterleave data band [k0, khi) directly from interleaved spectrum `spec` into an
+   L1D-resident stack buffer (wrapping cyclic slot k & (N - 1) when k0 > 0) and quantise
+   into contiguous [N] qdr, qdi rows without staging through split float bank storage. */
+static HWY_NOINLINE MF_Q15PREP_SECTION int q15_data_band(
+    size_t N, const float *spec, size_t k0, size_t khi,
+    int16_t *qdr, int16_t *qdi, float *scale_out){
+  if(N == 0 || N > 1024) return -1;
+  alignas(64) float re_buf[1024], im_buf[1024];
+  if(k0 == 0){
+    q15_deint_slice(spec, re_buf, im_buf, N);
+  } else {
+    const size_t raw_len = khi > k0 ? khi - k0 : 0;
+    const size_t len = raw_len < N ? raw_len : N;
+    if(len < N){
+      memset(re_buf, 0, N * sizeof(float));
+      memset(im_buf, 0, N * sizeof(float));
+    }
+    const size_t u0 = k0 & (N - 1);
+    const size_t first = len < N - u0 ? len : N - u0;
+    if(first) q15_deint_slice(spec + 2 * k0, re_buf + u0, im_buf + u0, first);
+    if(len > first) q15_deint_slice(spec + 2 * (k0 + first), re_buf, im_buf, len - first);
+  }
+  q15_data_contig(N, re_buf, im_buf, 0, 0, 0, qdr, qdi, scale_out);
+  return 0;
+}
+
+static HWY_INLINE void q15_lanethr_inline(float threshold, const float *qds,
+                                          int qds_stride, const float *qts,
+                                          float margin, int nomargin, int16_t *out){
   if(!qds_stride && qds[0] < 0.f){
     Q_STOREU(out, Q_SET1(-32768));
     return;
@@ -1460,6 +1790,103 @@ static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
   }
   hn::StoreU(hn::OrderedDemote2To(AP_DQ, parts[0], parts[1]), AP_DQ, out);
 #endif
+}
+
+/* Vectorised int16 lane thresholds across AP_QW lanes (qds_stride == 0 broadcasts qds[0]).
+   Kept in the hot text section alongside q15_screen because matchfilt.c invokes it per batch. */
+static HWY_NOINLINE void q15_lanethr(float threshold, const float *qds,
+                                     int qds_stride, const float *qts,
+                                     float margin, int nomargin, int16_t *out){
+  q15_lanethr_inline(threshold, qds, qds_stride, qts, margin, nomargin, out);
+}
+
+/* Whole-list Q15 gather batch evaluator: computes SIMD lane thresholds, runs the target's
+   gather screen without per-batch indirect dispatch, and compacts survivors directly via
+   bitmask ctzll when dst_d/dst_t are provided. */
+template<int IDX, int M1, int M2>
+static HWY_NOINLINE int q15_pairs_batch_n(
+    const int16_t *qdm, const float *qds, const int16_t *qtm, const float *qts,
+    int d0, int t0, const int *dsel, const int *tsel, int npairs,
+    float threshold, int nomargin, size_t ws, size_t we,
+    int *dst_d, int *dst_t, unsigned char *pass_out, int16_t *lag_out, void *scratch){
+  constexpr size_t N = (size_t)M1 * (size_t)M2;
+  constexpr size_t stride = 2 * N + 32;
+  const float margin = (float)ap_q15_margin(N);
+  alignas(64) float qds_lane[AP_QW], qts_lane[AP_QW];
+  alignas(64) int16_t lanethr[AP_QW], laneidx[AP_QW];
+  const int16_t *drp[AP_QW], *dip[AP_QW], *trp[AP_QW], *tip[AP_QW];
+  int total = 0;
+
+  for(int i0 = 0; i0 < npairs; i0 += AP_QW){
+    const int cnt = npairs - i0 < AP_QW ? npairs - i0 : AP_QW;
+    for(int l = 0; l < cnt; l++){
+      const int d = d0 + dsel[i0 + l], t = t0 + tsel[i0 + l];
+      const int16_t *dq = qdm + (size_t)d * stride;
+      const int16_t *tq = qtm + (size_t)t * stride;
+      drp[l] = dq; dip[l] = dq + N;
+      trp[l] = tq; tip[l] = tq + N;
+      qds_lane[l] = qds[d]; qts_lane[l] = qts[t];
+    }
+    for(int l = cnt; l < AP_QW; l++){
+      drp[l] = drp[cnt - 1]; dip[l] = dip[cnt - 1];
+      trp[l] = trp[cnt - 1]; tip[l] = tip[cnt - 1];
+      qds_lane[l] = 0.f; qts_lane[l] = 0.f;
+    }
+    q15_lanethr_inline(threshold, qds_lane, 1, qts_lane, margin, nomargin, lanethr);
+    uint64_t bits = 0;
+    if(q15_screen_gather_n<IDX, M1, M2>(drp, dip, trp, tip, cnt, ws, we, lanethr, &bits,
+                                        nullptr, lag_out ? laneidx : nullptr, scratch))
+      return -1;
+    if(dst_d){
+      while(bits){
+        const int l = __builtin_ctzll(bits);
+        const int idx = i0 + l;
+        dst_d[total] = dsel[idx];
+        dst_t[total] = tsel[idx];
+        if(lag_out)
+          lag_out[total] = (qds_lane[l] > 0.f && qts_lane[l] > 0.f) ? laneidx[l] : (int16_t)-1;
+        total++;
+        bits &= bits - 1;
+      }
+    } else {
+      if(!bits && !lag_out){
+        memset(pass_out + i0, 0, (size_t)cnt);
+        continue;
+      }
+      for(int l = 0; l < cnt; l++){
+        const int ok = (int)((bits >> l) & 1u);
+        pass_out[i0 + l] = (unsigned char)ok;
+        total += ok;
+        if(lag_out)
+          lag_out[i0 + l] = (qds_lane[l] > 0.f && qts_lane[l] > 0.f) ? laneidx[l] : (int16_t)-1;
+      }
+    }
+  }
+  return total;
+}
+
+static int q15_pairs_batch(
+    size_t N, const int16_t *qdm, const float *qds, const int16_t *qtm, const float *qts,
+    int d0, int t0, const int *dsel, const int *tsel, int npairs,
+    float threshold, int nomargin, size_t ws, size_t we,
+    int *dst_d, int *dst_t, unsigned char *pass_out, int16_t *lag_out, void *scratch){
+  if(npairs < 1) return 0;
+  if(we > N) we = N;
+  if(ws >= we){
+    if(!dst_d && pass_out) memset(pass_out, 0, (size_t)npairs);
+    if(!dst_d && lag_out){
+      for(int j = 0; j < npairs; j++) lag_out[j] = -1;
+    }
+    return 0;
+  }
+  switch(N){
+    case   64: return q15_pairs_batch_n<0,  8,  8>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
+    case  128: return q15_pairs_batch_n<1, 16,  8>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
+    case  256: return q15_pairs_batch_n<2, 16, 16>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
+    case  512: return q15_pairs_batch_n<3, 32, 16>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
+    case 1024: return q15_pairs_batch_n<4, 32, 32>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
+    default: return -1;
+  }
 }
 
 #undef MF_Q15PREP_SECTION
