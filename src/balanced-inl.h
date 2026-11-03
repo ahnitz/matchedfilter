@@ -1320,9 +1320,7 @@ static HWY_NOINLINE MF_FWD_SECTION void fft_forward_scaled_gm(
 
 /* Forward transform of cnt (1 .. AP_W) complex blocks in parallel across SIMD lanes on a
    small (element-transform) plan, writing only bins [0, out_bins) (full N when out_bins == 0
-   or out_bins >= N). On 8-lane targets at N = 2048, out_bins = 1024 decomposes Pass 2's
-   length-64 rows into 2x codelet(32) + half-butterfly into an L1D-resident [32][8] tile,
-   skipping the upper butterfly half and the 266 KB bR/bI writeback + strided reload. */
+   or out_bins >= N). */
 static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch_prefix(
     void *vp, const float *const *srcs, const size_t *haves, int cnt,
     float scale, size_t out_bins, float *const *outs) {
@@ -1390,69 +1388,6 @@ static HWY_NOINLINE MF_FWD_SECTION int fft_forward_batch_prefix(
         p->bR[slot0 + u] = tr[u];
         p->bI[slot0 + u] = ti[u];
       }
-    }
-  }
-  if constexpr (AP_W == 8) {
-    if (N == 2048 && ob == 1024 && p->a1 == 64 && p->a2 == 32) {
-      const int st = p->ea.st;
-      for (size_t e1 = 0; e1 < 64; e1++)
-        codelet(32, p->bR + e1, p->bI + e1, p->sR + e1, p->sI + e1, st);
-      /* Row k2p = 16 of p->w1r/w1i stores W_2048^{16 * e1}, so even indices 2 * k1 equal W_64^{k1}. */
-      const float *tw64r = p->w1r + 16 * 64;
-      const float *tw64i = p->w1i + 16 * 64;
-      alignas(64) vf er[32], ei[32], orr[32], oii[32], sr[32], si[32];
-      for (size_t k2_0 = 0; k2_0 < 32; k2_0 += W) {
-        for (size_t u = 0; u < W; u++) {
-          const size_t k2p = k2_0 + u;
-          const vf *xr = p->bR + k2p * (size_t)st;
-          const vf *xi = p->bI + k2p * (size_t)st;
-          const float *twr = p->w1r + k2p * 64;
-          const float *twi = p->w1i + k2p * 64;
-          if (k2p == 0) {
-            for (int m = 0; m < 32; m++) {
-              er[m]  = xr[2 * m];     ei[m]  = xi[2 * m];
-              orr[m] = xr[2 * m + 1]; oii[m] = xi[2 * m + 1];
-            }
-          } else {
-            for (int m = 0; m < 32; m++) {
-              const int e0 = 2 * m, e1 = 2 * m + 1;
-              const vf wr0 = V_SET1(twr[e0]), wi0 = V_SET1(twi[e0]);
-              const vf wr1 = V_SET1(twr[e1]), wi1 = V_SET1(twi[e1]);
-              er[m]  = V_FMSUB(xr[e0], wr0, V_MUL(xi[e0], wi0));
-              ei[m]  = V_FMADD(xr[e0], wi0, V_MUL(xi[e0], wr0));
-              orr[m] = V_FMSUB(xr[e1], wr1, V_MUL(xi[e1], wi1));
-              oii[m] = V_FMADD(xr[e1], wi1, V_MUL(xi[e1], wr1));
-            }
-          }
-          codelet(32, er, ei, sr, si, 1);
-          codelet(32, orr, oii, sr, si, 1);
-          for (int k1 = 0; k1 < 32; k1++) {
-            const vf wr = V_SET1(tw64r[2 * k1]), wi = V_SET1(tw64i[2 * k1]);
-            const vf tr_v = V_FMSUB(orr[k1], wr, V_MUL(oii[k1], wi));
-            const vf ti_v = V_FMADD(orr[k1], wi, V_MUL(oii[k1], wr));
-            p->sR[(size_t)k1 * W + u] = V_ADD(er[k1], tr_v);
-            p->sI[(size_t)k1 * W + u] = V_ADD(ei[k1], ti_v);
-          }
-        }
-        if (cnt == AP_W) {
-          for (size_t k1 = 0; k1 < 32; k1++) {
-            vf or_out[AP_W], oi_out[AP_W];
-            V_TRANSPOSE(p->sR + k1 * W, or_out);
-            V_TRANSPOSE(p->sI + k1 * W, oi_out);
-            const size_t k0 = k1 * 32 + k2_0;
-            for (int l = 0; l < AP_W; l++) v_inter(outs[l] + 2 * k0, or_out[l], oi_out[l]);
-          }
-        } else {
-          for (size_t k1 = 0; k1 < 32; k1++) {
-            vf or_out[AP_W], oi_out[AP_W];
-            V_TRANSPOSE(p->sR + k1 * W, or_out);
-            V_TRANSPOSE(p->sI + k1 * W, oi_out);
-            const size_t k0 = k1 * 32 + k2_0;
-            for (int l = 0; l < cnt; l++) v_inter(outs[l] + 2 * k0, or_out[l], oi_out[l]);
-          }
-        }
-      }
-      return 0;
     }
   }
   small_efft(p);
