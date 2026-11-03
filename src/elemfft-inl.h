@@ -100,8 +100,13 @@ static inline int codelet_tw(int m,vf*restrict ar,vf*restrict ai,vf*restrict br,
       if constexpr (AP_W >= 16) return fftsr32_tw(ar,ai,br,bi,S,twr,twi);
       else                      return fft32_tw  (ar,ai,br,bi,S,twr,twi);
     default:
-      if constexpr (AP_W >= 16) return fftsr64_tw(ar,ai,br,bi,S,twr,twi);
-      else                      return fft64_tw  (ar,ai,br,bi,S,twr,twi);
+      /* Split-radix from 8 lanes up. On the production ladder (test27, fine stage, the
+         2048-point forward and the pair-batched products) it matched the 8-lane forward's
+         hand-written n = 2048 path on Zen 3 and Ivy Bridge and ran ~3% faster on Haswell, which let that
+         path go (2026-11-03); the isolated batched forward was 5-20% faster on Haswell, Ivy
+         Bridge and Zen 5 at AVX2. At 4 lanes the M2's fine stage ran 1-2% slower with it. */
+      if constexpr (AP_W >= 8) return fftsr64_tw(ar,ai,br,bi,S,twr,twi);
+      else                     return fft64_tw  (ar,ai,br,bi,S,twr,twi);
   }
 }
 /* itwr/itwi hold W_M[e1*k2p] laid out [k2p][e1], so the second half can consume

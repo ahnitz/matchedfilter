@@ -255,6 +255,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The 64-point twiddled codelet is split-radix from 8 lanes up (it was only at 16), and the
+  8-lane forward's hand-written n = 2048 half-output path is gone: the generic path with
+  split-radix matched it on Zen 3 and Ivy Bridge and ran the fine stage ~3% faster on
+  Haswell (test27 ladder, concurrent pinned pairs, 2026-11-03). 4 lanes (NEON, SSE4) keep the radix-8 codelet:
+  the M2's fine stage ran 1-2% slower with split-radix.
 - The tier-0 centroids' setup on the test27 job: 21 -> 8 s on the CPU, 26 -> 13 s on the
   GPU (dev2). The pair scorer runs under Highway's dispatch (5.5x at AVX-512), and a bound
   after the first matching pass skips the second, and the pricing, of bands that cannot win.
