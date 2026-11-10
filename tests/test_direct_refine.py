@@ -641,6 +641,7 @@ def test_direct_refine_multi_isa_odd_and_tail_windows(isa, real_quadrature, monk
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_GATE16", "0")
     monkeypatch.setattr(_prices, "_DIRECT_PAIR", {})
+    monkeypatch.setattr(_prices, "_direct_lagtap", lambda *a, **kw: 0.05)
     mf.backend()
     mf.set_target(isa)
     try:

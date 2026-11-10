@@ -941,3 +941,90 @@ def test_single_tier_centroid_fdr_and_lower_bound(use_q15, monkeypatch):
     assert pval_high >= 1e-3, (
         f"empirical 1-tier FDR {miss}/{det} = {miss / det:.4f} exceeded budget {fd:.3f} (p={pval_high:.2e})"
     )
+
+
+@pytest.mark.parametrize("chain_str", ["256", "256,512"])
+@pytest.mark.parametrize("use_q15", [False, True])
+def test_clustered_tier0_preserves_sparse_c_order_across_interleaved_clusters(
+    monkeypatch, chain_str, use_q15
+):
+    """When multiple Tier-0 clusters with interleaved member indices (e.g. [0, 15], [1, 14], ...)
+    fire on the same block, run_series_batch_sparse and FilterResults emit peaks in strict
+    (block, template, bin) C-order matching an unclustered reference bank."""
+    from matchedfilter.benchmark import _inspiral_power
+    from matchedfilter.time_domain import template_spectra
+
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_CHAIN_FORCE", chain_str)
+    n, nt, L = 2048, 16, 323
+    counts = np.full(nt, L, dtype=np.int64)
+    taps = np.zeros((nt, L), dtype=np.complex64)
+    # Place correlated pairs at non-adjacent indices (k, nt - 1 - k) with distinct chirp slopes
+    # between pairs so Tier-0 clustering merges interleaved non-contiguous row indices.
+    for k in range(nt // 2):
+        for side, ti in enumerate((k, nt - 1 - k)):
+            w = np.zeros(L, dtype=np.complex128)
+            w[L // 2] = np.exp(1j * (0.4 * k + 0.03 * side))
+            w += 0.14 * np.hanning(L) * np.exp(1j * np.linspace(0, 1.5 + 0.6 * k + 0.02 * side, L)) / np.sqrt(L)
+            taps[ti] = w.astype(np.complex64)
+    filt, _ = template_spectra(taps, counts, n)
+    templates = np.conj(filt)
+
+    ref = _inspiral_power(n).copy()
+    ref[n // 2 :] = 0.0
+    total = 32768
+    p1 = _inspiral_power(total).copy()
+    p1[total // 2 :] = 0.0
+    p1 /= p1.sum()
+    rng = np.random.default_rng(3010)
+    W = np.fft.rfft(rng.standard_normal(total))
+    S_freq = np.zeros_like(W)
+    S_freq[: total // 2] = W[: total // 2] * np.sqrt(p1[: total // 2] * total)
+    x = np.fft.irfft(S_freq, n=total)
+    x = (x / np.std(x)).astype(np.float64)
+    pulse = np.real(np.fft.ifft(p1) * total) * 2.0
+    for tau in (4500, 9200, 15100, 21800):
+        x += 10.0 * np.roll(pulse, tau)
+    x = x.astype(np.float32)
+
+    b_cl = mf.TimeDomainFilterBank(
+        taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+        threshold=6.0, false_dismissal=1e-2, binsize=512, fft_lengths=(n,)
+    )
+    b_cl.set_reference(ref)
+    grp = [g for g in b_cl._groups if g.is_hier][0]
+    grp.plan._execution_plan()
+    if grp.plan._mf.tier0_cluster_count() == 0:
+        # Force clustering on interleaved rows via set_tier0_clusters so C-order is exercised on all ISAs
+        k0 = int(gc.band_offset(ref, n, 256))
+        cl = gc.tier0_pair_centroids(templates, ref, 256, k0=k0)
+        assert cl is not None
+        assert any(
+            int(cl.offsets[c + 1] - cl.offsets[c]) >= 2
+            and int(cl.members[cl.offsets[c + 1] - 1] - cl.members[cl.offsets[c]]) > 1
+            for c in range(cl.specs.shape[0])
+        )
+        grp.plan._mf.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad))
+    if use_q15:
+        if not grp.plan._mf.set_q15(True) or not grp.plan._mf.q15_stats()[0]:
+            pytest.skip("no Q15 screen available for Tier-0 band")
+    else:
+        grp.plan._mf.set_q15(False)
+
+    monkeypatch.setenv("MF_TIER0_CENTROIDS", "0")
+    b_ref = mf.TimeDomainFilterBank(
+        taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
+        threshold=6.0, false_dismissal=1e-2, binsize=512, fft_lengths=(n,)
+    )
+    b_ref.set_reference(ref)
+    if use_q15:
+        for g in b_ref._groups:
+            if g.is_hier:
+                g.plan._execution_plan().set_q15(True)
+
+    r_cl = b_cl.filter_series(x, windows=slice(2048, 28672))
+    r_ref = b_ref.filter_series(x, windows=slice(2048, 28672))
+    assert len(r_cl.template_indices) >= 16
+    np.testing.assert_array_equal(r_cl.template_indices, r_ref.template_indices)
+    np.testing.assert_array_equal(r_cl.sample_indices, r_ref.sample_indices)
+    np.testing.assert_allclose(r_cl.snr, r_ref.snr, rtol=2e-5, atol=2e-4)
