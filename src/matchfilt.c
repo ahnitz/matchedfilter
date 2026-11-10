@@ -207,11 +207,8 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_
     p->dsr=ap_alloc64((size_t)n*p->pb*sizeof(float));
     p->dsi=ap_alloc64((size_t)n*p->pb*sizeof(float));
     if(!p->tsr||!p->tsi||!p->dsr||!p->dsi){ ap_mf_destroy(p); return NULL; }
-    p->tmre=ap_alloc64((size_t)p->ntpad*n*sizeof(float));
-    p->tmim=ap_alloc64((size_t)p->ntpad*n*sizeof(float));
-    if(!p->tmre||!p->tmim){ ap_mf_destroy(p); return NULL; }
-    memset(p->tmre,0,(size_t)p->ntpad*n*sizeof(float));
-    memset(p->tmim,0,(size_t)p->ntpad*n*sizeof(float));
+    /* tmre/tmim ([ntpad][n]) are materialized lazily on first sparse pair run (mf_ensure_tm),
+       saving 50% of float template memory on dense Tier-0 and unscreened plans. */
   }
   return p;
 }
@@ -1806,11 +1803,30 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
   return total;
 }
 
+static void mf_ensure_tm(ap_mf_plan *p){
+  if(!p->pb || p->tmre) return;
+  const size_t n = p->n, sz = (size_t)p->ntpad * n * sizeof(float);
+  float *mre = ap_alloc64(sz), *mim = ap_alloc64(sz);
+  if(!mre || !mim){ free(mre); free(mim); return; }
+  memset(mre, 0, sz);
+  memset(mim, 0, sz);
+  const int W = p->pb;
+  for(int t = 0; t < p->nt; t++){
+    const size_t base = (size_t)(t / W) * n * W + (size_t)(t % W);
+    const float *re = p->tre + base, *im = p->tim + base;
+    float *dr = mre + (size_t)t * n, *di = mim + (size_t)t * n;
+    for(size_t k = 0; k < n; k++){ dr[k] = re[k * W]; di[k] = im[k * W]; }
+  }
+  p->tmre = mre;
+  p->tmim = mim;
+}
+
 static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
                                const int *dsel, const int *tsel, int npairs,
                                int t0, size_t binsize, float threshold,
                                ap_peak *peaks, int *counts, size_t start, size_t end,
                                int nt){
+  mf_ensure_tm(p);
   const size_t n = p->n, nb = ap_bin_count(binsize, start, end, row_phase(p, d0 + dsel[0]));
   const int W = p->pb;
   unsigned lph[AP_MAX_LANES];
@@ -1960,6 +1976,7 @@ int ap_mf_run_pairs_packed(ap_mf_plan *p, int d0,
     return 1;
   }
   const int W = p->pb;
+  mf_ensure_tm(p);
   if(p->pkcap < (size_t)W * nb){
     free(p->pkbuf);
     p->pkbuf = ap_alloc64((size_t)W * nb * sizeof(ap_peak));
@@ -2118,13 +2135,16 @@ static inline int16_t q15_q(float v,double s){
 /* Templates are stored conjugated already; quantise as stored. |t_q|_2 is
    AP_Q15_TNORM unless that would put a component past int16. */
 static void q15_template(ap_mf_plan *p,int t){
-  const size_t n=p->n; const int qw=p->qw;
-  const float *re,*im; int nat=0;
-  if(p->pb && p->tmre){ re=p->tmre+(size_t)t*n; im=p->tmim+(size_t)t*n; }
-  else { re=p->tre+(size_t)t*n; im=p->tim+(size_t)t*n; nat=1; }
+  const size_t n=p->n; const int qw=p->qw, pb=p->pb;
+  const float *re,*im; int nat=0, step=1;
+  if(pb && p->tmre){ re=p->tmre+(size_t)t*n; im=p->tmim+(size_t)t*n; }
+  else if(pb){
+    const size_t base=(size_t)(t/pb)*n*pb+(size_t)(t%pb);
+    re=p->tre+base; im=p->tim+base; step=pb;
+  } else { re=p->tre+(size_t)t*n; im=p->tim+(size_t)t*n; nat=1; }
   double ss=0, amax=0;
   for(size_t k=0;k<n;k++){
-    const size_t j=nat?q15_nat(p,k):k;
+    const size_t j=nat?q15_nat(p,k):k*(size_t)step;
     const double r=re[j], i=im[j];
     ss+=r*r+i*i;
     if(fabs(r)>amax) amax=fabs(r);
@@ -2137,7 +2157,7 @@ static void q15_template(ap_mf_plan *p,int t){
   }
   int16_t *qr=p->qtr+(size_t)(t/qw)*n*qw+(t%qw), *qi=p->qti+(size_t)(t/qw)*n*qw+(t%qw);
   for(size_t k=0;k<n;k++){
-    const size_t j=nat?q15_nat(p,k):k;
+    const size_t j=nat?q15_nat(p,k):k*(size_t)step;
     qr[k*qw]=sc>0?q15_q(re[j],sc):0;
     qi[k*qw]=sc>0?q15_q(im[j],sc):0;
   }
@@ -2396,12 +2416,16 @@ int ap_mf_set_q15_margin(ap_mf_plan *p,int on){
    or template-group bucketing. */
 static void q15_template_contig(ap_mf_plan *p,int t){
   const size_t n=p->n, stride=2*n+32;
-  const float *re,*im; int nat=0;
-  if(p->pb && p->tmre){ re=p->tmre+(size_t)t*n; im=p->tmim+(size_t)t*n; }
-  else { re=p->tre+(size_t)t*n; im=p->tim+(size_t)t*n; nat=1; }
+  const int pb=p->pb;
+  const float *re,*im; int nat=0, step=1;
+  if(pb && p->tmre){ re=p->tmre+(size_t)t*n; im=p->tmim+(size_t)t*n; }
+  else if(pb){
+    const size_t base=(size_t)(t/pb)*n*pb+(size_t)(t%pb);
+    re=p->tre+base; im=p->tim+base; step=pb;
+  } else { re=p->tre+(size_t)t*n; im=p->tim+(size_t)t*n; nat=1; }
   double ss=0, amax=0;
   for(size_t k=0;k<n;k++){
-    const size_t j=nat?q15_nat(p,k):k;
+    const size_t j=nat?q15_nat(p,k):k*(size_t)step;
     const double r=re[j], i=im[j];
     ss+=r*r+i*i;
     if(fabs(r)>amax) amax=fabs(r);
@@ -2417,7 +2441,7 @@ static void q15_template_contig(ap_mf_plan *p,int t){
     memset(qr,0,2*n*sizeof(int16_t));
   } else {
     for(size_t k=0;k<n;k++){
-      const size_t j=nat?q15_nat(p,k):k;
+      const size_t j=nat?q15_nat(p,k):k*(size_t)step;
       qr[k]=q15_q(re[j],sc);
       qi[k]=q15_q(im[j],sc);
     }

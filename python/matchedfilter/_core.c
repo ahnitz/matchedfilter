@@ -2116,13 +2116,14 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     return NULL;
   }
 
-  float *in_buf = (float*)malloc(2 * (size_t)n * sizeof(float));
+  float *in_buf = (float*)ap_alloc64(2 * (size_t)n * sizeof(float));
   if(!in_buf){
     ap_destroy(plan);
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
     PyErr_NoMemory();
     return NULL;
   }
+  memset(in_buf, 0, 2 * (size_t)n * sizeof(float));
 
   const float *taps = (const float*)btaps.buf;
   float *out = (float*)bout.buf;
@@ -2140,26 +2141,20 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     if(count > (size_t)max_taps) count = (size_t)max_taps;
     if(count > (size_t)n) count = (size_t)n;
     size_t half = count / 2;
-    memset(in_buf, 0, 2 * (size_t)n * sizeof(float));
+    size_t pos_len = count - half;
     if(cplx){
       const float *row = taps + t * 2 * (size_t)max_taps;
-      for(size_t i = 0; i < count - half; i++){
-        in_buf[2 * i] = row[2 * (half + i)]; in_buf[2 * i + 1] = row[2 * (half + i) + 1];
-      }
-      for(size_t i = 0; i < half; i++){
-        in_buf[2 * ((size_t)n - half + i)] = row[2 * i];
-        in_buf[2 * ((size_t)n - half + i) + 1] = row[2 * i + 1];
-      }
+      memcpy(in_buf, row + 2 * half, 2 * pos_len * sizeof(float));
+      if(half) memcpy(in_buf + 2 * ((size_t)n - half), row, 2 * half * sizeof(float));
     } else {
-    const float *row = taps + t * (size_t)max_taps;
-    for(size_t i = 0; i < count - half; i++){
-      in_buf[2 * i] = row[half + i];
-    }
-    for(size_t i = 0; i < half; i++){
-      in_buf[2 * ((size_t)n - half + i)] = row[i];
-    }
+      const float *row = taps + t * (size_t)max_taps;
+      for(size_t i = 0; i < pos_len; i++) in_buf[2 * i] = row[half + i];
+      for(size_t i = 0; i < half; i++) in_buf[2 * ((size_t)n - half + i)] = row[i];
     }
     ap_fft(plan, in_buf, out + t * 2 * (size_t)n, AP_FORWARD);
+    /* Clear only the active support written above so in_buf stays zeroed without 2n memsets. */
+    memset(in_buf, 0, 2 * pos_len * sizeof(float));
+    if(half) memset(in_buf + 2 * ((size_t)n - half), 0, 2 * half * sizeof(float));
   }
   Py_END_ALLOW_THREADS
 
