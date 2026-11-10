@@ -44,7 +44,8 @@ typedef struct {
   ap_peak *cebuf;
   unsigned char *pending;         /* [nd] owned series spectrum awaits ingestion */
   int npending;
-  int *fire_d,*fire_t;            /* this tier's survivors */
+  int *fire_d,*fire_t;            /* this tier's survivors (grown on demand to fire_cap) */
+  size_t fire_cap;
   long passed;                    /* pairs that passed this tier when evaluated */
   long checked;                   /* actual inputs; independent of execution order */
   unsigned long long ticks;       /* time spent in this tier */
@@ -107,7 +108,8 @@ struct ap_hmf_plan {
   float *dx, *dout;               /* [2n] a zero-padded block copy; direct output */
   int dx_d;                       /* block row currently cached in dx, or -1 */
   size_t dx_lo, dx_hi;            /* unpacked sample span [dx_lo, dx_hi) in dx */
-  int *dfd, *dft;                 /* [nd*nt] pairs the transform refines instead */
+  int *dfd, *dft;                 /* [df_cap] pairs the transform refines instead */
+  size_t df_cap;
   ap_peak *dir_sub;               /* [ns*HMF_COARSE_SUBBINS] coarse sub-bin peaks of multi-bin survivors */
   size_t dir_sub_cap;
   double dir_lagtap, dir_fftpair; /* priced: ticks per lag x tap, per whole-block refine */
@@ -169,6 +171,40 @@ static inline size_t hmf_fwd_pb_limit(const ap_hmf_plan *p){
   return 512u;
 }
 
+static inline int hmf_ensure_cebuf(ap_hmf_plan *p,hmf_tier *tr){
+  if(tr->cebuf) return 0;
+  tr->cebuf=calloc((size_t)p->nd*(size_t)p->nt,sizeof(ap_peak));
+  return tr->cebuf ? 0 : -1;
+}
+
+static inline int hmf_ensure_fire(hmf_tier *tr,size_t need){
+  if(need<=tr->fire_cap) return 0;
+  size_t cap=tr->fire_cap ? tr->fire_cap*2u : 256u;
+  if(cap<need) cap=need;
+  int *fd=realloc(tr->fire_d,cap*sizeof(int));
+  if(!fd) return -1;
+  tr->fire_d=fd;
+  int *ft=realloc(tr->fire_t,cap*sizeof(int));
+  if(!ft) return -1;
+  tr->fire_t=ft;
+  tr->fire_cap=cap;
+  return 0;
+}
+
+static inline int hmf_ensure_df(ap_hmf_plan *p,size_t need){
+  if(need<=p->df_cap) return 0;
+  size_t cap=p->df_cap ? p->df_cap*2u : 256u;
+  if(cap<need) cap=need;
+  int *fd=realloc(p->dfd,cap*sizeof(int));
+  if(!fd) return -1;
+  p->dfd=fd;
+  int *ft=realloc(p->dft,cap*sizeof(int));
+  if(!ft) return -1;
+  p->dft=ft;
+  p->df_cap=cap;
+  return 0;
+}
+
 ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
                                  const size_t *bands,int ntiers,int series_group){
   if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)
@@ -221,11 +257,8 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
       if(ap_gate16_available()) tr->g16=ap_gate16_create(tr->m,p->nd,ntmpl);
       tr->scratch=ap_alloc64(2*tr->m*sizeof(float));
       tr->fpow=calloc((size_t)ntmpl,sizeof(float));
-      tr->cebuf=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
       tr->pending=calloc((size_t)p->nd,1);
-      tr->fire_d=calloc((size_t)p->nd*ntmpl,sizeof(int));
-      tr->fire_t=calloc((size_t)p->nd*ntmpl,sizeof(int));
-      if(!tr->mf||!tr->scratch||!tr->fpow||!tr->cebuf||!tr->pending||!tr->fire_d||!tr->fire_t){
+      if(!tr->mf||!tr->scratch||!tr->fpow||!tr->pending){
         ap_hmf_destroy(p); return NULL;
       }
       if(i>0 && ap_mf_q15_lanes(tr->mf)>0){
@@ -303,9 +336,7 @@ static int set_taps_impl(ap_hmf_plan *p,const float *taps,size_t stride,const in
     p->tap_len=calloc((size_t)p->nt,sizeof(int));
     p->dx=ap_alloc64(2*p->n*sizeof(float));
     p->dout=ap_alloc64(2*p->n*sizeof(float));
-    p->dfd=malloc((size_t)p->nd*p->nt*sizeof(int));
-    p->dft=malloc((size_t)p->nd*p->nt*sizeof(int));
-    if(!p->taps||!p->tap_len||!p->dx||!p->dout||!p->dfd||!p->dft) goto fail;
+    if(!p->taps||!p->tap_len||!p->dx||!p->dout) goto fail;
   }
   for(int t=0;t<p->nt;t++){
     const int L=(int)counts[t];
@@ -334,6 +365,7 @@ fail:
   free(p->dout); p->dout=NULL;
   free(p->dfd); p->dfd=NULL;
   free(p->dft); p->dft=NULL;
+  p->df_cap=0;
   p->tap_cplx=0;
   return -1;
 }
@@ -1853,6 +1885,7 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
   unsigned long long q1=ap_ticks();
 
   /* Batch coarse sub-window peaks across multi-bin direct survivors in one call. */
+  if(hmf_ensure_df(p,(size_t)nfire)) return -1;
   int ns=0, have_sub=0;
   for(int j=0;j<nfire;j++){
     const int d=fire_d[j], t=fire_t[j];
@@ -2026,6 +2059,7 @@ static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
      tier's maximum goes to its cebuf (with optional direct survivor compaction on FP16). */
   if(use_q15)
     return ap_mf_q15_pairs_lag(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL,qlag);
+  if(hmf_ensure_cebuf(p,tr)) return -1;
   if(use_g16)
     return ap_gate16_run_pairs_lag(tr->g16,d0,t0,ds,ts,count,nt,lo,hi,elect_g16_lag,tr->thr,
                                    dst_d,dst_t,tr->cebuf);
@@ -2103,27 +2137,30 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       if(ns<0) return -1;
       int k=0;
       if(fast_sparse && !p->dump && !p->trace){
-        int * restrict dst_d = tr->fire_d;
-        int * restrict dst_t = tr->fire_t;
-        for(int d=0;d<nd;d++){
-          const unsigned char *qp = p->qpass + (size_t)d*nt;
-          int t=0;
-          for(; t+8<=nt; t+=8){
-            uint64_t w;
-            memcpy(&w, qp+t, sizeof w);
-            if(!w) continue;
-            uint64_t m = (w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
-                         & 0x8080808080808080ULL;
-            while(m){
-              const int off = __builtin_ctzll(m) >> 3;
-              dst_d[k] = d;
-              dst_t[k] = t + off;
-              k++;
-              m &= m - 1;
+        if(ns>0){
+          if(hmf_ensure_fire(tr,(size_t)ns)) return -1;
+          int * restrict dst_d = tr->fire_d;
+          int * restrict dst_t = tr->fire_t;
+          for(int d=0;d<nd;d++){
+            const unsigned char *qp = p->qpass + (size_t)d*nt;
+            int t=0;
+            for(; t+8<=nt; t+=8){
+              uint64_t w;
+              memcpy(&w, qp+t, sizeof w);
+              if(!w) continue;
+              uint64_t m = (w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
+                           & 0x8080808080808080ULL;
+              while(m){
+                const int off = __builtin_ctzll(m) >> 3;
+                dst_d[k] = d;
+                dst_t[k] = t + off;
+                k++;
+                m &= m - 1;
+              }
             }
-          }
-          for(; t<nt; t++){
-            if(qp[t]){ dst_d[k]=d; dst_t[k]=t; k++; }
+            for(; t<nt; t++){
+              if(qp[t]){ dst_d[k]=d; dst_t[k]=t; k++; }
+            }
           }
         }
         q15_direct_fire = 1;
@@ -2143,6 +2180,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     } else if(i==0){
       /* The first tier runs on every pair of the segment in one call: the data
          spectrum is read once and stays resident across the whole template sweep. */
+      if(hmf_ensure_cebuf(p,tr)) return -1;
       if(tr->g16){
         /* FP16: the reported magnitude is an upper bound on the FP32 one, so every pair
            the FP32 gate would pass passes here too (gate16.cc). */
@@ -2159,6 +2197,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       }
       const int elect_last = (i==p->ntiers-1 && p->direct && p->taps) ? 1 : 0;
       qlag = (use_q15 && elect_last) ? p->qidx : NULL;
+      if(qlag && hmf_ensure_cebuf(p,tr)) return -1;
       if(use_q15 && tr->qtm){
         if(hmf_q15_prepare_data(p,tr,ql)) return -1;
         const size_t stride = 2*tr->m + 32;
@@ -2174,6 +2213,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
           }
         }
         if(fast_sparse && checked_d && checked_t){
+          if(hmf_ensure_fire(tr,(size_t)nfire)) return -1;
           nnext = ap_q15_pairs_batch_on(p->full_fft,tr->m,tr->qdm,tr->qds,tr->qtm,tr->qts,
                                         d0,t0,checked_d,checked_t,nfire,thr,1,cstart,cend,
                                         tr->fire_d,tr->fire_t,NULL,qlag,tr->qscr);
@@ -2191,6 +2231,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         }
       } else if(!use_q15 && tr->g16 && fast_sparse && checked_d && checked_t
                 && !p->dump && !p->trace){
+        if(hmf_ensure_fire(tr,(size_t)nfire)) return -1;
         nnext = run_gate_pairs(p,tr,d0,t0,nt,checked_d,checked_t,nfire,start,end,
                                use_q15,elect_last,qlag,tr->fire_d,tr->fire_t);
         if(nnext < 0) return -1;
@@ -2215,6 +2256,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       /* Survivors already compacted directly into tr->fire_d, tr->fire_t. */
     } else if(i>0 && use_q15 && fast_sparse && checked_d && checked_t){
       /* Fast 8-byte SWAR scan of p->qpass in incoming (d, t) order without touching cebuf. */
+      if(nchecked>0 && hmf_ensure_fire(tr,(size_t)nchecked)) return -1;
       const unsigned char * restrict qp = p->qpass;
       int * restrict dst_d = tr->fire_d;
       int * restrict dst_t = tr->fire_t;
@@ -2239,29 +2281,32 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(qlag) tr->cebuf[(size_t)d*nt+t].index=qlag[j];
         dst_d[nnext]=d; dst_t[nnext]=t; nnext++;
       }
-    } else for(int j=0;j<nchecked;j++){
-      const int d = checked_d ? checked_d[j] : j/nt;
-      const int t = checked_t ? checked_t[j] : j%nt;
-      const size_t row=(size_t)d*nt+t;
-      const ap_peak ce = qstat ? (ap_peak){.index=0,
-                                           .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
-                               : (use_q15 ? (ap_peak){0,0.f,0.f,0.f} : tr->cebuf[row]);
-      int fire = qstat || (use_q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
-      if(i==0 && fire){
-        /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
-           MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */
-        if(p->dump){ float rec[8]={ce.magnitude,0.0f,(tr->g16&&!qstat)?ce.im:ce.magnitude,thr,thr,thr,
-                                   (float)(d0+d),(float)(t0+t)};
-                     fwrite(rec,sizeof rec,1,p->dump); }
-        const long pair=first_pair+(long)row+1;
-        if(p->trace && pair<6)
-          fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",pair,thr,ce.magnitude);
-      }
-      if(fire){
-        if(qlag) tr->cebuf[row].index = qlag[j];
-        tr->fire_d[nnext]=d; tr->fire_t[nnext]=t; nnext++;
-      } else if(!fast_sparse){
-        reject_row(p,peaks,counts,row,nb);
+    } else {
+      if(nchecked>0 && hmf_ensure_fire(tr,(size_t)nchecked)) return -1;
+      for(int j=0;j<nchecked;j++){
+        const int d = checked_d ? checked_d[j] : j/nt;
+        const int t = checked_t ? checked_t[j] : j%nt;
+        const size_t row=(size_t)d*nt+t;
+        const ap_peak ce = qstat ? (ap_peak){.index=0,
+                                             .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
+                                 : (use_q15 ? (ap_peak){0,0.f,0.f,0.f} : tr->cebuf[row]);
+        int fire = qstat || (use_q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
+        if(i==0 && fire){
+          /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
+             MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */
+          if(p->dump){ float rec[8]={ce.magnitude,0.0f,(tr->g16&&!qstat)?ce.im:ce.magnitude,thr,thr,thr,
+                                     (float)(d0+d),(float)(t0+t)};
+                       fwrite(rec,sizeof rec,1,p->dump); }
+          const long pair=first_pair+(long)row+1;
+          if(p->trace && pair<6)
+            fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",pair,thr,ce.magnitude);
+        }
+        if(fire){
+          if(qlag) tr->cebuf[row].index = qlag[j];
+          tr->fire_d[nnext]=d; tr->fire_t[nnext]=t; nnext++;
+        } else if(!fast_sparse){
+          reject_row(p,peaks,counts,row,nb);
+        }
       }
     }
     tr->checked += i==0 ? (long)nd*nt : nchecked;
@@ -2324,33 +2369,41 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
                             dump_or_trace ? p->qstat : NULL);
     if(ns<0) return -1;
     if(fast_sparse && !dump_or_trace){
-      int * restrict dst_d=tr->fire_d;
-      int * restrict dst_t=tr->fire_t;
-      for(int d=0;d<nd;d++){
-        const unsigned char *qp=p->qpass+(size_t)d*nc;
-        int c=0;
-        for(;c+8<=nc;c+=8){
-          uint64_t w;
-          memcpy(&w,qp+c,sizeof w);
-          if(!w) continue;
-          uint64_t m=(w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
-                     & 0x8080808080808080ULL;
-          while(m){
-            const int ci=c+(__builtin_ctzll(m)>>3);
-            for(int u=off[ci];u<off[ci+1];u++){
-              dst_d[nnext]=d;
-              dst_t[nnext]=members[u];
-              nnext++;
+      if(ns>0){
+        for(int d=0;d<nd;d++){
+          const unsigned char *qp=p->qpass+(size_t)d*nc;
+          int c=0;
+          for(;c+8<=nc;c+=8){
+            uint64_t w;
+            memcpy(&w,qp+c,sizeof w);
+            if(!w) continue;
+            uint64_t m=(w | ((w & 0x7f7f7f7f7f7f7f7fULL) + 0x7f7f7f7f7f7f7f7fULL))
+                       & 0x8080808080808080ULL;
+            while(m){
+              const int ci=c+(__builtin_ctzll(m)>>3);
+              const int u0=off[ci], u1=off[ci+1];
+              if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
+              int * restrict dst_d=tr->fire_d;
+              int * restrict dst_t=tr->fire_t;
+              for(int u=u0;u<u1;u++){
+                dst_d[nnext]=d;
+                dst_t[nnext]=members[u];
+                nnext++;
+              }
+              m&=m-1;
             }
-            m&=m-1;
           }
-        }
-        for(;c<nc;c++){
-          if(qp[c]){
-            for(int u=off[c];u<off[c+1];u++){
-              dst_d[nnext]=d;
-              dst_t[nnext]=members[u];
-              nnext++;
+          for(;c<nc;c++){
+            if(qp[c]){
+              const int u0=off[c], u1=off[c+1];
+              if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
+              int * restrict dst_d=tr->fire_d;
+              int * restrict dst_t=tr->fire_t;
+              for(int u=u0;u<u1;u++){
+                dst_d[nnext]=d;
+                dst_t[nnext]=members[u];
+                nnext++;
+              }
             }
           }
         }
@@ -2361,6 +2414,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
           const size_t crow=(size_t)d*nc+c;
           const int fire=p->qpass[crow]!=0;
           const float mag=dump_or_trace ? p->qstat[crow] : 0.0f;
+          if(fire && hmf_ensure_fire(tr,(size_t)(nnext+(off[c+1]-off[c])))) return -1;
           for(int u=off[c];u<off[c+1];u++){
             const int t=members[u];
             const size_t row=(size_t)d*nt+t;
@@ -2386,6 +2440,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
     p->qticks+=ap_ticks()-q0;
     tr->ticks+=ap_ticks()-t_0;
   } else {
+    if(hmf_ensure_cebuf(p,tr)) return -1;
     if(p->tier0_g16){
       if(ap_gate16_run(p->tier0_g16,d0,nd,0,nc,cstart,cend,tr->cebuf)<0) return -1;
     } else if(ap_mf_run(p->tier0_mf,d0,nd,0,nc,cspan,thr,tr->cebuf,NULL,cstart,cend)<0){
@@ -2393,13 +2448,15 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
     }
     tr->ticks+=ap_ticks()-t_0;
     if(fast_sparse && !dump_or_trace){
-      int * restrict dst_d=tr->fire_d;
-      int * restrict dst_t=tr->fire_t;
       for(int d=0;d<nd;d++){
         const ap_peak *ce_row=tr->cebuf+(size_t)d*nc;
         for(int c=0;c<nc;c++){
           if(ce_row[c].index>=0 && ce_row[c].magnitude>=thr){
-            for(int u=off[c];u<off[c+1];u++){
+            const int u0=off[c], u1=off[c+1];
+            if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
+            int * restrict dst_d=tr->fire_d;
+            int * restrict dst_t=tr->fire_t;
+            for(int u=u0;u<u1;u++){
               dst_d[nnext]=d;
               dst_t[nnext]=members[u];
               nnext++;
@@ -2412,6 +2469,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
         for(int c=0;c<nc;c++){
           const ap_peak ce=tr->cebuf[(size_t)d*nc+c];
           const int fire=(ce.index>=0 && ce.magnitude>=thr);
+          if(fire && hmf_ensure_fire(tr,(size_t)(nnext+(off[c+1]-off[c])))) return -1;
           for(int u=off[c];u<off[c+1];u++){
             const int t=members[u];
             const size_t row=(size_t)d*nt+t;

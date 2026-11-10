@@ -569,3 +569,64 @@ def test_held_playing_flag_is_thread_local():
     t.join(timeout=5.0)
     assert other_saw == [False]
     assert _choice.playing() is False
+
+
+def test_unsampled_banks_defer_non_default_layouts_and_pricing(monkeypatch):
+    """During set_reference, banks in an open trial build only DEFAULT's layout (rank 0), free
+    raw taps immediately, and defer block-size pricing and extra HMF builds to the _ROUND_BANKS
+    sampled banks in _joint_round."""
+    from matchedfilter import _calibration
+    priced = []
+    orig = _calibration.price_block_sizes
+    monkeypatch.setattr(_calibration, "price_block_sizes",
+                        lambda *a, **k: priced.append(1) or orig(*a, **k))
+
+    banks_and_rngs = [_inspiral_bank(seed=20 + i) for i in range(6)]
+    banks = [b for b, _ in banks_and_rngs]
+    if not getattr(banks[0], "_layouts", None):
+        pytest.skip("the model offered one block size only")
+
+    assert not priced, "set_reference must not run price_block_sizes before trial sampling"
+    for b in banks:
+        assert b._raw_taps is None and b._taps_list is None
+        assert b._layouts[0] is not None
+        assert all(s is None for s in b._layouts[1:])
+
+    data = _data(banks_and_rngs[0][1], 1 << 15)
+    # Run one joint round across all 6 banks: only _ROUND_BANKS (2) banks materialize arms.
+    TimeDomainFilterBank.filter_series_many([(b, data, {}) for b in banks])
+    materialized = sum(1 for b in banks if b._layouts is not None and all(s is not None for s in b._layouts))
+    unmaterialized = sum(1 for b in banks if b._layouts is not None and any(s is None for s in b._layouts))
+    assert materialized <= td._ROUND_BANKS
+    assert unmaterialized >= len(banks) - td._ROUND_BANKS
+
+
+def test_lazy_non_default_arm_lock_matches_direct_build():
+    """Locking a bank onto an unmaterialized non-default block-size arm builds that layout on
+    demand from rank 0's group taps and matches a fresh bank built directly at that size."""
+    bank, rng = _inspiral_bank(seed=42)
+    if len(bank._trial_cands) < 3 or bank._layouts is None:
+        pytest.skip("need at least two single block sizes")
+    other = bank._trial_cands[1]
+    arm = _settings.arm("n", other)
+    rank = bank._arm_rank(arm)
+    assert bank._layouts[rank] is None
+
+    # Lock directly onto the unmaterialized arm without calling _prepare_arms first.
+    bank._lock_arm(arm)
+    assert bank._layouts is None
+    assert {n for _, n in bank.chosen_layout} == {other}
+
+    tr = _trial.trial(td._trial_key(bank), bank._joint_arms)
+    tr.choice.lock(arm)
+    tr.choice.lock(tr.base)
+    direct, _ = _inspiral_bank(seed=42)
+    assert direct.chosen_layout == bank.chosen_layout
+    for i in range(len(bank.filters_f)):
+        np.testing.assert_array_equal(bank.filters_f[i], direct.filters_f[i])
+    x = _data(rng, 1 << 15)
+    r1 = bank.filter_series(x)
+    r2 = direct.filter_series(x)
+    np.testing.assert_array_equal(r1.template_indices, r2.template_indices)
+    np.testing.assert_allclose(np.abs(r1.snr), np.abs(r2.snr), rtol=2e-5, atol=1e-4)
+

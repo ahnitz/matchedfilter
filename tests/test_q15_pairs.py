@@ -22,7 +22,9 @@ def lib():
             ("ap_mf_set_q15_margin", [P, I], I),
             ("ap_mf_q15_screen", [P, I, I, I, I, F, Z, Z, P, P], I),
             ("ap_mf_q15_pairs", [P, I, P, P, I, I, F, Z, Z, P, P], I),
-            ("ap_mf_q15_pairs_lag", [P, I, P, P, I, I, F, Z, Z, P, P, P], I)):
+            ("ap_mf_q15_pairs_lag", [P, I, P, P, I, I, F, Z, Z, P, P, P], I),
+            ("ap_mf_run", [P, I, I, I, I, Z, F, P, P, Z, Z], I),
+            ("ap_mf_run_pairs_packed", [P, I, P, P, I, I, Z, F, P, Z, Z], I)):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = args, res
     return lib
@@ -145,5 +147,56 @@ def test_listed_screen_lag_election_and_zero_nan_scales(lib, target, m):
                                        C.c_float(0.0), lo, hi,
                                        lp.ctypes.data, ls.ctypes.data, li.ctypes.data)
         assert got0 == len(ds) and np.all(lp == 1)
+    finally:
+        lib.ap_mf_destroy(p)
+
+
+def test_deferred_tmre_q15_then_sparse_fp32_and_template_update(lib, target):
+    """Pairbatch plans defer tmre/tmim allocation during Q15 quantisation/screening and
+    materialize tmre/tmim lazily on first sparse FP32 pair evaluation without drift."""
+    m, nd, nt = 256, 5, 19            # nt not a multiple of pairbatch width
+    rng = np.random.default_rng(7719)
+    p = lib.ap_mf_create_pairbatch(m, nd, nt)
+    assert p
+    try:
+        D = _rows(rng, nd, m)
+        T = _rows(rng, nt, m)
+        for d in range(nd):
+            assert lib.ap_mf_set_data(p, d, D[d].ctypes.data) == 0
+        for t in range(nt):
+            assert lib.ap_mf_set_template(p, t, T[t].ctypes.data) == 0
+        lo, hi = 16, m - 16
+        if lib.ap_mf_q15_lanes(p) > 0:
+            qpass = np.zeros(nd * nt, np.uint8)
+            qstat = np.zeros(nd * nt, np.float32)
+            assert lib.ap_mf_q15_screen(p, 0, nd, 0, nt, C.c_float(1.5), lo, hi,
+                                        qpass.ctypes.data, qstat.ctypes.data) >= 0
+
+        # Dense FP32 reference vs sparse packed FP32 (which triggers lazy mf_ensure_tm)
+        ap_peak_dt = np.dtype([("index", np.int64), ("value", np.complex64),
+                               ("magnitude", np.float32)], align=True)
+        dense_pk = np.empty((nd, nt), ap_peak_dt)
+        assert lib.ap_mf_run(p, 0, nd, 0, nt, m, C.c_float(0.0),
+                             dense_pk.ctypes.data, None, lo, hi) >= 0
+        sel = np.array([0, 3, 18, 19, 25, 44, 71, 94], np.int64)
+        ds, ts = (np.ascontiguousarray(x, np.int32) for x in np.divmod(sel, nt))
+        sparse_pk = np.empty(len(sel), ap_peak_dt)
+        assert lib.ap_mf_run_pairs_packed(p, 0, ds.ctypes.data, ts.ctypes.data, len(sel),
+                                          0, m, C.c_float(0.0), sparse_pk.ctypes.data, lo, hi) == 1
+        ref_pk = dense_pk.reshape(-1)[sel]
+        np.testing.assert_array_equal(sparse_pk["index"], ref_pk["index"])
+        np.testing.assert_allclose(sparse_pk["value"], ref_pk["value"], rtol=2e-5, atol=2e-5)
+
+        # Overwrite templates after tmre/tmim has been materialized and verify sync
+        T2 = _rows(rng, nt, m)
+        for t in range(nt):
+            assert lib.ap_mf_set_template(p, t, T2[t].ctypes.data) == 0
+        assert lib.ap_mf_run(p, 0, nd, 0, nt, m, C.c_float(0.0),
+                             dense_pk.ctypes.data, None, lo, hi) >= 0
+        assert lib.ap_mf_run_pairs_packed(p, 0, ds.ctypes.data, ts.ctypes.data, len(sel),
+                                          0, m, C.c_float(0.0), sparse_pk.ctypes.data, lo, hi) == 1
+        ref_pk2 = dense_pk.reshape(-1)[sel]
+        np.testing.assert_array_equal(sparse_pk["index"], ref_pk2["index"])
+        np.testing.assert_allclose(sparse_pk["value"], ref_pk2["value"], rtol=2e-5, atol=2e-5)
     finally:
         lib.ap_mf_destroy(p)

@@ -574,7 +574,7 @@ class _TemplateGroup:
 
     def __init__(self, plan, n, template_indices, c_bad, n_valid, orig_taps_max, device=None,
                  plan_factory=None, kind=None, spectra_source=None, row_source=None,
-                 stored_bins=None):
+                 stored_bins=None, group_taps=None):
         # A hierarchical plan is made up front (references and templates load into it); a flat or
         # correlation plan only when something first filters with it, so a bank kept for its
         # spectra and layout alone costs no plan memory.
@@ -584,6 +584,7 @@ class _TemplateGroup:
         self.kind = kind
         self._spectra_source = spectra_source
         self._row_source = row_source
+        self._group_taps = group_taps
         self.n = int(n)
         self._stored_bins = int(n if stored_bins is None else stored_bins)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
@@ -1083,6 +1084,7 @@ class TimeDomainFilterBank:
             c_bad = int(np.ceil((orig_taps_max // 2) / self.rate_ratio))
             n_valid = int(chosen_N - l_data_max + 1)
 
+            donor = getattr(self, '_tap_donor', None)
             if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
                 group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
             else:
@@ -1091,7 +1093,11 @@ class TimeDomainFilterBank:
                                       (np.complex64 if self.complex_taps else np.float32))
                 for r, g_idx in enumerate(tmpl_indices):
                     cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
-                    group_taps[r, :cnt] = self._taps_list[g_idx][:cnt]
+                    if self._taps_list is not None:
+                        group_taps[r, :cnt] = self._taps_list[g_idx][:cnt]
+                    elif donor is not None:
+                        dg, dti = donor[int(g_idx)]
+                        group_taps[r, :cnt] = dg._group_taps[dti, :cnt]
             group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
             self._block_lengths_arr[tmpl_indices] = chosen_N
 
@@ -1168,6 +1174,7 @@ class TimeDomainFilterBank:
                 spectra_source=lambda s=src, p=pack: _group_spectra(pack=p, **s),
                 row_source=lambda rows, s=src: _group_spectra(rows=rows, **s),
                 stored_bins=chosen_N // 2 if pack else chosen_N,
+                group_taps=group_taps,
             )
             grp.templates_loaded = False
             self._built.append(grp)
@@ -1320,32 +1327,29 @@ class TimeDomainFilterBank:
                 if w is not None:
                     # the lock's layout alone: its "n=" size, else the default (smallest) size
                     n = (None if v == "model" else v) if v is not None else (singles[0] if singles else None)
-                    alts, sig = [self._choose_layout(fine_ref, df, single_n=n)], [n or "model"]
+                    alt0 = self._choose_layout(fine_ref, df, single_n=n)
+                    sig = [n or "model"]
                 else:
-                    alts = [self._choose_layout(fine_ref, df, single_n=n) for n in singles]
-                    alts.append(self._choose_layout(fine_ref, df))
                     sig = list(singles) + ["model"]
+                    n0 = None if sig[0] == "model" else sig[0]
+                    alt0 = self._choose_layout(fine_ref, df, single_n=n0)
                 self._candidate_sig = tuple(sig)
-                # The candidate layouts are built now -- the taps are freed below. One with an
-                # earlier one's partition shares its built layout. The bank starts on DEFAULT's,
-                # the first (its smallest size).
-                self._layouts = []
-                for k, alt in enumerate(alts):
-                    same = next((i for i in range(k) if alts[i][0] == alt[0]), None)
-                    if same is not None:
-                        self._layouts.append(self._layouts[same])
-                        continue
-                    if self._built is None or alt[0] != self._built_layout:
-                        self._build(*alt)
-                    self._layouts.append(self._snapshot())
-                start = 0
-                self._restore(self._layouts[start])
-                self._layout_rank = start
+                # Build DEFAULT's layout (rank 0) up front; any further trial candidate layouts
+                # are materialized lazily in _ensure_layout only on banks sampled by _joint_round
+                # (or if a non-default block-size arm wins the trial), avoiding block-size pricing
+                # and duplicate plans across unsampled leaf banks while freeing raw taps now.
+                if self._built is None or alt0[0] != self._built_layout:
+                    self._build(*alt0)
+                self._layout_rank = 0
                 self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
                 self._layout_ref = (reference, delta_f)
                 self._arms_ready = False
-                if len(self._layouts) < 2:
+                if len(sig) >= 2:
+                    self._layouts = [self._snapshot()] + [None] * (len(sig) - 1)
+                    self._lazy_trial_ref = (fine_ref, df)
+                else:
                     self._layouts = None
+                    self._lazy_trial_ref = None
             self._groups
             self._n_chosen = True
             self._taps_list = None
@@ -1416,12 +1420,45 @@ class TimeDomainFilterBank:
         for k, v in snap.items():
             setattr(self, k, v)
 
+    def _ensure_layout(self, rank: int):
+        """Materialize the rank-th candidate layout on demand from rank 0's group taps."""
+        layouts = getattr(self, '_layouts', None)
+        if not layouts or rank < 0 or rank >= len(layouts):
+            return None
+        if layouts[rank] is not None:
+            return layouts[rank]
+        cur = getattr(self, '_layout_rank', 0)
+        layouts[cur] = self._snapshot()
+        want = self._candidate_sig[rank]
+        fine_ref, df = self._lazy_trial_ref
+        alt = self._choose_layout(fine_ref, df, single_n=None if want == "model" else want)
+        same = next((i for i, s in enumerate(layouts)
+                     if s is not None and s.get('_built_layout') == alt[0]), None)
+        if same is not None:
+            layouts[rank] = layouts[same]
+        else:
+            self._tap_donor = layouts[0]['_template_map']
+            try:
+                self._build(*alt)
+            finally:
+                self._tap_donor = None
+            ref, rdf = self._layout_ref
+            self._current_ref_key = None
+            self.set_reference(ref, delta_f=rdf)
+            layouts[rank] = self._snapshot()
+            self._restore(layouts[cur])
+            self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
+        if all(s is not None for s in layouts):
+            self._lazy_trial_ref = None
+        return layouts[rank]
+
     def _use_layout(self, rank: int) -> None:
-        """Run on the rank-th candidate layout (built at the first reference). The plans differ,
+        """Run on the rank-th candidate layout (materialized lazily if needed). The plans differ,
         so the state version moves and recorded call plans are invalidated."""
         layouts = getattr(self, '_layouts', None)
         if not layouts or rank == getattr(self, '_layout_rank', 0) or rank >= len(layouts):
             return
+        self._ensure_layout(rank)
         if layouts[rank].get('_built') is layouts[self._layout_rank].get('_built'):
             self._layout_rank = rank                  # the same partition: nothing to switch
             return
@@ -1438,12 +1475,15 @@ class TimeDomainFilterBank:
         """Keep the rank-th layout and free the others, on the device too: the dropped
         layout's spectra and recordings sit in its GPU context's caches, which LRU evicts only
         under pressure -- on a small shared-memory GPU, after re-uploading live data."""
+        self._ensure_layout(rank)
         self._use_layout(rank)
         # a layout another rank shares (the same partition) is the live one: compared by its
         # groups, which every snapshot of the partition holds (a snapshot is retaken on leaving)
         keep = self._layouts[rank].get('_built') if self._layouts else None
-        dropped = [snap for snap in (self._layouts or []) if snap.get('_built') is not keep]
+        dropped = [snap for snap in (self._layouts or [])
+                   if snap is not None and snap.get('_built') is not keep]
         self._layouts = None
+        self._lazy_trial_ref = None
         ctxs = {}
         for snap in dropped:
             for g in snap.get('_built') or []:
@@ -1467,7 +1507,8 @@ class TimeDomainFilterBank:
         if self._layouts is None or rank == self._layout_rank:
             groups = self._built or ()
         else:
-            groups = self._layouts[rank].get('_built') or ()
+            snap = self._ensure_layout(rank)
+            groups = (snap.get('_built') if snap is not None else None) or ()
         return [g._plan for g in groups if g.is_hier and getattr(g, '_plan', None) is not None]
 
     def _prepare_arms(self) -> None:
@@ -1495,8 +1536,9 @@ class TimeDomainFilterBank:
         """The configuration this bank runs for an arm: its layout (by partition) and what each
         of the layout's plans runs."""
         r = self._arm_rank(label)
+        snap = self._ensure_layout(r) if self._layouts else None
         part = tuple((int(b), int(e), int(n)) for b, e, n, _ in
-                     (self._layouts[r].get('_built_layout') if self._layouts else self._built_layout))
+                     (snap.get('_built_layout') if snap is not None else self._built_layout))
         return part, tuple(p.arm_config(label) for p in self._layout_plans(r))
 
     def _use_arm(self, label) -> None:
