@@ -342,7 +342,8 @@ class HierarchicalFilter(MatchedFilter):
                 and self._gpu._shipped("compactc", self.n)
             )
         )
-        return (self._clusters_allowed and tiers >= 2 and self.ntemplates >= 4
+        min_tiers = 1 if self.device.kind == "cpu" else 2
+        return (self._clusters_allowed and tiers >= min_tiers and self.ntemplates >= 4
                 and self._pinned is None and self._cal_thr is None
                 and self._pending_ref is not None and len(self._pending_ref) == self.n
                 and dev_ok and not self._hermitian and _tier0_centroid_enabled())
@@ -370,7 +371,8 @@ class HierarchicalFilter(MatchedFilter):
         if got is not None and (got[1] or pass2 is not None):
             return got[0]
         usable = _gatechain.usable_bands(self._pending_ref, self.n)
-        if len(usable) < 2 or b not in usable[:-1]:
+        cand_ok = (b in usable) if self.device.kind == "cpu" else (len(usable) >= 2 and b in usable[:-1])
+        if not cand_ok:
             self._tier0_cand_cache[b] = (empty, True)
             return empty
         tmpl = self._templates_for_clustering() if templates is None else templates
@@ -424,8 +426,10 @@ class HierarchicalFilter(MatchedFilter):
             return None
         # Compare candidate arities against unclustered cost from smallest ratio upward
         snr = self._fs_snr or self.snr
+        is_cpu = self.device.kind == "cpu"
+        min_len = 1 if is_cpu else 2
         base_cm = self._cost_model(cluster_ratios={})
-        use_forced = forced_chain is not None and len(forced_chain) >= 2 and forced_chain[0] == b
+        use_forced = forced_chain is not None and len(forced_chain) >= min_len and forced_chain[0] == b
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         if use_forced:
             pl_uncl = _gatechain.chain_thresholds(
@@ -445,7 +449,7 @@ class HierarchicalFilter(MatchedFilter):
             best_cost = min((q["cost"] for q in uncl_plans), default=float("inf"))
         best_cl = None
         for cand in reversed(cands):
-            cm_cand = base_cm.with_tier0_cluster({b: cand.ratio})
+            cm_cand = base_cm.with_tier0_cluster({b: cand.ratio}, single_tier=is_cpu)
             if use_forced:
                 pl_lb = _gatechain.chain_thresholds(
                     self._pending_ref, self.n, snr, self.fd, forced_chain,
@@ -481,7 +485,7 @@ class HierarchicalFilter(MatchedFilter):
                     tier0_clusters={b: (a_q, cand.lag_pad)}, first=b
                 )
                 c_val = min(
-                    (q["cost"] for q in plans if len(q["chain"]) >= 2 and q["chain"][0] == b),
+                    (q["cost"] for q in plans if len(q["chain"]) >= min_len and q["chain"][0] == b),
                     default=float("inf"),
                 )
             if c_val < best_cost:
@@ -503,7 +507,8 @@ class HierarchicalFilter(MatchedFilter):
     def _active_tier0_cluster(self, chain=None):
         """Active `Tier0Cluster` for `chain[0]`, or `None` when Tier-0 clustering is disabled."""
         ch = self._chain if chain is None else chain
-        if ch is None or len(ch) < 2:
+        min_len = 1 if self.device.kind == "cpu" else 2
+        if ch is None or len(ch) < min_len:
             return None
         return self._tier0_cluster_for_band(int(ch[0]))
 
@@ -870,12 +875,13 @@ class HierarchicalFilter(MatchedFilter):
                 cm = cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
                                     fraction=getattr(self, "_one_bin_frac", 1.0),
                                     base=0.25 * cm.refine(0.1), multi_frac=mfrac)
+        is_cpu = self.device.kind == "cpu"
         if cluster_ratios is None:
             csig = self._clusters_sig()
             if csig and self._cal_thr is None:
-                cm = cm.with_tier0_cluster({b: r for b, r, _, _ in csig})
+                cm = cm.with_tier0_cluster({b: r for b, r, _, _ in csig}, single_tier=is_cpu)
         elif cluster_ratios:
-            cm = cm.with_tier0_cluster(cluster_ratios)
+            cm = cm.with_tier0_cluster(cluster_ratios, single_tier=is_cpu)
         return cm
 
     def _direct_key(self):
@@ -929,18 +935,19 @@ class HierarchicalFilter(MatchedFilter):
 
         # Lazily cluster only candidate Tier-0 bands whose optimistic lower bound can win
         if self._tier0_cluster_eligible():
+            is_cpu = self.device.kind == "cpu"
+            min_len = 1 if is_cpu else 2
             usable = _gatechain.usable_bands(self._pending_ref, self.n)
-            cand_bands = usable[:-1] if len(usable) >= 2 else []
+            cand_bands = usable if (is_cpu and usable) else (usable[:-1] if len(usable) >= 2 else [])
             tmpl = self._templates_for_clustering() if cand_bands else None
             if tmpl is not None:
                 if forced_want is not None:
-                    if len(forced_want) >= 2 and forced_want[0] in cand_bands:
+                    if len(forced_want) >= min_len and forced_want[0] in cand_bands:
                         self._tier0_cluster_for_band(
                             forced_want[0], templates=tmpl, forced_chain=forced_want
                         )
                 else:
                     max_k = int(_TIER0_MAX_ARITY)
-                    is_cpu = self.device.kind == "cpu"
                     opt_map = {
                         int(b): max(
                             0.15,
@@ -949,7 +956,7 @@ class HierarchicalFilter(MatchedFilter):
                         for b in cand_bands
                     }
                     base_cm = self._cost_model(cluster_ratios={})
-                    opt_cm = base_cm.with_tier0_cluster(opt_map)
+                    opt_cm = base_cm.with_tier0_cluster(opt_map, single_tier=is_cpu)
                     _, lb_plans = _gatechain.choose_chain(
                         self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                         cost=opt_cm, max_tiers=tiers, window=self.search_window
@@ -962,14 +969,14 @@ class HierarchicalFilter(MatchedFilter):
                     best_b0 = int(best_uncl["chain"][0]) if best_uncl is not None else self.n
                     lb_by_b0 = {
                         int(b0): min(
-                            (q["cost"] for q in lb_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
+                            (q["cost"] for q in lb_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
                             default=float("inf"),
                         )
                         for b0 in cand_bands
                     }
                     uncl_by_b0 = {
                         int(b0): min(
-                            (q["cost"] for q in uncl_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
+                            (q["cost"] for q in uncl_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
                             default=float("inf"),
                         )
                         for b0 in cand_bands
@@ -986,7 +993,8 @@ class HierarchicalFilter(MatchedFilter):
                             _, plans_r = _gatechain.choose_chain(
                                 self._pending_ref, self.n, snr, self.fd,
                                 ntemplates=self.ntemplates,
-                                cost=base_cm.with_tier0_cluster({b0: ratio}), max_tiers=tiers,
+                                cost=base_cm.with_tier0_cluster({b0: ratio}, single_tier=is_cpu),
+                                max_tiers=tiers,
                                 window=self.search_window, first=b0)
                             return min((q["cost"] for q in plans_r), default=float("inf"))
 
@@ -1006,14 +1014,14 @@ class HierarchicalFilter(MatchedFilter):
                             if bound(cand.ratio) >= min(limit, best_cand_b0_cost):
                                 continue
                             a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
-                            cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio})
+                            cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio}, single_tier=is_cpu)
                             _, cur_plans = _gatechain.choose_chain(
                                 self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                 cost=cm_b0, max_tiers=tiers, window=self.search_window,
                                 tier0_clusters={b0: (a_q, cand.lag_pad)}, first=b0
                             )
                             cand_b0_cost = min(
-                                (q["cost"] for q in cur_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
+                                (q["cost"] for q in cur_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
                                 default=float("inf"),
                             )
                             if cand_b0_cost < best_cand_b0_cost:

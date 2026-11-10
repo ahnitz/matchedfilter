@@ -431,7 +431,21 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     prod_ab = (W[None, :] * Ca_u.conj()) * Cb_u
 
     sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64) if s_step > 1 else None
-    if sub_offs is not None:
+    from . import _core as _c_t0
+    if hasattr(_c_t0, "tier0_refine_lags"):
+        best_dl = np.empty(npairs, dtype=np.int64)
+        g_vec = np.empty(npairs, dtype=np.complex128)
+        _c_t0.tier0_refine_lags(
+            np.ascontiguousarray(prod_ab, dtype=np.complex128),
+            exp_all,
+            np.ascontiguousarray(pdl, dtype=np.int64),
+            int(R),
+            int(s_step - 1) if s_step > 1 else 0,
+            best_dl,
+            g_vec,
+        )
+        pdl = best_dl
+    elif sub_offs is not None:
         best_abs = np.full(npairs, -1.0, dtype=np.float64)
         best_dl = pdl.copy()
         g_vec = np.zeros(npairs, dtype=np.complex128)
@@ -601,15 +615,28 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         g_coarse_p = prod_p.astype(np.complex64) @ shifts64.T
         dl_p = dls[np.argmax(np.abs(g_coarse_p), axis=1)]
         if sub_offs is not None:
-            best_abs_p = np.full(dl_p.size, -1.0, dtype=np.float64)
-            best_dl_p = dl_p.copy()
-            for off_val in sub_offs:
-                cdl_p = np.clip(dl_p + int(off_val), -R, R)
-                abs_p = np.abs(np.einsum("ij,ij->i", prod_p, exp_all[cdl_p + R]))
-                better_p = abs_p > best_abs_p
-                best_abs_p = np.where(better_p, abs_p, best_abs_p)
-                best_dl_p = np.where(better_p, cdl_p, best_dl_p)
-            dl_p = best_dl_p
+            if hasattr(_c_t0, "tier0_refine_lags"):
+                best_dl_p = np.empty(dl_p.size, dtype=np.int64)
+                _c_t0.tier0_refine_lags(
+                    np.ascontiguousarray(prod_p, dtype=np.complex128),
+                    exp_all,
+                    np.ascontiguousarray(dl_p, dtype=np.int64),
+                    int(R),
+                    int(s_step - 1),
+                    best_dl_p,
+                    None,
+                )
+                dl_p = best_dl_p
+            else:
+                best_abs_p = np.full(dl_p.size, -1.0, dtype=np.float64)
+                best_dl_p = dl_p.copy()
+                for off_val in sub_offs:
+                    cdl_p = np.clip(dl_p + int(off_val), -R, R)
+                    abs_p = np.abs(np.einsum("ij,ij->i", prod_p, exp_all[cdl_p + R]))
+                    better_p = abs_p > best_abs_p
+                    best_abs_p = np.where(better_p, abs_p, best_abs_p)
+                    best_dl_p = np.where(better_p, cdl_p, best_dl_p)
+                dl_p = best_dl_p
 
         by_arity = {}
         pos_dl = 0
@@ -1743,7 +1770,7 @@ class CostModel:
                    None if self.feed is None else (tuple(sorted(self.feed["band"].items())),
                                                    self.feed["full"]))
             if t0r:
-                sig = sig + (tuple(sorted(t0r.items())),)
+                sig = sig + (tuple(sorted(t0r.items())), bool(getattr(self, "tier0_single", True)))
             self._sig = sig
         return sig
 
@@ -1787,10 +1814,10 @@ class CostModel:
 
     def first_tier_for(self, chain, reach1):
         """(cost per pair, q15) of `chain`'s first tier, scaling dense Tier-0 work by centroid ratio
-        when `len(chain) > 1` and `chain[0]` has a Tier-0 cluster ratio."""
+        when `chain[0]` has an active Tier-0 cluster ratio."""
         b = int(chain[0])
         t0r = getattr(self, "tier0_ratios", None)
-        if len(chain) <= 1 or not t0r or b not in t0r:
+        if not t0r or b not in t0r or (len(chain) <= 1 and not getattr(self, "tier0_single", True)):
             return self.first_tier(b, reach1)
         ratio = t0r[b]
         c = self.dense[b] * ratio
@@ -1801,13 +1828,16 @@ class CostModel:
         cq = sc["dense"] * ratio + passed * sc["recheck"]
         return (cq, True) if cq <= c * (1.0 + TIE) else (c, False)
 
-    def with_tier0_cluster(self, ratios):
-        """Return a shallow copy pricing multi-tier chains' first tier with centroid ratios.
+    def with_tier0_cluster(self, ratios, single_tier=True):
+        """Return a shallow copy pricing chains' first tier with centroid ratios.
 
         Parameters
         ----------
         ratios : dict of {int: float} or None
             Mapping from candidate Tier-0 band `b` to `n_clusters / n_templates` (`< 1.0`).
+        single_tier : bool, optional
+            Whether single-tier chains `(b,)` may use Tier-0 centroids (`True` on CPU,
+            `False` on GPU).
 
         Returns
         -------
@@ -1821,6 +1851,7 @@ class CostModel:
         import copy
         cm = copy.copy(self)
         cm.tier0_ratios = clean
+        cm.tier0_single = bool(single_tier)
         cm._sig = None
         return cm
 
@@ -1897,10 +1928,21 @@ class CostModel:
         c, screened = self.first_tier_for(chain, reach[1] if len(reach) > 1 else 1.0)
         for i in range(1, len(chain)):
             c += reach[i] * self.sparse_for(chain[i], reach[i], screened)
-        # A one-tier chain behind the Q15 screen has no coarse lag to refine around (hmf.c: the
-        # screen reports none), so its survivors refine by transform, as the engine runs them.
         f = reach[len(chain)]
-        c += f * (self.refine(f) if screened and len(chain) == 1 else self.refine_for(chain, f, hw))
+        if len(chain) == 1:
+            b0 = int(chain[0])
+            t0r = getattr(self, "tier0_ratios", None)
+            if t0r and b0 in t0r and getattr(self, "tier0_single", True):
+                if hw is not None and self.prices_direct(chain):
+                    f_surv = (self.screen_reach(b0, f) or f) if screened else f
+                    c_elect = self.sparse(b0, f_surv) if b0 in self._sparse else self.dense[b0]
+                    c += f_surv * (c_elect + self.refine_for(chain, f_surv, hw))
+                else:
+                    c += f * self.refine(f)
+                return c
+            c += f * (self.refine(f) if screened else self.refine_for(chain, f, hw))
+            return c
+        c += f * self.refine_for(chain, f, hw)
         return c
 
 
@@ -2604,8 +2646,10 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     nsim = dsim if nsim is None else int(nsim)
     if nsamp is None:
         return None, []          # the tail bound needs more detections than the model holds
+    t0_single = bool(getattr(cost, "tier0_single", True))
+    min_t0_len = 1 if t0_single else 2
     t0_map = {}
-    if tier0_clusters and int(max_tiers) >= 2:
+    if tier0_clusters and int(max_tiers) >= min_t0_len:
         for b, sp in tier0_clusters.items():
             a, lp = (sp.alpha, sp.lag_pad) if hasattr(sp, "alpha") else sp
             t0_map[int(b)] = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
@@ -2665,13 +2709,16 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             int(nsim), int(nsamp))
 
     # Build joint multi-tier signal & noise matrices per clustered Tier-0 band (matching chain_thresholds)
+    t0_single = bool(getattr(cost, "tier0_single", True))
+    min_t0_len = 1 if t0_single else 2
     t0_draws = {}
-    if tier0_clusters and int(max_tiers) >= 2 and len(bands) >= 2:
+    if tier0_clusters and int(max_tiers) >= min_t0_len and len(bands) >= min_t0_len:
         t0_map = {}
         for b, sp in tier0_clusters.items():
             a, lp = (sp.alpha, sp.lag_pad) if hasattr(sp, "alpha") else sp
             t0_map[int(b)] = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
-        t0_bands = [b for b in bands[:-1] if b in t0_map]
+        cand_t0 = bands if t0_single else bands[:-1]
+        t0_bands = [b for b in cand_t0 if b in t0_map]
         for b0 in t0_bands:
             a0, lp0 = t0_map[b0]
             al_b0 = tuple(a0 if b == b0 else 1.0 for b in bands)
@@ -2689,11 +2736,14 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
 
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
-        if first is not None and (len(chain) < 2 or chain[0] != first):
+        if first is not None and (len(chain) < min_t0_len or chain[0] != first):
             continue
         offs = tuple(offsets_by_band[b] for b in chain)
-        if len(chain) > 1 and chain[0] in t0_draws:
+        if len(chain) >= min_t0_len and chain[0] in t0_draws:
             sig_use, noise_use, memo_use, lags_use = t0_draws[chain[0]]
+            if len(chain) == 1:
+                lags_use = lags
+                memo_use = memo_use + ("l1",)
         else:
             sig_use, noise_use, memo_use, lags_use = sig, noise, memo, lags
         pl = plan_chain(sig_use, noise_use, bands, list(chain), fd, cost, n, snr, prune=True,
@@ -2739,8 +2789,10 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     nsim = dsim if nsim is None else int(nsim)
     if nsamp is None:
         return None              # the tail bound needs more detections than the model holds
+    t0_single = bool(getattr(cost, "tier0_single", True))
+    min_t0_len = 1 if t0_single else 2
     t0_cl = None
-    if tier0_cluster is not None and len(chain) > 1:
+    if tier0_cluster is not None and len(chain) >= min_t0_len:
         a, lp = (tier0_cluster.alpha, tier0_cluster.lag_pad) if hasattr(tier0_cluster, "alpha") else tier0_cluster
         t0_cl = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
     sig_p = _gm._profile_sig(p)
@@ -2764,21 +2816,32 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     if hit is not None:
         _cache_put(_PLAN_CACHE, key, hit)
         return hit
-    _, _, bands = _cached_band_offsets(p, sig_p, n, floor)
+    _, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
     if not set(chain) <= set(bands):
         return None
     if t0_cl is not None:
         b0 = chain[0]
+        c_bands, _, _ = _cached_band_offsets(p, sig_p, n, floor)
+        off_map = dict(zip(c_bands, k0_cand))
+        k0s = tuple(off_map[b] for b in bands)
+        Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
+        sr_kw = {"k0s": k0s} if any(k0s) else {}
+        p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
         al_vec = tuple(t0_cl[0] if b == b0 else 1.0 for b in bands)
         lp_vec = tuple(t0_cl[1] if b == b0 else 0 for b in bands)
-        drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True, alphas=al_vec)
+        drawn = signal_draws(p_base, n, bands, snr, nsamp, window=window, lags_too=True, alphas=al_vec)
         if drawn is None:
             return None
         sig, lags = drawn
-        noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window,
+        if len(chain) == 1:
+            base_drawn = signal_draws(p_base, n, bands, snr, nsamp, window=window, lags_too=True)
+            if base_drawn is not None:
+                lags = base_drawn[1]
+        noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=window,
                                    alphas=al_vec, lag_pads=lp_vec)
-        memo = ("choose_t0", id(sig[0]), id(noise), chain[0], t0_cl, n, float(snr), float(fd),
-                tuple(bands), win, int(nsim), int(nsamp))
+        memo = (("choose_t0", id(sig[0]), id(noise), chain[0], t0_cl, n, float(snr), float(fd),
+                 tuple(bands), win, int(nsim), int(nsamp))
+                + (("l1",) if len(chain) == 1 else ()))
     else:
         drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True)
         if drawn is None:
@@ -2957,8 +3020,9 @@ def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND,
     all_chains = enumerate_chains(n, max_tiers, floor, bands=bands)
     if not all_chains:
         return None
+    t0_single = bool(getattr(cost, "tier0_single", True))
     min_all_floor = min(
-        (c0_floor_m[ch[0]] if len(ch) > 1 else c0_floor_1[ch[0]]) + _feed_min(ch)
+        (c0_floor_m[ch[0]] if (len(ch) > 1 or t0_single) else c0_floor_1[ch[0]]) + _feed_min(ch)
         for ch in all_chains
     )
     out_val = min_all_floor if math.isfinite(min_all_floor) else None
