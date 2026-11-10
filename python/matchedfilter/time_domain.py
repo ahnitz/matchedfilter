@@ -1475,6 +1475,48 @@ class TimeDomainFilterBank:
         """Keep the rank-th layout and free the others, on the device too: the dropped
         layout's spectra and recordings sit in its GPU context's caches, which LRU evicts only
         under pressure -- on a small shared-memory GPU, after re-uploading live data."""
+        layouts = self._layouts
+        if layouts and 0 <= rank < len(layouts) and layouts[rank] is None:
+            cur = getattr(self, '_layout_rank', 0)
+            layouts[cur] = self._snapshot()
+            want = self._candidate_sig[rank]
+            fine_ref, df = self._lazy_trial_ref
+            alt = self._choose_layout(fine_ref, df, single_n=None if want == "model" else want)
+            same = next((i for i, s in enumerate(layouts)
+                         if s is not None and s.get('_built_layout') == alt[0]), None)
+            if same is None:
+                # Release earlier layouts' plans before building the locked layout so peak RSS
+                # never holds two layouts simultaneously on unsampled banks.
+                donor_map = layouts[0]['_template_map']
+                ctxs = {}
+                for snap in layouts:
+                    if snap is None:
+                        continue
+                    for g in snap.get('_built') or []:
+                        p = getattr(g, '_plan', None)
+                        ctx = getattr(p, '_gpu', None)
+                        if ctx is not None:
+                            ctxs[id(ctx)] = ctx
+                        g._plan = None
+                for ctx in ctxs.values():
+                    ctx._drain()
+                    ctx._evict_all()
+                self._layouts = None
+                self._lazy_trial_ref = None
+                self._built = None
+                self._tap_donor = donor_map
+                try:
+                    self._build(*alt)
+                finally:
+                    self._tap_donor = None
+                self._layout_rank = rank
+                self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
+                ref, rdf = self._layout_ref
+                self._current_ref_key = None
+                self.set_reference(ref, delta_f=rdf)
+                self._state_version = getattr(self, '_state_version', 0) + 1
+                return
+            layouts[rank] = layouts[same]
         self._ensure_layout(rank)
         self._use_layout(rank)
         # a layout another rank shares (the same partition) is the live one: compared by its
