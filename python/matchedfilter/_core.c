@@ -1013,7 +1013,7 @@ static PyObject *HMF_set_tier0_clusters(HMFObject *self,PyObject *args){
     && bmem.len==(Py_ssize_t)self->nt*(Py_ssize_t)sizeof(int);
   int nc = valid ? (int)(boff.len/(Py_ssize_t)sizeof(int))-1 : 0;
   if(valid){
-    valid = nti>=2 && nc>=1 && nc<=self->nt
+    valid = nti>=1 && nc>=1 && nc<=self->nt
       && (size_t)bsp.len == (size_t)nc*2u*bands[0]*sizeof(float);
   }
   if(!valid){
@@ -2331,6 +2331,63 @@ static PyObject *M_tier0_pair_scores(PyObject *self,PyObject *args){
   Py_END_ALLOW_THREADS
   for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
   if(rc) return PyErr_NoMemory();
+  Py_RETURN_NONE;
+}
+
+void ap_tier0_refine_lags(const double *prod_ab, const double *exp_all, const int64_t *pdl,
+                          long long npairs, long long len, long long R, long long half_span,
+                          int64_t *out_dl, double *out_g);               /* src/tier0.cc */
+static PyObject *M_tier0_refine_lags(PyObject *self,PyObject *args){
+  (void)self;
+  Py_buffer pab={0}, ex={0}, pdl={0}, odl={0}, og={0};
+  PyObject *pabo, *exo, *pdlo, *odlo, *ogo=Py_None;
+  long long R=0, half_span=0;
+  if(!PyArg_ParseTuple(args,"OOOLLOO",&pabo,&exo,&pdlo,&R,&half_span,&odlo,&ogo)) return NULL;
+  int has_og = (ogo != Py_None);
+  int ok = 1;
+  int g_pab=0, g_ex=0, g_pdl=0, g_odl=0, g_og=0;
+  if(PyObject_GetBuffer(pabo,&pab,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else g_pab=1;
+  if(ok && PyObject_GetBuffer(exo,&ex,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else if(ok) g_ex=1;
+  if(ok && PyObject_GetBuffer(pdlo,&pdl,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else if(ok) g_pdl=1;
+  if(ok && PyObject_GetBuffer(odlo,&odl,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else if(ok) g_odl=1;
+  if(ok && has_og){
+    if(PyObject_GetBuffer(ogo,&og,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0;
+    else g_og=1;
+  }
+  Py_ssize_t npairs=0, len=0;
+  if(ok){
+    ok = pab.ndim==2 && ex.ndim==2 && pdl.ndim==1 && odl.ndim==1
+         && pab.itemsize==16 && strcmp(pab.format,"Zd")==0
+         && ex.itemsize==16 && strcmp(ex.format,"Zd")==0
+         && pdl.itemsize==8 && (strcmp(pdl.format,"q")==0 || strcmp(pdl.format,"l")==0)
+         && odl.itemsize==8 && (strcmp(odl.format,"q")==0 || strcmp(odl.format,"l")==0);
+    if(ok && has_og){
+      ok = og.ndim==1 && og.itemsize==16 && strcmp(og.format,"Zd")==0;
+    }
+    if(ok){
+      npairs=pab.shape[0]; len=pab.shape[1];
+      ok = npairs>=0 && len>=1 && R>=0 && half_span>=0
+           && ex.shape[0]==2*(Py_ssize_t)R+1 && ex.shape[1]==len
+           && pdl.shape[0]==npairs && odl.shape[0]==npairs
+           && (!has_og || og.shape[0]==npairs);
+    }
+  }
+  if(!ok){
+    if(g_pab) PyBuffer_Release(&pab);
+    if(g_ex) PyBuffer_Release(&ex);
+    if(g_pdl) PyBuffer_Release(&pdl);
+    if(g_odl) PyBuffer_Release(&odl);
+    if(g_og) PyBuffer_Release(&og);
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_refine_lags: invalid buffer shapes or dtypes");
+    return NULL;
+  }
+  Py_BEGIN_ALLOW_THREADS
+  ap_tier0_refine_lags((const double*)pab.buf,(const double*)ex.buf,(const int64_t*)pdl.buf,
+                       (long long)npairs,(long long)len,R,half_span,
+                       (int64_t*)odl.buf, has_og ? (double*)og.buf : NULL);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&pab); PyBuffer_Release(&ex); PyBuffer_Release(&pdl); PyBuffer_Release(&odl);
+  if(g_og) PyBuffer_Release(&og);
   Py_RETURN_NONE;
 }
 
@@ -3652,6 +3709,7 @@ static PyMethodDef methods[]={
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless, dsets) -> [(earlier thresholds, earlier reach, lasts)]: gatechain._chain_candidates's search"},
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
+  {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},

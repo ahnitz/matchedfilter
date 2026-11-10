@@ -719,3 +719,225 @@ def test_pass2_runs_only_when_asked_and_a_skipped_one_is_built_later(monkeypatch
     assert again[1] is not None
     np.testing.assert_array_equal(again[1].members, full[1].members)
     np.testing.assert_array_equal(again[1].specs, full[1].specs)
+
+
+@pytest.mark.parametrize("half_span", [0, 3, 7])
+def test_tier0_refine_lags_matches_numpy_reference(half_span):
+    """_core.tier0_refine_lags matches the exact complex128 shifted inner-product search across
+    interior and [-R, +R] boundary-clipped coarse lag guesses."""
+    rng = np.random.default_rng(9090 + half_span)
+    npairs, length, R = 29, 99, 16
+    prod_ab = rng.standard_normal((npairs, length)) + 1j * rng.standard_normal((npairs, length))
+    prod_ab = np.ascontiguousarray(prod_ab, dtype=np.complex128)
+    dls_all = np.arange(-R, R + 1, dtype=np.float64)
+    k_vec = np.arange(length, dtype=np.float64)
+    exp_all = np.ascontiguousarray(
+        np.exp((-2j * np.pi / (length * R)) * dls_all[:, None] * k_vec[None, :]),
+        dtype=np.complex128,
+    )
+    pdl = rng.integers(-R, R + 1, size=npairs, dtype=np.int64)
+    pdl[:4] = np.array([-R, -R + 1, R - 1, R], dtype=np.int64)
+
+    out_dl = np.full(npairs, -999, dtype=np.int64)
+    out_g = np.zeros(npairs, dtype=np.complex128)
+    _core.tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g)
+
+    if half_span == 0:
+        ref_dl = pdl.copy()
+        ref_g = np.einsum("ij,ij->i", prod_ab, exp_all[pdl + R])
+    else:
+        ref_abs = np.full(npairs, -1.0, dtype=np.float64)
+        ref_dl = pdl.copy()
+        ref_g = np.zeros(npairs, dtype=np.complex128)
+        for off_val in range(-half_span, half_span + 1):
+            cdl = np.clip(pdl + off_val, -R, R)
+            g_cur = np.einsum("ij,ij->i", prod_ab, exp_all[cdl + R])
+            abs_cur = np.abs(g_cur)
+            better = abs_cur > ref_abs
+            ref_abs = np.where(better, abs_cur, ref_abs)
+            ref_dl = np.where(better, cdl, ref_dl)
+            ref_g = np.where(better, g_cur, ref_g)
+
+    np.testing.assert_array_equal(out_dl, ref_dl)
+    np.testing.assert_allclose(out_g, ref_g, rtol=1e-13, atol=1e-13)
+
+
+@pytest.mark.parametrize("use_q15", [False, True])
+@pytest.mark.parametrize("use_direct", [False, True])
+def test_single_tier_chain_centroids_fft_and_direct_refine(use_q15, use_direct, monkeypatch):
+    """Single-tier CPU chains (e.g. (256,) at n=1024) cluster Tier 0 and recover exact flat-filter
+    peaks under both whole-block FFT refine and direct time-domain refine."""
+    monkeypatch.setenv("MF_GATE16", "0")
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1" if use_direct else "0")
+    monkeypatch.setenv("MF_CHAIN_FORCE", "1024:256")
+    n, nblocks, nt, tap_len = 1024, 4, 16, 129
+    b0 = 256
+    rng = np.random.default_rng(31415 + int(use_direct) * 17 + int(use_q15) * 31)
+
+    # Build 4 quad families of compact complex64 time-domain FIR taps sharing positive-band power
+    taps = np.zeros((nt, tap_len), dtype=np.complex64)
+    idx_t = np.arange(tap_len, dtype=np.float64) - tap_len // 2
+    env = np.hanning(tap_len)
+    for q in range(nt // 4):
+        f0 = 0.08
+        chirp = 0.0004 * ((q % 2) * 2 - 1)
+        cubic = 0.000008 * (q - 1.5)
+        base = env * np.exp(2j * np.pi * (f0 * idx_t + chirp * idx_t ** 2 + cubic * idx_t ** 3))
+        for m in range(4):
+            shift = m - 1
+            rolled = np.zeros(tap_len, dtype=np.complex128)
+            src_lo = max(0, -shift)
+            src_hi = min(tap_len, tap_len - shift)
+            rolled[src_lo + shift : src_hi + shift] = base[src_lo:src_hi] * np.exp(0.15j * m)
+            rolled /= np.linalg.norm(rolled)
+            taps[4 * q + m] = rolled.astype(np.complex64)
+
+    from matchedfilter.time_domain import template_spectra
+    counts = np.full(nt, tap_len, dtype=np.int64)
+    filt, _ = template_spectra(taps, counts, n)
+    templates = np.conj(filt).astype(np.complex64)
+    power = np.mean(np.abs(templates.astype(np.complex128)) ** 2, axis=0)
+    power /= power.sum()
+
+    # Build continuous complex series with loud injections in shifted non-anchor members
+    step = n // 2
+    nseries = (nblocks - 1) * step + n
+    series = ((rng.standard_normal(nseries) + 1j * rng.standard_normal(nseries)) / np.sqrt(2.0)).astype(
+        np.complex64
+    )
+    starts = np.arange(nblocks, dtype=np.int64) * step
+    ws = np.full(nblocks, 128, dtype=np.int64)
+    we = np.full(nblocks, n - 128, dtype=np.int64)
+    injections = [(0, 3, 340), (2, 11, 610)]
+    for b_idx, t_idx, lag in injections:
+        pos = int(starts[b_idx]) + lag - tap_len // 2
+        series[pos : pos + tap_len] += (11.5 * taps[t_idx]).astype(np.complex64)
+
+    flat = mf.MatchedFilter(n, ndata=nblocks, ntemplates=nt)
+    flat.set_templates(templates)
+    ref = flat.run_series(series, starts=starts, win_start=ws, win_end=we,
+                          binsize=n - 256, threshold=6.5)
+
+    hf = mf.HierarchicalFilter(n, ndata=nblocks, ntemplates=nt, snr=5.5, fd=1e-2,
+                               search_window=(128, n - 128))
+    hf.set_reference(power)
+    hf.set_templates(templates)
+    if use_direct:
+        hf.set_taps(taps, counts)
+    hf._execution_plan()
+    assert tuple(hf._chain) == (b0,)
+    cl_active = hf._active_tier0_cluster()
+    assert cl_active is not None
+    nc_active = int(cl_active.specs.shape[0])
+    assert 1 <= nc_active <= nt // 2
+    assert hf._mf.tier0_cluster_count() == nc_active
+    if use_q15:
+        hf._set_q15(True)
+        if not hf._q15:
+            pytest.skip("no Q15 screen available for Tier-0 band")
+    else:
+        hf._set_q15(False)
+
+    got = hf.run_series(series, starts=starts, win_start=ws, win_end=we,
+                        binsize=n - 256, threshold=6.5)
+    wc = hf.work_counts()
+    assert wc["checked"][0] == nblocks * nc_active
+    if use_direct and hf._resolve().direct_hw is not None:
+        assert hf.direct_stats()["pairs"] > 0
+
+    for b_idx, t_idx, _ in injections:
+        got_pk = got[b_idx, t_idx, 0]
+        ref_pk = ref[b_idx, t_idx, 0]
+        assert int(ref_pk["index"]) >= 0
+        assert int(got_pk["index"]) == int(ref_pk["index"])
+        np.testing.assert_allclose(got_pk["value"], ref_pk["value"], rtol=2e-4, atol=2e-4)
+
+
+@pytest.mark.parametrize("use_q15", [False, True])
+def test_single_tier_centroid_fdr_and_lower_bound(use_q15, monkeypatch):
+    """Single-tier clustered chains respect the false-dismissal budget across interior and
+    window-edge lags and satisfy pair_cost_lower_bound <= chosen cost."""
+    monkeypatch.setenv("MF_GATE16", "0")
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    n, nt = 1024, 16
+    snr = 5.5
+    fd = 0.05
+    chain = (256,)
+    win = (128, 896)
+    power, psd, templates = _make_colored_correlated_bank(n, nt, chain[0], seed=1707)
+
+    # Verify pair_cost_lower_bound <= chosen 1-tier clustered cost
+    cm = gc.CostModel(
+        n=n,
+        dense={64: 10.0, 128: 16.0, 256: 24.0, 512: 40.0},
+        sparse={b: [(1e-3, 18.0), (1e-1, 14.0)] for b in (64, 128, 256, 512)},
+        refine=[(1e-4, 95.0), (1e-2, 85.0)],
+    ).with_tier0_cluster({256: 0.25}, single_tier=True)
+    best, _ = gc.choose_chain(
+        power, n, snr=snr, fd=fd, ntemplates=nt, cost=cm, max_tiers=3,
+        window=win, tier0_clusters={256: (0.97, 1)}
+    )
+    lb = gc.pair_cost_lower_bound(power, n, snr, fd, cost=cm, window=win)
+    assert lb <= best["cost"] + 1e-9
+
+    monkeypatch.setenv("MF_CHAIN_FORCE", "256")
+    hf = mf.HierarchicalFilter(n, ndata=1, ntemplates=nt, snr=snr, fd=fd, search_window=win)
+    hf.set_reference(power)
+    hf.set_templates(templates)
+    hf._execution_plan()
+    assert tuple(hf._chain) == chain
+    cl_active = hf._active_tier0_cluster()
+    assert cl_active is not None
+    assert 1 <= hf._mf.tier0_cluster_count() <= nt // 2
+    if use_q15:
+        if not hf._mf.set_q15(True) or not hf._mf.q15_stats()[0]:
+            pytest.skip("no Q15 screen available for Tier-0 band")
+
+    flat = _core.MF(n, 1, nt)
+    flat.set_template_batch(0, templates)
+
+    rng = np.random.default_rng(1808 + int(use_q15))
+    noise_scale = np.sqrt(psd)
+    k = np.arange(n, dtype=np.float64)
+    step_r = n // chain[0]
+    w0, w1 = win
+
+    idx_f = np.empty(nt, dtype=np.int64)
+    val_f = np.empty(nt, dtype=np.complex64)
+    mag_f = np.empty(nt, dtype=np.float32)
+    cnt_f = np.empty(nt, dtype=np.int32)
+
+    det = 0
+    miss = 0
+    for trial in range(1200):
+        t_idx = int(trial % nt)
+        if trial % 4 == 0:
+            lag = float(rng.uniform(w0 + 2, w0 + 2 * step_r))
+        elif trial % 4 == 1:
+            lag = float(rng.uniform(w1 - 2 * step_r, w1 - 2))
+        else:
+            lag = float(rng.uniform(w0 + 32, w1 - 32))
+
+        sig = snr * psd * templates[t_idx] * np.exp((-2j * np.pi * lag / n) * k)
+        noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * noise_scale
+        d = (sig + noise).astype(np.complex64)
+
+        flat.set_data(0, d)
+        flat.run(0, 1, t_idx, 1, w1 - w0, snr, w0, w1, idx_f[:1], val_f[:1], mag_f[:1], cnt_f[:1])
+        at = int(idx_f[0])
+        if at < 0 or float(mag_f[0]) < snr or abs(at - lag) > 32:
+            continue
+
+        det += 1
+        hf.set_data(d[None, :])
+        res = hf.run(binsize=w1 - w0, threshold=snr, window=win)
+        pk = res[0, t_idx, 0]
+        if int(pk["index"]) < 0 or abs(complex(pk["value"])) < snr:
+            miss += 1
+
+    assert det >= 450
+    pval_high = binomtest(miss, det, p=fd, alternative="greater").pvalue
+    assert pval_high >= 1e-3, (
+        f"empirical 1-tier FDR {miss}/{det} = {miss / det:.4f} exceeded budget {fd:.3f} (p={pval_high:.2e})"
+    )

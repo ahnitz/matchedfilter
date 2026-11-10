@@ -291,15 +291,15 @@ def run_bank_case(job):
     nt = int(a["bank"])
     row = dict(profile=name, n=n, snr=a["snr"], fd=a["fd"], window=[ws, we], chain=list(chain),
                bank=nt)
-    if len(chain) < 2:
-        return dict(row, error="one tier: no tier-0 centroid")
+    if len(chain) < 1:
+        return dict(row, error="empty chain")
     H = bank_spectra(power, n, nt, chain[0], [a["seed"], n, sum(map(ord, name))])
     os.environ["MF_CHAIN_FORCE"] = "%d:%s" % (n, ",".join(map(str, chain)))
     os.environ["MF_AUTOTUNE"] = "0"
     flat = mf.MatchedFilter(n, ndata=_B, ntemplates=nt)
     flat.set_templates(np.conj(H))
     filters, plans = {}, {}
-    devices = [("cpu", None)] + ([("device", a["device"])] if a.get("device") else [])
+    devices = [("cpu", None)] + ([("device", a["device"])] if (a.get("device") and len(chain) >= 2) else [])
     for t0, on in (("t0c", True), ("flat0", False)):
         _hierarchical._TIER0_PAIR_CENTROID = on
         try:

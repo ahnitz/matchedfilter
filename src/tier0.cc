@@ -132,6 +132,58 @@ int PairScores(const float *ur, const float *ui, const float *sr, const float *s
   return rc;
 }
 
+/* Exact complex128 fine-lag refinement around each pair's coarse lag pdl[i] over
+   [max(-R, pdl[i] - half_span), min(R, pdl[i] + half_span)], keeping prod_ab[i] L1-resident
+   and avoiding (npairs, len) complex128 temporary shift matrices. */
+void RefineLags(const double *prod_ab, const double *exp_all, const int64_t *pdl,
+                long long npairs, long long len, long long R, long long half_span,
+                int64_t *out_dl, double *out_g) {
+  const hn::ScalableTag<double> dd;
+  using VD = hn::Vec<decltype(dd)>;
+  const long long W = (long long)hn::Lanes(dd);
+  for (long long i = 0; i < npairs; i++) {
+    const double *pa = prod_ab + i * 2 * len;
+    long long lo = pdl[i] - half_span;
+    long long hi = pdl[i] + half_span;
+    if (lo < -R) lo = -R;
+    if (hi > R) hi = R;
+    double best_abs = -1.0, best_re = 0.0, best_im = 0.0;
+    long long best_d = lo;
+    for (long long dl = lo; dl <= hi; dl++) {
+      const double *ex = exp_all + (dl + R) * 2 * len;
+      VD vre = hn::Zero(dd), vim = hn::Zero(dd);
+      long long k = 0;
+      for (; k + W <= len; k += W) {
+        VD ar, ai, br, bi;
+        hn::LoadInterleaved2(dd, pa + 2 * k, ar, ai);
+        hn::LoadInterleaved2(dd, ex + 2 * k, br, bi);
+        vre = hn::NegMulAdd(ai, bi, hn::MulAdd(ar, br, vre));
+        vim = hn::MulAdd(ai, br, hn::MulAdd(ar, bi, vim));
+      }
+      double re = hn::ReduceSum(dd, vre);
+      double im = hn::ReduceSum(dd, vim);
+      for (; k < len; k++) {
+        const double ar = pa[2 * k], ai = pa[2 * k + 1];
+        const double br = ex[2 * k], bi = ex[2 * k + 1];
+        re += ar * br - ai * bi;
+        im += ar * bi + ai * br;
+      }
+      const double mag = hypot(re, im);
+      if (mag > best_abs) {
+        best_abs = mag;
+        best_d = dl;
+        best_re = re;
+        best_im = im;
+      }
+    }
+    out_dl[i] = (int64_t)best_d;
+    if (out_g) {
+      out_g[2 * i] = best_re;
+      out_g[2 * i + 1] = best_im;
+    }
+  }
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ap_tier0
 HWY_AFTER_NAMESPACE();
@@ -139,11 +191,17 @@ HWY_AFTER_NAMESPACE();
 #if HWY_ONCE
 namespace ap_tier0 {
 HWY_EXPORT(PairScores);
+HWY_EXPORT(RefineLags);
 /* Dispatched unqualified from inside the namespace (see gauss.cc). */
 static int Dispatch(const float *ur, const float *ui, const float *sr, const float *si,
                     const double *v, long long mc, long long len, long long nsh, float *r2,
                     int32_t *bs) {
   return HWY_DYNAMIC_DISPATCH(PairScores)(ur, ui, sr, si, v, mc, len, nsh, r2, bs);
+}
+static void DispatchRefine(const double *prod_ab, const double *exp_all, const int64_t *pdl,
+                           long long npairs, long long len, long long R, long long half_span,
+                           int64_t *out_dl, double *out_g) {
+  HWY_DYNAMIC_DISPATCH(RefineLags)(prod_ab, exp_all, pdl, npairs, len, R, half_span, out_dl, out_g);
 }
 }  // namespace ap_tier0
 /* The tier-0 pair scores of an mc-template chunk (see the top of this file), for the best
@@ -152,5 +210,11 @@ extern "C" int ap_tier0_pair_scores(const float *ur, const float *ui, const floa
                                     const float *si, const double *v, long long mc,
                                     long long len, long long nsh, float *r2, int32_t *bs) {
   return ap_tier0::Dispatch(ur, ui, sr, si, v, mc, len, nsh, r2, bs);
+}
+extern "C" void ap_tier0_refine_lags(const double *prod_ab, const double *exp_all,
+                                     const int64_t *pdl, long long npairs, long long len,
+                                     long long R, long long half_span, int64_t *out_dl,
+                                     double *out_g) {
+  ap_tier0::DispatchRefine(prod_ab, exp_all, pdl, npairs, len, R, half_span, out_dl, out_g);
 }
 #endif

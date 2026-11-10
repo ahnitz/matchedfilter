@@ -937,7 +937,7 @@ int ap_hmf_tier0_cluster_count(const ap_hmf_plan *p){
 
 int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
                               const int *offsets,const int *members,int lag_pad){
-  if(!p || p->ntiers<2 || p->hermitian || !specs || !offsets || !members) return -1;
+  if(!p || p->ntiers<1 || p->hermitian || !specs || !offsets || !members) return -1;
   if(nc<1 || nc>p->nt || lag_pad<0 || (size_t)lag_pad>=p->tier[0].m) return -1;
   if(offsets[0]!=0 || offsets[nc]!=p->nt) return -1;
   unsigned char *seen=calloc((size_t)p->nt,1);
@@ -2096,10 +2096,37 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(cstart>0) cstart--;
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     if(i==0 && p->tier0_clustered){
-      if(t0==0 && nt==p->nt && p->ntiers>=2 && !p->dump){
+      if(t0==0 && nt==p->nt && !p->dump){
         int rc=hmf_run_tier0_clustered(p,d0,nd,fast_sparse,nb,peaks,counts,start,end,
                                        &fire_d,&fire_t,&nfire);
         if(rc<=0) return rc;
+        /* For a 1-tier clustered chain with direct time-domain refine active, elect each
+           surviving member template's own coarse peak lag at threshold 0 (dismissing none). */
+        if(p->ntiers==1 && p->direct && p->taps && start<end
+           && (end-1-start)/binsize < HMF_MAX_DIRECT_BINS){
+          int any_time=0;
+          for(int j=0;j<nfire;j++){ if(p->dtime[d0+fire_d[j]]){ any_time=1; break; } }
+          if(any_time){
+            unsigned long long t_el=ap_ticks();
+            if(hmf_ensure_cebuf(p,tr)) return -1;
+            for(int j=0;j<nfire;j++){
+              const int gd=d0+fire_d[j];
+              if((p->tier0_uncl_pend && p->tier0_uncl_pend[gd])
+                 || (tr->pending[gd] & HMF_PEND_MF)){
+                if(p->dspec[gd]
+                   && ingest_tier_data_target(p,tr,tr->mf,NULL,gd,p->dspec[gd],1,0))
+                  return -1;
+                if(p->tier0_uncl_pend) p->tier0_uncl_pend[gd]=0;
+                hmf_set_pending(tr,gd,(unsigned char)(tr->pending[gd] & ~HMF_PEND_MF));
+              }
+            }
+            if(ap_mf_run_pairs_pooled(tr->mf,d0,fire_d,fire_t,nfire,0,cspan,0.0f,
+                                      tr->cebuf,NULL,cstart,cend,nt)<0)
+              return -1;
+            tr->lagged=1;
+            tr->ticks+=ap_ticks()-t_el;
+          }
+        }
         continue;
       }
       if(hmf_sync_unclustered_tier0(p,d0,nd)) return -1;
