@@ -394,18 +394,25 @@ typedef struct {
    microsecond on an M2), so timed once it read 0, and a price of 0 is a failed price: the
    direct refine went unpriced, and so unused, on Apple CPUs (2026-11-01). Rounds of 100,000
    ticks -- 100 us of that clock, ~30 us of x86 cycles -- put its step under 1% of a round. */
-#define PRICE_MIN_TICKS 100000ull
+#define PRICE_MIN_TICKS 300000ull
 
 /* Ticks per call of job's correlation: the fastest of 7 rounds, each of as many calls as span
    PRICE_MIN_TICKS. */
 static double price_corr_ticks(const price_corr_job *j){
+  /* Fault output buffer and warm caches before sizing reps so a minor page fault or single
+     preemption does not truncate reps at 1 or read an unboosted idle-core clock. */
+  ap_td_corr_ex_on(j->fft,j->x,j->x_real,j->tr,j->ti,j->L,j->nl,j->out);
   unsigned long reps=1;
   for(;;){                                   /* calls per round, doubled until long enough */
-    const unsigned long long a=ap_ticks();
-    for(unsigned long k=0;k<reps;k++)
-      ap_td_corr_ex_on(j->fft,j->x,j->x_real,j->tr,j->ti,j->L,j->nl,j->out);
-    const unsigned long long b=ap_ticks();
-    if(b-a>=PRICE_MIN_TICKS || reps>=(1ul<<20)) break;
+    unsigned long long span=~0ull;
+    for(int p=0;p<2;p++){
+      const unsigned long long a=ap_ticks();
+      for(unsigned long k=0;k<reps;k++)
+        ap_td_corr_ex_on(j->fft,j->x,j->x_real,j->tr,j->ti,j->L,j->nl,j->out);
+      const unsigned long long d=ap_ticks()-a;
+      if(d<span) span=d;
+    }
+    if(span>=PRICE_MIN_TICKS || reps>=(1ul<<20)) break;
     reps*=2;
   }
   double best=1e30;
@@ -2350,6 +2357,20 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   return r;
 }
 
+static inline void hmf_sort_ints(int * restrict a,int n){
+  static const int gaps[5]={57,23,10,4,1};
+  for(int gi=(n>32 ? 0 : 4);gi<5;gi++){
+    const int gap=gaps[gi];
+    for(int i=gap;i<n;i++){
+      const int v=a[i];
+      if(v>=a[i-gap]) continue;
+      int j=i-gap;
+      do { a[j+gap]=a[j]; j-=gap; } while(j>=0 && a[j]>v);
+      a[j+gap]=v;
+    }
+  }
+}
+
 static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,size_t nb,
                                    ap_peak *peaks,int *counts,size_t start,size_t end,
                                    const int **out_fire_d,const int **out_fire_t,int *out_nfire){
@@ -2398,6 +2419,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
     if(fast_sparse && !dump_or_trace){
       if(ns>0){
         for(int d=0;d<nd;d++){
+          const int d_start=nnext;
           const unsigned char *qp=p->qpass+(size_t)d*nc;
           int c=0;
           for(;c+8<=nc;c+=8){
@@ -2433,10 +2455,12 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
               }
             }
           }
+          if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
         }
       }
     } else {
       for(int d=0;d<nd;d++){
+        const int d_start=nnext;
         for(int c=0;c<nc;c++){
           const size_t crow=(size_t)d*nc+c;
           const int fire=p->qpass[crow]!=0;
@@ -2461,6 +2485,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
             }
           }
         }
+        if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
       }
     }
     p->qpassed+=nnext;
@@ -2476,6 +2501,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
     tr->ticks+=ap_ticks()-t_0;
     if(fast_sparse && !dump_or_trace){
       for(int d=0;d<nd;d++){
+        const int d_start=nnext;
         const ap_peak *ce_row=tr->cebuf+(size_t)d*nc;
         for(int c=0;c<nc;c++){
           if(ce_row[c].index>=0 && ce_row[c].magnitude>=thr){
@@ -2490,9 +2516,11 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
             }
           }
         }
+        if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
       }
     } else {
       for(int d=0;d<nd;d++){
+        const int d_start=nnext;
         for(int c=0;c<nc;c++){
           const ap_peak ce=tr->cebuf[(size_t)d*nc+c];
           const int fire=(ce.index>=0 && ce.magnitude>=thr);
@@ -2518,6 +2546,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
             }
           }
         }
+        if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
       }
     }
   }
