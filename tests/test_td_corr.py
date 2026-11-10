@@ -102,3 +102,50 @@ def test_td_corr_tap_lengths_up_to_1024(native, target_isa, mode):
             out_cr = np.empty(2 * nlag, dtype=np.float32)
             native.ap_td_corr(x.ctypes.data, tr.ctypes.data, length, nlag, out_cr.ctypes.data)
             np.testing.assert_array_equal(out_cr, out)
+
+
+@pytest.mark.parametrize("mode", ["rr", "rc", "cc", "cr"])
+def test_td_corr_nan_fenced_exact_bounds_and_odd_windows(native, target_isa, mode):
+    """Exact input/output bounds check with NaN fences immediately outside valid x and guard
+    canaries outside out across odd refine windows (2*hw*R + 1 = 17, 33, 49, 65) and tails."""
+    rng = np.random.default_rng(2026)
+    x_real = 1 if mode in ("rr", "rc") else 0
+    has_ti = mode in ("rc", "cc")
+    step = 1 if x_real else 2
+    guard = np.float32(-4321.5)
+
+    for length in (1, 3, 4, 7, 8, 9, 15, 16, 17, 64, 256, 385):
+        tr_buf = np.full(length + 16, np.nan, dtype=np.float32)
+        tr = tr_buf[8 : 8 + length]
+        tr[:] = rng.standard_normal(length).astype(np.float32)
+        if has_ti:
+            ti_buf = np.full(length + 16, np.nan, dtype=np.float32)
+            ti = ti_buf[8 : 8 + length]
+            ti[:] = rng.standard_normal(length).astype(np.float32)
+            ti_ptr = ti.ctypes.data
+        else:
+            ti = None
+            ti_ptr = 0
+
+        for nlag in (1, 2, 3, 5, 7, 9, 15, 17, 31, 33, 47, 49, 63, 65):
+            nvalid = step * (nlag + length - 1)
+            x_buf = np.full(nvalid + 64, np.nan, dtype=np.float32)
+            x_view = x_buf[32 : 32 + nvalid]
+            x_view[:] = rng.standard_normal(nvalid).astype(np.float32)
+
+            out_buf = np.full(2 * nlag + 32, guard, dtype=np.float32)
+            out_view = out_buf[16 : 16 + 2 * nlag]
+
+            native.ap_td_corr_ex(
+                x_view.ctypes.data, x_real, tr.ctypes.data, ti_ptr, length, nlag,
+                out_view.ctypes.data,
+            )
+            assert np.all(np.isfinite(out_view)), f"NaN leaked at L={length}, nlag={nlag}, mode={mode}"
+            assert np.all(out_buf[:16] == guard)
+            assert np.all(out_buf[16 + 2 * nlag :] == guard)
+            ref = _reference_corr(x_view, x_real, tr, ti, length, nlag)
+            scale = max(float(np.max(np.abs(ref))), float(np.sqrt(length)))
+            assert np.max(np.abs(out_view.astype(np.float64) - ref)) <= 1.5e-6 * scale
+            if mode == "rr":
+                assert np.all(out_view[1::2] == 0.0)
+

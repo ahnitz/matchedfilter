@@ -629,3 +629,108 @@ def test_multibin_per_bin_coarse_election_with_loud_neighbor_excursion(use_q15_l
     m = i0 >= 0
     np.testing.assert_allclose(v1[m], v0[m], rtol=2e-5, atol=1e-4)
 
+
+@pytest.mark.parametrize("isa", mf.targets())
+@pytest.mark.parametrize("real_quadrature", [False, True])
+def test_direct_refine_multi_isa_odd_and_tail_windows(isa, real_quadrature, monkeypatch):
+    """Across every runtime SIMD target, direct refine on odd 2*hw*R+1 windows, clipped windows,
+    and truncated end-of-series blocks (have < n) matches the whole-block transform."""
+    import os
+    from matchedfilter import _prices
+
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_GATE16", "0")
+    monkeypatch.setattr(_prices, "_DIRECT_PAIR", {})
+    mf.backend()
+    mf.set_target(isa)
+    try:
+        if not real_quadrature:
+            data = _bank(n=1024, T=16, nblocks=18, nsig=12, seed=31)
+            n, taps, counts, spec, series, layout, ref, window = data
+            starts, w0, w1 = layout
+            # Truncate series so the final block has have < n (tests unpadded dx tail path too).
+            series_cut = series[: int(starts[-1] + w1[-1] + int(counts.max()) // 2 - 5)]
+            monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+            hf1 = mf.HierarchicalFilter(n, 1, T := spec.shape[0], snr=6.0, fd=1e-2,
+                                        chain=(256, 512), search_window=window)
+            hf1.set_reference(ref); hf1.set_templates(spec); hf1.set_taps(taps, counts)
+            hf1._execution_plan().set_direct_prices(0.01, 1e9)
+            i1, v1 = hf1.run_series(series_cut, starts, w0, w1, binsize=n, threshold=6.0, raw=True)
+            i1, v1, st = i1.copy(), v1.copy(), hf1.direct_stats()
+            thr = hf1._resolve().thresholds
+
+            monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+            hf0 = mf.HierarchicalFilter(n, 1, T, snr=6.0, fd=1e-2, chain=(256, 512),
+                                        search_window=window)
+            hf0.set_reference(ref); hf0.set_templates(spec); hf0.set_coarse_threshold(thr)
+            i0, v0 = hf0.run_series(series_cut, starts, w0, w1, binsize=n, threshold=6.0, raw=True)
+            assert (i0 >= 0).sum() > 10
+            assert st["pairs"] > 0, (isa, st)
+            np.testing.assert_array_equal(i1, i0)
+            m = i0 >= 0
+            np.testing.assert_allclose(v1[m], v0[m], rtol=2e-5, atol=1e-4)
+        else:
+            from matchedfilter.benchmark import _inspiral_power
+            rng = np.random.default_rng(37)
+            n, T, nblocks, nsig = 1024, 16, 18, 10
+            counts = (2 * rng.integers(45, 130, T) + 1).astype(np.int64)
+            taps = np.zeros((T, int(counts.max())), np.complex64)
+            for t in range(T):
+                L = int(counts[t])
+                w = np.zeros(L, np.complex128)
+                w[L // 2] = np.exp(1j * (0.3 + 0.07 * t))
+                w += 0.15 * np.hanning(L) * np.exp(1j * np.linspace(0, 3 + 0.1 * t, L)) / np.sqrt(L)
+                taps[t, :L] = w.astype(np.complex64)
+            filt, valid = template_spectra(taps, counts, n)
+            spec = np.conj(filt)
+            cbad, vend = int(valid[:, 0].max()), int(valid[:, 1].min())
+            step = vend - cbad
+            total = step * (nblocks - 1) + vend + 7  # truncated final block (have < n)
+            tot_fft = 1 << int(np.ceil(np.log2(total + n)))
+            p1 = _inspiral_power(tot_fft)
+            p1[tot_fft // 2 :] = 0.0
+            p1 /= p1.sum()
+            W = np.fft.rfft(rng.standard_normal(tot_fft))
+            S = np.zeros_like(W)
+            m_bins = min(len(S), tot_fft // 2)
+            S[:m_bins] = W[:m_bins] * np.sqrt(p1[:m_bins] * tot_fft)
+            full = np.fft.irfft(S, n=tot_fft)
+            full /= np.std(full)
+            pulse = np.real(np.fft.ifft(p1) * tot_fft) * 2.0
+            gap = (total - 2 * n) // max(nsig, 1)
+            for i in range(nsig):
+                full += rng.uniform(8.5, 11.0) * np.roll(pulse, cbad + 48 + i * gap)
+            x = full[:total].astype(np.float32)
+            starts = (np.arange(nblocks) * step).astype(np.int64)
+            w0 = np.full(nblocks, cbad, np.int64)
+            w1 = np.full(nblocks, vend, np.int64)
+            q = n // 32
+            win = ((cbad // q) * q, n - (cbad // q) * q)
+            ref = _inspiral_power(n)
+            ref[n // 2 :] = 0.0
+
+            monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+            hf1 = mf.HierarchicalFilter(n, 1, T, snr=6.0, fd=1e-2, chain=(256, 512),
+                                        search_window=win)
+            hf1.set_reference(ref); hf1.set_templates(spec); hf1.set_taps(taps, counts)
+            # Force cheap direct price so AVX1/SSE4 also exercise direct refine on real+complex taps
+            hf1._execution_plan().set_direct_prices(0.01, 1e9)
+            i1, v1 = hf1.run_series(x, starts, w0, w1, binsize=n, threshold=6.0, raw=True)
+            i1, v1, st = i1.copy(), v1.copy(), hf1.direct_stats()
+            thr = hf1._resolve().thresholds
+
+            monkeypatch.setenv("MF_DIRECT_REFINE", "0")
+            hf0 = mf.HierarchicalFilter(n, 1, T, snr=6.0, fd=1e-2, chain=(256, 512),
+                                        search_window=win)
+            hf0.set_reference(ref); hf0.set_templates(spec); hf0.set_coarse_threshold(thr)
+            i0, v0 = hf0.run_series(x, starts, w0, w1, binsize=n, threshold=6.0, raw=True)
+
+            assert (i0 >= 0).sum() > 8
+            assert st["pairs"] > 0, (isa, st)
+            np.testing.assert_array_equal(i1, i0)
+            m = i0 >= 0
+            np.testing.assert_allclose(v1[m], v0[m], rtol=2e-5, atol=1e-4)
+    finally:
+        mf.set_target(os.environ.get("MF_ISA") or None)
+
+

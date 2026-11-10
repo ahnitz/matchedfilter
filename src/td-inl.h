@@ -213,22 +213,51 @@ static void td_corr(const float *HWY_RESTRICT x, const float *HWY_RESTRICT taps,
   }
 #endif
   if (i + W <= nf) { td_pass_cr_vec(x + i, taps, L, out + i); i += W; }
-  for (; i < nf; i += 2) {
-    float ar = 0.f, br = 0.f, ai = 0.f, bi = 0.f;
+  if (nf - i >= 4 && L >= (int)(W / 2)) {
+    const size_t rem_f = nf - i, rem = rem_f / 2;
+    const int k_safe = L - (int)(W / 2) + (int)rem;
+    vf a0 = V_ZERO(), b0 = V_ZERO(), c0 = V_ZERO(), d0 = V_ZERO();
     int k = 0;
-    for (; k + 1 < L; k += 2) {
-      const float w0 = taps[k], w1 = taps[k + 1];
+    AP_TD_NO_UNROLL
+    for (; k + 3 < k_safe; k += 4) {
       const float *p = x + i + 2 * (size_t)k;
-      ar += w0 * p[0]; ai += w0 * p[1];
-      br += w1 * p[2]; bi += w1 * p[3];
+      a0 = V_FMADD(V_SET1(taps[k]), V_LOADU(p), a0);
+      b0 = V_FMADD(V_SET1(taps[k + 1]), V_LOADU(p + 2), b0);
+      c0 = V_FMADD(V_SET1(taps[k + 2]), V_LOADU(p + 4), c0);
+      d0 = V_FMADD(V_SET1(taps[k + 3]), V_LOADU(p + 6), d0);
+    }
+    for (; k < k_safe; k++) {
+      a0 = V_FMADD(V_SET1(taps[k]), V_LOADU(x + i + 2 * (size_t)k), a0);
+    }
+    alignas(64) float xtail[2 * AP_W] = {0};
+    memcpy(xtail, x + i + 2 * (size_t)k_safe, (W - 2) * sizeof(float));
+    for (int t = 0; t < L - k_safe; t++) {
+      a0 = V_FMADD(V_SET1(taps[k_safe + t]), V_LOADU(xtail + 2 * (size_t)t), a0);
+    }
+    alignas(64) float tmp[AP_W];
+    V_STOREU(tmp, V_ADD(V_ADD(a0, b0), V_ADD(c0, d0)));
+    memcpy(out + i, tmp, rem_f * sizeof(float));
+    i = nf;
+  }
+  for (; i < nf; i += 2) {
+    float ar0 = 0.f, ar1 = 0.f, ar2 = 0.f, ar3 = 0.f;
+    float ai0 = 0.f, ai1 = 0.f, ai2 = 0.f, ai3 = 0.f;
+    int k = 0;
+    for (; k + 3 < L; k += 4) {
+      const float *p = x + i + 2 * (size_t)k;
+      const float w0 = taps[k], w1 = taps[k + 1], w2 = taps[k + 2], w3 = taps[k + 3];
+      ar0 += w0 * p[0]; ai0 += w0 * p[1];
+      ar1 += w1 * p[2]; ai1 += w1 * p[3];
+      ar2 += w2 * p[4]; ai2 += w2 * p[5];
+      ar3 += w3 * p[6]; ai3 += w3 * p[7];
     }
     for (; k < L; k++) {
       const float w0 = taps[k];
       const float *p = x + i + 2 * (size_t)k;
-      ar += w0 * p[0]; ai += w0 * p[1];
+      ar0 += w0 * p[0]; ai0 += w0 * p[1];
     }
-    out[i] = ar + br;
-    out[i + 1] = ai + bi;
+    out[i] = (ar0 + ar1) + (ar2 + ar3);
+    out[i + 1] = (ai0 + ai1) + (ai2 + ai3);
   }
 }
 
@@ -356,12 +385,43 @@ static void td_corr_rc(const float *HWY_RESTRICT x, const float *HWY_RESTRICT tr
       for (; k < L; k++) a0 = V_FMADD(V_SET1(tr[k]), V_LOADU(x + i + (size_t)k), a0);
       v_inter(out + 2 * i, V_ADD(V_ADD(a0, b0), V_ADD(c0, d0)), V_ZERO());
     }
-    for (; i < nl; i++) {
-      float ar = 0.f, br = 0.f;
+    if (nl - i >= 2 && L >= (int)W) {
+      const size_t rem = nl - i;
+      const int k_safe = L - (int)W + (int)rem;
+      vf a0 = V_ZERO(), b0 = V_ZERO(), c0 = V_ZERO(), d0 = V_ZERO();
       int k = 0;
-      for (; k + 1 < L; k += 2) { ar += tr[k] * x[i + k]; br += tr[k + 1] * x[i + k + 1]; }
-      for (; k < L; k++) ar += tr[k] * x[i + k];
-      out[2 * i] = ar + br;
+      AP_TD_NO_UNROLL
+      for (; k + 3 < k_safe; k += 4) {
+        const float *p = x + i + (size_t)k;
+        AP_TD_HIDE_PTR(p);
+        a0 = V_FMADD(V_SET1(tr[k]), V_LOADU(p), a0);
+        b0 = V_FMADD(V_SET1(tr[k + 1]), V_LOADU(p + 1), b0);
+        c0 = V_FMADD(V_SET1(tr[k + 2]), V_LOADU(p + 2), c0);
+        d0 = V_FMADD(V_SET1(tr[k + 3]), V_LOADU(p + 3), d0);
+      }
+      for (; k < k_safe; k++) a0 = V_FMADD(V_SET1(tr[k]), V_LOADU(x + i + (size_t)k), a0);
+      alignas(64) float xtail[2 * AP_W] = {0};
+      memcpy(xtail, x + i + (size_t)k_safe, (W - 1) * sizeof(float));
+      for (int t = 0; t < L - k_safe; t++) {
+        a0 = V_FMADD(V_SET1(tr[k_safe + t]), V_LOADU(xtail + (size_t)t), a0);
+      }
+      alignas(64) float tmp[2 * AP_W];
+      v_inter(tmp, V_ADD(V_ADD(a0, b0), V_ADD(c0, d0)), V_ZERO());
+      memcpy(out + 2 * i, tmp, 2 * rem * sizeof(float));
+      i = nl;
+    }
+    for (; i < nl; i++) {
+      float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+      int k = 0;
+      for (; k + 3 < L; k += 4) {
+        const float *p = x + i + (size_t)k;
+        a0 += tr[k] * p[0];
+        a1 += tr[k + 1] * p[1];
+        a2 += tr[k + 2] * p[2];
+        a3 += tr[k + 3] * p[3];
+      }
+      for (; k < L; k++) a0 += tr[k] * x[i + k];
+      out[2 * i] = (a0 + a1) + (a2 + a3);
       out[2 * i + 1] = 0.f;
     }
     return;
@@ -517,20 +577,56 @@ static void td_corr_rc(const float *HWY_RESTRICT x, const float *HWY_RESTRICT tr
       v_inter(out + 2 * i, V_ADD(ar, br), V_ADD(ai, bi));
     }
   }
-  for (; i < nl; i++) {
-    float ar = 0.f, br = 0.f, ai = 0.f, bi = 0.f;
+  if (nl - i >= 2 && L >= (int)W) {
+    const size_t rem = nl - i;
+    const int k_safe = L - (int)W + (int)rem;
+    vf ar = V_ZERO(), br = V_ZERO(), ai = V_ZERO(), bi = V_ZERO();
     int k = 0;
-    for (; k + 1 < L; k += 2) {
-      const float x0 = x[i + k], x1 = x[i + k + 1];
-      ar += tr[k] * x0; ai += ti[k] * x0;
-      br += tr[k + 1] * x1; bi += ti[k + 1] * x1;
+    AP_TD_NO_UNROLL
+    for (; k + 1 < k_safe; k += 2) {
+      const float *p = x + i + (size_t)k;
+      AP_TD_HIDE_PTR(p);
+      const vf x0 = V_LOADU(p), x1 = V_LOADU(p + 1);
+      ar = V_FMADD(V_SET1(tr[k]), x0, ar);
+      ai = V_FMADD(V_SET1(ti[k]), x0, ai);
+      br = V_FMADD(V_SET1(tr[k + 1]), x1, br);
+      bi = V_FMADD(V_SET1(ti[k + 1]), x1, bi);
+    }
+    for (; k < k_safe; k++) {
+      const vf x0 = V_LOADU(x + i + (size_t)k);
+      ar = V_FMADD(V_SET1(tr[k]), x0, ar);
+      ai = V_FMADD(V_SET1(ti[k]), x0, ai);
+    }
+    alignas(64) float xtail[2 * AP_W] = {0};
+    memcpy(xtail, x + i + (size_t)k_safe, (W - 1) * sizeof(float));
+    for (int t = 0; t < L - k_safe; t++) {
+      const vf x0 = V_LOADU(xtail + (size_t)t);
+      ar = V_FMADD(V_SET1(tr[k_safe + t]), x0, ar);
+      ai = V_FMADD(V_SET1(ti[k_safe + t]), x0, ai);
+    }
+    alignas(64) float tmp[2 * AP_W];
+    v_inter(tmp, V_ADD(ar, br), V_ADD(ai, bi));
+    memcpy(out + 2 * i, tmp, 2 * rem * sizeof(float));
+    i = nl;
+  }
+  for (; i < nl; i++) {
+    float ar0 = 0.f, ar1 = 0.f, ar2 = 0.f, ar3 = 0.f;
+    float ai0 = 0.f, ai1 = 0.f, ai2 = 0.f, ai3 = 0.f;
+    int k = 0;
+    for (; k + 3 < L; k += 4) {
+      const float *p = x + i + (size_t)k;
+      const float x0 = p[0], x1 = p[1], x2 = p[2], x3 = p[3];
+      ar0 += tr[k] * x0; ai0 += ti[k] * x0;
+      ar1 += tr[k + 1] * x1; ai1 += ti[k + 1] * x1;
+      ar2 += tr[k + 2] * x2; ai2 += ti[k + 2] * x2;
+      ar3 += tr[k + 3] * x3; ai3 += ti[k + 3] * x3;
     }
     for (; k < L; k++) {
       const float x0 = x[i + k];
-      ar += tr[k] * x0; ai += ti[k] * x0;
+      ar0 += tr[k] * x0; ai0 += ti[k] * x0;
     }
-    out[2 * i] = ar + br;
-    out[2 * i + 1] = ai + bi;
+    out[2 * i] = (ar0 + ar1) + (ar2 + ar3);
+    out[2 * i + 1] = (ai0 + ai1) + (ai2 + ai3);
   }
 }
 
@@ -669,15 +765,58 @@ static void td_corr_cc(const float *HWY_RESTRICT x, const float *HWY_RESTRICT tr
     V_STOREU(out + 2 * i, V_LOADU(tmp));
     i += W / 2;
   }
-  for (; i < nl; i++) {
-    float ar = 0.f, ai = 0.f;
-    for (int k = 0; k < L; k++) {
-      const float xr = x[2 * (i + (size_t)k)], xi = x[2 * (i + (size_t)k) + 1];
-      ar += tr[k] * xr - ti[k] * xi;
-      ai += tr[k] * xi + ti[k] * xr;
+  if (nl - i >= 2 && L >= (int)(W / 2)) {
+    const size_t rem = nl - i;
+    const int k_safe = L - (int)(W / 2) + (int)rem;
+    vf u0a = V_ZERO(), v0a = V_ZERO(), u0b = V_ZERO(), v0b = V_ZERO();
+    int k = 0;
+    AP_TD_NO_UNROLL
+    for (; k + 1 < k_safe; k += 2) {
+      const float *p = x + 2 * (i + (size_t)k);
+      const vf z0 = V_LOADU(p), z1 = V_LOADU(p + 2);
+      u0a = V_FMADD(V_SET1(tr[k]), z0, u0a);
+      v0a = V_FMADD(V_SET1(ti[k]), z0, v0a);
+      u0b = V_FMADD(V_SET1(tr[k + 1]), z1, u0b);
+      v0b = V_FMADD(V_SET1(ti[k + 1]), z1, v0b);
     }
-    out[2 * i] = ar;
-    out[2 * i + 1] = ai;
+    for (; k < k_safe; k++) {
+      const vf z0 = V_LOADU(x + 2 * (i + (size_t)k));
+      u0a = V_FMADD(V_SET1(tr[k]), z0, u0a);
+      v0a = V_FMADD(V_SET1(ti[k]), z0, v0a);
+    }
+    alignas(64) float xtail[2 * AP_W] = {0};
+    memcpy(xtail, x + 2 * (i + (size_t)k_safe), (W - 2) * sizeof(float));
+    for (int t = 0; t < L - k_safe; t++) {
+      const vf z0 = V_LOADU(xtail + 2 * (size_t)t);
+      u0a = V_FMADD(V_SET1(tr[k_safe + t]), z0, u0a);
+      v0a = V_FMADD(V_SET1(ti[k_safe + t]), z0, v0a);
+    }
+    alignas(64) float tmp[2 * AP_W];
+    const vf z = V_ZERO();
+    td_store_cc_w(tmp, V_ADD(u0a, u0b), z, V_ADD(v0a, v0b), z);
+    memcpy(out + 2 * i, tmp, 2 * rem * sizeof(float));
+    i = nl;
+  }
+  for (; i < nl; i++) {
+    float ar0 = 0.f, ai0 = 0.f, ar1 = 0.f, ai1 = 0.f;
+    float ar2 = 0.f, ai2 = 0.f, ar3 = 0.f, ai3 = 0.f;
+    int k = 0;
+    for (; k + 3 < L; k += 4) {
+      const float *p = x + 2 * (i + (size_t)k);
+      const float xr0 = p[0], xi0 = p[1], xr1 = p[2], xi1 = p[3];
+      const float xr2 = p[4], xi2 = p[5], xr3 = p[6], xi3 = p[7];
+      ar0 += tr[k] * xr0 - ti[k] * xi0; ai0 += tr[k] * xi0 + ti[k] * xr0;
+      ar1 += tr[k + 1] * xr1 - ti[k + 1] * xi1; ai1 += tr[k + 1] * xi1 + ti[k + 1] * xr1;
+      ar2 += tr[k + 2] * xr2 - ti[k + 2] * xi2; ai2 += tr[k + 2] * xi2 + ti[k + 2] * xr2;
+      ar3 += tr[k + 3] * xr3 - ti[k + 3] * xi3; ai3 += tr[k + 3] * xi3 + ti[k + 3] * xr3;
+    }
+    for (; k < L; k++) {
+      const float xr = x[2 * (i + (size_t)k)], xi = x[2 * (i + (size_t)k) + 1];
+      ar0 += tr[k] * xr - ti[k] * xi;
+      ai0 += tr[k] * xi + ti[k] * xr;
+    }
+    out[2 * i] = (ar0 + ar1) + (ar2 + ar3);
+    out[2 * i + 1] = (ai0 + ai1) + (ai2 + ai3);
   }
 }
 

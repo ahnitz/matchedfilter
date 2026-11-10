@@ -1726,6 +1726,7 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
   /* the block's samples; a lag tau reads tau - c .. tau - c + L - 1 */
   const float *x=p->dtime[d];
   const size_t have=p->dhave[d];
+  int x_contig=1;
   for(int w=0;w<nw;w++)
     if(lo[w]-c<0 || hi[w]-1-c+L>(long)n) return -2;     /* would wrap: the transform's answer */
   if(nw>0){
@@ -1755,22 +1756,32 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
           p->dx_d=d; p->dx_lo=s_min; p->dx_hi=s_max;
         }
         x=p->dx;
+        x_contig=0;
       }
     } else if(s_max>have){
       const size_t avail=have>s_min ? have-s_min : 0;
       if(avail) memcpy(p->dx+2*s_min,x+2*s_min,2*avail*sizeof(float));
       memset(p->dx+2*(s_min+avail),0,2*(s_max-s_min-avail)*sizeof(float));
       x=p->dx;
+      x_contig=0;
     }
   }
   const float *tr=p->taps[t];
   const float *ti=p->tap_cplx ? tr+tap_imag_offset(L) : NULL;
   const float t2=threshold>0.f ? threshold*threshold : 0.f;
+  const int lw=ap_plan_lanes(p->full_fft);
+  const int q=lw>0 ? (p->real_series ? lw : (lw>=2 ? lw/2 : 1)) : 1;
   for(size_t b=0;b<nb;b++) out[b]=(ap_peak){-1,0.f,0.f,t2};
   for(int w=0;w<nw;w++){
     const int m=(int)(hi[w]-lo[w]);
+    int mcall=m;
+    if(q>1 && x_contig){
+      /* Round odd 2*hw*R+1 windows up to a full SIMD vector quantum when in-bounds. */
+      const int mpad=(m+q-1)&~(q-1);
+      if((size_t)mpad<=n && (size_t)(lo[w]-c)+(size_t)mpad-1+(size_t)L<=have) mcall=mpad;
+    }
     const float *xw=p->real_series ? x+(lo[w]-c) : x+2*(lo[w]-c);
-    ap_td_corr_ex_on(p->full_fft,xw,p->real_series,tr,ti,L,m,p->dout);
+    ap_td_corr_ex_on(p->full_fft,xw,p->real_series,tr,ti,L,mcall,p->dout);
     for(int i=0;i<m;i++){
       const float re=p->dout[2*i], im=p->dout[2*i+1], m2=re*re+im*im;
       const long k=lo[w]+i;
