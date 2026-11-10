@@ -220,7 +220,7 @@ def _built(banks):
 #: for every configuration cost 11 s of a 74 s job (dev2, 2026-10-26).
 _ROUND_BANKS = 2
 #: Maximum banks in a batch that ever materialize trial layouts across all rounds of a trial.
-_TRIAL_SAMPLE_BANKS = 2 * _ROUND_BANKS
+_TRIAL_SAMPLE_BANKS = 4 * _ROUND_BANKS
 
 #: A joint round's settle on a GPU (_joint_round): replays until one builds nothing and runs
 #: within this fraction of the one before -- half the paired rule's tie, so what is left of
@@ -298,15 +298,29 @@ def _joint_round(jobs):
             for b in banks:
                 b._lock_arm(tr.winner)
             continue
-        # Sample up to _TRIAL_SAMPLE_BANKS evenly spaced banks across the batch, rotating
-        # _ROUND_BANKS per round so profile diversity is covered without materializing new
-        # trial layouts in late rounds.
-        if len(banks) > _TRIAL_SAMPLE_BANKS:
-            sample = [banks[(i * (len(banks) - 1)) // (_TRIAL_SAMPLE_BANKS - 1)]
-                      for i in range(_TRIAL_SAMPLE_BANKS)]
+        # Sample up to _TRIAL_SAMPLE_BANKS interior tap-length quantiles paired antithetically,
+        # rotating by a monotonic round counter so every round balances short and long profiles
+        # without materializing new trial layouts in late rounds.
+        ordered = sorted(
+            banks,
+            key=lambda b: int(np.max(b.tap_counts)) if len(b.tap_counts) else 0,
+        )
+        if len(ordered) > _TRIAL_SAMPLE_BANKS:
+            m = _TRIAL_SAMPLE_BANKS
+            quantiles = [ordered[(2 * i + 1) * len(ordered) // (2 * m)] for i in range(m)]
         else:
-            sample = banks
-        k = (tr.rounds * _ROUND_BANKS) % len(sample)
+            quantiles = ordered
+        sample = []
+        lo, hi = 0, len(quantiles) - 1
+        while lo <= hi:
+            sample.append(quantiles[lo])
+            if lo < hi:
+                sample.append(quantiles[hi])
+            lo += 1
+            hi -= 1
+        seq = getattr(tr, "_round_seq", 0)
+        tr._round_seq = seq + 1
+        k = (seq * _ROUND_BANKS) % len(sample)
         chosen = (sample[k:] + sample[:k])[:_ROUND_BANKS]
         pick = {id(b) for b in chosen}
         idx = [j for j, (b, _, kw) in enumerate(jobs) if id(b) in pick
