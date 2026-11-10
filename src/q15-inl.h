@@ -1103,12 +1103,72 @@ static HWY_NOINLINE int q15_screen_gather_row_fused_n(
   constexpr int PSTRIDE = (M2 & 1) ? M2 : (M2 + 1);
   alignas(64) vq pbuf_r[AP_QW * PSTRIDE];
   alignas(64) vq pbuf_i[AP_QW * PSTRIDE];
-  for(int l = 0; l < cnt; l++){
+  for(int l = 0; l < cnt;){
+    const int16_t *dr0 = drp[l], *di0 = dip[l];
+    /* Share dR/dI in registers across consecutive survivor pairs from the same data block
+       (such as members expanded from a firing Tier-0 centroid). */
+    if(l + 3 < cnt && drp[l + 1] == dr0 && drp[l + 2] == dr0 && drp[l + 3] == dr0){
+      if(l + 5 < cnt){
+        __builtin_prefetch(trp[l + 4], 0, 1);
+        __builtin_prefetch(tip[l + 4], 0, 1);
+      }
+      const int16_t *tr0 = trp[l], *ti0 = tip[l];
+      const int16_t *tr1 = trp[l + 1], *ti1 = tip[l + 1];
+      const int16_t *tr2 = trp[l + 2], *ti2 = tip[l + 2];
+      const int16_t *tr3 = trp[l + 3], *ti3 = tip[l + 3];
+      vq *pr0 = pbuf_r + (size_t)l * PSTRIDE, *pi0 = pbuf_i + (size_t)l * PSTRIDE;
+      vq *pr1 = pr0 + PSTRIDE, *pi1 = pi0 + PSTRIDE;
+      vq *pr2 = pr1 + PSTRIDE, *pi2 = pi1 + PSTRIDE;
+      vq *pr3 = pr2 + PSTRIDE, *pi3 = pi2 + PSTRIDE;
+      for(int e2 = 0; e2 < M2; e2++){
+        const size_t off = (size_t)e2 * (size_t)M1;
+        const vq dR = Q_LOADU(dr0 + off), dI = Q_LOADU(di0 + off);
+        const vq tR0 = Q_LOADU(tr0 + off), tI0 = Q_LOADU(ti0 + off);
+        pr0[e2] = Q_MLSH(Q_MUL(dR, tR0), dI, tI0);
+        pi0[e2] = Q_MLAH(Q_MUL(dR, tI0), dI, tR0);
+        const vq tR1 = Q_LOADU(tr1 + off), tI1 = Q_LOADU(ti1 + off);
+        pr1[e2] = Q_MLSH(Q_MUL(dR, tR1), dI, tI1);
+        pi1[e2] = Q_MLAH(Q_MUL(dR, tI1), dI, tR1);
+        const vq tR2 = Q_LOADU(tr2 + off), tI2 = Q_LOADU(ti2 + off);
+        pr2[e2] = Q_MLSH(Q_MUL(dR, tR2), dI, tI2);
+        pi2[e2] = Q_MLAH(Q_MUL(dR, tI2), dI, tR2);
+        const vq tR3 = Q_LOADU(tr3 + off), tI3 = Q_LOADU(ti3 + off);
+        pr3[e2] = Q_MLSH(Q_MUL(dR, tR3), dI, tI3);
+        pi3[e2] = Q_MLAH(Q_MUL(dR, tI3), dI, tR3);
+      }
+      for(int u = 0; u < 4; u++)
+        qcodelet(M2, pbuf_r + (size_t)(l + u) * PSTRIDE, pbuf_i + (size_t)(l + u) * PSTRIDE, 1);
+      l += 4;
+      continue;
+    }
+    if(l + 1 < cnt && drp[l + 1] == dr0){
+      if(l + 3 < cnt){
+        __builtin_prefetch(trp[l + 2], 0, 1);
+        __builtin_prefetch(tip[l + 2], 0, 1);
+      }
+      const int16_t *tr0 = trp[l], *ti0 = tip[l];
+      const int16_t *tr1 = trp[l + 1], *ti1 = tip[l + 1];
+      vq *pr0 = pbuf_r + (size_t)l * PSTRIDE, *pi0 = pbuf_i + (size_t)l * PSTRIDE;
+      vq *pr1 = pr0 + PSTRIDE, *pi1 = pi0 + PSTRIDE;
+      for(int e2 = 0; e2 < M2; e2++){
+        const size_t off = (size_t)e2 * (size_t)M1;
+        const vq dR = Q_LOADU(dr0 + off), dI = Q_LOADU(di0 + off);
+        const vq tR0 = Q_LOADU(tr0 + off), tI0 = Q_LOADU(ti0 + off);
+        pr0[e2] = Q_MLSH(Q_MUL(dR, tR0), dI, tI0);
+        pi0[e2] = Q_MLAH(Q_MUL(dR, tI0), dI, tR0);
+        const vq tR1 = Q_LOADU(tr1 + off), tI1 = Q_LOADU(ti1 + off);
+        pr1[e2] = Q_MLSH(Q_MUL(dR, tR1), dI, tI1);
+        pi1[e2] = Q_MLAH(Q_MUL(dR, tI1), dI, tR1);
+      }
+      qcodelet(M2, pr0, pi0, 1);
+      qcodelet(M2, pr1, pi1, 1);
+      l += 2;
+      continue;
+    }
     if(l + 2 < cnt){
       __builtin_prefetch(trp[l + 2], 0, 1);
       __builtin_prefetch(tip[l + 2], 0, 1);
     }
-    const int16_t *dr0 = drp[l], *di0 = dip[l];
     const int16_t *tr0 = trp[l], *ti0 = tip[l];
     vq *pr = pbuf_r + (size_t)l * PSTRIDE;
     vq *pi = pbuf_i + (size_t)l * PSTRIDE;
@@ -1120,6 +1180,7 @@ static HWY_NOINLINE int q15_screen_gather_row_fused_n(
       pi[e2] = Q_MLAH(Q_MUL(dR, tI), dI, tR);
     }
     qcodelet(M2, pr, pi, 1);
+    l++;
   }
   for(int lp = cnt; lp < AP_QW; lp++){
     memcpy(pbuf_r + (size_t)lp * PSTRIDE, pbuf_r + (size_t)(cnt - 1) * PSTRIDE, M2 * sizeof(vq));
@@ -1885,6 +1946,165 @@ static int q15_pairs_batch(
     case  256: return q15_pairs_batch_n<2, 16, 16>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
     case  512: return q15_pairs_batch_n<3, 32, 16>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
     case 1024: return q15_pairs_batch_n<4, 32, 32>(qdm, qds, qtm, qts, d0, t0, dsel, tsel, npairs, threshold, nomargin, ws, we, dst_d, dst_t, pass_out, lag_out, scratch);
+    default: return -1;
+  }
+}
+
+static HWY_INLINE int q15_write_pass_row(uint64_t bits, int l0, int nlanes, uint64_t act_mask,
+                                         unsigned char *row){
+  uint64_t mbits = (bits >> l0) & act_mask;
+  memset(row, 0, (size_t)nlanes);
+  if(!mbits) return 0;
+  int cnt = 0;
+  while(mbits){
+    row[__builtin_ctzll(mbits)] = 1u;
+    cnt++;
+    mbits &= mbits - 1u;
+  }
+  return cnt;
+}
+
+/* L1D-tiled multi-block Q15 screen: sweeps nd contiguous data blocks against one AP_QW-lane
+   template group in B-block tiles (B in {4, 2, 1} chosen from ap_l1d_bytes()), reusing each
+   template column and Pass-2 twiddle row across B blocks from L1D without per-block indirect
+   dispatch. Bit-for-bit identical to q15_screen_n + q15_lanethr. */
+template<int IDX, int M1, int M2>
+static HWY_NOINLINE int q15_screen_blocks_n(
+    const int16_t *dq, const float *qds, int nd,
+    const int16_t *tr, const int16_t *ti, const float *qts,
+    int l0, int nlanes, float threshold, float margin, int nomargin,
+    size_t ws, size_t we, unsigned char *pass, size_t pass_stride, void *scratch){
+  constexpr size_t N = (size_t)M1 * (size_t)M2;
+  constexpr size_t st = (size_t)(M1 + 1);
+  constexpr size_t scr_vecs = (size_t)2 * (M1 + 1) * M2;
+  if(we > N) we = N;
+  const uint64_t act_mask = nlanes >= 64 ? ~0ULL : (((uint64_t)1 << nlanes) - 1u);
+  const int Bmax = ap_q15_block_tile(N, AP_QW);
+  const qtw_table *tw = q15_tw_fast<IDX>();
+  const bool mid_mode = (M1 == 8) ? (ws <= 2 * (size_t)M2 && we >= 6 * (size_t)M2)
+                      : (M1 == 16) ? (ws <= 2 * (size_t)M2 && we >= 14 * (size_t)M2)
+                                   : (ws <= 4 * (size_t)M2 && we >= 28 * (size_t)M2);
+  const size_t wso = ws + (size_t)(M2 - 1), weo = we + (size_t)(M2 - 1);
+  alignas(64) int16_t lanethr[AP_QW];
+  int total = 0;
+  int d = 0;
+
+  if constexpr (M1 <= 16) {
+    if(Bmax >= 4){
+      vq *Xb[4], *Xib[4];
+      for(int b = 0; b < 4; b++){
+        Xb[b] = (vq *)scratch + (size_t)b * scr_vecs;
+        Xib[b] = Xb[b] + st * (size_t)M2;
+      }
+      for(; d + 4 <= nd; d += 4){
+        for(int e1 = 0; e1 < M1; e1++){
+          const int16_t *tr_col = tr + (size_t)e1 * AP_QW;
+          const int16_t *ti_col = ti + (size_t)e1 * AP_QW;
+          for(int b = 0; b < 4; b++){
+            const int16_t *dq_b = dq + (size_t)(d + b) * 3 * N;
+            qcodelet_prod(M2, (const int32_t *)dq_b + e1, dq_b + 2 * N + e1,
+                          tr_col, ti_col, Xb[b] + e1, Xib[b] + e1, M1 + 1, M1, (long)M1 * AP_QW);
+          }
+        }
+        if(mid_mode){
+          vq mm[4][2];
+          for(int b = 0; b < 4; b++) mm[b][0] = mm[b][1] = Q_ZERO();
+          for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+            const long lo = (long)((wso - k2) / (size_t)M2);
+            const long hi = (long)((weo - k2) / (size_t)M2);
+            const qtw_elem *twr = tw->re + k2 * (size_t)M1;
+            const qtw_elem *twi = tw->im + k2 * (size_t)M1;
+            for(int b = 0; b < 4; b++){
+              if constexpr (M1 == 8)
+                qsr8_twmax_middle(Xb[b] + k2 * st, Xib[b] + k2 * st, 1, twr, twi, lo, hi, mm[b]);
+              else
+                qsr16_twmax_middle(Xb[b] + k2 * st, Xib[b] + k2 * st, 1, twr, twi, lo, hi, mm[b]);
+            }
+          }
+          for(int b = 0; b < 4; b++){
+            q15_lanethr_inline(threshold, qds + d + b, 0, qts, margin, nomargin, lanethr);
+            const vq mx = Q_MAX(mm[b][0], mm[b][1]);
+            const uint64_t bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
+            total += q15_write_pass_row(bits, l0, nlanes, act_mask, pass + (size_t)(d + b) * pass_stride);
+          }
+        } else {
+          for(int b = 0; b < 4; b++){
+            q15_lanethr_inline(threshold, qds + d + b, 0, qts, margin, nomargin, lanethr);
+            uint64_t bits = 0;
+            q15_finish_n<M1, M2, false>(tw, Xb[b], Xib[b], ws, we, lanethr, &bits, nullptr, nullptr);
+            total += q15_write_pass_row(bits, l0, nlanes, act_mask, pass + (size_t)(d + b) * pass_stride);
+          }
+        }
+      }
+    }
+    if(Bmax >= 2){
+      vq *Xb[2] = {(vq *)scratch, (vq *)scratch + scr_vecs};
+      vq *Xib[2] = {Xb[0] + st * (size_t)M2, Xb[1] + st * (size_t)M2};
+      for(; d + 2 <= nd; d += 2){
+        for(int e1 = 0; e1 < M1; e1++){
+          const int16_t *tr_col = tr + (size_t)e1 * AP_QW;
+          const int16_t *ti_col = ti + (size_t)e1 * AP_QW;
+          for(int b = 0; b < 2; b++){
+            const int16_t *dq_b = dq + (size_t)(d + b) * 3 * N;
+            qcodelet_prod(M2, (const int32_t *)dq_b + e1, dq_b + 2 * N + e1,
+                          tr_col, ti_col, Xb[b] + e1, Xib[b] + e1, M1 + 1, M1, (long)M1 * AP_QW);
+          }
+        }
+        if(mid_mode){
+          vq mm[2][2] = {{Q_ZERO(), Q_ZERO()}, {Q_ZERO(), Q_ZERO()}};
+          for(size_t k2 = 0; k2 < (size_t)M2; k2++){
+            const long lo = (long)((wso - k2) / (size_t)M2);
+            const long hi = (long)((weo - k2) / (size_t)M2);
+            const qtw_elem *twr = tw->re + k2 * (size_t)M1;
+            const qtw_elem *twi = tw->im + k2 * (size_t)M1;
+            for(int b = 0; b < 2; b++){
+              if constexpr (M1 == 8)
+                qsr8_twmax_middle(Xb[b] + k2 * st, Xib[b] + k2 * st, 1, twr, twi, lo, hi, mm[b]);
+              else
+                qsr16_twmax_middle(Xb[b] + k2 * st, Xib[b] + k2 * st, 1, twr, twi, lo, hi, mm[b]);
+            }
+          }
+          for(int b = 0; b < 2; b++){
+            q15_lanethr_inline(threshold, qds + d + b, 0, qts, margin, nomargin, lanethr);
+            const vq mx = Q_MAX(mm[b][0], mm[b][1]);
+            const uint64_t bits = q15_mask_bits(Q_GE(mx, Q_LOADU(lanethr)));
+            total += q15_write_pass_row(bits, l0, nlanes, act_mask, pass + (size_t)(d + b) * pass_stride);
+          }
+        } else {
+          for(int b = 0; b < 2; b++){
+            q15_lanethr_inline(threshold, qds + d + b, 0, qts, margin, nomargin, lanethr);
+            uint64_t bits = 0;
+            q15_finish_n<M1, M2, false>(tw, Xb[b], Xib[b], ws, we, lanethr, &bits, nullptr, nullptr);
+            total += q15_write_pass_row(bits, l0, nlanes, act_mask, pass + (size_t)(d + b) * pass_stride);
+          }
+        }
+      }
+    }
+  }
+
+  vq *X = (vq *)scratch, *Xi = X + st * (size_t)M2;
+  for(; d < nd; d++){
+    q15_prod_n<M1, M2>(dq + (size_t)d * 3 * N, tr, ti, X, Xi);
+    q15_lanethr_inline(threshold, qds + d, 0, qts, margin, nomargin, lanethr);
+    uint64_t bits = 0;
+    q15_finish_n<M1, M2, false>(tw, X, Xi, ws, we, lanethr, &bits, nullptr, nullptr);
+    total += q15_write_pass_row(bits, l0, nlanes, act_mask, pass + (size_t)d * pass_stride);
+  }
+  return total;
+}
+
+static int q15_screen_blocks(
+    size_t N, const int16_t *dq, const float *qds, int nd,
+    const int16_t *tr, const int16_t *ti, const float *qts,
+    int l0, int nlanes, float threshold, float margin, int nomargin,
+    size_t ws, size_t we, unsigned char *pass, size_t pass_stride, void *scratch){
+  if(nd < 1 || nlanes < 1 || l0 < 0 || l0 + nlanes > AP_QW) return -1;
+  switch(N){
+    case   64: return q15_screen_blocks_n<0,  8,  8>(dq, qds, nd, tr, ti, qts, l0, nlanes, threshold, margin, nomargin, ws, we, pass, pass_stride, scratch);
+    case  128: return q15_screen_blocks_n<1, 16,  8>(dq, qds, nd, tr, ti, qts, l0, nlanes, threshold, margin, nomargin, ws, we, pass, pass_stride, scratch);
+    case  256: return q15_screen_blocks_n<2, 16, 16>(dq, qds, nd, tr, ti, qts, l0, nlanes, threshold, margin, nomargin, ws, we, pass, pass_stride, scratch);
+    case  512: return q15_screen_blocks_n<3, 32, 16>(dq, qds, nd, tr, ti, qts, l0, nlanes, threshold, margin, nomargin, ws, we, pass, pass_stride, scratch);
+    case 1024: return q15_screen_blocks_n<4, 32, 32>(dq, qds, nd, tr, ti, qts, l0, nlanes, threshold, margin, nomargin, ws, we, pass, pass_stride, scratch);
     default: return -1;
   }
 }

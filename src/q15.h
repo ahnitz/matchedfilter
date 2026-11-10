@@ -72,6 +72,7 @@ static inline size_t ap_q15_batch_bytes(size_t N, int QW){
 /* This CPU's L1 data cache, from the OS: sysconf, else Linux sysfs (the level-1 Data
    cache entry), else macOS sysctl. 0 when the OS does not say. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #if defined(__APPLE__)
@@ -108,6 +109,112 @@ static inline size_t ap_l1d_bytes(void){
     v = r > 0 ? r : 0;
   }
   return (size_t)v;
+}
+
+static inline int ap_count_cpulist(const char *path){
+  FILE *f = fopen(path, "r");
+  if(!f) return 0;
+  char buf[256] = {0};
+  const int ok = fgets(buf, sizeof buf, f) != NULL;
+  fclose(f);
+  if(!ok) return 0;
+  int count = 0;
+  const char *p = buf;
+  while(*p){
+    while(*p == ' ' || *p == ',' || *p == '\n' || *p == '\r') p++;
+    if(*p < '0' || *p > '9') break;
+    char *end = NULL;
+    long a = strtol(p, &end, 10);
+    p = end;
+    if(*p == '-'){
+      long b = strtol(p + 1, &end, 10);
+      p = end;
+      if(b >= a) count += (int)(b - a + 1);
+    } else {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/* This CPU's per-core L2 cache, from the OS: Linux sysfs (dividing cluster-shared L2 by the
+   physical cores sharing it), else sysconf, else macOS sysctl (perflevel0 l2cachesize / cpusperl2).
+   0 when the OS does not say. */
+static inline size_t ap_l2_bytes(void){
+  static long v = -2;
+  if(v == -2){
+    long r = -1;
+    int l1_thr = 0, l2_thr = 0;
+    for(int idx = 0; idx < 5; idx++){
+      char path[96], tbuf[32] = {0};
+      int lvl = 0;
+      snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/level", idx);
+      FILE *f = fopen(path, "r");
+      if(!f) break;
+      if(fscanf(f, "%d", &lvl) != 1) lvl = 0;
+      fclose(f);
+      if(lvl == 1){
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/type", idx);
+        f = fopen(path, "r");
+        if(f){ if(!fgets(tbuf, sizeof tbuf, f)) tbuf[0] = 0; fclose(f); }
+        if(!strncmp(tbuf, "Data", 4)){
+          snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/shared_cpu_list", idx);
+          l1_thr = ap_count_cpulist(path);
+        }
+      } else if(lvl == 2 && r <= 0){
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/size", idx);
+        f = fopen(path, "r");
+        if(f){ unsigned long kb = 0; char unit = 0;
+               if(fscanf(f, "%lu%c", &kb, &unit) >= 1) r = (long)kb * (unit == 'M' ? 1024L * 1024 : 1024L);
+               fclose(f); }
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/shared_cpu_list", idx);
+        l2_thr = ap_count_cpulist(path);
+      }
+    }
+    if(r > 0 && l2_thr > 1){
+      const int tpc = l1_thr > 0 ? l1_thr : 1;
+      const int cores = l2_thr > tpc ? (l2_thr / tpc) : 1;
+      if(cores > 1) r /= cores;
+    }
+#ifdef _SC_LEVEL2_CACHE_SIZE
+    if(r <= 0) r = sysconf(_SC_LEVEL2_CACHE_SIZE);
+#endif
+#if defined(__APPLE__)
+    if(r <= 0){
+      unsigned long long b = 0, cpl2 = 0;
+      size_t len = sizeof b;
+      if(!sysctlbyname("hw.perflevel0.l2cachesize", &b, &len, NULL, 0) && b){
+        len = sizeof cpl2;
+        if(!sysctlbyname("hw.perflevel0.cpusperl2", &cpl2, &len, NULL, 0) && cpl2 > 1) b /= cpl2;
+        r = (long)b;
+      } else {
+        len = sizeof b;
+        if(!sysctlbyname("hw.l2cachesize", &b, &len, NULL, 0) && b) r = (long)b;
+      }
+    }
+#endif
+    v = r > 0 ? r : 0;
+  }
+  return (size_t)v;
+}
+
+/* Contiguous data blocks sharing one template-group sweep in q15_screen_blocks for 4-step
+   transforms with M1 <= 16 (N <= 256) while keeping all B intermediate scratch matrices,
+   the active Pass-1 column strip, and Pass-2 twiddle table inside L1D. */
+static inline int ap_q15_block_tile(size_t N, int QW){
+  const size_t scr = ap_q15_scratch_bytes(N, QW);
+  int M1 = 0, M2 = 0;
+  if(!scr || QW <= 0) return 1;
+  ap_q15_factor(N, &M1, &M2);
+  if(M1 <= 0 || M1 > 16) return 1;
+  const size_t l1d = ap_l1d_bytes();
+  const size_t budget = l1d ? l1d : (32u << 10);
+  const size_t tw = (size_t)2 * N * sizeof(int32_t);
+  for(int B = 4; B >= 2; B >>= 1){
+    const size_t col = (size_t)2 * (size_t)M2 * (size_t)(QW + 3 * B) * sizeof(int16_t);
+    if((size_t)B * scr + col + tw <= budget) return B;
+  }
+  return 1;
 }
 
 /* Four-step twiddles W_N^(e1*k2) in Q15, laid out [k2][e1] as pass 2 reads them. */

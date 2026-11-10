@@ -83,6 +83,7 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.q15_data_band = k::q15_data_band;
     be.q15_pairs_batch = k::q15_pairs_batch;
     be.fft_forward_batch_prefix = k::fft_forward_batch_prefix;
+    be.q15_screen_blocks = k::q15_screen_blocks;
     ready = 1;
   }
   return &be;

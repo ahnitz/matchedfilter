@@ -145,9 +145,15 @@ int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
    this, the group that ran, not the one asked for. */
 int ap_hmf_effective_group(size_t n,int requested){
   const long v=ap_env_int("MF_DGROUP",0);
-  int grp = v>0 ? (int)v : (requested>0 ? requested : (n<=2048 ? 32 : 16));
   const size_t cap = v>0 ? (size_t)4*1024*1024 : (size_t)512*1024;
+  int grp = v>0 ? (int)v : (requested>0 ? requested : 64);
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > cap) grp>>=1;
+  /* Above the 32-block SIMD/pairbatch floor, keep the held spectrum slab
+     (grp * 8 * n bytes) within half of per-core L2 so templates stay L2-resident too. */
+  if(v<=0 && requested<=0 && grp>32){
+    const size_t l2=ap_l2_bytes();
+    while(grp>32 && (size_t)grp*8*n > (l2>>1)) grp>>=1;
+  }
   return grp;
 }
 

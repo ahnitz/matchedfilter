@@ -3679,7 +3679,8 @@ const ap_backend *Backend(void){
     q15_data_contig, q15_screen_gather,
     fft_quad_pair_batch,
     q15_data_band, q15_pairs_batch,
-    fft_forward_batch_prefix
+    fft_forward_batch_prefix,
+    q15_screen_blocks
   };
   return &be;
 }
