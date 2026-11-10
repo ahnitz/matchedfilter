@@ -959,7 +959,8 @@ class TimeDomainFilterBank:
 
         if fft_lengths is None:
             if (self.data_sample_rate <= 1024.0 or self.analytic
-                    or (self.engine == 'flat' and _small_blocks_fit(device))):
+                    or ((self.engine == 'flat' or (self.engine == 'hier' and binsize is not None))
+                        and _small_blocks_fit(device))):
                 candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
@@ -1238,12 +1239,14 @@ class TimeDomainFilterBank:
                                     candidate_ns=self._candidate_ns, n_sorted=n_sorted)
 
     def _single_sizes(self):
-        """The block sizes every batch of the bank can run at (above its longest data count),
-        smallest first: the joint trial's block-size arms besides the model's layout."""
+        """The block sizes every batch of the bank can run at (keeping at least half the block
+        valid where possible, else above its longest data count), smallest first: the joint
+        trial's block-size arms besides the model's layout."""
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
-        longest = max((int(counts[j - 1]) for i, j, _, _ in groups), default=0)
-        return sorted(int(n) for n in self._choice_ns if int(n) > longest)
+        longest = max((int(counts[j - 1]) for _, j, _, _ in groups), default=0)
+        good = sorted(int(n) for n in self._choice_ns if int(n) - longest >= int(n) // 2)
+        return good or sorted(int(n) for n in self._choice_ns if int(n) > longest)
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:

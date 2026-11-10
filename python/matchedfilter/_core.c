@@ -1954,6 +1954,10 @@ static PyObject *M_l1d_bytes(PyObject *self,PyObject *args){
   (void)self; (void)args;
   return PyLong_FromSize_t(ap_l1d_bytes());
 }
+static PyObject *M_l2_bytes(PyObject *self,PyObject *args){
+  (void)self; (void)args;
+  return PyLong_FromSize_t(ap_l2_bytes());
+}
 static PyObject *M_backend(PyObject *self,PyObject *args){
   (void)self;(void)args;
   return PyUnicode_FromString(ap_isa());
@@ -3659,6 +3663,7 @@ static PyMethodDef methods[]={
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
+  {"l2_bytes",M_l2_bytes,METH_NOARGS,"l2_bytes() -> the per-core L2 cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"gate16_max",M_gate16_max,METH_VARARGS,"gate16_max(N, data, templates, nt) -> bytes of nt float32 FP16 maxima (-1: not fired), or None"},
   {"price_direct",M_price_direct,METH_VARARGS,"price_direct(real_series=False, complex_taps=False) -> ticks per lag x tap of the direct refine's correlation"},

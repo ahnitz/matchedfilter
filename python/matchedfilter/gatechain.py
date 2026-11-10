@@ -122,7 +122,7 @@ def _band_slice(n, b, k0):
 
 def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4,
                              pass2=None):
-    """Build Pass-1 (``k <= 2``) and optional Pass-2 (``k <= max_arity``) Tier-0 centroid banks.
+    """Build hierarchical Tier-0 centroid banks up to ``max_arity`` (``k <= 2, 4, 8, 16``).
 
     Parameters
     ----------
@@ -139,39 +139,38 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     rho_min : float, optional
         Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
     max_arity : int, optional
-        Maximum cluster arity for Pass 2 in ``{2, 3, 4}`` (default ``4``).
+        Maximum cluster arity in ``2 .. 16`` (default ``4``).
     pass2 : callable, optional
-        Called with the ``k <= 2`` bank once Pass 1 has built it; Pass 2 runs only when it
-        returns True (default ``None``: always). A caller that can bound what a ``k <= 4``
-        bank could buy (it merges pairs of Pass-1 centroids, so it keeps at least half of
-        them) skips Pass 2 where nothing it could build would win.
+        Called with the preceding pass's ``Tier0Cluster`` before each pass ``>= 2``; further
+        passes run only when it returns True (default ``None``: always).
 
     Returns
     -------
-    tuple of (Tier0Cluster or None, Tier0Cluster or None)
-        ``(cl_k2, cl_hi)`` where ``cl_k2`` is the ``k <= 2`` centroid bank (or ``None`` when
-        fewer than 15% of templates merge) and ``cl_hi`` is the ``k <= max_arity`` minimax
-        centroid bank (or ``None`` when ``max_arity <= 2`` or Pass 2 merges no additional
-        clusters).
+    tuple of (Tier0Cluster or None, ...)
+        Candidate ``Tier0Cluster`` tuple across hierarchical passes (2-tuple ``(cl_k2, cl_k4)``
+        when ``max_arity <= 4``, 3-tuple up to ``k <= 8``, 4-tuple up to ``k <= 16``).
     """
     n, b0, k0 = int(n), int(band), int(k0)
     cap_arity = int(max_arity)
     if cap_arity < 2:
         raise ValueError("max_arity must be >= 2")
-    cap_arity = min(cap_arity, 4)
+    cap_arity = min(cap_arity, 16)
+    # At least 2 output slots so max_arity=2 preserves the (cl_k2, None) 2-tuple contract
+    num_slots = max(2, int(math.ceil(math.log2(cap_arity))))
+    empty_ret = (None,) * num_slots
     H = np.asarray(spectra)
     if H.ndim != 2 or H.shape[0] < 2 or b0 < 1 or b0 >= n // 2 or n % b0 != 0:
-        return None, None
+        return empty_ret
     nt = int(H.shape[0])
-    p = _norm_profile(power, n)
+    p = _norm_profile(np.asarray(power, dtype=np.float32), n)
     k_lo, k_hi = _band_slice(n, b0, k0)
     length = k_hi - k_lo
     if length <= 0 or k_hi > H.shape[1]:
-        return None, None
+        return empty_ret
     p_band = p[k_lo:k_hi]
     f0 = float(p_band.sum())
     if f0 <= 0.0:
-        return None, None
+        return empty_ret
 
     # Estimate scale-free inverse-PSD weights W_k from p_ref / mean_t |H_t[k]|^2
     H_band = np.asarray(H[:, k_lo:k_hi], dtype=np.complex128)
@@ -181,7 +180,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     m_bin = h_pow.mean(axis=0)
     m_max = float(m_bin.max())
     if m_max <= 0.0:
-        return None, None
+        return empty_ret
     W = p_band / np.maximum(m_bin, 1e-6 * m_max)
     sqrt_W = np.sqrt(W)
     c_pow = C.real * C.real + C.imag * C.imag
@@ -189,11 +188,13 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     valid = v > 0.0
     valid_idx = np.flatnonzero(valid)
     if valid_idx.size < 2:
-        return None, None
+        return empty_ret
 
     # Order valid templates by mean in-band frequency so neighbors fall in one L1/L2 chunk
     inv_sqrt_v = np.zeros(nt, dtype=np.float64)
     inv_sqrt_v[valid] = 1.0 / np.sqrt(v[valid])
+    WC64 = (W[None, :] * C * inv_sqrt_v[:, None]).astype(np.complex64)
+    W32 = W.astype(np.float32)
     U64 = (C * (inv_sqrt_v[:, None] * sqrt_W[None, :])).astype(np.complex64)
     u_pow = U64.real * U64.real + U64.imag * U64.imag
     k_idx = np.arange(k_lo, k_hi, dtype=np.float64)
@@ -206,6 +207,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     s_step = max(1, R // 8)
     all_dls = np.arange(-R, R + 1, dtype=np.int64)
     exp_all = np.exp((-2j * np.pi / n) * (all_dls[:, None] * k_idx[None, :]))
+    exp_all64 = exp_all.astype(np.complex64)
     dls = all_dls[::s_step]
     zero_pos = int(np.argmin(np.abs(dls)))
     shifts_c128 = exp_all[::s_step]
@@ -235,7 +237,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         best_rho2 = np.empty((m_c, m_c), dtype=np.float32)
         best_s = np.empty((m_c, m_c), dtype=np.int32)
         _core.tier0_pair_scores(Ur, Ui, Sr, Si, v_c, best_rho2, best_s)
-        if sizes is not None and size_cap < 4:
+        if sizes is not None:
             sz_c = sizes[sub_idx]
             best_rho2[sz_c[:, None] + sz_c[None, :] > size_cap] = -1.0
         ri = np.arange(m_c)[:, None]
@@ -262,49 +264,67 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             used[b_l] = True
             local_pairs.append((a_l, b_l) if a_l < b_l else (b_l, a_l))
         # Resolve 3-edge augmenting swaps (u - w - z - v) when greedy matching strands two nodes
-        if m_c - 2 * len(local_pairs) >= 2 and local_pairs:
+        if sizes is None and m_c - 2 * len(local_pairs) >= 2 and local_pairs:
             sym_r2 = best_rho2 + best_rho2.T
-            free_nodes = [i for i in range(m_c) if not used[i]]
-            i_u = 0
-            while i_u < len(free_nodes):
-                node_u = free_nodes[i_u]
+            free_arr = np.flatnonzero(~used)
+            w_arr = np.array([p[0] for p in local_pairs], dtype=np.int32)
+            z_arr = np.array([p[1] for p in local_pairs], dtype=np.int32)
+            uw_mat = (sym_r2[np.ix_(free_arr, w_arr)] >= f2_floor).astype(np.float32)
+            uz_mat = (sym_r2[np.ix_(free_arr, z_arr)] >= f2_floor).astype(np.float32)
+            aug_adj = np.triu(uw_mat @ uz_mat.T + uz_mat @ uw_mat.T, k=1)
+            cand_us = np.flatnonzero(np.any(aug_adj > 0.0, axis=1))
+            for idx_u in cand_us:
+                node_u = int(free_arr[idx_u])
                 if used[node_u]:
-                    i_u += 1
+                    continue
+                uw_ok = sym_r2[node_u, w_arr] >= f2_floor
+                uz_ok = sym_r2[node_u, z_arr] >= f2_floor
+                if not (np.any(uw_ok) or np.any(uz_ok)):
                     continue
                 best_gain = -1.0
                 best_swap = None
-                for i_v in range(i_u + 1, len(free_nodes)):
-                    node_v = free_nodes[i_v]
+                for idx_v in range(idx_u + 1, free_arr.size):
+                    node_v = int(free_arr[idx_v])
                     if used[node_v]:
                         continue
-                    for e_idx, (w_n, z_n) in enumerate(local_pairs):
-                        if sym_r2[node_u, w_n] >= f2_floor and sym_r2[node_v, z_n] >= f2_floor:
-                            sc = float(sym_r2[node_u, w_n] + sym_r2[node_v, z_n])
-                            if sc > best_gain:
-                                best_gain = sc
-                                best_swap = (
-                                    e_idx,
-                                    node_v,
-                                    (node_u, w_n) if node_u < w_n else (w_n, node_u),
-                                    (node_v, z_n) if node_v < z_n else (z_n, node_v),
-                                )
-                        if sym_r2[node_u, z_n] >= f2_floor and sym_r2[node_v, w_n] >= f2_floor:
-                            sc = float(sym_r2[node_u, z_n] + sym_r2[node_v, w_n])
-                            if sc > best_gain:
-                                best_gain = sc
-                                best_swap = (
-                                    e_idx,
-                                    node_v,
-                                    (node_u, z_n) if node_u < z_n else (z_n, node_u),
-                                    (node_v, w_n) if node_v < w_n else (w_n, node_v),
-                                )
+                    hit1 = np.flatnonzero(uw_ok & (sym_r2[node_v, z_arr] >= f2_floor))
+                    if hit1.size > 0:
+                        gains1 = sym_r2[node_u, w_arr[hit1]] + sym_r2[node_v, z_arr[hit1]]
+                        k1 = int(hit1[int(np.argmax(gains1))])
+                        sc1 = float(sym_r2[node_u, w_arr[k1]] + sym_r2[node_v, z_arr[k1]])
+                        if sc1 > best_gain:
+                            w_n, z_n = int(w_arr[k1]), int(z_arr[k1])
+                            best_gain = sc1
+                            best_swap = (
+                                k1,
+                                node_v,
+                                (node_u, w_n) if node_u < w_n else (w_n, node_u),
+                                (node_v, z_n) if node_v < z_n else (z_n, node_v),
+                            )
+                    hit2 = np.flatnonzero(uz_ok & (sym_r2[node_v, w_arr] >= f2_floor))
+                    if hit2.size > 0:
+                        gains2 = sym_r2[node_u, z_arr[hit2]] + sym_r2[node_v, w_arr[hit2]]
+                        k2 = int(hit2[int(np.argmax(gains2))])
+                        sc2 = float(sym_r2[node_u, z_arr[k2]] + sym_r2[node_v, w_arr[k2]])
+                        if sc2 > best_gain:
+                            w_n, z_n = int(w_arr[k2]), int(z_arr[k2])
+                            best_gain = sc2
+                            best_swap = (
+                                k2,
+                                node_v,
+                                (node_u, z_n) if node_u < z_n else (z_n, node_u),
+                                (node_v, w_n) if node_v < w_n else (w_n, node_v),
+                            )
                 if best_swap is not None:
                     e_idx, node_v, e1, e2 = best_swap
                     used[node_u] = True
                     used[node_v] = True
                     local_pairs[e_idx] = e1
                     local_pairs.append(e2)
-                i_u += 1
+                    w_arr[e_idx] = e1[0]
+                    z_arr[e_idx] = e1[1]
+                    w_arr = np.append(w_arr, e2[0])
+                    z_arr = np.append(z_arr, e2[1])
         out_a, out_b, out_dl = [], [], []
         for a_l, b_l in local_pairs:
             ta = int(sub_idx[a_l])
@@ -320,10 +340,14 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                 out_dl.append(-dl_ab)
         return out_a, out_b, out_dl
 
+    from . import _core as _cmod
+    l2_b = int(_cmod.l2_bytes()) if hasattr(_cmod, "l2_bytes") else 0
+    l2_b = l2_b if l2_b > 0 else 262144
+    chunk_size = max(48, min(192, ((l2_b * 3 // 4) // (16 * max(length, 1)) // 16) * 16))
+
     def _run_chunked_matching(order_idx, total_nodes, U_arr, v_arr, f2_floor, sizes=None, size_cap=2):
         a_list, b_list, dl_list = [], [], []
         paired_flag = np.zeros(total_nodes, dtype=bool)
-        chunk_size = 48
         for c_start in range(0, order_idx.size, chunk_size):
             ca, cb, cdl = _match_subset(
                 order_idx[c_start:c_start + chunk_size], U_arr, v_arr, f2_floor, sizes, size_cap
@@ -360,12 +384,12 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         if multi.size == 0:
             return out
         t_m = mems_i32[multi]
-        B = bvecs_c64[cid[multi]].astype(np.complex128)
-        v_c = np.sum((B.real * B.real + B.imag * B.imag) * W[None, :], axis=1)
+        B64 = bvecs_c64[cid[multi]]
+        v_c = np.sum((B64.real * B64.real + B64.imag * B64.imag) * W32[None, :], axis=1, dtype=np.float64)
         reach = min(R, int(lpad) * R)
-        taus = exp_all[R - reach:R + reach + 1]
-        prod = (W[None, :] * B.conj()) * (C[t_m] * inv_sqrt_v[t_m, None])
-        ov = np.max(np.abs(prod @ taus.T), axis=1) / np.sqrt(np.maximum(v_c, 1e-300))
+        taus64 = exp_all64[R - reach:R + reach + 1]
+        prod64 = B64.conj() * WC64[t_m]
+        ov = np.max(np.abs(prod64 @ taus64.T), axis=1).astype(np.float64) / np.sqrt(np.maximum(v_c, 1e-300))
         out[t_m] = np.minimum(1.0, np.sqrt(v_c / v[t_m]) * ov)
         return out
 
@@ -396,7 +420,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     max_nc = int(0.85 * nt)
     npairs = len(pair_a_list)
     if npairs == 0 or (nt - npairs) > max_nc:
-        return None, None
+        return empty_ret
 
     # Pass 1: vectorized exact complex128 lag refinement and unit-variance pair synthesis
     pa = np.asarray(pair_a_list, dtype=np.int32)
@@ -408,15 +432,20 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
 
     sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64) if s_step > 1 else None
     if sub_offs is not None:
-        cand_dls = np.clip(pdl[:, None] + sub_offs[None, :], -R, R)
-        phases_sub = exp_all[cand_dls + R]
-        g_sub = np.sum(prod_ab[:, None, :] * phases_sub, axis=2)
-        best_sub = np.argmax(np.abs(g_sub), axis=1)
-        row_idx = np.arange(npairs)
-        pdl = cand_dls[row_idx, best_sub]
-        g_vec = g_sub[row_idx, best_sub]
+        best_abs = np.full(npairs, -1.0, dtype=np.float64)
+        best_dl = pdl.copy()
+        g_vec = np.zeros(npairs, dtype=np.complex128)
+        for off_val in sub_offs:
+            cdl = np.clip(pdl + int(off_val), -R, R)
+            g_cur = np.einsum("ij,ij->i", prod_ab, exp_all[cdl + R])
+            abs_cur = np.abs(g_cur)
+            better = abs_cur > best_abs
+            best_abs = np.where(better, abs_cur, best_abs)
+            best_dl = np.where(better, cdl, best_dl)
+            g_vec = np.where(better, g_cur, g_vec)
+        pdl = best_dl
     else:
-        g_vec = np.sum(prod_ab * exp_all[pdl + R], axis=1)
+        g_vec = np.einsum("ij,ij->i", prod_ab, exp_all[pdl + R])
 
     rho_vec = np.abs(g_vec)
     keep_mask = rho_vec >= float(rho_min)
@@ -430,7 +459,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         rho_vec = rho_vec[keep_mask]
         npairs = int(pa.size)
         if npairs == 0 or (nt - npairs) > max_nc:
-            return None, None
+            return empty_ret
 
     Cb_u_s = Cb_u * exp_all[pdl + R]
     u_psi = g_vec.conj() / rho_vec
@@ -488,188 +517,245 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     offsets[ci] = m_pos
 
     cl_k2 = _pack_cluster(band_vecs, offsets, members, alphas, max_abs_dl)
-    if cap_arity <= 2 or nc < 2 or (pass2 is not None and not pass2(cl_k2)):
-        return cl_k2, None
+    out_levels = [cl_k2]
+    if cap_arity <= 2:
+        return tuple(out_levels + [None] * (num_slots - len(out_levels)))
 
-    # Pass 2: pair-of-pairs matching on Pass-1 centroids + 2-step minimax weight synthesis
-    sz_2 = offsets[1:] - offsets[:-1]
-    valid2 = (v_cl2 > 0.0) & (sz_2 < cap_arity)
-    valid2_idx = np.flatnonzero(valid2)
-    if valid2_idx.size < 2:
-        return cl_k2, None
-
-    inv_sqrt_v2 = np.zeros(nc, dtype=np.float64)
-    inv_sqrt_v2[valid2] = 1.0 / np.sqrt(v_cl2[valid2])
-    U2_64 = (band_vecs_128 * (inv_sqrt_v2[:, None] * sqrt_W[None, :])).astype(np.complex64)
-    u2_pow = U2_64.real * U2_64.real + U2_64.imag * U2_64.imag
-    f_mean2 = np.sum(u2_pow[valid2_idx] * k_f32[None, :], axis=1)
-    perm2 = valid2_idx[np.argsort(f_mean2, kind="stable")]
-
-    rho_min_p2 = max(0.84, float(rho_min) - 0.05)
-    coarse_floor_p2 = rho_min_p2 * (0.90 if s_step > 1 else 1.0)
-    ca_list, cb_list, _ = _run_chunked_matching(
-        perm2, nc, U2_64, v_cl2, coarse_floor_p2 * coarse_floor_p2, sizes=sz_2, size_cap=cap_arity
-    )
-    if not ca_list:
-        return cl_k2, None
-
-    # Filter Pass-2 candidates by group variance compatibility and collect member lag pairs
-    cand_groups = []
-    cand_pairs = []
-    ref_list = []
-    mem_list = []
-    for ca_i, cb_i in zip(ca_list, cb_list):
-        grp = sorted(
-            int(x)
-            for x in list(members[offsets[ca_i]:offsets[ca_i + 1]])
-            + list(members[offsets[cb_i]:offsets[cb_i + 1]])
-        )
-        v_grp = v[grp]
-        if float(v_grp.min()) < 0.80 * float(v_grp.max()):
-            continue
-        t0_ref = grp[0]
-        for tj in grp[1:]:
-            ref_list.append(t0_ref)
-            mem_list.append(tj)
-        cand_groups.append(grp)
-        cand_pairs.append((ca_i, cb_i))
-    if not cand_groups:
-        return cl_k2, None
-
-    # Align every candidate member tj to its group reference t0_ref across [-R, +R]
-    ref_arr = np.asarray(ref_list, dtype=np.int32)
-    mem_arr = np.asarray(mem_list, dtype=np.int32)
-    prod_p2 = (W[None, :] * (C[ref_arr] * inv_sqrt_v[ref_arr, None]).conj()) * (
-        C[mem_arr] * inv_sqrt_v[mem_arr, None]
-    )
-    g_coarse_p2 = prod_p2 @ shifts_c128.T
-    dl_p2 = dls[np.argmax(np.abs(g_coarse_p2), axis=1)]
-    if sub_offs is not None:
-        cand_dls_p2 = np.clip(dl_p2[:, None] + sub_offs[None, :], -R, R)
-        g_sub_p2 = np.sum(prod_p2[:, None, :] * exp_all[cand_dls_p2 + R], axis=2)
-        dl_p2 = cand_dls_p2[np.arange(dl_p2.size), np.argmax(np.abs(g_sub_p2), axis=1)]
-
-    # Group candidates by arity m in {2, 3, 4} for vectorized 2-step minimax synthesis
+    # Passes 2..num_slots: iterative hierarchical matching + minimax weight synthesis up to cap_arity
+    cur_nc = nc
+    cur_vecs = band_vecs
+    cur_vecs_128 = band_vecs_128
+    cur_v = v_cl2
+    cur_dl = dl_cl2
+    cur_offsets = offsets
+    cur_members = members
+    cur_alphas = alphas
+    prev_cl = cl_k2
     alpha_floor = max(0.88, min(0.93, float(rho_min) + 0.03))
-    by_arity = {2: [], 3: [], 4: []}
-    pos_dl = 0
-    for idx_g, grp in enumerate(cand_groups):
-        m_arity = len(grp)
-        dls_grp = [0] + [int(x) for x in dl_p2[pos_dl:pos_dl + m_arity - 1]]
-        pos_dl += m_arity - 1
-        by_arity[m_arity].append((idx_g, grp, dls_grp))
+    rho_min_hi = max(0.84, float(rho_min) - 0.05)
+    coarse_floor_hi = rho_min_hi * (0.90 if s_step > 1 else 1.0)
+    f2_hi = coarse_floor_hi * coarse_floor_hi
 
-    accepted = {}
-    for m_arity, bucket in by_arity.items():
-        if not bucket:
-            continue
-        g_ids = [item[0] for item in bucket]
-        grp_mat = np.asarray([item[1] for item in bucket], dtype=np.int32)
-        dls_mat = np.asarray([item[2] for item in bucket], dtype=np.int64)
-        U_raw = (C[grp_mat] * inv_sqrt_v[grp_mat, None]) * exp_all[dls_mat + R]
-        g0 = np.sum(W[None, None, :] * U_raw[:, 0:1, :].conj() * U_raw, axis=2)
-        abs_g0 = np.abs(g0)
-        phase0 = np.where(abs_g0 > 1e-12, g0.conj() / np.maximum(abs_g0, 1e-12), 1.0 + 0.0j)
-        U_tilde = U_raw * phase0[:, :, None]
+    for p_idx in range(2, num_slots + 1):
+        if cur_nc < 2 or (pass2 is not None and not pass2(prev_cl)):
+            break
+        pass_cap = min(cap_arity, 1 << p_idx)
+        sz_cur = cur_offsets[1:] - cur_offsets[:-1]
+        valid_cur = (cur_v > 0.0) & (sz_cur < pass_cap)
+        valid_cur_idx = np.flatnonzero(valid_cur)
+        if valid_cur_idx.size < 2:
+            break
 
-        # Unweighted aligned mean baseline + 4-step Multiplicative Weights Update (Hedge) minimax
-        mean_vec = np.mean(U_tilde, axis=1)
-        mean_norm = np.sqrt(np.maximum(
-            np.sum((mean_vec.real * mean_vec.real + mean_vec.imag * mean_vec.imag) * W[None, :], axis=1),
+        inv_sqrt_vc = np.zeros(cur_nc, dtype=np.float64)
+        inv_sqrt_vc[valid_cur] = 1.0 / np.sqrt(cur_v[valid_cur])
+        Uc_64 = (cur_vecs_128 * (inv_sqrt_vc[:, None] * sqrt_W[None, :])).astype(np.complex64)
+        uc_pow = Uc_64.real * Uc_64.real + Uc_64.imag * Uc_64.imag
+        f_meanc = np.sum(uc_pow[valid_cur_idx] * k_f32[None, :], axis=1)
+        permc = valid_cur_idx[np.argsort(f_meanc, kind="stable")]
+
+        ca_list, cb_list, cdl_list = _run_chunked_matching(
+            permc, cur_nc, Uc_64, cur_v, f2_hi, sizes=sz_cur, size_cap=pass_cap
+        )
+        if not ca_list:
+            break
+
+        # Filter candidates by group variance compatibility and align members in [-R, +R]
+        cand_groups = []
+        cand_pairs = []
+        cand_cdl = []
+        for ca_i, cb_i, dl_ab in zip(ca_list, cb_list, cdl_list):
+            grp = sorted(
+                int(x)
+                for x in list(cur_members[cur_offsets[ca_i]:cur_offsets[ca_i + 1]])
+                + list(cur_members[cur_offsets[cb_i]:cur_offsets[cb_i + 1]])
+            )
+            v_grp = v[grp]
+            if float(v_grp.min()) < 0.80 * float(v_grp.max()):
+                continue
+            cand_groups.append(grp)
+            cand_pairs.append((ca_i, cb_i))
+            cand_cdl.append(int(dl_ab))
+        if not cand_groups:
+            break
+
+        # Center lag frame at the midpoint of the two merged centroids so lags stay in [-R, +R]
+        ca_arr = np.asarray([cp[0] for cp in cand_pairs], dtype=np.int32)
+        cb_arr = np.asarray([cp[1] for cp in cand_pairs], dtype=np.int32)
+        cdl_arr = np.clip(np.asarray(cand_cdl, dtype=np.int64), -R, R)
+        ua = cur_vecs_128[ca_arr] * inv_sqrt_vc[ca_arr, None]
+        ub_s = (cur_vecs_128[cb_arr] * inv_sqrt_vc[cb_arr, None]) * exp_all[cdl_arr + R]
+        ip_ab = np.einsum("ij,ij->i", W[None, :] * ua.conj(), ub_s)
+        abs_ip = np.abs(ip_ab)
+        ph_ab = np.where(abs_ip > 1e-12, ip_ab.conj() / np.maximum(abs_ip, 1e-12), 1.0 + 0.0j)
+        mid_raw = ua + ph_ab[:, None] * ub_s
+        mid_norm = np.sqrt(np.maximum(
+            np.sum((mid_raw.real * mid_raw.real + mid_raw.imag * mid_raw.imag) * W[None, :], axis=1),
             1e-30,
         ))
-        c_mean = mean_vec / mean_norm[:, None]
-        ov_mean = np.abs(np.sum(W[None, None, :] * c_mean[:, None, :].conj() * U_raw, axis=2))
+        mid_u = mid_raw / mid_norm[:, None]
+        grp_lens = np.asarray([len(g) for g in cand_groups], dtype=np.int32)
+        ref_rep = np.repeat(np.arange(len(cand_groups), dtype=np.int32), grp_lens)
+        mem_arr = np.asarray([tj for g in cand_groups for tj in g], dtype=np.int32)
+        prod_p = (W[None, :] * mid_u[ref_rep].conj()) * (C[mem_arr] * inv_sqrt_v[mem_arr, None])
 
-        weights = np.ones((len(bucket), m_arity), dtype=np.float64)
-        U_iter = U_tilde.copy()
-        for _ in range(4):
+        g_coarse_p = prod_p.astype(np.complex64) @ shifts64.T
+        dl_p = dls[np.argmax(np.abs(g_coarse_p), axis=1)]
+        if sub_offs is not None:
+            best_abs_p = np.full(dl_p.size, -1.0, dtype=np.float64)
+            best_dl_p = dl_p.copy()
+            for off_val in sub_offs:
+                cdl_p = np.clip(dl_p + int(off_val), -R, R)
+                abs_p = np.abs(np.einsum("ij,ij->i", prod_p, exp_all[cdl_p + R]))
+                better_p = abs_p > best_abs_p
+                best_abs_p = np.where(better_p, abs_p, best_abs_p)
+                best_dl_p = np.where(better_p, cdl_p, best_dl_p)
+            dl_p = best_dl_p
+
+        by_arity = {}
+        pos_dl = 0
+        for idx_g, grp in enumerate(cand_groups):
+            m_arity = len(grp)
+            dls_grp = [int(x) for x in dl_p[pos_dl:pos_dl + m_arity]]
+            pos_dl += m_arity
+            by_arity.setdefault(m_arity, []).append((idx_g, grp, dls_grp))
+
+        accepted = {}
+        mwu_steps = 2 * p_idx
+        for m_arity, bucket in by_arity.items():
+            g_ids = [item[0] for item in bucket]
+            grp_mat = np.asarray([item[1] for item in bucket], dtype=np.int32)
+            dls_mat = np.asarray([item[2] for item in bucket], dtype=np.int64)
+            U_raw = (C[grp_mat] * inv_sqrt_v[grp_mat, None]) * exp_all[dls_mat + R]
+            ref_frame = mid_u[g_ids, None, :]
+            g0 = np.sum(W[None, None, :] * ref_frame.conj() * U_raw, axis=2)
+            abs_g0 = np.abs(g0)
+            phase0 = np.where(abs_g0 > 1e-12, g0.conj() / np.maximum(abs_g0, 1e-12), 1.0 + 0.0j)
+            U_tilde = U_raw * phase0[:, :, None]
+
+            mean_vec = np.mean(U_tilde, axis=1)
+            mean_norm = np.sqrt(np.maximum(
+                np.sum((mean_vec.real * mean_vec.real + mean_vec.imag * mean_vec.imag) * W[None, :], axis=1),
+                1e-30,
+            ))
+            c_mean = mean_vec / mean_norm[:, None]
+            ov_mean = np.abs(np.sum(W[None, None, :] * c_mean[:, None, :].conj() * U_raw, axis=2))
+
+            weights = np.ones((len(bucket), m_arity), dtype=np.float64)
+            U_iter = U_tilde.copy()
+            for _ in range(mwu_steps):
+                s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
+                s_norm = np.sqrt(np.maximum(
+                    np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
+                    1e-30,
+                ))
+                c_iter = s_vec / s_norm[:, None]
+                ov = np.sum(W[None, None, :] * c_iter[:, None, :].conj() * U_iter, axis=2)
+                abs_ov = np.abs(ov)
+                rephase = np.where(abs_ov > 1e-12, ov.conj() / np.maximum(abs_ov, 1e-12), 1.0 + 0.0j)
+                U_iter = U_iter * rephase[:, :, None]
+                deficit = np.maximum(1.0 - abs_ov, 0.0)
+                shift_def = deficit - np.min(deficit, axis=1, keepdims=True)
+                weights = weights * np.exp(np.minimum(25.0 * shift_def, 10.0))
+                weights = weights / np.mean(weights, axis=1, keepdims=True)
+
             s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
             s_norm = np.sqrt(np.maximum(
                 np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
                 1e-30,
             ))
-            c_iter = s_vec / s_norm[:, None]
-            ov = np.sum(W[None, None, :] * c_iter[:, None, :].conj() * U_iter, axis=2)
-            abs_ov = np.abs(ov)
-            rephase = np.where(abs_ov > 1e-12, ov.conj() / np.maximum(abs_ov, 1e-12), 1.0 + 0.0j)
-            U_iter = U_iter * rephase[:, :, None]
-            deficit = np.maximum(1.0 - abs_ov, 0.0)
-            shift_def = deficit - np.min(deficit, axis=1, keepdims=True)
-            weights = weights * np.exp(np.minimum(25.0 * shift_def, 10.0))
-            weights = weights / np.mean(weights, axis=1, keepdims=True)
+            c_mwu = s_vec / s_norm[:, None]
+            ov_mwu = np.abs(np.sum(W[None, None, :] * c_mwu[:, None, :].conj() * U_raw, axis=2))
+            use_mwu = np.min(ov_mwu, axis=1) >= np.min(ov_mean, axis=1)
+            c_unit = np.where(use_mwu[:, None], c_mwu, c_mean)
+            exact_ov = np.where(use_mwu[:, None], ov_mwu, ov_mean)
+            v_mem = v[grp_mat]
+            v_bar = np.mean(v_mem, axis=1)
+            alpha_mat = np.minimum(1.0, np.sqrt(v_bar[:, None] / v_mem) * exact_ov)
+            c_vecs_128 = np.sqrt(v_bar)[:, None] * c_unit
+            c_vecs_64 = c_vecs_128.astype(np.complex64)
 
-        s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
-        s_norm = np.sqrt(np.maximum(
-            np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
-            1e-30,
-        ))
-        c_mwu = s_vec / s_norm[:, None]
-        ov_mwu = np.abs(np.sum(W[None, None, :] * c_mwu[:, None, :].conj() * U_raw, axis=2))
-        use_mwu = np.min(ov_mwu, axis=1) >= np.min(ov_mean, axis=1)
-        c_unit = np.where(use_mwu[:, None], c_mwu, c_mean)
-        exact_ov = np.where(use_mwu[:, None], ov_mwu, ov_mean)
-        v_mem = v[grp_mat]
-        v_bar = np.mean(v_mem, axis=1)
-        alpha_mat = np.minimum(1.0, np.sqrt(v_bar[:, None] / v_mem) * exact_ov)
-        c_vecs_64 = (np.sqrt(v_bar)[:, None] * c_unit).astype(np.complex64)
+            for row_k, gid in enumerate(g_ids):
+                if float(alpha_mat[row_k].min()) >= alpha_floor:
+                    accepted[gid] = (
+                        c_vecs_64[row_k],
+                        c_vecs_128[row_k],
+                        float(v_bar[row_k]),
+                        grp_mat[row_k],
+                        alpha_mat[row_k],
+                        int(np.max(np.abs(dls_mat[row_k]))),
+                    )
 
-        for row_k, gid in enumerate(g_ids):
-            if float(alpha_mat[row_k].min()) >= alpha_floor:
-                accepted[gid] = (
-                    c_vecs_64[row_k],
-                    grp_mat[row_k],
-                    alpha_mat[row_k],
-                    int(np.max(np.abs(dls_mat[row_k]))),
-                )
+        if not accepted:
+            break
 
-    if not accepted:
-        return cl_k2, None
+        merged_gid = np.full(cur_nc, -1, dtype=np.int32)
+        merged_partner = np.full(cur_nc, -1, dtype=np.int32)
+        for gid, (ca_i, cb_i) in enumerate(cand_pairs):
+            if gid in accepted:
+                lo_c, hi_c = (ca_i, cb_i) if ca_i < cb_i else (cb_i, ca_i)
+                merged_gid[lo_c] = gid
+                merged_partner[lo_c] = hi_c
+                merged_partner[hi_c] = lo_c
 
-    merged_c2 = np.full(nc, -1, dtype=np.int32)
-    merged_partner = np.full(nc, -1, dtype=np.int32)
-    for gid, (ca_i, cb_i) in enumerate(cand_pairs):
-        if gid in accepted:
-            lo_c, hi_c = (ca_i, cb_i) if ca_i < cb_i else (cb_i, ca_i)
-            merged_c2[lo_c] = gid
-            merged_partner[lo_c] = hi_c
-            merged_partner[hi_c] = lo_c
-
-    nc_hi = nc - len(accepted)
-    band_vecs_hi = np.empty((nc_hi, length), dtype=np.complex64)
-    offsets_hi = np.empty(nc_hi + 1, dtype=np.int32)
-    members_hi = np.empty(nt, dtype=np.int32)
-    alphas_hi = alphas.copy()
-    max_dl_hi = 0
-    ci_hi = 0
-    m_pos_hi = 0
-    for c_idx in range(nc):
-        other_c = int(merged_partner[c_idx])
-        if other_c >= 0 and other_c < c_idx:
-            continue
+        need_next = p_idx < num_slots
+        nc_hi = cur_nc - len(accepted)
+        band_vecs_hi = np.empty((nc_hi, length), dtype=np.complex64)
+        band_vecs_hi_128 = np.empty((nc_hi, length), dtype=np.complex128) if need_next else None
+        v_hi = np.empty(nc_hi, dtype=np.float64) if need_next else None
+        dl_hi = np.zeros(nc_hi, dtype=np.int64)
+        offsets_hi = np.empty(nc_hi + 1, dtype=np.int32)
+        members_hi = np.empty(nt, dtype=np.int32)
+        alphas_hi = cur_alphas.copy()
+        max_dl_hi = 0
+        ci_hi = 0
+        m_pos_hi = 0
+        for c_idx in range(cur_nc):
+            other_c = int(merged_partner[c_idx])
+            if other_c >= 0 and other_c < c_idx:
+                continue
+            offsets_hi[ci_hi] = m_pos_hi
+            if other_c > c_idx:
+                c_vec, c_vec128, v_val, grp_row, a_row, dl_row = accepted[int(merged_gid[c_idx])]
+                band_vecs_hi[ci_hi] = c_vec
+                if need_next:
+                    band_vecs_hi_128[ci_hi] = c_vec128
+                    v_hi[ci_hi] = v_val
+                dl_hi[ci_hi] = dl_row
+                m_len = int(grp_row.size)
+                members_hi[m_pos_hi:m_pos_hi + m_len] = grp_row
+                alphas_hi[grp_row] = a_row
+                if dl_row > max_dl_hi:
+                    max_dl_hi = dl_row
+                m_pos_hi += m_len
+            else:
+                band_vecs_hi[ci_hi] = cur_vecs[c_idx]
+                if need_next:
+                    band_vecs_hi_128[ci_hi] = cur_vecs_128[c_idx]
+                    v_hi[ci_hi] = cur_v[c_idx]
+                dl_val = int(cur_dl[c_idx])
+                dl_hi[ci_hi] = dl_val
+                s0, s1 = int(cur_offsets[c_idx]), int(cur_offsets[c_idx + 1])
+                m_len = s1 - s0
+                members_hi[m_pos_hi:m_pos_hi + m_len] = cur_members[s0:s1]
+                if dl_val > max_dl_hi:
+                    max_dl_hi = dl_val
+                m_pos_hi += m_len
+            ci_hi += 1
         offsets_hi[ci_hi] = m_pos_hi
-        if other_c > c_idx:
-            c_vec, grp_row, a_row, dl_row = accepted[int(merged_c2[c_idx])]
-            band_vecs_hi[ci_hi] = c_vec
-            m_len = int(grp_row.size)
-            members_hi[m_pos_hi:m_pos_hi + m_len] = grp_row
-            alphas_hi[grp_row] = a_row
-            if dl_row > max_dl_hi:
-                max_dl_hi = dl_row
-            m_pos_hi += m_len
-        else:
-            band_vecs_hi[ci_hi] = band_vecs[c_idx]
-            s0, s1 = int(offsets[c_idx]), int(offsets[c_idx + 1])
-            m_len = s1 - s0
-            members_hi[m_pos_hi:m_pos_hi + m_len] = members[s0:s1]
-            if int(dl_cl2[c_idx]) > max_dl_hi:
-                max_dl_hi = int(dl_cl2[c_idx])
-            m_pos_hi += m_len
-        ci_hi += 1
-    offsets_hi[ci_hi] = m_pos_hi
 
-    cl_hi = _pack_cluster(band_vecs_hi, offsets_hi, members_hi, alphas_hi, max_dl_hi)
-    return cl_k2, cl_hi
+        cl_hi = _pack_cluster(band_vecs_hi, offsets_hi, members_hi, alphas_hi, max_dl_hi)
+        out_levels.append(cl_hi)
+        prev_cl = cl_hi
+        cur_nc = nc_hi
+        cur_vecs = band_vecs_hi
+        cur_vecs_128 = band_vecs_hi_128
+        cur_v = v_hi
+        cur_dl = dl_hi
+        cur_offsets = offsets_hi
+        cur_members = members_hi
+        cur_alphas = alphas_hi
+
+    return tuple(out_levels + [None] * (num_slots - len(out_levels)))
 
 
 def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=2):
@@ -700,12 +786,16 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_ari
         and conservative signal-retention factor ``alpha``, or ``None`` when ``nt < 2``
         or fewer than 15% of templates merge.
     """
-    cl_k2, cl_hi = cluster_tier0_candidates(
+    cands = cluster_tier0_candidates(
         spectra, power, n, band, k0=k0, rho_min=rho_min, max_arity=max_arity
     )
-    if int(max_arity) <= 2 or cl_hi is None:
-        return cl_k2
-    return cl_hi
+    if int(max_arity) <= 2:
+        return cands[0]
+    best = None
+    for cl in cands:
+        if cl is not None:
+            best = cl
+    return best
 
 
 def band_offset(power, n, b):
@@ -1898,7 +1988,16 @@ def _q15_band(b):
 
 def default_series_group(n):
     """Blocks a CPU plan filters together, as HierarchicalFilter uses without an execution policy."""
-    return 32 if n <= 2048 else 16
+    from . import _core
+    n_i = max(1, int(n))
+    grp = 64
+    while grp > 1 and grp * 8 * n_i > 512 * 1024:
+        grp >>= 1
+    if grp > 32:
+        l2 = int(_core.l2_bytes()) if hasattr(_core, "l2_bytes") else 0
+        while grp > 32 and grp * 8 * n_i > (l2 >> 1):
+            grp >>= 1
+    return grp
 
 
 def _run_ms(log):

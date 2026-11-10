@@ -223,5 +223,10 @@ int ap_q15_pairs_batch_on(const ap_plan *p, size_t n, const int16_t *qdm, const 
                           float threshold, int nomargin, size_t start, size_t end,
                           int *dst_d, int *dst_t, unsigned char *pass_out,
                           int16_t *lag_out, void *scratch);
+int ap_q15_screen_blocks(const ap_plan *p, const int16_t *dq, const float *qds, int nd,
+                         const int16_t *tr, const int16_t *ti, const float *qts,
+                         int l0, int nlanes, float threshold, float margin, int nomargin,
+                         size_t start, size_t end, unsigned char *pass, size_t pass_stride,
+                         void *scratch);
 
 #endif

@@ -923,33 +923,8 @@ static size_t llc_bytes(void){
   return v;
 }
 static size_t l2_bytes(void){
-  static size_t v=(size_t)-1;
-  if(v==(size_t)-1){
-    long r=-1;
-#ifdef _SC_LEVEL2_CACHE_SIZE
-    r=sysconf(_SC_LEVEL2_CACHE_SIZE);
-#endif
-    for(int idx=0; r<=0 && idx<5; idx++){
-      char path[96]; int lvl=0;
-      snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/level",idx);
-      FILE *f=fopen(path,"r");
-      if(!f) break;
-      if(fscanf(f,"%d",&lvl)!=1) lvl=0;
-      fclose(f);
-      if(lvl!=2) continue;
-      snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/size",idx);
-      f=fopen(path,"r");
-      if(f){ unsigned long kb=0; char unit=0;
-             if(fscanf(f,"%lu%c",&kb,&unit)>=1) r=(long)kb*(unit=='M'?1024L*1024:1024L);
-             fclose(f); }
-    }
-#if defined(__APPLE__)
-    if(r<=0){ unsigned long long b=0; size_t len=sizeof b;
-              if(!sysctlbyname("hw.l2cachesize",&b,&len,NULL,0) && b) r=(long)b; }
-#endif
-    v = r>0 ? (size_t)r : (256u<<10);
-  }
-  return v;
+  const size_t v = ap_l2_bytes();
+  return v ? v : (256u<<10);
 }
 static void out_copy(float *dst,const float *src,size_t bytes,int stream){
 #if defined(__x86_64__) || defined(__i386__)
@@ -2080,7 +2055,7 @@ static int q15_prepare_common(ap_mf_plan *p){
   const size_t n=p->n;
   p->qts=calloc((size_t)p->nt,sizeof(float));
   p->qds=calloc((size_t)p->nd,sizeof(float));
-  p->qscr=ap_alloc64(ap_q15_scratch_bytes(n,qw));
+  p->qscr=ap_alloc64((size_t)ap_q15_block_tile(n,qw)*ap_q15_scratch_bytes(n,qw));
   if(!p->qts||!p->qds||!p->qscr){
     free(p->qts);free(p->qds);free(p->qscr);
     p->qts=NULL;p->qds=NULL;p->qscr=NULL;
@@ -2354,6 +2329,15 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
       total+=r;
     }
     const int nlanes=l1-l0;
+    if(!stat && first<d0+nd){
+      for(int d=first;d<d0+nd;d++) if(!p->qdok[d]) q15_data(p,d);
+      const int rb=ap_q15_screen_blocks(
+          p->fft, p->qd+(size_t)first*n*3, p->qds+first, d0+nd-first,
+          tr, ti, bl, l0, nlanes, threshold, margin, p->qnomargin,
+          start, end, pass+(size_t)(first-d0)*nt+(size_t)(g*qw+l0-t0),
+          (size_t)nt, p->qscr);
+      if(rb>=0){ total+=rb; continue; }
+    }
     const uint64_t act_mask=((uint64_t)1<<nlanes)-1u;
     for(int d=first;d<d0+nd;d++){
       if(!p->qdok[d]) q15_data(p,d);

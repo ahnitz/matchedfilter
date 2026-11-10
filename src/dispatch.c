@@ -436,3 +436,15 @@ int ap_q15_pairs_batch_on(const ap_plan *p, size_t n, const int16_t *qdm, const 
   return b->q15_pairs_batch(n,qdm,qds,qtm,qts,d0,t0,dsel,tsel,npairs,threshold,nomargin,
                             start,end,dst_d,dst_t,pass_out,lag_out,scratch);
 }
+
+int ap_q15_screen_blocks(const ap_plan *p, const int16_t *dq, const float *qds, int nd,
+                         const int16_t *tr, const int16_t *ti, const float *qts,
+                         int l0, int nlanes, float threshold, float margin, int nomargin,
+                         size_t start, size_t end, unsigned char *pass, size_t pass_stride,
+                         void *scratch){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_screen_blocks || !dq || !qds || nd<1 || !tr || !ti || !qts ||
+     nlanes<1 || !pass || !scratch) return -1;
+  return b->q15_screen_blocks(p->n,dq,qds,nd,tr,ti,qts,l0,nlanes,threshold,margin,nomargin,
+                              start,end,pass,pass_stride,scratch);
+}

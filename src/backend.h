@@ -167,6 +167,12 @@ typedef struct {
   /* Prefix-only forward transform across SIMD lanes writing bins [0, out_bins). */
   int (*fft_forward_batch_prefix)(void *, const float *const *srcs, const size_t *haves, int cnt,
                                   float scale, size_t out_bins, float *const *outs);
+  /* L1D-tiled multi-block Q15 screen over nd contiguous blocks against one template group. */
+  int (*q15_screen_blocks)(size_t N, const int16_t *dq, const float *qds, int nd,
+                           const int16_t *tr, const int16_t *ti, const float *qts,
+                           int l0, int nlanes, float threshold, float margin, int nomargin,
+                           size_t start, size_t end, unsigned char *pass, size_t pass_stride,
+                           void *scratch);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if

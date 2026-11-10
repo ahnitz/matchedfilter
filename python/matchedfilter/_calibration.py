@@ -94,24 +94,25 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
             _gc._COSTS[key] = cm
             return cm
     rng = np.random.default_rng(seed)
+    run_blocks = max(int(blocks), group) if int(blocks) == _CAL_BLOCKS else int(blocks)
     bands = _gc.candidate_bands(n)
     taps = n // 4
     h = np.zeros((nt, n), np.complex64)
     h[:, :taps] = rng.standard_normal((nt, taps)) / np.sqrt(taps)
     spec = np.fft.fft(h, axis=1).astype(np.complex64)
     step = n - taps
-    S = (blocks + 1) * step + n
+    S = (run_blocks + 1) * step + n
     x = (rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)
     X = np.fft.fft(x); X[S // 2:] = 0
     ser = (np.fft.ifft(X) * np.sqrt(2)).astype(np.complex64).view(np.float32)
-    starts = (np.arange(blocks) * step).astype(np.uint64)
-    ws = np.full(blocks, taps, np.uint64); we = np.full(blocks, n, np.uint64)
+    starts = (np.arange(run_blocks) * step).astype(np.uint64)
+    ws = np.full(run_blocks, taps, np.uint64); we = np.full(run_blocks, n, np.uint64)
     ref = np.zeros(n, np.float32); ref[:n // 2] = 1.0
-    idx = np.zeros((blocks, nt, 1), np.int64); val = np.zeros((blocks, nt, 1), np.complex64)
-    mag = np.zeros((blocks, nt, 1), np.float32); cnt = np.zeros((blocks, nt), np.int32)
+    idx = np.zeros((run_blocks, nt, 1), np.int64); val = np.zeros((run_blocks, nt, 1), np.complex64)
+    mag = np.zeros((run_blocks, nt, 1), np.float32); cnt = np.zeros((run_blocks, nt), np.int32)
     big = float(np.finfo(np.float32).max)
 
-    pairs = blocks * nt
+    pairs = run_blocks * nt
 
     # One plan per chain shape, its thresholds and screen set per use: a plan's construction
     # loads the 64 templates, and building one per measurement and per bisection step was a
@@ -225,7 +226,7 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
     dense.update({b: least(("dense", b), lambda x: x[0][0][1]) / pairs for b in need})
     dense = {b: dense[b] for b in bands}
     # Per-block fixed work: a whole run_series call minus its tiers and refine (nothing passes).
-    block = [least(("dense", b0), lambda x: x[2]) / blocks]
+    block = [least(("dense", b0), lambda x: x[2]) / run_blocks]
     sparse = {b: list(v) for b, v in (shared["sparse"].items() if shared else ()) if b in bands}
     refine = []
     for f in dens:

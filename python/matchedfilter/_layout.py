@@ -74,9 +74,7 @@ def _partition_templates(
             run_end += 1
 
         if max_batch is None:
-            # Sized to stay resident within 1 MB L2 cache per core:
-            # coarse template memory = b * sizeof(complex64) = (current_n // 8) * 8 bytes = current_n bytes.
-            batch_target = min(512, max(32, 1048576 // (max(64, current_n // 8) * 8)))
+            batch_target = _batch_target(current_n, None)
         else:
             batch_target = int(max_batch)
 
@@ -197,7 +195,10 @@ def _batch_target(n: int, max_batch: Optional[int]) -> int:
     """Templates per group: the bank's cache-resident sizing, or the caller's bound."""
     if max_batch is not None:
         return int(max_batch)
-    return min(512, max(32, 1048576 // (max(64, n // 8) * 8)))
+    from . import _core
+    l2 = int(_core.l2_bytes()) if hasattr(_core, "l2_bytes") else 0
+    cap = 1024 if l2 >= 1048576 else 512
+    return min(cap, max(32, 1048576 // (max(64, int(n) // 8) * 8)))
 
 
 def _corr_partition(counts, candidate_ns=(2048, 4096, 8192, 16384, 32768, 65536),

@@ -113,10 +113,41 @@ def _direct_refine_enabled():
 
 
 _TIER0_PAIR_CENTROID = True
+_TIER0_MAX_ARITY = 16
 
 
 def _tier0_centroid_enabled():
     return bool(_TIER0_PAIR_CENTROID)
+
+
+def _tier0_min_clusters(band, is_cpu=True):
+    """Minimum worthwhile cluster count above k <= 4 from the backend's SIMD tile width."""
+    if not is_cpu:
+        return 8
+    try:
+        qw = int(_core.MF(int(band), 1, 1).q15_lanes())
+    except Exception:
+        qw = 0
+    return max(4, qw // 4) if qw > 0 else 4
+
+
+def _pareto_tier0_candidates(raw_cands):
+    """Distinct Pareto-undominated Tier-0 centroid candidates ordered from largest to smallest ratio."""
+    distinct = []
+    for cl in raw_cands:
+        if cl is not None and (not distinct or cl.ratio <= distinct[-1].ratio - 0.05 + 1e-9):
+            distinct.append(cl)
+    if len(distinct) <= 1:
+        return distinct
+    kept = []
+    aq = [math.floor(c.alpha * 50.0 + 1e-9) / 50.0 for c in distinct]
+    for i, ci in enumerate(distinct):
+        # Drop ci if a strictly smaller-ratio candidate j > i has >= quantized alpha and <= lag_pad
+        if any(aq[j] >= aq[i] - 1e-12 and distinct[j].lag_pad <= ci.lag_pad
+               for j in range(i + 1, len(distinct))):
+            continue
+        kept.append(ci)
+    return kept
 
 
 class _Resolved(NamedTuple):
@@ -327,34 +358,57 @@ class HierarchicalFilter(MatchedFilter):
         return None
 
     def _tier0_candidates_for_band(self, band, templates=None, pass2=None):
-        """Lazily build `(cl_k2, cl_k4)` candidate Tier-0 clusters for `band`. `pass2`, when
-        given, decides from the `k <= 2` bank whether the `k <= 4` one is built
-        (gatechain.cluster_tier0_candidates); a later call without it builds what was
-        skipped."""
+        """Lazily build candidate Tier-0 clusters up to `_TIER0_MAX_ARITY` for `band`. `pass2`,
+        when given, decides after each pass whether the next higher-arity pass is built
+        (gatechain.cluster_tier0_candidates); a later call without it builds what was skipped."""
+        max_k = int(_TIER0_MAX_ARITY)
+        empty = (None,) * (2 if max_k <= 4 else int(math.ceil(math.log2(max_k))))
         if not self._tier0_cluster_eligible():
-            return None, None
+            return empty
         b = int(band)
         got = self._tier0_cand_cache.get(b)
-        if got is not None and (got[2] or pass2 is not None):
-            return got[0], got[1]
+        if got is not None and (got[1] or pass2 is not None):
+            return got[0]
         usable = _gatechain.usable_bands(self._pending_ref, self.n)
         if len(usable) < 2 or b not in usable[:-1]:
-            self._tier0_cand_cache[b] = (None, None, True)
-            return None, None
+            self._tier0_cand_cache[b] = (empty, True)
+            return empty
         tmpl = self._templates_for_clustering() if templates is None else templates
         if tmpl is None:
-            return None, None
+            return empty
         k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
-        built = []
-        def wants_pass2(cl_k2):
-            built.append(pass2 is None or bool(pass2(cl_k2)))
-            return built[-1]
-        cl_k2, cl_k4 = _gatechain.cluster_tier0_candidates(
-            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=4, pass2=wants_pass2
+        min_cl = _tier0_min_clusters(b, is_cpu=self.device.kind == "cpu")
+        step_ref = [0]
+        skipped = [False]
+
+        def wants_pass(prev_cl):
+            step_ref[0] += 1
+            cur_cap = 1 << step_ref[0]
+            floor_cl = 2 if cur_cap < 4 else min_cl
+            if (int(prev_cl.offsets.size) - 1) <= floor_cl:
+                return False
+            if pass2 is not None and not bool(pass2(prev_cl, cur_cap)):
+                skipped[0] = True
+                return False
+            return True
+
+        def call_pass2(prev_cl):
+            try:
+                return wants_pass(prev_cl)
+            except TypeError:
+                floor_cl = 2 if (1 << step_ref[0]) < 4 else min_cl
+                if (int(prev_cl.offsets.size) - 1) <= floor_cl:
+                    return False
+                ok = bool(pass2(prev_cl))
+                if not ok:
+                    skipped[0] = True
+                return ok
+
+        cands = _gatechain.cluster_tier0_candidates(
+            tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=max_k, pass2=call_pass2
         )
-        # complete unless Pass 2 was skipped on pass2's word
-        self._tier0_cand_cache[b] = (cl_k2, cl_k4, not built or built[-1])
-        return cl_k2, cl_k4
+        self._tier0_cand_cache[b] = (cands, not skipped[0])
+        return cands
 
     def _tier0_cluster_for_band(self, band, templates=None, forced_chain=None):
         """Lazily compute and memoize `Tier0Cluster` (or `None`) for `band` under `_pending_ref`."""
@@ -363,26 +417,47 @@ class HierarchicalFilter(MatchedFilter):
         b = int(band)
         if b in self._tier0_clusters:
             return self._tier0_clusters[b]
-        cl_k2, cl_k4 = self._tier0_candidates_for_band(b, templates=templates)
-        cands = []
-        if cl_k2 is not None:
-            cands.append(cl_k2)
-        if cl_k4 is not None and (cl_k2 is None or cl_k4.ratio <= cl_k2.ratio - 0.05 + 1e-9):
-            cands.append(cl_k4)
+        raw_cands = self._tier0_candidates_for_band(b, templates=templates)
+        cands = _pareto_tier0_candidates(raw_cands)
         if not cands:
             self._tier0_clusters[b] = None
             return None
-        if len(cands) == 1:
-            self._tier0_clusters[b] = cands[0]
-            return cands[0]
-        # Compare k<=2 vs k<=4 on forced_chain (or across chains starting at b) under the cost model
+        # Compare candidate arities against unclustered cost from smallest ratio upward
         snr = self._fs_snr or self.snr
         base_cm = self._cost_model(cluster_ratios={})
-        best_cl = cands[0]
-        best_cost = float("inf")
-        for cand in cands:
+        use_forced = forced_chain is not None and len(forced_chain) >= 2 and forced_chain[0] == b
+        tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+        if use_forced:
+            pl_uncl = _gatechain.chain_thresholds(
+                self._pending_ref, self.n, snr, self.fd, forced_chain,
+                cost=base_cm, window=self.search_window
+            )
+            best_cost = float("inf") if pl_uncl is None else (
+                pl_uncl["cost"] + base_cm.feed_delta(
+                    forced_chain, pl_uncl["reach"], self.ntemplates, pl_uncl.get("halfwidth")
+                )
+            )
+        else:
+            _, uncl_plans = _gatechain.choose_chain(
+                self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                cost=base_cm, max_tiers=tiers, window=self.search_window, first=b
+            )
+            best_cost = min((q["cost"] for q in uncl_plans), default=float("inf"))
+        best_cl = None
+        for cand in reversed(cands):
             cm_cand = base_cm.with_tier0_cluster({b: cand.ratio})
-            if forced_chain is not None and len(forced_chain) >= 2 and forced_chain[0] == b:
+            if use_forced:
+                pl_lb = _gatechain.chain_thresholds(
+                    self._pending_ref, self.n, snr, self.fd, forced_chain,
+                    cost=cm_cand, window=self.search_window
+                )
+                lb_val = float("inf") if pl_lb is None else (
+                    pl_lb["cost"] + cm_cand.feed_delta(
+                        forced_chain, pl_lb["reach"], self.ntemplates, pl_lb.get("halfwidth")
+                    )
+                )
+                if lb_val >= best_cost:
+                    continue
                 pl = _gatechain.chain_thresholds(
                     self._pending_ref, self.n, snr, self.fd, forced_chain,
                     cost=cm_cand, window=self.search_window, tier0_cluster=cand
@@ -393,12 +468,17 @@ class HierarchicalFilter(MatchedFilter):
                     )
                 )
             else:
-                tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+                _, lb_plans = _gatechain.choose_chain(
+                    self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                    cost=cm_cand, max_tiers=tiers, window=self.search_window, first=b
+                )
+                if min((q["cost"] for q in lb_plans), default=float("inf")) >= best_cost:
+                    continue
                 a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
                 _, plans = _gatechain.choose_chain(
                     self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                     cost=cm_cand, max_tiers=tiers, window=self.search_window,
-                    tier0_clusters={b: (a_q, cand.lag_pad)}
+                    tier0_clusters={b: (a_q, cand.lag_pad)}, first=b
                 )
                 c_val = min(
                     (q["cost"] for q in plans if len(q["chain"]) >= 2 and q["chain"][0] == b),
@@ -859,8 +939,17 @@ class HierarchicalFilter(MatchedFilter):
                             forced_want[0], templates=tmpl, forced_chain=forced_want
                         )
                 else:
+                    max_k = int(_TIER0_MAX_ARITY)
+                    is_cpu = self.device.kind == "cpu"
+                    opt_map = {
+                        int(b): max(
+                            0.15,
+                            round(max(1.0 / max_k, _tier0_min_clusters(b, is_cpu) / max(self.ntemplates, 1)) * 20.0) / 20.0,
+                        )
+                        for b in cand_bands
+                    }
                     base_cm = self._cost_model(cluster_ratios={})
-                    opt_cm = base_cm.with_tier0_cluster({int(b): 0.25 for b in cand_bands})
+                    opt_cm = base_cm.with_tier0_cluster(opt_map)
                     _, lb_plans = _gatechain.choose_chain(
                         self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                         cost=opt_cm, max_tiers=tiers, window=self.search_window
@@ -901,34 +990,27 @@ class HierarchicalFilter(MatchedFilter):
                                 window=self.search_window, first=b0)
                             return min((q["cost"] for q in plans_r), default=float("inf"))
 
-                        def k4_can_win(cl_k2, limit=limit, bound=bound):
-                            # Pass 2 merges pairs of Pass-1 centroids: at least half remain
-                            nt = int(cl_k2.members.size)
-                            nc2 = int(cl_k2.offsets.size) - 1
-                            r4 = max(0.25, round(math.ceil(nc2 / 2) / nt * 20.0) / 20.0)
-                            return bound(r4) < limit
+                        def next_can_win(prev_cl, cur_cap=2, limit=limit, bound=bound, opt_b=opt_map[b0]):
+                            nt = int(prev_cl.members.size)
+                            nc_prev = int(prev_cl.offsets.size) - 1
+                            rem_div = max(2, max_k // max(int(cur_cap), 2))
+                            r_best = max(opt_b, round(math.ceil(nc_prev / rem_div) / nt * 20.0) / 20.0)
+                            return bound(r_best) < limit
 
-                        cl_k2, cl_k4 = self._tier0_candidates_for_band(b0, templates=tmpl,
-                                                                       pass2=k4_can_win)
-                        cands = []
-                        if cl_k2 is not None and bound(cl_k2.ratio) < limit:
-                            cands.append(cl_k2)
-                        if cl_k4 is not None and (
-                            cl_k2 is None or cl_k4.ratio <= cl_k2.ratio - 0.05 + 1e-9
-                        ) and bound(cl_k4.ratio) < limit:
-                            cands.append(cl_k4)
+                        raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,
+                                                                    pass2=next_can_win)
+                        cands = _pareto_tier0_candidates(raw_cands)
                         best_cand = None
                         best_cand_b0_cost = uncl_by_b0[b0]
-                        best_cand_overall = None
-                        for cand in cands:
-                            self._tier0_clusters[b0] = cand
-                            csig_now = self._clusters_sig()
-                            t0_now = {b: (a, lp) for b, _, a, lp in csig_now}
-                            cm_now = base_cm.with_tier0_cluster({b: r for b, r, _, _ in csig_now})
-                            cur_best, cur_plans = _gatechain.choose_chain(
+                        for cand in reversed(cands):
+                            if bound(cand.ratio) >= min(limit, best_cand_b0_cost):
+                                continue
+                            a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
+                            cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio})
+                            _, cur_plans = _gatechain.choose_chain(
                                 self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
-                                cost=cm_now, max_tiers=tiers, window=self.search_window,
-                                tier0_clusters=t0_now
+                                cost=cm_b0, max_tiers=tiers, window=self.search_window,
+                                tier0_clusters={b0: (a_q, cand.lag_pad)}, first=b0
                             )
                             cand_b0_cost = min(
                                 (q["cost"] for q in cur_plans if len(q["chain"]) >= 2 and q["chain"][0] == b0),
@@ -937,12 +1019,10 @@ class HierarchicalFilter(MatchedFilter):
                             if cand_b0_cost < best_cand_b0_cost:
                                 best_cand_b0_cost = cand_b0_cost
                                 best_cand = cand
-                                best_cand_overall = cur_best
                         self._tier0_clusters[b0] = best_cand
-                        if best_cand is not None and best_cand_overall is not None:
-                            if best_cand_overall["cost"] < best_upper:
-                                best_upper = best_cand_overall["cost"]
-                                best_b0 = int(best_cand_overall["chain"][0])
+                        if best_cand is not None and best_cand_b0_cost < best_upper:
+                            best_upper = best_cand_b0_cost
+                            best_b0 = b0
 
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
