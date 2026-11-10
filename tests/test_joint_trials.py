@@ -601,6 +601,42 @@ def test_unsampled_banks_defer_non_default_layouts_and_pricing(monkeypatch):
     assert unmaterialized >= len(banks) - td._ROUND_BANKS
 
 
+def test_multi_round_batch_bounds_sampled_banks_and_locks_all(monkeypatch):
+    """Across an entire multi-round trial on a large batch, at most _TRIAL_SAMPLE_BANKS banks
+    ever materialize non-default layouts (zero after round 1), and locking locks every bank."""
+    from matchedfilter import _calibration
+    priced_calls = []
+    orig = _calibration.price_block_sizes
+    monkeypatch.setattr(_calibration, "price_block_sizes",
+                        lambda *a, **k: priced_calls.append(1) or orig(*a, **k))
+
+    banks_and_rngs = [_inspiral_bank(seed=100 + i) for i in range(10)]
+    banks = [b for b, _ in banks_and_rngs]
+    if not getattr(banks[0], "_layouts", None):
+        pytest.skip("the model offered one block size only")
+
+    data = _data(banks_and_rngs[0][1], 1 << 15)
+    # Rounds 0 and 1 warm the bounded cohort; later rounds must do zero additional pricing.
+    TimeDomainFilterBank.filter_series_many([(b, data, {}) for b in banks])
+    TimeDomainFilterBank.filter_series_many([(b, data, {}) for b in banks])
+    calls_after_two_rounds = len(priced_calls)
+    ever_sampled = sum(
+        1 for b in banks
+        if b._layouts is None or any(s is not None for s in b._layouts[1:])
+    )
+    assert ever_sampled <= td._TRIAL_SAMPLE_BANKS
+
+    for _ in range(3 * _choice.rounds()[1]):
+        if all(not b._in_trial for b in banks):
+            break
+        TimeDomainFilterBank.filter_series_many([(b, data, {}) for b in banks])
+        # While still open, no round beyond round 1 may price a new bank for trial sampling.
+        if any(b._in_trial for b in banks):
+            assert len(priced_calls) == calls_after_two_rounds
+
+    assert all(not b._in_trial and b._layouts is None for b in banks)
+
+
 def test_lazy_non_default_arm_lock_matches_direct_build():
     """Locking a bank onto an unmaterialized non-default block-size arm builds that layout on
     demand from rank 0's group taps and matches a fresh bank built directly at that size."""

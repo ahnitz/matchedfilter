@@ -219,6 +219,8 @@ def _built(banks):
 #: the batch runs once, on the default. A test67 batch held 17 banks: replaying all of them
 #: for every configuration cost 11 s of a 74 s job (dev2, 2026-10-26).
 _ROUND_BANKS = 2
+#: Maximum banks in a batch that ever materialize trial layouts across all rounds of a trial.
+_TRIAL_SAMPLE_BANKS = 2 * _ROUND_BANKS
 
 #: A joint round's settle on a GPU (_joint_round): replays until one builds nothing and runs
 #: within this fraction of the one before -- half the paired rule's tie, so what is left of
@@ -287,7 +289,6 @@ def _joint_round(jobs):
     timed = set()
     for key, byid in groups.items():
         banks = list(byid.values())
-        banks[0]._prepare_arms()                    # the trial's arms come from its plans
         tr = _trial.trial(key, banks[0]._joint_arms)
         if len(tr.live()) < 2:
             ch = tr.choice
@@ -297,11 +298,16 @@ def _joint_round(jobs):
             for b in banks:
                 b._lock_arm(tr.winner)
             continue
-        # this round's banks: _ROUND_BANKS of them, rotated by the trial's round count
-        k = tr.rounds % len(banks)
-        chosen = (banks[k:] + banks[:k])[:_ROUND_BANKS]
-        for b in chosen:
-            b._prepare_arms()
+        # Sample up to _TRIAL_SAMPLE_BANKS evenly spaced banks across the batch, rotating
+        # _ROUND_BANKS per round so profile diversity is covered without materializing new
+        # trial layouts in late rounds.
+        if len(banks) > _TRIAL_SAMPLE_BANKS:
+            sample = [banks[(i * (len(banks) - 1)) // (_TRIAL_SAMPLE_BANKS - 1)]
+                      for i in range(_TRIAL_SAMPLE_BANKS)]
+        else:
+            sample = banks
+        k = (tr.rounds * _ROUND_BANKS) % len(sample)
+        chosen = (sample[k:] + sample[:k])[:_ROUND_BANKS]
         pick = {id(b) for b in chosen}
         idx = [j for j, (b, _, kw) in enumerate(jobs) if id(b) in pick
                and (kw or {}).get("template_index") is None and j not in timed]
@@ -317,6 +323,10 @@ def _joint_round(jobs):
 
         res = _trial.run_round(tr, _BankArms.of([jobs[j][0] for j in idx]), replay, sub_work,
                                settle=settle_for(sub) if gpu else None)
+        if tr.winner is not None:
+            for b in banks:
+                if b._in_trial:
+                    b._lock_arm(tr.winner)
         for j, r in zip(idx, res):
             out[j] = r
         timed.update(idx)
@@ -1437,6 +1447,7 @@ class TimeDomainFilterBank:
         if same is not None:
             layouts[rank] = layouts[same]
         else:
+            prev_ref_key = getattr(self, '_current_ref_key', None)
             self._tap_donor = layouts[0]['_template_map']
             try:
                 self._build(*alt)
@@ -1447,6 +1458,7 @@ class TimeDomainFilterBank:
             self.set_reference(ref, delta_f=rdf)
             layouts[rank] = self._snapshot()
             self._restore(layouts[cur])
+            self._current_ref_key = prev_ref_key
             self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
         if all(s is not None for s in layouts):
             self._lazy_trial_ref = None
@@ -1570,6 +1582,8 @@ class TimeDomainFilterBank:
         """The arms this bank proposes for its trial (_BLOCK_TRIAL_RANKS block sizes, the screen)."""
         arms = [_trial.DEFAULT] + [_settings.arm("n", n) for n in self._trial_cands[1:]]
         plans = self._layout_plans(self._arm_rank(_trial.DEFAULT))
+        for p in plans:
+            p.arm_config(_trial.DEFAULT)
         if any(p._q15_ok(tuple(p._chain)) for p in plans if p._chain is not None):
             arms += [_settings.arm("q15", True), _settings.arm("q15", False)]
         return arms
@@ -2790,7 +2804,6 @@ class TimeDomainFilterBank:
                 if win is not None:
                     l_bank._lock_arm(win)
                     continue
-                l_bank._prepare_arms()
                 tr = _trial.trial(t_key, l_bank._joint_arms)
                 if len(tr.live()) < 2:
                     with _AUTOTUNE_LOCK:
