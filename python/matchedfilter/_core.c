@@ -999,13 +999,24 @@ static PyObject *HMF_series_group(HMFObject *self,PyObject *unused){
 
 int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
                               const int *offsets,const int *members,int lag_pad);
+int ap_hmf_set_tier0_thr_scale(ap_hmf_plan *p,const float *scales);
 void ap_hmf_clear_tier0_clusters(ap_hmf_plan *p);
 int ap_hmf_tier0_cluster_count(const ap_hmf_plan *p);
+int ap_hmf_set_tier1_clusters(ap_hmf_plan *p,int nc,const float *specs,
+                              const int *offsets,const int *members,int lag_pad);
+void ap_hmf_clear_tier1_clusters(ap_hmf_plan *p);
+int ap_hmf_tier1_cluster_count(const ap_hmf_plan *p);
 
 static PyObject *HMF_set_tier0_clusters(HMFObject *self,PyObject *args){
-  Py_buffer bsp,boff,bmem;
+  Py_buffer bsp,boff,bmem,bsc={0};
   int lag_pad=0;
-  if(!PyArg_ParseTuple(args,"y*y*y*|i",&bsp,&boff,&bmem,&lag_pad)) return NULL;
+  PyObject *sc_obj=Py_None;
+  if(!PyArg_ParseTuple(args,"y*y*y*|iO",&bsp,&boff,&bmem,&lag_pad,&sc_obj)) return NULL;
+  int has_sc = (sc_obj && sc_obj != Py_None);
+  if(has_sc && PyObject_GetBuffer(sc_obj,&bsc,PyBUF_SIMPLE)<0){
+    PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
+    return NULL;
+  }
   size_t bands[AP_HMF_MAX_TIERS];
   int nti=ap_hmf_chain(self->p,bands);
   int valid = boff.len%(Py_ssize_t)sizeof(int)==0
@@ -1014,18 +1025,25 @@ static PyObject *HMF_set_tier0_clusters(HMFObject *self,PyObject *args){
   int nc = valid ? (int)(boff.len/(Py_ssize_t)sizeof(int))-1 : 0;
   if(valid){
     valid = nti>=1 && nc>=1 && nc<=self->nt
-      && (size_t)bsp.len == (size_t)nc*2u*bands[0]*sizeof(float);
+      && (size_t)bsp.len == (size_t)nc*2u*bands[0]*sizeof(float)
+      && (!has_sc || (size_t)bsc.len == (size_t)nc*sizeof(float));
   }
   if(!valid){
+    if(has_sc) PyBuffer_Release(&bsc);
     PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
-    PyErr_SetString(PyExc_ValueError,"set_tier0_clusters: invalid specs, offsets or members buffer shape");
+    PyErr_SetString(PyExc_ValueError,"set_tier0_clusters: invalid specs, offsets, members or scales buffer shape");
     return NULL;
   }
   int r;
   Py_BEGIN_ALLOW_THREADS
   r=ap_hmf_set_tier0_clusters(self->p,nc,(const float*)bsp.buf,
                               (const int*)boff.buf,(const int*)bmem.buf,lag_pad);
+  if(r==0 && has_sc){
+    r=ap_hmf_set_tier0_thr_scale(self->p,(const float*)bsc.buf);
+    if(r!=0) ap_hmf_clear_tier0_clusters(self->p);
+  }
   Py_END_ALLOW_THREADS
+  if(has_sc) PyBuffer_Release(&bsc);
   PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
   return PyBool_FromLong(r==0);
 }
@@ -1037,6 +1055,42 @@ static PyObject *HMF_clear_tier0_clusters(HMFObject *self,PyObject *unused){
 static PyObject *HMF_tier0_cluster_count(HMFObject *self,PyObject *unused){
   (void)unused;
   return PyLong_FromLong(ap_hmf_tier0_cluster_count(self->p));
+}
+static PyObject *HMF_set_tier1_clusters(HMFObject *self,PyObject *args){
+  Py_buffer bsp,boff,bmem;
+  int lag_pad=0;
+  if(!PyArg_ParseTuple(args,"y*y*y*|i",&bsp,&boff,&bmem,&lag_pad)) return NULL;
+  size_t bands[AP_HMF_MAX_TIERS];
+  int nti=ap_hmf_chain(self->p,bands);
+  int valid = boff.len%(Py_ssize_t)sizeof(int)==0
+    && boff.len>=2*(Py_ssize_t)sizeof(int)
+    && bmem.len==(Py_ssize_t)self->nt*(Py_ssize_t)sizeof(int);
+  int nc = valid ? (int)(boff.len/(Py_ssize_t)sizeof(int))-1 : 0;
+  if(valid){
+    valid = nti>=2 && nc>=1 && nc<=self->nt
+      && (size_t)bsp.len == (size_t)nc*2u*bands[1]*sizeof(float);
+  }
+  if(!valid){
+    PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
+    PyErr_SetString(PyExc_ValueError,"set_tier1_clusters: invalid specs, offsets or members buffer shape");
+    return NULL;
+  }
+  int r;
+  Py_BEGIN_ALLOW_THREADS
+  r=ap_hmf_set_tier1_clusters(self->p,nc,(const float*)bsp.buf,
+                              (const int*)boff.buf,(const int*)bmem.buf,lag_pad);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&bsp); PyBuffer_Release(&boff); PyBuffer_Release(&bmem);
+  return PyBool_FromLong(r==0);
+}
+static PyObject *HMF_clear_tier1_clusters(HMFObject *self,PyObject *unused){
+  (void)unused;
+  ap_hmf_clear_tier1_clusters(self->p);
+  Py_RETURN_NONE;
+}
+static PyObject *HMF_tier1_cluster_count(HMFObject *self,PyObject *unused){
+  (void)unused;
+  return PyLong_FromLong(ap_hmf_tier1_cluster_count(self->p));
 }
 
 static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
@@ -1061,6 +1115,9 @@ GUARDED(HMFObject,HMF_q15_stats)
 GUARDED(HMFObject,HMF_set_tier0_clusters)
 GUARDED(HMFObject,HMF_clear_tier0_clusters)
 GUARDED(HMFObject,HMF_tier0_cluster_count)
+GUARDED(HMFObject,HMF_set_tier1_clusters)
+GUARDED(HMFObject,HMF_clear_tier1_clusters)
+GUARDED(HMFObject,HMF_tier1_cluster_count)
 GUARDED(HMFObject,HMF_set_data)
 GUARDED(HMFObject,HMF_set_template)
 GUARDED(HMFObject,HMF_set_data_batch)
@@ -1090,9 +1147,12 @@ static PyMethodDef HMF_methods[]={
   {"set_direct_prices",(PyCFunction)HMF_set_direct_prices_g,METH_VARARGS,"set_direct_prices(lagtap, fftpair) -> True: the prices the direct-or-transform choice compares"},
   {"set_q15",(PyCFunction)HMF_set_q15_g,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
   {"q15_stats",(PyCFunction)HMF_q15_stats_g,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
-  {"set_tier0_clusters",(PyCFunction)HMF_set_tier0_clusters_g,METH_VARARGS,"set_tier0_clusters(specs, offsets, members, lag_pad=0) -> True if Tier-0 centroid gating is active"},
+  {"set_tier0_clusters",(PyCFunction)HMF_set_tier0_clusters_g,METH_VARARGS,"set_tier0_clusters(specs, offsets, members, lag_pad=0, thr_scales=None) -> True if Tier-0 centroid gating is active"},
   {"clear_tier0_clusters",(PyCFunction)HMF_clear_tier0_clusters_g,METH_NOARGS,"clear_tier0_clusters() -> disable Tier-0 centroid gating"},
   {"tier0_cluster_count",(PyCFunction)HMF_tier0_cluster_count_g,METH_NOARGS,"tier0_cluster_count() -> active Tier-0 centroid count, or 0 if unclustered"},
+  {"set_tier1_clusters",(PyCFunction)HMF_set_tier1_clusters_g,METH_VARARGS,"set_tier1_clusters(specs, offsets, members, lag_pad=0) -> True if Tier-1 centroid gating is active"},
+  {"clear_tier1_clusters",(PyCFunction)HMF_clear_tier1_clusters_g,METH_NOARGS,"clear_tier1_clusters() -> disable Tier-1 centroid gating"},
+  {"tier1_cluster_count",(PyCFunction)HMF_tier1_cluster_count_g,METH_NOARGS,"tier1_cluster_count() -> active Tier-1 centroid count, or 0 if unclustered"},
   {"set_data",(PyCFunction)HMF_set_data_g,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)HMF_set_template_g,METH_VARARGS,"set_template(i, buffer)"},
   {"set_data_batch",(PyCFunction)HMF_set_data_batch_g,METH_VARARGS,"set_data_batch(i0, buffer)"},

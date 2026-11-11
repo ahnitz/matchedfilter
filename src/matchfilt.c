@@ -99,6 +99,7 @@ struct ap_mf_plan {
   int qnomargin;              /* decide on the int16 maximum itself (ap_mf_set_q15_margin) */
   int16_t *qtr,*qti;          /* [group][n][qw] quantised templates, conjugated */
   float *qts;                 /* [nt] template scale: t_q = t * qts */
+  float *qthr_scale;          /* [nt] optional per-template threshold multiplier, or NULL */
   unsigned char *qtok;        /* [nt] quantised copy current */
   int16_t *qd;                /* [nd][n][3] quantised data, (dr, di, -di) */
   float *qds;                 /* [nd] data scale */
@@ -242,7 +243,7 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->twiddles);free(p->sspec_tw);free(p->dif_pkbuf);
   free(p->sfwd_2n);free(p->sspec_2n);
   free(p->sfwd_n);free(p->sspec_n);
-  free(p->qtr);free(p->qti);free(p->qts);free(p->qtok);
+  free(p->qtr);free(p->qti);free(p->qts);free(p->qthr_scale);free(p->qtok);
   free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);free(p->qdx);free(p->qdxok);free(p->qord);free(p->qzero);
   free(p->qdm);free(p->qtm);free(p->qdmok);free(p->qtmok);
   free(p);
@@ -2253,7 +2254,7 @@ static inline float q15_stat_val(float qds,float qts,int16_t lanemax){
    register allocation or data-quantization call sites on other backends. */
 static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int first,
                       int t0, int nt, int g, int l1, int max_width, float threshold,
-                      size_t start, size_t end, const float *bl,
+                      size_t start, size_t end, const float *bl, const float *bl_stat,
                       const int16_t *tr, const int16_t *ti,
                       unsigned char *pass, float *stat){
   const size_t n=p->n;
@@ -2300,7 +2301,7 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
         }
         if(stat){
           for(int l=0;l<active;l++)
-            stat[row+l]=q15_stat_val(p->qds[d+b],bl[off+l],lanemax[b*width+l]);
+            stat[row+l]=q15_stat_val(p->qds[d+b],bl_stat[off+l],lanemax[b*width+l]);
         }
       }
     }
@@ -2318,7 +2319,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
   if(q15_prepare(p)) return -1;
   const size_t n=p->n; const int qw=p->qw;
   const float margin=(float)ap_q15_margin(n);
-  float bl[64];
+  float bl[64], bl_stat[64];
   int16_t lanethr[64], lanemax[64];
   int total=0;
   for(int g=t0/qw; g*qw<t0+nt; g++){
@@ -2326,10 +2327,11 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
     const int l1 = (g+1)*qw>t0+nt ? t0+nt-g*qw : qw;
     for(int l=0;l<qw;l++){
       const int t=g*qw+l;
-      bl[l]=0.f;
+      bl[l]=0.f; bl_stat[l]=0.f;
       if(l<l0 || l>=l1) continue;
       if(!p->qtok[t]) q15_template(p,t);
-      bl[l]=p->qts[t];
+      bl_stat[l]=p->qts[t];
+      bl[l]=p->qthr_scale ? p->qts[t]*p->qthr_scale[t] : p->qts[t];
     }
     const int16_t *tr=p->qtr+(size_t)g*n*qw, *ti=p->qti+(size_t)g*n*qw;
     int first=d0;
@@ -2339,12 +2341,13 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
     if(p->qfull && l0==0 && l1==qw && nd>=2){
       first=d0+(nd/2)*2;
       const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,qw/2,threshold,
-                                 start,end,bl,tr,ti,pass,stat);
+                                 start,end,bl,bl_stat,tr,ti,pass,stat);
       if(r<0) return -1;
       total+=r;
     } else if(p->qtail && l0==0 && l1<=3*qw/4 && nd>=4){
       first=d0+(nd/4)*4;
-      const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,qw/2,threshold,start,end,bl,tr,ti,pass,stat);
+      const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,qw/2,threshold,
+                                 start,end,bl,bl_stat,tr,ti,pass,stat);
       if(r<0) return -1;
       total+=r;
     }
@@ -2390,7 +2393,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
       }
       if(stat){
         float *srow=stat+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);
-        for(int l=l0;l<l1;l++) srow[l-l0]=q15_stat_val(p->qds[d],bl[l],lanemax[l]);
+        for(int l=l0;l<l1;l++) srow[l-l0]=q15_stat_val(p->qds[d],bl_stat[l],lanemax[l]);
       }
     }
   }
@@ -2403,6 +2406,23 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
 int ap_mf_set_q15_margin(ap_mf_plan *p,int on){
   if(!p) return -1;
   p->qnomargin=!on;
+  return 0;
+}
+
+int ap_mf_set_q15_thr_scale(ap_mf_plan *p,const float *scales){
+  if(!p) return -1;
+  if(!scales){
+    free(p->qthr_scale);
+    p->qthr_scale=NULL;
+    return 0;
+  }
+  for(int t=0;t<p->nt;t++)
+    if(!isfinite(scales[t]) || !(scales[t]>0.0f)) return -1;
+  if(!p->qthr_scale){
+    p->qthr_scale=malloc((size_t)p->nt*sizeof(float));
+    if(!p->qthr_scale) return -1;
+  }
+  memcpy(p->qthr_scale,scales,(size_t)p->nt*sizeof(float));
   return 0;
 }
 
