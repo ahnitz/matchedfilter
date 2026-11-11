@@ -1,4 +1,4 @@
-import math, sys
+import math, re, sys
 # Generate fully-unrolled Stockham autosort SoA vector FFT codelets.
 # Data: __m512 xr[n], xi[n]  (element index = transform index; SIMD lanes = independent transforms)
 def wconst(k,n):
@@ -248,15 +248,69 @@ class SRGen(Gen):
         c,sn=wconst(k,n)
         o=("t%d_r"%s.nc,"t%d_i"%s.nc); s.nc+=1
         s.cmul(a[0],a[1],c,sn,o); return o
-    def rec(s,idxs):
+    stream_z = False
+    def rec(s,idxs,sink_fn=None,root_combine=None):
         n=len(idxs)
-        if n==1: return [s.load(idxs[0])]
+        if n==1:
+            v=s.load(idxs[0])
+            if sink_fn is not None:
+                sink_fn(0, v)
+                return None
+            return [v]
         if n==2:
             a=s.load(idxs[0]); b=s.load(idxs[1])
-            return [s.add(a,b), s.sub(a,b)]
+            out=[s.add(a,b), s.sub(a,b)]
+            if sink_fn is not None:
+                sink_fn(0, out[0])
+                sink_fn(1, out[1])
+                return None
+            return out
+        q=n//4
+        if root_combine is not None and (n>=64 or (n>=32 and s.stream_z)):
+            t1=[None]*q
+            def zc_sink(k, zc_val):
+                t1[k]=s.twmul(zc_val,k,n)
+            s.rec(idxs[1::4], sink_fn=zc_sink)
+            su=[None]*q
+            mdf=[None]*q
+            def zp_sink(k, zp_val):
+                t2=s.twmul(zp_val,3*k,n)
+                su[k]=s.add(t1[k],t2)
+                mdf[k]=s.mi(s.sub(t1[k],t2))
+            s.rec(idxs[3::4], sink_fn=zp_sink)
+            def u_sink(uk_idx, uk_val):
+                if uk_idx<q:
+                    root_combine(uk_idx, uk_val, su[uk_idx], False)
+                    root_combine(uk_idx+2*q, uk_val, su[uk_idx], True)
+                else:
+                    k=uk_idx-q
+                    root_combine(k+q, uk_val, mdf[k], False)
+                    root_combine(k+3*q, uk_val, mdf[k], True)
+            s.rec(idxs[0::2], sink_fn=u_sink)
+            return None
         U=s.rec(idxs[0::2]); Zc=s.rec(idxs[1::4]); Zp=s.rec(idxs[3::4])
-        X=[None]*n; q=n//4
-        for k in range(q):
+        if root_combine is not None:
+            for k in reversed(range(q)):
+                t1=s.twmul(Zc[k],k,n); t2=s.twmul(Zp[k],3*k,n)
+                su=s.add(t1,t2); df=s.sub(t1,t2)
+                root_combine(k, U[k], su, False)
+                root_combine(k+2*q, U[k], su, True)
+                mdf=s.mi(df)
+                root_combine(k+q, U[k+q], mdf, False)
+                root_combine(k+3*q, U[k+q], mdf, True)
+            return None
+        if sink_fn is not None:
+            for k in reversed(range(q)):
+                t1=s.twmul(Zc[k],k,n); t2=s.twmul(Zp[k],3*k,n)
+                su=s.add(t1,t2); df=s.sub(t1,t2)
+                sink_fn(k, s.add(U[k],su))
+                sink_fn(k+2*q, s.sub(U[k],su))
+                mdf=s.mi(df)
+                sink_fn(k+q, s.add(U[k+q], mdf))
+                sink_fn(k+3*q, s.sub(U[k+q], mdf))
+            return None
+        X=[None]*n
+        for k in reversed(range(q)):
             t1=s.twmul(Zc[k],k,n); t2=s.twmul(Zp[k],3*k,n)
             su=s.add(t1,t2); df=s.sub(t1,t2)
             X[k]      = s.add(U[k],su)
@@ -266,45 +320,25 @@ class SRGen(Gen):
             X[k+3*q]  = s.sub(U[k+q], mdf)
         return X
 
-def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_tw=False):
+def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_tw=False,stream_z=False):
     if sink and not inplace:
         raise ValueError("an output sink requires plain unit-stride float input")
     if inplace and (not unit or prod or tw):
         raise ValueError("in-place float buffers require a plain unit-stride codelet")
     g=SRGen(n,name,tw,False,prod)
-    X=g.rec(list(range(n)))
-    if out_tw:
-        for k in range(n):
+    g.stream_z=stream_z
+    def emit_root(k, u_val, d_val, is_sub):
+        if sink:
+            g.emit("if(rowmask & (1u << %d)){" % k)
+        xk = g.sub(u_val, d_val) if is_sub else g.add(u_val, d_val)
+        if out_tw:
             g.emit("ar[S*%d]=V_FMSUB(%s,twr[%d],V_MUL(%s,twi[%d])); ai[S*%d]=V_FMADD(%s,twi[%d],V_MUL(%s,twr[%d]));"%(
-                k,X[k][0],k,X[k][1],k, k,X[k][0],k,X[k][1],k))
-    else:
-        for k in range(n):
-            g.emit("ar[S*%d]=%s; ai[S*%d]=%s;"%(k,X[k][0],k,X[k][1]))
-    if unit:
-        # The top-level combine starts after every input has been consumed.
-        # Store each final result at its definition instead of keeping all
-        # 2*n output vectors live until the end of the DAG.
-        import re
-        stores={X[k][1]: (k, g.L[-n+k]) for k in range(n)}
-        scheduled=[]
-        for line in g.L[:-n]:
-            matched = None
-            for var, (k, store) in stores.items():
-                if re.search(r"\b"+var+r"=", line):
-                    matched = (k, store)
-                    break
-            if matched is not None and sink:
-                k, store = matched
-                scheduled.append("  if(rowmask & (1u << %d)){" % k)
-                scheduled.append("  "+line)
-                scheduled.append("  "+store)
-                scheduled.append("  }")
-            elif matched is not None:
-                scheduled.append(line)
-                scheduled.append(matched[1])
-            else:
-                scheduled.append(line)
-        g.L=scheduled
+                k,xk[0],k,xk[1],k, k,xk[0],k,xk[1],k))
+        else:
+            g.emit("ar[S*%d]=%s; ai[S*%d]=%s;"%(k,xk[0],k,xk[1]))
+        if sink:
+            g.emit("}")
+    g.rec(list(range(n)), root_combine=emit_root)
     body=fold_negations("\n".join(g.L))
     cdefs="\n".join("  const vf %s=V_SET1(%sf);"%(v,k) for k,v in g.consts.items())
     if prod:
@@ -321,7 +355,6 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_
     if inplace:
         # Stage B can consume its contiguous float intermediate directly.
         # Explicit loads/stores keep this interface independent of vf's type.
-        import re
         args=args.replace("vf*restrict ar,vf*restrict ai",
                           "float*restrict ar,float*restrict ai")
         body=re.sub(r"(ar|ai)\[S\*(\d+)\]=(\w+);",
@@ -381,33 +414,32 @@ if __name__=="__main__":
         out.append(build(nn,rr,"fft%d_prod"%nn,prod=True))
     # Split-radix at the sizes elemfft.h actually selects.  8 is served by
     # fft8_42 and fft8_tw, so fftsr8 was generated and never called.
-    for nn in (16,32,64):
+    for nn in (16,64):
         out.append(build_sr(nn,"fftsr%d"%nn))
         out.append(build_sr(nn,"fftsr%d_tw"%nn,tw=True))
-    # Split-radix PRODUCT codelets. The Stockham fft%d_prod forms above bounce
-    # through the br/bi scratch pair between their two passes -- 32 vector
-    # accesses at m=16, 128 at m=64 -- and in the pair-batched path that
-    # scratch is indexed at the OUTPUT stride, so consecutive calls walk the
-    # whole element buffer instead of one small block. Split-radix reads each
-    # input once into a register and writes back in place, so the scratch
-    # traffic is not reduced, it is DELETED.
-    for nn in (16,32,64):
         out.append(build_sr(nn,"fftsr%d_prod"%nn,prod=True))
+        out.append(broadcast_codelet(build_sr(nn,"fftsr%d_prod_broadcast"%nn,prod=True)))
     # Twiddle-fused: only the sizes elemfft.h falls through to.  16 and 32
     # go to the split-radix variants, so fft16_tw and fft32_tw were dead.
     for (nn,rr) in ((8,[8]),(32,[8,4]),(64,[8,8])):
         out.append(build(nn,rr,"fft%d_tw"%nn,tw=True))
     for nn,rr in ((8,[8]),(32,[8,4]),(64,[8,8])):
         out.append(broadcast_codelet(build(nn,rr,"fft%d_prod_broadcast"%nn,prod=True)))
-    for nn in (16,32,64):
-        out.append(broadcast_codelet(build_sr(nn,"fftsr%d_prod_broadcast"%nn,prod=True)))
-    # Unit-stride AVX2 codelets are measured separately from strided/broadcast
-    # layouts. Dispatch keeps other widths on their established implementation.
-    out.append(build_sr(32,"fftsr32_unit",unit=True))
-    out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True))
-    out.append(build_sr(32,"fftsr32_prod_unit_tw",prod=True,unit=True,out_tw=True))
-    out.append(build_sr(32,"fftsr32_unit_inplace",unit=True,inplace=True))
-    out.append(build_sr(32,"fftsr32_unit_sink",unit=True,inplace=True,sink=True))
+    def emit_sr32(stream_z):
+        out.append(build_sr(32,"fftsr32",stream_z=stream_z))
+        out.append(build_sr(32,"fftsr32_tw",tw=True,stream_z=stream_z))
+        out.append(build_sr(32,"fftsr32_prod",prod=True,stream_z=stream_z))
+        out.append(broadcast_codelet(build_sr(32,"fftsr32_prod_broadcast",prod=True,stream_z=stream_z)))
+        out.append(build_sr(32,"fftsr32_unit",unit=True,stream_z=stream_z))
+        out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True,stream_z=stream_z))
+        out.append(build_sr(32,"fftsr32_prod_unit_tw",prod=True,unit=True,out_tw=True,stream_z=stream_z))
+        out.append(build_sr(32,"fftsr32_unit_inplace",unit=True,inplace=True,stream_z=stream_z))
+        out.append(build_sr(32,"fftsr32_unit_sink",unit=True,inplace=True,sink=True,stream_z=stream_z))
+    out.append("#if defined(AP_SIMD_AVX1) || (defined(HWY_ARCH_X86) && HWY_ARCH_X86 && (!defined(HWY_MAX_BYTES) || HWY_MAX_BYTES < 64))")
+    emit_sr32(True)
+    out.append("#else")
+    emit_sr32(False)
+    out.append("#endif")
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif"]
     import os

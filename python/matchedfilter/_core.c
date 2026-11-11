@@ -1857,7 +1857,7 @@ static void cc_consider(cc_state *c, const double *prefix, int ndead, const int 
 static void cc_rec(cc_state *c, int i, double *prefix, double remaining, int ndead,
                    const int *alive, int nalive, double *fracs){
   if(c->err) return;
-  if(i==c->k-1){ cc_consider(c,prefix,ndead,alive,nalive,fracs); return; }
+  if(i>=c->k-1 || i>=3){ cc_consider(c,prefix,ndead,alive,nalive,fracs); return; }
   const long long *low=c->low[i]; const float *lowv=c->lowv[i];
   for(int a=0;a<c->nsplit && !c->err;a++){
     const double share=c->splits[a]*remaining;

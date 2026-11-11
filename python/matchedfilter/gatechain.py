@@ -409,7 +409,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         alphas_arr = _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad)
         rat = round((nc_out / float(nt)) * 20.0) / 20.0
         raw_a = float(np.mean(alphas_arr) - 0.5 * np.std(alphas_arr))
-        eff_a = max(0.5, min(1.0, math.floor(raw_a * 50.0 + 1e-9) / 50.0))
+        eff_a = max(0.5, min(1.0, math.floor(raw_a * 200.0 + 1e-9) / 200.0))
         return Tier0Cluster(specs=specs_out, offsets=offs_i32, members=mems_i32,
                             lag_pad=lpad, ratio=rat, alpha=eff_a,
                             member_alphas=np.asarray(alphas_arr, np.float32))
