@@ -21,7 +21,7 @@ PYPROJECT = Path(__file__).resolve().parents[1] / 'pyproject.toml'
 
 #: cibuildwheel platform -> (hosted runner, platform tag families built there).
 PLATFORMS = {'linux': ('ubuntu-24.04', ('manylinux', 'musllinux')),
-             'macos': ('macos-14', ('macosx',))}
+             'macos': ('macos-latest', ('macosx',))}
 
 
 def identifiers(select='*', pyproject=PYPROJECT):
