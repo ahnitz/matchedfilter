@@ -322,6 +322,12 @@ def _joint_round(jobs):
         tr._round_seq = seq + 1
         k = (seq * _ROUND_BANKS) % len(sample)
         chosen = (sample[k:] + sample[:k])[:_ROUND_BANKS]
+        # A bank's first round materializes every candidate layout it may be asked for (and
+        # prices the model's block sizes), so all of that happens within the cohort's warmup
+        # rounds: lazily, a later pass of the trial meeting a configuration the bank had not
+        # yet built priced it then (Nightly arm64, 2026-11-11: 8 priced calls where 6).
+        for b in chosen:
+            b._prepare_arms()
         pick = {id(b) for b in chosen}
         idx = [j for j, (b, _, kw) in enumerate(jobs) if id(b) in pick
                and (kw or {}).get("template_index") is None and j not in timed]

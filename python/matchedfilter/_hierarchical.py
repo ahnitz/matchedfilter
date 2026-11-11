@@ -514,28 +514,38 @@ class HierarchicalFilter(MatchedFilter):
             return None
         return self._tier0_cluster_for_band(int(ch[0]))
 
+    def _tier1_usable(self, chain):
+        """Whether Tier-1 sub-centroids may run on `chain`: a CPU plan of at least two tiers,
+        except where Tier 1 is the last tier and a direct refine may apply (the direct refine
+        elects each survivor's own last-tier lag, which a shared centroid cannot give; the C
+        plan runs that tier unclustered then, ap_hmf_run)."""
+        if self.device.kind != "cpu" or self._gpu is not None or chain is None or len(chain) < 2:
+            return False
+        if len(chain) == 2 and (getattr(self, "_taps", None) is not None
+                                and _direct_refine_enabled() and self._cal_thr is None):
+            return False
+        return True
+
     def _active_tier1_cluster(self, chain=None):
-        """Active Tier-1 sub-centroid `Tier0Cluster` for `chain[1]`, or `None` when disabled."""
-        if self.device.kind != "cpu" or self._gpu is not None:
-            return None
+        """Active Tier-1 sub-centroid `Tier0Cluster` for `chain[1]` (nested inside the active
+        Tier-0 clusters), or `None` when Tier-1 clustering does not apply."""
         ch = self._chain if chain is None else chain
-        if ch is None or len(ch) < 2:
+        if not self._tier1_usable(ch):
             return None
         cl0 = self._active_tier0_cluster(ch)
         if cl0 is None or cl0.specs.shape[0] >= self.ntemplates:
             return None
+        key = (int(ch[0]), int(ch[1]))
+        hit = self._tier1_clusters.get(key)
+        if hit is not None and hit[0] is cl0:
+            return hit[1]
         tmpl = self._templates_for_clustering()
         if tmpl is None:
             return None
-        b0, b1 = int(ch[0]), int(ch[1])
-        key = (b0, b1, id(cl0))
-        if key in self._tier1_clusters:
-            return self._tier1_clusters[key]
-        k0_1 = int(_gatechain.band_offset(self._pending_ref, self.n, b1)) if self._cal_thr is None else 0
         cl1 = _gatechain.cluster_tier1_from_tier0(
-            tmpl, self._pending_ref, self.n, cl0, b1, k0=k0_1, rho_min=0.985
-        )
-        self._tier1_clusters[key] = cl1
+            tmpl, self._pending_ref, self.n, cl0, key[1],
+            k0=self._desired_offsets(ch)[1])
+        self._tier1_clusters[key] = (cl0, cl1)
         return cl1
 
     def _sync_tier0_clusters(self, plan):
@@ -554,21 +564,9 @@ class HierarchicalFilter(MatchedFilter):
             else:
                 plan.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad))
             self._synced_t0 = tag
-        self._sync_tier1_clusters(plan)
-
-    def _sync_tier1_clusters(self, plan):
-        """Upload or clear Tier-1 sub-centroid clusters on CPU `_core.HMF` `plan`."""
-        if plan is None or not hasattr(plan, "set_tier1_clusters"):
-            return
-        r = self.__dict__.get("_resolved")
-        ch = self._chain
-        disable_for_direct = (
-            ch is not None
-            and len(ch) == 2
-            and r is not None
-            and r.direct_hw is not None
-        )
-        cl1 = None if disable_for_direct else self._active_tier1_cluster(ch)
+        # Tier-1 sub-centroids nest inside the Tier-0 clusters: the C plan drops them whenever
+        # the Tier-0 clusters change, and they are uploaded after them.
+        cl1 = self._active_tier1_cluster() if cl is not None else None
         tag1 = (id(plan), None if cl1 is None else id(cl1))
         if self._synced_t1 == tag1 and (
             (cl1 is None and plan.tier1_cluster_count() == 0)
@@ -803,9 +801,10 @@ class HierarchicalFilter(MatchedFilter):
                 # one-tier chain's tier reports its lag for the direct refine's window
                 cost = cost.unscreened()
             cl0 = self._active_tier0_cluster(self._chain)
+            cl1 = self._active_tier1_cluster(self._chain) if cl0 is not None else None
             pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
                                              self._chain, cost=cost, window=self.search_window,
-                                             tier0_cluster=cl0)
+                                             tier0_cluster=cl0, tier1_cluster=cl1)
             if pl is not None:
                 th = tuple(float(x) for x in pl["thresholds"])
                 for v in th:
@@ -1171,9 +1170,7 @@ class HierarchicalFilter(MatchedFilter):
                 self._ckey = None
                 self.__dict__.pop("_call_plans", None)
                 if self._mf is not None:
-                    self._mf.clear_tier0_clusters()
-                    if hasattr(self._mf, "clear_tier1_clusters"):
-                        self._mf.clear_tier1_clusters()
+                    self._mf.clear_tier0_clusters()   # drops the nested Tier-1 clusters too
             if self._pinned is None and self._chain is not None and self._chosen_csig:
                 self._chain, self._mf, self._resolved = None, None, None
                 self._ckey = None

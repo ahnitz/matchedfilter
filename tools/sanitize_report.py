@@ -20,13 +20,24 @@ import sys
 OUTCOMES = ("PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR")
 
 
+#: pytest's closing line ("=== 1 failed, 300 passed in 2308.12s (0:38:28) ==="): the run
+#: finished, whatever its outcome, so nothing crashed.
+FINISHED = re.compile(r"^=+ .*\bin \d+(?:\.\d+)?s\b.*=+\s*$", re.M)
+
+
 def crashing_test(text):
     """The pytest node (tests/test_x.py::test_y) running at a crash, or None: the one
-    faulthandler shows, else the last node id pytest -v printed with no outcome after it
-    (under ASan, ASan's abort handler runs instead of faulthandler's)."""
-    m = re.findall(r'File "[^"]*/(tests/test_\w+\.py)", line \d+ in (test_\w+)', text)
-    if m:
-        return "%s::%s" % m[0]
+    faulthandler shows after its "Fatal Python error", else -- when pytest did not finish --
+    the last node id pytest -v printed with no outcome after it (under ASan, ASan's abort
+    handler runs instead of faulthandler's). A traceback a test merely printed, in a run that
+    finished, names no crash."""
+    fatal = text.find("Fatal Python error")
+    if fatal >= 0:
+        m = re.findall(r'File "[^"]*/(tests/test_\w+\.py)", line \d+ in (test_\w+)', text[fatal:])
+        if m:
+            return "%s::%s" % m[0]
+    if FINISHED.search(text):
+        return None
     started = re.findall(r"^(tests/test_\w+\.py::\S+)(.*)$", text, re.M)
     if started and not any(o in started[-1][1] for o in OUTCOMES):
         return started[-1][0]

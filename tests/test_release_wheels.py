@@ -39,7 +39,7 @@ def pyproject(tmp_path):
 def test_the_matrix_is_pyprojects_wheel_list(pyproject):
     assert sorted(checker.identifiers('*', pyproject)) == sorted(WHEELS)
     jobs = {j['build']: j for j in checker.matrix('*', pyproject)}
-    assert jobs['cp311-macosx_arm64'] == {'build': 'cp311-macosx_arm64', 'os': 'macos-latest',
+    assert jobs['cp311-macosx_arm64'] == {'build': 'cp311-macosx_arm64', 'os': 'macos-15',
                                           'python': '3.11', 'native': True}
     assert jobs['cp314-musllinux_x86_64']['os'] == 'ubuntu-24.04'
     assert not jobs['cp314-musllinux_x86_64']['native']

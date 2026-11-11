@@ -119,14 +119,16 @@ def binom_two_sided(x, n, p):
     return float(min(1.0, pm[pm <= pm[x] * (1 + 1e-9)].sum()))
 
 
-def modelled(power, n, chain, thresholds, snr, window, count, seed=9770, alpha0=1.0):
+def modelled(power, n, chain, thresholds, snr, window, count, seed=9770, alpha0=1.0, alpha1=1.0):
     """(dismissed, detections): of `count` detections of a model simulation independent of
     the plans' (seeds seed, seed + 1, ...: 2M detections each), those some tier of chain at
-    these thresholds dismisses. alpha0: the signal's retention at the first tier (a tier-0
-    centroid's member's)."""
+    these thresholds dismisses. alpha0 / alpha1: the signal's retention at the first / second
+    tier (a tier-0 centroid's / tier-1 sub-centroid's member's)."""
     from matchedfilter import gatechain as gc
     bands = gc.usable_bands(power, n)
-    alphas = None if alpha0 >= 1.0 else tuple(alpha0 if b == chain[0] else 1.0 for b in bands)
+    b1 = chain[1] if len(chain) >= 2 else None
+    alphas = (None if alpha0 >= 1.0 and alpha1 >= 1.0 else
+              tuple(alpha0 if b == chain[0] else (alpha1 if b == b1 else 1.0) for b in bands))
     lost = total = 0
     step = 2000000
     for c in range(-(-int(count) // step)):
@@ -321,24 +323,30 @@ def run_bank_case(job):
                     if tuple(hf._chain) != tuple(chain):
                         return dict(row, error="MF_CHAIN_FORCE not honoured: %s" % (hf._chain,))
                     cl = hf._active_tier0_cluster()
+                    cl1 = hf._active_tier1_cluster() if cl is not None else None
                     key = "%s %s %s" % (t0, "cpu" if dname == "cpu" else "dev", stat)
                     filters[key] = hf
                     plans[key] = dict(thresholds=[float(x) for x in r.thresholds],
                                       clusters=0 if cl is None else int(cl.specs.shape[0]),
                                       alpha=None if cl is None else float(cl.alpha),
                                       member_alphas=None if cl is None or cl.member_alphas is None
-                                      else [float(x) for x in cl.member_alphas])
+                                      else [float(x) for x in cl.member_alphas],
+                                      member_alphas1=None if cl1 is None
+                                      else [float(x) for x in cl1.member_alphas])
         finally:
             _hierarchical._TIER0_PAIR_CENTROID = True
     # each plan's modelled dismissal: templates injected uniformly, member t at its retention
     count = a["check"] or max(1000000, 10 * a["inj"])
     for key, pl in plans.items():
         al = pl["member_alphas"] or [pl["alpha"] or 1.0] * nt
+        al1 = pl["member_alphas1"] or [1.0] * nt
+        pairs = [(round(x, 4), round(y, 4)) for x, y in zip(al, al1)]
         lost = tot = 0
-        for v in sorted(set(round(x, 4) for x in al)):
-            w = sum(1 for x in al if round(x, 4) == v)
+        for v, v1 in sorted(set(pairs)):
+            w = sum(1 for q in pairs if q == (v, v1))
             l_, t_ = modelled(power, n, chain, pl["thresholds"], a["snr"], win,
-                              max(100000, count * w // nt), alpha0=min(1.0, v))
+                              max(100000, count * w // nt), alpha0=min(1.0, v),
+                              alpha1=min(1.0, v1))
             lost += l_ * w / t_
             tot += w
         pl["model"] = lost / tot          # the plan's modelled dismissal, a share

@@ -14,6 +14,7 @@ import pytest
 
 from conftest import usable_gpu, usable_gpu_reason
 import matchedfilter as mf
+from matchedfilter import _prices
 from matchedfilter._results import _Deferred, _SparsePeaks
 from matchedfilter.time_domain import template_spectra
 
@@ -252,6 +253,10 @@ def test_gpu_deferred_grouped_multibatch_and_empty_flag(dev):
 @pytest.mark.parametrize("complex_taps", [False, True])
 def test_gpu_direct_refine_chains_and_modes(dev, chain, real_kind, complex_taps, monkeypatch):
     """GPU direct time-domain refine matches GPU FFT refine across 1/2-tier chains and dtypes."""
+    # Pinned direct/FFT price ratio (per lag x tap against a length-n FFT refine pair; ~2e-5
+    # timed on a desktop GPU): the timed one (_prices, once per process) can price the direct
+    # refine out under a loaded full-suite run, and this test checks that it runs.
+    monkeypatch.setattr(_prices, "_gpu_direct_ratio", lambda *a, **kw: 1.0e-5)
     data = _synthetic_td_bank(n=2048, ntemplates=20, nblocks=28, nsig=10,
                               complex_taps=complex_taps, real_kind=real_kind, seed=31)
     n, taps, counts, spec, series, layout, ref, window = data
@@ -304,6 +309,10 @@ def test_gpu_direct_refine_chains_and_modes(dev, chain, real_kind, complex_taps,
 def test_gpu_direct_refine_fallbacks_and_time_domain_bank(dev, monkeypatch):
     """Verify multi-bin bypass, straddling-bin mixed direct/FFT fallback, edge/long-tap
     fallback, and TimeDomainFilterBank end-to-end on GPU."""
+    # Pinned direct/FFT price ratio (per lag x tap against a length-n FFT refine pair; ~2e-5
+    # timed on a desktop GPU): the timed one (_prices, once per process) can price the direct
+    # refine out under a loaded full-suite run, and this test checks that it runs.
+    monkeypatch.setattr(_prices, "_gpu_direct_ratio", lambda *a, **kw: 1.0e-5)
     data = _synthetic_td_bank(n=2048, ntemplates=20, nblocks=36, nsig=14,
                               complex_taps=True, real_kind="real_contig", seed=53)
     n, taps, counts, spec, series, layout, ref, window = data

@@ -153,10 +153,14 @@ def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
     np.testing.assert_allclose(z1[~moved], z0[~moved], rtol=1e-4, atol=1e-4 * np.abs(z0).max())
 
 
-def test_a_lane_of_a_complex_series_is_read_in_place():
+def test_a_lane_of_a_complex_series_is_read_in_place(monkeypatch):
     """A real series that is one lane (real or imaginary part) of a complex array -- a packed
     pair of real middle series -- is filtered in place, with exactly the results of the same
     series made contiguous."""
+    # Both runs must take the same configuration: an open joint trial (this layout's may have
+    # been started by an earlier test) can switch arms between the two calls, and arms may
+    # refine a pair directly or by its transform, which round the value differently (~1 ulp).
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
     rng = np.random.default_rng(9)
     counts = list(rng.integers(150, 401, 12))
     taps, w, df = _quadrature_bank(rng, counts)

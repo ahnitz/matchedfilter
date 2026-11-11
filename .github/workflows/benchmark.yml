@@ -46,7 +46,7 @@ jobs:
           # compare machines as much as kernels.
           - {os: ubuntu-24.04,     label: "linux-x86_64"}
           - {os: ubuntu-24.04-arm, label: "linux-arm64"}
-          - {os: macos-latest,     label: "macos-arm64"}
+          - {os: macos-15,         label: "macos-arm64"}
           # Intel macOS is deliberately absent: the hosted fleet is retiring
           # those runners, and a platform that cannot be tested should not be
           # claimed.  It may well work -- it is the x86 kernels plus Clang --

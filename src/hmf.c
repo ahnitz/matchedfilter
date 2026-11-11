@@ -134,7 +134,6 @@ struct ap_hmf_plan {
   void *tier0_g16;
   int *tier0_off;                 /* [tier0_nt + 1] CSR offsets into tier0_members */
   int *tier0_members;             /* [nt] disjoint member template indices in [0, nt) */
-  float *tier0_thr_scale;         /* [tier0_nt] optional per-cluster threshold multiplier */
   unsigned char *tier0_uncl_pend; /* [nd] deferred ingest into unclustered tier[0] */
   /* Tier-1 sub-centroid clustering (ap_hmf_set_tier1_clusters): evaluates tier1_nt <= nt
      sub-centroids at tier 1 on survivors of tier 0 and expands firing Tier-1 centroids
@@ -767,6 +766,38 @@ int ap_hmf_set_thresholds(ap_hmf_plan *p,const float *thr,int ntiers){
   for(int i=0;i<ntiers;i++) p->tier[i].thr=thr[i];   /* negative marks unconfigured */
   return 0;
 }
+/* Quantize one conjugated coarse template row spec ([m] interleaved complex) to the Q15
+   screen's layout (qrow: [m] real then [m] imaginary int16, scaled to |t_q|_2 = AP_Q15_TNORM
+   unless a component would pass int16). Returns the scale t_q = t * scale (0 for an all-zero
+   row, negative for a non-finite one; the row is then zeroed). */
+static float hmf_q15_template_row(const float *spec,size_t m,int16_t *qrow){
+  double ss=0.0, amax=0.0;
+  for(size_t k=0;k<m;k++){
+    const double r=(double)spec[2*k], im=-(double)spec[2*k+1];
+    ss += r*r + im*im;
+    if(fabs(r)>amax) amax=fabs(r);
+    if(fabs(im)>amax) amax=fabs(im);
+  }
+  double sc = !isfinite(ss) ? -1.0 : 0.0;
+  if(sc==0.0 && ss>0.0){
+    sc = AP_Q15_TNORM(m) / sqrt(ss);
+    if(sc*amax > 32767.0) sc = 32767.0 / amax;
+  }
+  int16_t *qr = qrow, *qi = qrow + m;
+  if(!(sc > 0.0)){
+    memset(qr,0,2*m*sizeof(int16_t));
+  } else {
+    for(size_t k=0;k<m;k++){
+      double vr=nearbyint((double)spec[2*k]*sc), vi=nearbyint(-(double)spec[2*k+1]*sc);
+      if(vr>32767.0) vr=32767.0; else if(vr<-32767.0) vr=-32767.0;
+      if(vi>32767.0) vi=32767.0; else if(vi<-32767.0) vi=-32767.0;
+      qr[k]=(int16_t)vr;
+      qi[k]=(int16_t)vi;
+    }
+  }
+  return (float)sc;
+}
+
 /* Each tier's template t: the in-band part of spec ([k0, khi), wrapped to cyclic slots
    k & (m - 1) when k0 > 0; for a Hermitian-packed spectrum with k0 == 0 the Nyquist value in
    DC's imaginary part is dropped), scaled to unit expected power in the band -- by the
@@ -793,35 +824,8 @@ static int load_tiers(ap_hmf_plan *p,int t,const float *spec){
     }
     if(ap_mf_set_template(tr->mf,t,tr->scratch)) return -1;
     if(tr->g16 && ap_gate16_set_template(tr->g16,t,tr->scratch)) return -1;
-    if(tr->qtm){
-      double ss=0.0, amax=0.0;
-      for(size_t k=0;k<tr->m;k++){
-        const float rf=tr->scratch[2*k], imf=-tr->scratch[2*k+1];
-        const double r=(double)rf, im=(double)imf;
-        ss += r*r + im*im;
-        if(fabs(r)>amax) amax=fabs(r);
-        if(fabs(im)>amax) amax=fabs(im);
-      }
-      double sc = !isfinite(ss) ? -1.0 : 0.0;
-      if(sc==0.0 && ss>0.0){
-        sc = AP_Q15_TNORM(tr->m) / sqrt(ss);
-        if(sc*amax > 32767.0) sc = 32767.0 / amax;
-      }
-      int16_t *qr = tr->qtm + (size_t)t*(2*tr->m+32), *qi = qr + tr->m;
-      if(!(sc > 0.0)){
-        memset(qr,0,2*tr->m*sizeof(int16_t));
-      } else {
-        for(size_t k=0;k<tr->m;k++){
-          const float rf=tr->scratch[2*k], imf=-tr->scratch[2*k+1];
-          double vr=nearbyint((double)rf*sc), vi=nearbyint((double)imf*sc);
-          if(vr>32767.0) vr=32767.0; else if(vr<-32767.0) vr=-32767.0;
-          if(vi>32767.0) vi=32767.0; else if(vi<-32767.0) vi=-32767.0;
-          qr[k]=(int16_t)vr;
-          qi[k]=(int16_t)vi;
-        }
-      }
-      tr->qts[t]=(float)sc;
-    }
+    if(tr->qtm)
+      tr->qts[t]=hmf_q15_template_row(tr->scratch,tr->m,tr->qtm+(size_t)t*(2*tr->m+32));
   }
   return 0;
 }
@@ -939,7 +943,6 @@ static void hmf_free_tier0_clusters(ap_hmf_plan *p){
   if(p->tier0_g16){ ap_gate16_destroy(p->tier0_g16); p->tier0_g16=NULL; }
   free(p->tier0_off); p->tier0_off=NULL;
   free(p->tier0_members); p->tier0_members=NULL;
-  free(p->tier0_thr_scale); p->tier0_thr_scale=NULL;
   free(p->tier0_uncl_pend); p->tier0_uncl_pend=NULL;
   p->tier0_clustered=0;
   p->tier0_nt=0;
@@ -993,6 +996,10 @@ static int hmf_sync_unclustered_tier1(ap_hmf_plan *p,int d0,int nd){
 
 void ap_hmf_clear_tier0_clusters(ap_hmf_plan *p){
   if(!p || !p->tier0_clustered) return;
+  /* Tier-1 sub-centroids are only valid nested inside an active Tier-0 partition: a firing
+     Tier-1 centroid passes all its members on, which equals the unclustered tier only when
+     each of them came out of the same firing Tier-0 centroid. */
+  ap_hmf_clear_tier1_clusters(p);
   (void)hmf_sync_unclustered_tier0(p,0,p->nd);
   hmf_free_tier0_clusters(p);
 }
@@ -1011,76 +1018,89 @@ int ap_hmf_tier1_cluster_count(const ap_hmf_plan *p){
   return (p && p->tier1_clustered) ? p->tier1_nt : 0;
 }
 
-int ap_hmf_set_tier0_thr_scale(ap_hmf_plan *p,const float *scales){
-  if(!p || !p->tier0_clustered || !p->tier0_mf) return -1;
-  const int nc=p->tier0_nt;
-  if(!scales){
-    free(p->tier0_thr_scale);
-    p->tier0_thr_scale=NULL;
-    return ap_mf_set_q15_thr_scale(p->tier0_mf,NULL);
+/* Whether (offsets, members) is a partition of [0, nt) into nc nonempty clusters: CSR offsets
+   from 0 to nt, strictly increasing, and every template exactly once. */
+static int hmf_valid_partition(int nt,int nc,const int *offsets,const int *members){
+  if(nc<1 || nc>nt || offsets[0]!=0 || offsets[nc]!=nt) return 0;
+  unsigned char *seen=calloc((size_t)nt,1);
+  if(!seen) return 0;
+  int ok=1;
+  for(int c=0;ok && c<nc;c++){
+    if(offsets[c]>=offsets[c+1]){ ok=0; break; }
+    for(int m=offsets[c];m<offsets[c+1];m++){
+      const int t=members[m];
+      if(t<0 || t>=nt || seen[t]){ ok=0; break; }
+      seen[t]=1;
+    }
   }
-  for(int c=0;c<nc;c++)
-    if(!isfinite(scales[c]) || !(scales[c]>0.0f)) return -1;
-  float *sc=malloc((size_t)nc*sizeof(float));
-  if(!sc) return -1;
-  memcpy(sc,scales,(size_t)nc*sizeof(float));
-  if(ap_mf_set_q15_thr_scale(p->tier0_mf,sc)){
-    free(sc);
+  free(seen);
+  return ok;
+}
+
+/* The coarse plans of a centroid bank at band m: a pair-batched FP32 plan where nc fills a
+   vector and m is within the pair-batch limit (as hmf_create_tier sizes a tier's), else a
+   plain one, and the FP16 gate where this build has it. Every centroid spectrum is loaded. */
+static int hmf_cluster_plans(ap_hmf_plan *p,size_t m,int nc,const float *specs,
+                             ap_mf_plan **out_mf,void **out_g16){
+  const long pbmax=ap_env_int("MF_PBMAX",-1);
+  const int lw=ap_lane_width();
+  const size_t pblim=pbmax>=0 ? (size_t)pbmax : (lw>=16 ? 1024u : 512u);
+  const size_t min_ntmpl=(lw>0) ? (size_t)lw : 16u;
+  ap_mf_plan *cmf=NULL;
+  if((size_t)nc>=min_ntmpl && m<=pblim) cmf=ap_mf_create_pairbatch(m,p->nd,nc);
+  if(!cmf) cmf=ap_mf_create(m,p->nd,nc);
+  void *cg16=ap_gate16_available() ? ap_gate16_create(m,p->nd,nc) : NULL;
+  int ok = cmf && (!ap_gate16_available() || cg16);
+  for(int c=0;ok && c<nc;c++){
+    const float *cspec=specs+(size_t)c*2*m;
+    if(ap_mf_set_template(cmf,c,cspec) || (cg16 && ap_gate16_set_template(cg16,c,cspec))) ok=0;
+  }
+  if(!ok){
+    if(cmf) ap_mf_destroy(cmf);
+    if(cg16) ap_gate16_destroy(cg16);
     return -1;
   }
-  free(p->tier0_thr_scale);
-  p->tier0_thr_scale=sc;
+  if(p->q15) ap_mf_set_q15_margin(cmf,0);
+  *out_mf=cmf;
+  *out_g16=cg16;
+  return 0;
+}
+
+/* Ingest the data rows this plan holds its own copy of into a newly built centroid bank of
+   tier tr (rows the caller keeps arrive again with its next call). */
+static int hmf_cluster_replay_data(ap_hmf_plan *p,hmf_tier *tr,ap_mf_plan *cmf,void *cg16){
+  if(!p->dcopy) return 0;
+  const size_t row=2*p->n;
+  for(int d=0;d<p->nd;d++){
+    if(p->dmirrored[d] && p->dspec[d]==p->dcopy+(size_t)d*row){
+      const int to_mf=(p->q15 || !cg16) ? 1 : 0;
+      if(ingest_tier_data_target(p,tr,cmf,cg16,d,p->dcopy+(size_t)d*row,to_mf,1)) return -1;
+      if(!to_mf) hmf_set_pending(tr,d,HMF_PEND_MF);
+    }
+  }
   return 0;
 }
 
 int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
                               const int *offsets,const int *members,int lag_pad){
   if(!p || p->ntiers<1 || p->hermitian || !specs || !offsets || !members) return -1;
-  if(nc<1 || nc>p->nt || lag_pad<0 || (size_t)lag_pad>=p->tier[0].m) return -1;
-  if(offsets[0]!=0 || offsets[nc]!=p->nt) return -1;
-  unsigned char *seen=calloc((size_t)p->nt,1);
-  if(!seen) return -1;
-  for(int c=0;c<nc;c++){
-    if(offsets[c]>=offsets[c+1]){ free(seen); return -1; }
-    for(int m=offsets[c];m<offsets[c+1];m++){
-      const int t=members[m];
-      if(t<0 || t>=p->nt || seen[t]){ free(seen); return -1; }
-      seen[t]=1;
-    }
-  }
-  free(seen);
+  if(lag_pad<0 || (size_t)lag_pad>=p->tier[0].m) return -1;
+  if(!hmf_valid_partition(p->nt,nc,offsets,members)) return -1;
 
   ap_hmf_clear_tier0_clusters(p);
 
-  const size_t m0=p->tier[0].m;
-  const long pbmax=ap_env_int("MF_PBMAX",-1);
-  const int lw=ap_lane_width();
-  const size_t pblim=pbmax>=0 ? (size_t)pbmax : (lw>=16 ? 1024u : 512u);
-  const size_t min_ntmpl=(lw>0) ? (size_t)lw : 16u;
   ap_mf_plan *cmf=NULL;
-  if((size_t)nc>=min_ntmpl && m0<=pblim) cmf=ap_mf_create_pairbatch(m0,p->nd,nc);
-  if(!cmf) cmf=ap_mf_create(m0,p->nd,nc);
-  void *cg16=ap_gate16_available() ? ap_gate16_create(m0,p->nd,nc) : NULL;
+  void *cg16=NULL;
+  if(hmf_cluster_plans(p,p->tier[0].m,nc,specs,&cmf,&cg16)) return -1;
   int *coff=malloc((size_t)(nc+1)*sizeof(int));
   int *cmem=malloc((size_t)p->nt*sizeof(int));
   unsigned char *cpend=calloc((size_t)p->nd,1);
-  if(!cmf || (ap_gate16_available() && !cg16) || !coff || !cmem || !cpend){
-    if(cmf) ap_mf_destroy(cmf);
+  if(!coff || !cmem || !cpend){
+    ap_mf_destroy(cmf);
     if(cg16) ap_gate16_destroy(cg16);
     free(coff); free(cmem); free(cpend);
     return -1;
   }
-  for(int c=0;c<nc;c++){
-    const float *cspec=specs+(size_t)c*2*m0;
-    if(ap_mf_set_template(cmf,c,cspec)
-       || (cg16 && ap_gate16_set_template(cg16,c,cspec))){
-      ap_mf_destroy(cmf);
-      if(cg16) ap_gate16_destroy(cg16);
-      free(coff); free(cmem); free(cpend);
-      return -1;
-    }
-  }
-  if(p->q15) ap_mf_set_q15_margin(cmf,0);
   memcpy(coff,offsets,(size_t)(nc+1)*sizeof(int));
   memcpy(cmem,members,(size_t)p->nt*sizeof(int));
   p->tier0_mf=cmf;
@@ -1092,19 +1112,9 @@ int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
   p->tier0_lag_pad=lag_pad;
   p->tier0_clustered=1;
 
-  if(p->dcopy){
-    hmf_tier *tr=&p->tier[0];
-    const size_t row=2*p->n;
-    for(int d=0;d<p->nd;d++){
-      if(p->dmirrored[d] && p->dspec[d]==p->dcopy+(size_t)d*row){
-        const int to_mf=(p->q15 || !cg16) ? 1 : 0;
-        if(ingest_tier_data_target(p,tr,cmf,cg16,d,p->dcopy+(size_t)d*row,to_mf,1)){
-          ap_hmf_clear_tier0_clusters(p);
-          return -1;
-        }
-        if(!to_mf) hmf_set_pending(tr,d,HMF_PEND_MF);
-      }
-    }
+  if(hmf_cluster_replay_data(p,&p->tier[0],cmf,cg16)){
+    ap_hmf_clear_tier0_clusters(p);
+    return -1;
   }
   return 0;
 }
@@ -1112,90 +1122,43 @@ int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
 int ap_hmf_set_tier1_clusters(ap_hmf_plan *p,int nc,const float *specs,
                               const int *offsets,const int *members,int lag_pad){
   if(!p || p->ntiers<2 || p->hermitian || !specs || !offsets || !members) return -1;
-  if(nc<1 || nc>p->nt || lag_pad<0 || (size_t)lag_pad>=p->tier[1].m) return -1;
-  if(offsets[0]!=0 || offsets[nc]!=p->nt) return -1;
-  unsigned char *seen=calloc((size_t)p->nt,1);
-  if(!seen) return -1;
-  for(int c=0;c<nc;c++){
-    if(offsets[c]>=offsets[c+1]){ free(seen); return -1; }
-    for(int m=offsets[c];m<offsets[c+1];m++){
-      const int t=members[m];
-      if(t<0 || t>=p->nt || seen[t]){ free(seen); return -1; }
-      seen[t]=1;
-    }
-  }
-  free(seen);
+  if(lag_pad<0 || (size_t)lag_pad>=p->tier[1].m) return -1;
+  if(!p->tier0_clustered || !hmf_valid_partition(p->nt,nc,offsets,members)) return -1;
+  /* Every Tier-1 cluster must lie inside one Tier-0 cluster (see ap_hmf_clear_tier0_clusters). */
+  int *t0of=malloc((size_t)p->nt*sizeof(int));
+  if(!t0of) return -1;
+  for(int c=0;c<p->tier0_nt;c++)
+    for(int u=p->tier0_off[c];u<p->tier0_off[c+1];u++) t0of[p->tier0_members[u]]=c;
+  int nested=1;
+  for(int c=0;nested && c<nc;c++)
+    for(int u=offsets[c]+1;u<offsets[c+1];u++)
+      if(t0of[members[u]]!=t0of[members[offsets[c]]]){ nested=0; break; }
+  free(t0of);
+  if(!nested) return -1;
 
   ap_hmf_clear_tier1_clusters(p);
 
   const size_t m1=p->tier[1].m;
-  const long pbmax=ap_env_int("MF_PBMAX",-1);
-  const int lw=ap_lane_width();
-  const size_t pblim=pbmax>=0 ? (size_t)pbmax : 1024u;
-  const size_t min_ntmpl=(lw>0) ? (size_t)lw : 16u;
   ap_mf_plan *cmf=NULL;
-  if((size_t)nc>=min_ntmpl && m1<=pblim) cmf=ap_mf_create_pairbatch(m1,p->nd,nc);
-  if(!cmf) cmf=ap_mf_create(m1,p->nd,nc);
-  void *cg16=ap_gate16_available() ? ap_gate16_create(m1,p->nd,nc) : NULL;
-  int16_t *cqtm=NULL;
-  float *cqts=NULL;
-  if(cmf && ap_mf_q15_lanes(cmf)>0){
-    cqtm=ap_alloc64((size_t)nc*(2*m1+32)*sizeof(int16_t));
-    cqts=calloc((size_t)nc,sizeof(float));
-  }
+  void *cg16=NULL;
+  if(hmf_cluster_plans(p,m1,nc,specs,&cmf,&cg16)) return -1;
+  const int want_q15=ap_mf_q15_lanes(cmf)>0;
+  int16_t *cqtm=want_q15 ? ap_alloc64((size_t)nc*(2*m1+32)*sizeof(int16_t)) : NULL;
+  float *cqts=want_q15 ? calloc((size_t)nc,sizeof(float)) : NULL;
   int *coff=malloc((size_t)(nc+1)*sizeof(int));
   int *cmem=malloc((size_t)p->nt*sizeof(int));
   int *cmap=malloc((size_t)p->nt*sizeof(int));
   unsigned char *cpend=calloc((size_t)p->nd,1);
-  if(!cmf || (ap_gate16_available() && !cg16)
-     || (ap_mf_q15_lanes(cmf)>0 && (!cqtm || !cqts))
-     || !coff || !cmem || !cmap || !cpend){
-    if(cmf) ap_mf_destroy(cmf);
+  if((want_q15 && (!cqtm || !cqts)) || !coff || !cmem || !cmap || !cpend){
+    ap_mf_destroy(cmf);
     if(cg16) ap_gate16_destroy(cg16);
     free(cqtm); free(cqts); free(coff); free(cmem); free(cmap); free(cpend);
     return -1;
   }
   for(int c=0;c<nc;c++){
-    const float *cspec=specs+(size_t)c*2*m1;
-    if(ap_mf_set_template(cmf,c,cspec)
-       || (cg16 && ap_gate16_set_template(cg16,c,cspec))){
-      ap_mf_destroy(cmf);
-      if(cg16) ap_gate16_destroy(cg16);
-      free(cqtm); free(cqts); free(coff); free(cmem); free(cmap); free(cpend);
-      return -1;
-    }
-    if(cqtm){
-      double ss=0.0, amax=0.0;
-      for(size_t k=0;k<m1;k++){
-        const float rf=cspec[2*k], imf=-cspec[2*k+1];
-        const double r=(double)rf, im=(double)imf;
-        ss += r*r + im*im;
-        if(fabs(r)>amax) amax=fabs(r);
-        if(fabs(im)>amax) amax=fabs(im);
-      }
-      double sc = !isfinite(ss) ? -1.0 : 0.0;
-      if(sc==0.0 && ss>0.0){
-        sc = AP_Q15_TNORM(m1) / sqrt(ss);
-        if(sc*amax > 32767.0) sc = 32767.0 / amax;
-      }
-      int16_t *qr = cqtm + (size_t)c*(2*m1+32), *qi = qr + m1;
-      if(!(sc > 0.0)){
-        memset(qr,0,2*m1*sizeof(int16_t));
-      } else {
-        for(size_t k=0;k<m1;k++){
-          const float rf=cspec[2*k], imf=-cspec[2*k+1];
-          double vr=nearbyint((double)rf*sc), vi=nearbyint((double)imf*sc);
-          if(vr>32767.0) vr=32767.0; else if(vr<-32767.0) vr=-32767.0;
-          if(vi>32767.0) vi=32767.0; else if(vi<-32767.0) vi=-32767.0;
-          qr[k]=(int16_t)vr;
-          qi[k]=(int16_t)vi;
-        }
-      }
-      cqts[c]=(float)sc;
-    }
-    for(int m=offsets[c];m<offsets[c+1];m++) cmap[members[m]]=c;
+    if(cqtm) cqts[c]=hmf_q15_template_row(specs+(size_t)c*2*m1,m1,cqtm+(size_t)c*(2*m1+32));
+    for(int u=offsets[c];u<offsets[c+1];u++) cmap[members[u]]=c;
   }
-  if(p->q15) ap_mf_set_q15_margin(cmf,0);
   memcpy(coff,offsets,(size_t)(nc+1)*sizeof(int));
   memcpy(cmem,members,(size_t)p->nt*sizeof(int));
   p->tier1_mf=cmf;
@@ -1210,22 +1173,17 @@ int ap_hmf_set_tier1_clusters(ap_hmf_plan *p,int nc,const float *specs,
   p->tier1_lag_pad=lag_pad;
   p->tier1_clustered=1;
 
-  if(p->dcopy){
-    hmf_tier *tr=&p->tier[1];
-    const size_t row=2*p->n;
-    for(int d=0;d<p->nd;d++){
-      if(p->dmirrored[d] && p->dspec[d]==p->dcopy+(size_t)d*row){
-        const int to_mf=(p->q15 || !cg16) ? 1 : 0;
-        if(ingest_tier_data_target(p,tr,cmf,cg16,d,p->dcopy+(size_t)d*row,to_mf,1)){
-          ap_hmf_clear_tier1_clusters(p);
-          return -1;
-        }
-        if(!to_mf) hmf_set_pending(tr,d,HMF_PEND_MF);
-      }
-    }
+  if(hmf_cluster_replay_data(p,&p->tier[1],cmf,cg16)){
+    ap_hmf_clear_tier1_clusters(p);
+    return -1;
   }
   return 0;
 }
+
+/* The fewest pairs a later tier screens with the arbitrary-pair Q15 gather (ql lanes): it pools
+   survivors across SIMD lanes without slab or template-group bucketing, and pays for its data
+   quantisation once nfire exceeds one FP32 vector (ql/2). Below that the tier runs in FP32. */
+static inline long hmf_min_q15_pairs(int ql){ return ql > 1 ? ql / 2 + 1 : 1; }
 
 static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,size_t nb,
                                    ap_peak *peaks,int *counts,size_t start,size_t end,
@@ -2447,11 +2405,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       int ql = 0;
       if(tr->q15){
         ql = ap_mf_q15_lanes(tr->mf);
-        /* Arbitrary-pair Q15 gather pools survivors directly across SIMD lanes without
-           slab or template-group bucketing; switch once nfire reaches 4 pairs (a single
-           4-way same-block data reuse tile). */
-        const long min_q15 = ql >= 4 ? 4 : 1;
-        use_q15 = ql > 0 && nfire >= min_q15;
+        use_q15 = ql > 0 && nfire >= hmf_min_q15_pairs(ql);
       }
       const int elect_last = (i==p->ntiers-1 && p->direct && p->taps) ? 1 : 0;
       qlag = (use_q15 && elect_last) ? p->qidx : NULL;
@@ -2723,14 +2677,12 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
       return -1;
     }
     tr->ticks+=ap_ticks()-t_0;
-    const float * restrict tsc=p->tier0_thr_scale;
     if(fast_sparse && !dump_or_trace){
       for(int d=0;d<nd;d++){
         const int d_start=nnext;
         const ap_peak *ce_row=tr->cebuf+(size_t)d*nc;
         for(int c=0;c<nc;c++){
-          const float cthr = tsc ? thr * tsc[c] : thr;
-          if(ce_row[c].index>=0 && ce_row[c].magnitude>=cthr){
+          if(ce_row[c].index>=0 && ce_row[c].magnitude>=thr){
             const int u0=off[c], u1=off[c+1];
             if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
             int * restrict dst_d=tr->fire_d;
@@ -2749,8 +2701,7 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
         const int d_start=nnext;
         for(int c=0;c<nc;c++){
           const ap_peak ce=tr->cebuf[(size_t)d*nc+c];
-          const float cthr = tsc ? thr * tsc[c] : thr;
-          const int fire=(ce.index>=0 && ce.magnitude>=cthr);
+          const int fire=(ce.index>=0 && ce.magnitude>=thr);
           if(fire && hmf_ensure_fire(tr,(size_t)(nnext+(off[c+1]-off[c])))) return -1;
           for(int u=off[c];u<off[c+1];u++){
             const int t=members[u];
@@ -2758,13 +2709,13 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
             if(fire){
               if(p->dump){
                 float rec[8]={ce.magnitude,0.0f,p->tier0_g16 ? ce.im : ce.magnitude,
-                              cthr,cthr,cthr,(float)(d0+d),(float)t};
+                              thr,thr,thr,(float)(d0+d),(float)t};
                 fwrite(rec,sizeof rec,1,p->dump);
               }
               const long pair=first_pair+(long)row+1;
               if(p->trace && pair<6)
                 fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",
-                        pair,cthr,ce.magnitude);
+                        pair,thr,ce.magnitude);
               tr->fire_d[nnext]=d;
               tr->fire_t[nnext]=t;
               nnext++;
@@ -2850,8 +2801,7 @@ static int hmf_run_tier1_clustered(ap_hmf_plan *p,int d0,int fast_sparse,size_t 
   int ql=0, use_q15=0;
   if(tr->q15 && p->tier1_qtm){
     ql=ap_mf_q15_lanes(p->tier1_mf);
-    const long min_q15 = ql >= 4 ? 4 : 1;
-    use_q15 = ql > 0 && ncand >= min_q15;
+    use_q15 = ql > 0 && ncand >= hmf_min_q15_pairs(ql);
   }
   if(use_q15){
     if(hmf_q15_prepare_data(p,tr,ql)) return -1;
@@ -2899,7 +2849,10 @@ static int hmf_run_tier1_clustered(ap_hmf_plan *p,int d0,int fast_sparse,size_t 
   }
   tr->ticks+=ap_ticks()-t_0;
 
-  /* Expand firing Tier-1 centroids into sorted member template indices per block. */
+  /* Expand firing Tier-1 centroids into sorted member template indices per block. Every member
+     of a firing centroid came in as a Tier-0 survivor: Tier-1 clusters nest inside Tier-0
+     clusters (ap_hmf_set_tier1_clusters), and this path runs only after hmf_run_tier0_clustered
+     passed whole Tier-0 clusters on in the same call (ap_hmf_run's conditions match). */
   int nnext=0;
   for(int j0=0;j0<ncand;){
     const int d=cd[j0];

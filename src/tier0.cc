@@ -243,8 +243,7 @@ static int PairScores(const float *ur, const float *ui, const float *sr, const f
           _mm256_store_ps(ti + k * mcp + b0, _mm256_add_ps(_mm256_mul_ps(d, xr), _mm256_mul_ps(c, xi)));
         }
       }
-      const int32_t s32 = (int32_t)s;
-      const __m256 vs_ps = _mm256_broadcast_ss((const float *)&s32);
+      const __m256 vs_ps = _mm256_castsi256_ps(_mm256_set1_epi32((int)s));
       for (long long a0 = 0; a0 + 1 < mc; a0 += A) {
         const float *u0 = ar + a0 * len, *w0 = ai + a0 * len;
         for (long long b0 = (a0 + 1) / N * N; b0 < mcp; b0 += N) {
