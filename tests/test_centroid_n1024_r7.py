@@ -149,10 +149,11 @@ def test_q15_screen_blocks_bit_exact_against_stat_path(target, band):
         lib.ap_mf_destroy(plan)
 
 
-@pytest.mark.parametrize("band", [256, 512, 1024])
+@pytest.mark.parametrize("band", [64, 128, 256, 512, 1024])
 def test_q15_pairs_batch_same_block_centroid_runs_exact(target, band):
-    """Verify 4-way and 2-way same-block register reuse in q15_screen_gather_row_fused_n matches
-    single-pair evaluation bit-for-bit across runs of 1..9 survivors per data block."""
+    """Verify 4-way and 2-way same-block register reuse in q15_prod_gather_n and
+    q15_screen_gather_row_fused_n matches single-pair evaluation bit-for-bit across runs of
+    1..9 survivors per data block at every Q15 band."""
     lib = ctypes.CDLL(_core.__file__)
     lib.ap_mf_create.argtypes = [ctypes.c_size_t, ctypes.c_int, ctypes.c_int]
     lib.ap_mf_create.restype = ctypes.c_void_p

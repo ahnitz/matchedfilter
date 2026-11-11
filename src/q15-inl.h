@@ -985,19 +985,48 @@ static HWY_INLINE void q15_prod_gather_n(const int16_t *const *drp, const int16_
   alignas(64) vq pbuf_i[AP_QW * PSTRIDE];
   for(int v0 = 0; v0 < NV; v0 += VB){
     const size_t k_tile = (size_t)v0 * (size_t)AP_QW;
-    const int16_t *cur_dr = nullptr;
-    vq dR[VB], dI[VB];
-    for(int l = 0; l < AP_QW; l++){
-      /* Explicit l == 0 proves dR/dI are unconditionally written on the first lane, preventing
-         GCC from spilling dead dR[0..VB-1]/dI[0..VB-1] across the v0 loop backedge. */
-      if(l == 0 || drp[l] != cur_dr){
-        cur_dr = drp[l];
-        const int16_t *drl = cur_dr + k_tile;
-        const int16_t *dil = dip[l] + k_tile;
-        for(int dv = 0; dv < VB; dv++){
-          dR[dv] = Q_LOADU(drl + (size_t)dv * (size_t)AP_QW);
-          dI[dv] = Q_LOADU(dil + (size_t)dv * (size_t)AP_QW);
+    for(int l = 0; l < AP_QW;){
+      const int16_t *dr0 = drp[l];
+      const int16_t *drl = dr0 + k_tile;
+      const int16_t *dil = dip[l] + k_tile;
+      vq dR[VB], dI[VB];
+      for(int dv = 0; dv < VB; dv++){
+        dR[dv] = Q_LOADU(drl + (size_t)dv * (size_t)AP_QW);
+        dI[dv] = Q_LOADU(dil + (size_t)dv * (size_t)AP_QW);
+      }
+      /* Share dR/dI in registers across consecutive survivor pairs from the same data block
+         (such as members expanded from a firing Tier-0 centroid). */
+      if(l + 3 < AP_QW && drp[l + 1] == dr0 && drp[l + 2] == dr0 && drp[l + 3] == dr0){
+        for(int u = 0; u < 4; u++){
+          const int16_t *trl = trp[l + u] + k_tile;
+          const int16_t *til = tip[l + u] + k_tile;
+          vq *pr = pbuf_r + (size_t)(l + u) * (size_t)PSTRIDE;
+          vq *pi = pbuf_i + (size_t)(l + u) * (size_t)PSTRIDE;
+          for(int dv = 0; dv < VB; dv++){
+            const vq tR = Q_LOADU(trl + (size_t)dv * (size_t)AP_QW);
+            const vq tI = Q_LOADU(til + (size_t)dv * (size_t)AP_QW);
+            pr[dv] = Q_MLSH(Q_MUL(dR[dv], tR), dI[dv], tI);
+            pi[dv] = Q_MLAH(Q_MUL(dR[dv], tI), dI[dv], tR);
+          }
         }
+        l += 4;
+        continue;
+      }
+      if(l + 1 < AP_QW && drp[l + 1] == dr0){
+        for(int u = 0; u < 2; u++){
+          const int16_t *trl = trp[l + u] + k_tile;
+          const int16_t *til = tip[l + u] + k_tile;
+          vq *pr = pbuf_r + (size_t)(l + u) * (size_t)PSTRIDE;
+          vq *pi = pbuf_i + (size_t)(l + u) * (size_t)PSTRIDE;
+          for(int dv = 0; dv < VB; dv++){
+            const vq tR = Q_LOADU(trl + (size_t)dv * (size_t)AP_QW);
+            const vq tI = Q_LOADU(til + (size_t)dv * (size_t)AP_QW);
+            pr[dv] = Q_MLSH(Q_MUL(dR[dv], tR), dI[dv], tI);
+            pi[dv] = Q_MLAH(Q_MUL(dR[dv], tI), dI[dv], tR);
+          }
+        }
+        l += 2;
+        continue;
       }
       const int16_t *trl = trp[l] + k_tile;
       const int16_t *til = tip[l] + k_tile;
@@ -1009,6 +1038,7 @@ static HWY_INLINE void q15_prod_gather_n(const int16_t *const *drp, const int16_
         pr[dv] = Q_MLSH(Q_MUL(dR[dv], tR), dI[dv], tI);
         pi[dv] = Q_MLAH(Q_MUL(dR[dv], tI), dI[dv], tR);
       }
+      l++;
     }
     for(int dv = 0; dv < VB; dv++){
       const size_t k_base = k_tile + (size_t)dv * (size_t)AP_QW;

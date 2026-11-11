@@ -658,25 +658,30 @@ def test_k4_quad_bank_empirical_fdr_respects_budget(monkeypatch):
 
 
 
-def test_pair_scores_match_a_direct_evaluation():
+@pytest.mark.parametrize("target_isa", mf.targets())
+def test_pair_scores_match_a_direct_evaluation(target_isa):
     """_core.tier0_pair_scores (src/tier0.cc) returns, for every pair a < b of a chunk whose
     variances agree within 15%, the largest |sum_k conj(U_a) U_b S_s|^2 over the shifts and the
     first shift reaching it; every other entry is 0. A chunk of 21 templates is not a whole
     number of vectors on any target, so the padding is exercised too."""
-    rng = np.random.default_rng(77)
-    mc, L, R = 21, 96, 3
-    U = (rng.standard_normal((mc, L)) + 1j * rng.standard_normal((mc, L))) / np.sqrt(2 * L)
-    U[1::3] = 0.95 * U[0] + 0.05 * U[1::3]                   # a few strongly coherent pairs
-    U[5] *= 1.5                                               # variance 2.25x: never scored
-    dls = np.arange(-R, R + 1)
-    order = np.argsort(np.abs(dls), kind="stable")
-    S = np.exp(-2j * np.pi * dls[order, None] * np.arange(L)[None, :] / (L * R))
-    v = np.sum(np.abs(U) ** 2, axis=1)
-    Ur, Ui = (np.ascontiguousarray(x, np.float32) for x in (U.real, U.imag))
-    Sr, Si = (np.ascontiguousarray(x, np.float32) for x in (S.real, S.imag))
-    r2 = np.full((mc, mc), -7.0, np.float32)
-    bs = np.full((mc, mc), -7, np.int32)
-    _core.tier0_pair_scores(Ur, Ui, Sr, Si, v.astype(np.float64), r2, bs)
+    mf.set_target(target_isa)
+    try:
+        rng = np.random.default_rng(77)
+        mc, L, R = 21, 96, 3
+        U = (rng.standard_normal((mc, L)) + 1j * rng.standard_normal((mc, L))) / np.sqrt(2 * L)
+        U[1::3] = 0.95 * U[0] + 0.05 * U[1::3]                   # a few strongly coherent pairs
+        U[5] *= 1.5                                               # variance 2.25x: never scored
+        dls = np.arange(-R, R + 1)
+        order = np.argsort(np.abs(dls), kind="stable")
+        S = np.exp(-2j * np.pi * dls[order, None] * np.arange(L)[None, :] / (L * R))
+        v = np.sum(np.abs(U) ** 2, axis=1)
+        Ur, Ui = (np.ascontiguousarray(x, np.float32) for x in (U.real, U.imag))
+        Sr, Si = (np.ascontiguousarray(x, np.float32) for x in (S.real, S.imag))
+        r2 = np.full((mc, mc), -7.0, np.float32)
+        bs = np.full((mc, mc), -7, np.int32)
+        _core.tier0_pair_scores(Ur, Ui, Sr, Si, v.astype(np.float64), r2, bs)
+    finally:
+        mf.set_target(None)
 
     U64 = Ur.astype(np.float64) + 1j * Ui
     S64 = Sr.astype(np.float64) + 1j * Si
@@ -721,10 +726,11 @@ def test_pass2_runs_only_when_asked_and_a_skipped_one_is_built_later(monkeypatch
     np.testing.assert_array_equal(again[1].specs, full[1].specs)
 
 
+@pytest.mark.parametrize("target_isa", mf.targets())
 @pytest.mark.parametrize("half_span", [0, 3, 7])
-def test_tier0_refine_lags_matches_numpy_reference(half_span):
+def test_tier0_refine_lags_matches_numpy_reference(target_isa, half_span):
     """_core.tier0_refine_lags matches the exact complex128 shifted inner-product search across
-    interior and [-R, +R] boundary-clipped coarse lag guesses."""
+    interior and [-R, +R] boundary-clipped coarse lag guesses across all SIMD targets."""
     rng = np.random.default_rng(9090 + half_span)
     npairs, length, R = 29, 99, 16
     prod_ab = rng.standard_normal((npairs, length)) + 1j * rng.standard_normal((npairs, length))
@@ -740,7 +746,11 @@ def test_tier0_refine_lags_matches_numpy_reference(half_span):
 
     out_dl = np.full(npairs, -999, dtype=np.int64)
     out_g = np.zeros(npairs, dtype=np.complex128)
-    _core.tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g)
+    mf.set_target(target_isa)
+    try:
+        _core.tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g)
+    finally:
+        mf.set_target(None)
 
     if half_span == 0:
         ref_dl = pdl.copy()
@@ -1028,3 +1038,24 @@ def test_clustered_tier0_preserves_sparse_c_order_across_interleaved_clusters(
     np.testing.assert_array_equal(r_cl.template_indices, r_ref.template_indices)
     np.testing.assert_array_equal(r_cl.sample_indices, r_ref.sample_indices)
     np.testing.assert_allclose(r_cl.snr, r_ref.snr, rtol=2e-5, atol=2e-4)
+
+
+def test_finer_alpha_quantization_preserves_high_retention_thresholds():
+    """Verify _pack_cluster quantizes Tier-0 retention alpha on a 1/200 (0.005) grid rather than
+    1/50 (0.02), keeping >=0.995 retentions above 0.98 and raising Tier-0 thresholds to cut
+    Tier-1 survivor reach."""
+    n, nt, b0 = 2048, 16, 128
+    power, _, templates = _make_quad_correlated_bank(n, nt, b0, chain_drift=0.14, seed=8282)
+    cl_k2, cl_k4 = gc.cluster_tier0_candidates(templates, power, n, b0, max_arity=4)
+    assert cl_k2 is not None and cl_k4 is not None
+    assert cl_k2.alpha > 0.98
+    assert cl_k4.alpha >= 0.99
+
+    pl_fine = gc.chain_thresholds(power, n, 5.5, 0.01, (128, 512), tier0_cluster=cl_k4)
+    pl_coarse = gc.chain_thresholds(
+        power, n, 5.5, 0.01, (128, 512), tier0_cluster=(0.98, cl_k4.lag_pad)
+    )
+    assert pl_fine is not None and pl_coarse is not None
+    assert pl_fine["thresholds"][0] > pl_coarse["thresholds"][0]
+    assert pl_fine["reach"][1] < pl_coarse["reach"][1]
+

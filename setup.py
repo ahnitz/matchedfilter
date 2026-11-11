@@ -118,7 +118,7 @@ AVX1_ARCH = [f for f in ARCH if "split-unaligned" not in f] + ["-mavx"]
 SOURCES = (
     [("src/kernel.cc", CXX + ARCH, DEFS + AVX1), ("src/gate16.cc", CXX + ARCH, DEFS),
      ("src/gauss.cc", CXX + ARCH, DEFS + AVX1), ("src/records.cc", CXX + ARCH, DEFS),
-     ("src/tier0.cc", CXX + ARCH, DEFS)]
+     ("src/tier0.cc", CXX + ARCH, DEFS + AVX1)]
     + ([("src/kernel_avx1.cc", CXX + AVX1_ARCH, DEFS + AVX1)] if AVX1 else [])
     + [(s, CXX + ARCH, DEFS) for s in HWY_SRC]   # same baseline, or the
                                                  # dispatch tables disagree

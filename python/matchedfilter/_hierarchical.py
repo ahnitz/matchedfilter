@@ -140,7 +140,7 @@ def _pareto_tier0_candidates(raw_cands):
     if len(distinct) <= 1:
         return distinct
     kept = []
-    aq = [math.floor(c.alpha * 50.0 + 1e-9) / 50.0 for c in distinct]
+    aq = [math.floor(c.alpha * 200.0 + 1e-9) / 200.0 for c in distinct]
     for i, ci in enumerate(distinct):
         # Drop ci if a strictly smaller-ratio candidate j > i has >= quantized alpha and <= lag_pad
         if any(aq[j] >= aq[i] - 1e-12 and distinct[j].lag_pad <= ci.lag_pad
@@ -478,7 +478,7 @@ class HierarchicalFilter(MatchedFilter):
                 )
                 if min((q["cost"] for q in lb_plans), default=float("inf")) >= best_cost:
                     continue
-                a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
+                a_q = math.floor(cand.alpha * 200.0 + 1e-9) / 200.0
                 _, plans = _gatechain.choose_chain(
                     self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                     cost=cm_cand, max_tiers=tiers, window=self.search_window,
@@ -499,7 +499,7 @@ class HierarchicalFilter(MatchedFilter):
         if not self._tier0_clusters or not _tier0_centroid_enabled():
             return ()
         return tuple(
-            (b, round(cl.ratio, 2), math.floor(cl.alpha * 50.0 + 1e-9) / 50.0, cl.lag_pad)
+            (b, round(cl.ratio, 2), math.floor(cl.alpha * 200.0 + 1e-9) / 200.0, cl.lag_pad)
             for b, cl in sorted(self._tier0_clusters.items())
             if cl is not None
         )
@@ -1013,7 +1013,7 @@ class HierarchicalFilter(MatchedFilter):
                         for cand in reversed(cands):
                             if bound(cand.ratio) >= min(limit, best_cand_b0_cost):
                                 continue
-                            a_q = math.floor(cand.alpha * 50.0 + 1e-9) / 50.0
+                            a_q = math.floor(cand.alpha * 200.0 + 1e-9) / 200.0
                             cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio}, single_tier=is_cpu)
                             _, cur_plans = _gatechain.choose_chain(
                                 self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
