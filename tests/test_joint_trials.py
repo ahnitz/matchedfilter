@@ -599,6 +599,11 @@ def test_unsampled_banks_defer_non_default_layouts_and_pricing(monkeypatch):
     unmaterialized = sum(1 for b in banks if b._layouts is not None and any(s is None for s in b._layouts))
     assert materialized <= td._ROUND_BANKS
     assert unmaterialized >= len(banks) - td._ROUND_BANKS
+    # The round's banks built all their candidate layouts up front (_prepare_arms), the rest
+    # none: a bank prices only in its first round, never in a later pass of the trial.
+    prepared = [b for b in banks if b._arms_ready]
+    assert len(prepared) == td._ROUND_BANKS
+    assert all(all(s is not None for s in b._layouts) for b in prepared if b._layouts is not None)
 
 
 def test_multi_round_batch_bounds_sampled_banks_and_locks_all(monkeypatch):
@@ -629,6 +634,11 @@ def test_multi_round_batch_bounds_sampled_banks_and_locks_all(monkeypatch):
     )
     if any(b._in_trial for b in banks):
         assert ever_sampled <= td._TRIAL_SAMPLE_BANKS
+        # A sampled bank built every candidate layout in its first round (_prepare_arms): what
+        # keeps later rounds from pricing, whichever configurations the trial's passes reach.
+        for b in banks:
+            if b._layouts is not None and any(s is not None for s in b._layouts[1:]):
+                assert all(s is not None for s in b._layouts)
 
     for _ in range(3 * _choice.rounds()[1]):
         if all(not b._in_trial for b in banks):

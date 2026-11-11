@@ -5,8 +5,24 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
-from matchedfilter import gatechain
+from matchedfilter import _prices, gatechain
 from matchedfilter.time_domain import template_spectra
+
+#: Tests that time the real prices themselves (the rest run on pinned ones).
+_REAL_PRICES = {"test_plans_of_one_size_compare_the_same_direct_prices"}
+
+
+@pytest.fixture(autouse=True)
+def _pinned_direct_prices(request, monkeypatch):
+    """Whether a survivor is refined directly or by its transform, and whether a plan prices a
+    direct window at all, follow prices timed once per process (_prices). Timed under a loaded
+    full-suite run they could price the direct refine out, and these tests -- which check that
+    it runs and matches the transform -- then failed depending on what ran first. They run on
+    fixed prices that favour the direct refine; the bin-count and window rules still apply."""
+    if request.node.originalname in _REAL_PRICES:
+        return
+    monkeypatch.setattr(_prices, "_direct_lagtap", lambda *a, **kw: 0.05)
+    monkeypatch.setattr(_prices, "_direct_pair_prices", lambda *a, **kw: (0.01, 1.0e9))
 
 
 def _bank(n=2048, T=48, nblocks=120, nsig=60, seed=3):
@@ -346,7 +362,6 @@ def test_direct_refine_real_and_complex_combinations(real_kind, complex_taps, mo
     if real_kind != "complex":
         ref = ref.copy()
         ref[n // 2:] = 0.0
-    data = (n, taps, counts, spec, series, layout, ref, window)
 
     # Use the direct plan's exact coarse thresholds on the transform plan so both pass the
     # identical survivor set to refine.

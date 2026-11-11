@@ -119,3 +119,22 @@ def test_annotation_carries_the_failure_messages(tmp_path):
                          text=True)
     head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
     assert "E     t=3 s=20228 merged (1+2j) separate (1.000001+2j)" in head
+
+
+def test_a_printed_traceback_in_a_finished_run_names_no_crash(tmp_path):
+    # Nightly 2026-11-11: a shard that finished with one ordinary failure was annotated with a
+    # "crashing test" taken from a traceback another test had printed.
+    log = tmp_path / "san.log"
+    log.write_text("tests/test_g.py::test_quantile PASSED                    [ 30%]\n"
+                   'Traceback (most recent call last):\n'
+                   '  File "/w/tests/test_g.py", line 7 in test_quantile\n'
+                   "tests/test_j.py::test_rounds FAILED                      [ 60%]\n"
+                   "FAILED tests/test_j.py::test_rounds - assert 8 == 6\n"
+                   "============ 1 failed, 300 passed in 2308.12s (0:38:28) ============\n"
+                   "sanitize: pytest rc=1 (FAILED)\n")
+    out = run("--crashing-test", log=log)
+    assert out.returncode == 1 and out.stdout.strip() == ""
+    body = subprocess.run([sys.executable, str(TOOL), str(log), "1"], capture_output=True,
+                          text=True).stdout.replace("%0A", "\n")
+    assert "crashing test" not in body
+    assert "FAILED tests/test_j.py::test_rounds - assert 8 == 6" in body
