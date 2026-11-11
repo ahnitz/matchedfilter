@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 import pytest
-from scipy.stats import binomtest
+from spectral_profiles import binomtest
 
 import matchedfilter as mf
 from matchedfilter import _calibration, _core, gatechain
