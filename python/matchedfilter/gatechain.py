@@ -102,7 +102,8 @@ class Tier0Cluster(NamedTuple):
     """Precomputed Tier-0 coarse centroid bank and calibration parameters. The thresholds
     are solved for one retention, alpha (from the members' mean less half their spread);
     member_alphas holds each template's own, which tools/fdr_audit.py --bank models a plan's
-    dismissal with."""
+    dismissal with; cluster_alphas holds each centroid's conservative worst-case member
+    retention (1.0 for singletons)."""
     specs: np.ndarray
     offsets: np.ndarray
     members: np.ndarray
@@ -110,6 +111,7 @@ class Tier0Cluster(NamedTuple):
     ratio: float
     alpha: float
     member_alphas: Optional[np.ndarray] = None
+    cluster_alphas: Optional[np.ndarray] = None
 
 
 def _band_slice(n, b, k0):
@@ -410,9 +412,15 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         rat = round((nc_out / float(nt)) * 20.0) / 20.0
         raw_a = float(np.mean(alphas_arr) - 0.5 * np.std(alphas_arr))
         eff_a = max(0.5, min(1.0, math.floor(raw_a * 200.0 + 1e-9) / 200.0))
+        cl_alphas = np.ones(nc_out, dtype=np.float32)
+        for ci_k in range(nc_out):
+            u0, u1 = int(offs_i32[ci_k]), int(offs_i32[ci_k + 1])
+            if u1 - u0 > 1:
+                cl_alphas[ci_k] = np.float32(np.min(alphas_arr[mems_i32[u0:u1]]))
         return Tier0Cluster(specs=specs_out, offsets=offs_i32, members=mems_i32,
                             lag_pad=lpad, ratio=rat, alpha=eff_a,
-                            member_alphas=np.asarray(alphas_arr, np.float32))
+                            member_alphas=np.asarray(alphas_arr, np.float32),
+                            cluster_alphas=cl_alphas)
 
     pair_a_list, pair_b_list, pair_dl_list = _run_chunked_matching(
         perm, nt, U64, v, floor2
@@ -823,6 +831,261 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_ari
         if cl is not None:
             best = cl
     return best
+
+
+def tier0_cluster_threshold_scales(power, n, snr, fd, chain, tier0_cluster, cost=None, window=None):
+    """Per-cluster Tier-0 threshold multipliers ``thr_0(alpha_c) / thr_0(alpha_bank) >= 1.0``.
+
+    Parameters
+    ----------
+    power : array_like
+        Expected nonnegative filter-output power profile of length ``n``.
+    n : int
+        Full fine FFT block length.
+    snr : float
+        Target detection signal-to-noise ratio.
+    fd : float
+        False-dismissal budget.
+    chain : sequence of int
+        Coarse gate band lengths.
+    tier0_cluster : Tier0Cluster
+        Active Tier-0 centroid bank.
+    cost : CostModel, optional
+        Calibrated tier cost model (default ``None``).
+    window : tuple of int, optional
+        Searched fine-lag window ``(start, end)`` (default ``None``).
+
+    Returns
+    -------
+    numpy.ndarray
+        Contiguous ``float32`` array of shape ``(nc,)`` with ``scales[c] >= 1.0``.
+    """
+    nc = int(tier0_cluster.offsets.size) - 1
+    out = np.ones(nc, dtype=np.float32)
+    if nc <= 1:
+        return out
+    cl_alphas = tier0_cluster.cluster_alphas
+    if cl_alphas is None:
+        m_al = tier0_cluster.member_alphas
+        if m_al is None:
+            return out
+        cl_alphas = np.ones(nc, dtype=np.float32)
+        for c in range(nc):
+            u0, u1 = int(tier0_cluster.offsets[c]), int(tier0_cluster.offsets[c + 1])
+            if u1 - u0 > 1:
+                cl_alphas[c] = np.float32(np.min(m_al[tier0_cluster.members[u0:u1]]))
+    base_pl = chain_thresholds(
+        power, n, snr, fd, chain, cost=cost, window=window, tier0_cluster=tier0_cluster
+    )
+    if base_pl is None or not base_pl.get("thresholds") or base_pl["thresholds"][0] <= 0.0:
+        return out
+    base_thr0 = float(base_pl["thresholds"][0])
+    base_aq = math.floor(float(tier0_cluster.alpha) * 200.0 + 1e-9) / 200.0
+    lpad = int(tier0_cluster.lag_pad)
+    q_alphas = np.floor(np.asarray(cl_alphas, dtype=np.float64) * 200.0 + 1e-9) / 200.0
+    scale_by_aq = {base_aq: 1.0}
+    for aq in sorted(set(float(x) for x in q_alphas)):
+        if aq <= base_aq + 1e-9:
+            scale_by_aq[aq] = 1.0
+            continue
+        pl_a = chain_thresholds(
+            power, n, snr, fd, chain, cost=cost, window=window,
+            tier0_cluster=(aq, lpad),
+        )
+        if pl_a is not None and pl_a.get("thresholds") and pl_a["thresholds"][0] > base_thr0:
+            scale_by_aq[aq] = float(pl_a["thresholds"][0]) / base_thr0
+        else:
+            scale_by_aq[aq] = 1.0
+    for c in range(nc):
+        out[c] = np.float32(scale_by_aq.get(float(q_alphas[c]), 1.0))
+    return out
+
+
+def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_min=0.985):
+    """Build a Tier-1 sub-centroid bank inside each multi-member Tier-0 cluster.
+
+    Parameters
+    ----------
+    spectra : array_like
+        Complex frequency-domain template bank of shape ``(nt, k_bins)``.
+    power : array_like
+        Expected nonnegative filter-output power profile of length ``n``.
+    n : int
+        Full fine FFT block length.
+    tier0_cluster : Tier0Cluster
+        Parent Tier-0 centroid bank whose clusters have arity ``>= 2``.
+    band1 : int
+        Tier-1 coarse FFT band length ``b1`` (must divide ``n`` and be ``< n // 2``).
+    k0 : int, optional
+        Starting fine bin offset of Tier 1 (default ``0``).
+    rho_min : float, optional
+        Minimum PSD-weighted in-band coherence at ``band1`` required to merge a pair
+        within the same Tier-0 cluster (default ``0.985``).
+
+    Returns
+    -------
+    Tier0Cluster or None
+        Precomputed Tier-1 sub-centroid bank with ``specs`` ``(nc1, b1)``, CSR ``offsets``
+        ``(nc1 + 1,)``, ``members`` ``(nt,)``, and ``lag_pad``, or ``None`` when no
+        beneficial sub-merges occur.
+    """
+    if tier0_cluster is None:
+        return None
+    n, b1, k0 = int(n), int(band1), int(k0)
+    H = np.asarray(spectra)
+    if H.ndim != 2 or H.shape[0] < 2 or b1 < 1 or b1 >= n // 2 or n % b1 != 0:
+        return None
+    nt = int(H.shape[0])
+    off0 = np.asarray(tier0_cluster.offsets, dtype=np.int32)
+    mem0 = np.asarray(tier0_cluster.members, dtype=np.int32)
+    nc0 = int(off0.size) - 1
+    if nc0 < 1 or int(mem0.size) != nt or not np.any(np.diff(off0) >= 2):
+        return None
+
+    p = _norm_profile(np.asarray(power, dtype=np.float32), n)
+    k_lo, k_hi = _band_slice(n, b1, k0)
+    length = k_hi - k_lo
+    if length <= 0 or k_hi > H.shape[1]:
+        return None
+    p_band = p[k_lo:k_hi]
+    f1 = float(p_band.sum())
+    if f1 <= 0.0:
+        return None
+
+    H_band = np.asarray(H[:, k_lo:k_hi], dtype=np.complex128)
+    scale = 1.0 / math.sqrt(f1)
+    C = H_band * scale
+    h_pow = H_band.real * H_band.real + H_band.imag * H_band.imag
+    m_bin = h_pow.mean(axis=0)
+    m_max = float(m_bin.max())
+    if m_max <= 0.0:
+        return None
+    W = p_band / np.maximum(m_bin, 1e-6 * m_max)
+    c_pow = C.real * C.real + C.imag * C.imag
+    v = np.sum(c_pow * W[None, :], axis=1)
+    inv_sqrt_v = np.where(v > 0.0, 1.0 / np.sqrt(np.maximum(v, 1e-300)), 0.0)
+
+    R1 = n // b1
+    s_step = max(1, R1 // 8)
+    all_dls = np.arange(-R1, R1 + 1, dtype=np.int64)
+    k_idx = np.arange(k_lo, k_hi, dtype=np.float64)
+    exp_all = np.exp((-2j * np.pi / n) * (all_dls[:, None] * k_idx[None, :]))
+    dls = all_dls[::s_step]
+    shifts_c128 = exp_all[::s_step]
+    sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64) if s_step > 1 else None
+    rho_floor = float(rho_min)
+
+    vecs_list = []
+    offs_list = [0]
+    mems_list = []
+    alphas = np.ones(nt, dtype=np.float64)
+    max_abs_dl = 0
+    n_merged = 0
+
+    for c0 in range(nc0):
+        u0, u1 = int(off0[c0]), int(off0[c0 + 1])
+        grp = [int(t) for t in mem0[u0:u1]]
+        m_g = len(grp)
+        if m_g < 2:
+            for t in grp:
+                vecs_list.append(C[t].astype(np.complex64))
+                mems_list.append(t)
+                offs_list.append(len(mems_list))
+            continue
+
+        # Evaluate all candidate pairs within this Tier-0 cluster at band1
+        cand_edges = []
+        for ia in range(m_g):
+            ta = grp[ia]
+            if v[ta] <= 0.0:
+                continue
+            ua = C[ta] * inv_sqrt_v[ta]
+            for ib in range(ia + 1, m_g):
+                tb = grp[ib]
+                if v[tb] <= 0.0 or min(v[ta], v[tb]) < 0.85 * max(v[ta], v[tb]):
+                    continue
+                ub = C[tb] * inv_sqrt_v[tb]
+                prod = W * ua.conj() * ub
+                g_coarse = shifts_c128 @ prod
+                s_best = int(np.argmax(np.abs(g_coarse)))
+                dl_best = int(dls[s_best])
+                g_best = complex(g_coarse[s_best])
+                rho_best = abs(g_best)
+                if sub_offs is not None and rho_best >= rho_floor * 0.90:
+                    for off_val in sub_offs:
+                        cdl = int(np.clip(dl_best + int(off_val), -R1, R1))
+                        g_cur = complex(np.dot(prod, exp_all[cdl + R1]))
+                        if abs(g_cur) > rho_best:
+                            rho_best = abs(g_cur)
+                            dl_best = cdl
+                            g_best = g_cur
+                if rho_best >= rho_floor:
+                    cand_edges.append((rho_best, ta, tb, dl_best, g_best))
+
+        cand_edges.sort(key=lambda x: -x[0])
+        used_t = set()
+        for rho_ab, ta, tb, dl_ab, g_ab in cand_edges:
+            if ta in used_t or tb in used_t:
+                continue
+            used_t.add(ta)
+            used_t.add(tb)
+            ua = C[ta] * inv_sqrt_v[ta]
+            ub_s = (C[tb] * inv_sqrt_v[tb]) * exp_all[dl_ab + R1]
+            u_psi = g_ab.conjugate() / rho_ab
+            target_v = 0.5 * (v[ta] + v[tb])
+            c_vec = (math.sqrt(target_v / (2.0 * (1.0 + rho_ab)))) * (ua + u_psi * ub_s)
+            vecs_list.append(c_vec.astype(np.complex64))
+            lo_t, hi_t = (ta, tb) if ta < tb else (tb, ta)
+            mems_list.extend([lo_t, hi_t])
+            offs_list.append(len(mems_list))
+            ret_ab = math.sqrt(0.5 * (1.0 + rho_ab))
+            alphas[ta] = min(1.0, math.sqrt(target_v / v[ta]) * ret_ab)
+            alphas[tb] = min(1.0, math.sqrt(target_v / v[tb]) * ret_ab)
+            if abs(dl_ab) > max_abs_dl:
+                max_abs_dl = abs(dl_ab)
+            n_merged += 1
+
+        for t in grp:
+            if t not in used_t:
+                vecs_list.append(C[t].astype(np.complex64))
+                mems_list.append(t)
+                offs_list.append(len(mems_list))
+
+    nc1 = len(vecs_list)
+    if n_merged == 0 or nc1 >= nt:
+        return None
+    bvecs_c64 = np.asarray(vecs_list, dtype=np.complex64)
+    specs_out = np.zeros((nc1, b1), dtype=np.complex64)
+    if k0 <= 0:
+        specs_out[:, :length] = bvecs_c64
+    else:
+        u0 = k_lo & (b1 - 1)
+        first = min(length, b1 - u0)
+        if first > 0:
+            specs_out[:, u0:u0 + first] = bvecs_c64[:, :first]
+        if length > first:
+            specs_out[:, :length - first] = bvecs_c64[:, first:]
+    lpad1 = int((max_abs_dl + R1 - 1) // R1) if max_abs_dl > 0 else 0
+    offs_i32 = np.asarray(offs_list, dtype=np.int32)
+    mems_i32 = np.asarray(mems_list, dtype=np.int32)
+    rat1 = round((nc1 / float(nt)) * 20.0) / 20.0
+    raw_a1 = float(np.mean(alphas) - 0.5 * np.std(alphas))
+    eff_a1 = max(0.5, min(1.0, math.floor(raw_a1 * 200.0 + 1e-9) / 200.0))
+    cl_alphas1 = np.ones(nc1, dtype=np.float32)
+    for c1 in range(nc1):
+        s0, s1 = int(offs_i32[c1]), int(offs_i32[c1 + 1])
+        if s1 - s0 > 1:
+            cl_alphas1[c1] = np.float32(np.min(alphas[mems_i32[s0:s1]]))
+    return Tier0Cluster(
+        specs=specs_out,
+        offsets=offs_i32,
+        members=mems_i32,
+        lag_pad=lpad1,
+        ratio=rat1,
+        alpha=eff_a1,
+        member_alphas=np.asarray(alphas, dtype=np.float32),
+        cluster_alphas=cl_alphas1,
+    )
 
 
 def band_offset(power, n, b):

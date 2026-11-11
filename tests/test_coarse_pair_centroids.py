@@ -1059,3 +1059,127 @@ def test_finer_alpha_quantization_preserves_high_retention_thresholds():
     assert pl_fine["thresholds"][0] > pl_coarse["thresholds"][0]
     assert pl_fine["reach"][1] < pl_coarse["reach"][1]
 
+
+@pytest.mark.parametrize("use_q15", [False, True])
+def test_tier0_per_cluster_threshold_scales_filter_singletons(use_q15):
+    """Verify tier0_cluster_threshold_scales assigns scale > 1.0 to lossless singletons
+    (alpha_c == 1.0) and HMF.set_tier0_clusters(..., thr_scales=scales) filters singleton
+    noise blocks that exceed thr0 but fall below thr0 * scale_c across both FP32 and Q15."""
+    n, nt, b0, b1 = 2048, 8, 128, 512
+    power, psd, base_templates = _make_colored_correlated_bank(n, nt, b0, seed=9101)
+    rng = np.random.default_rng(9102)
+    templates = base_templates.copy()
+    # Replace templates 4..7 with independent templates so they stay singletons
+    for t in range(4, nt):
+        ph = rng.uniform(0.0, 2.0 * np.pi, size=n)
+        spec = np.sqrt(power / psd) * np.exp(1j * ph)
+        norm = math.sqrt(float(np.sum(psd * (spec.real ** 2 + spec.imag ** 2))))
+        templates[t] = (spec / norm).astype(np.complex64)
+
+    k0 = int(gc.band_offset(power, n, b0))
+    cl = gc.cluster_tier0_templates(templates, power, n, b0, k0=k0, max_arity=2)
+    assert cl is not None
+    assert cl.cluster_alphas is not None
+    assert cl.cluster_alphas.shape == (cl.specs.shape[0],)
+
+    scales = gc.tier0_cluster_threshold_scales(power, n, 5.5, 0.01, (b0, b1), cl)
+    assert scales is not None
+    assert scales.shape == (cl.specs.shape[0],)
+    arities = np.diff(cl.offsets)
+    assert np.any(arities == 1) and np.any(arities == 2)
+    assert np.all(scales[arities == 1] > 1.01)
+    assert np.allclose(scales[arities == 2], 1.0, atol=1e-6)
+
+    # Compare HMF with uniform vs scaled Tier-0 thresholds on moderate noise blocks
+    noise_scale = np.sqrt(psd)
+    data = (
+        1.15 * (rng.standard_normal((16, n)) + 1j * rng.standard_normal((16, n))) * noise_scale[None, :]
+    ).astype(np.complex64)
+
+    pl = gc.chain_thresholds(power, n, 5.5, 0.01, (b0, b1), tier0_cluster=cl)
+    assert pl is not None
+    thr = list(pl["thresholds"])
+    k0_1 = int(gc.band_offset(power, n, b1))
+
+    def _make_hmf(thr_sc):
+        hf = mf.HierarchicalFilter(
+            n, ndata=16, ntemplates=nt, snr=5.5, fd=0.01, chain=(b0, b1), device="cpu"
+        )
+        hf.set_reference(power)
+        hf.set_templates(templates)
+        hf.set_data(data)
+        plan = hf._execution_plan()
+        plan.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad), thr_sc)
+        if use_q15:
+            if not plan.set_q15(True) or not plan.q15_stats()[0]:
+                pytest.skip("no Q15 screen available for Tier-0 band")
+        else:
+            plan.set_q15(False)
+        hf.run(binsize=256, threshold=5.5)
+        return plan.tier_inputs()
+
+    ti_unscaled = _make_hmf(None)
+    ti_scaled = _make_hmf(scales)
+    assert ti_scaled[0] == ti_unscaled[0]
+    assert ti_scaled[1] <= ti_unscaled[1]
+
+
+def test_tier1_sub_centroids_cascade_and_preserve_triggers(monkeypatch):
+    """Verify cluster_tier1_from_tier0 builds Tier-1 sub-centroids inside 4-member Tier-0
+    clusters, HMF.set_tier1_clusters reduces Tier-1 evaluations while expanding to full
+    templates for Tier 2 / refinement, and HierarchicalFilter auto-attaches Tier-1 sub-centroids."""
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
+    n, nt, b0, b1 = 2048, 16, 128, 512
+    # Very small drift so pairs within each 4-template quad stay >=0.985 coherent even at band b1=512
+    power, psd, templates = _make_quad_correlated_bank(n, nt, b1, chain_drift=0.06, seed=9201)
+    k0_0 = int(gc.band_offset(power, n, b0))
+    k0_1 = int(gc.band_offset(power, n, b1))
+    cl0 = gc.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=4)
+    assert cl0 is not None
+    assert cl0.specs.shape[0] < nt
+
+    cl1 = gc.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0_1, rho_min=0.985)
+    assert cl1 is not None
+    assert cl0.specs.shape[0] <= cl1.specs.shape[0] < nt
+    assert cl1.alpha >= 0.992
+
+    rng = np.random.default_rng(9202)
+    noise_scale = np.sqrt(psd)
+    data = (
+        (rng.standard_normal((8, n)) + 1j * rng.standard_normal((8, n))) * noise_scale[None, :]
+    ).astype(np.complex64)
+    k = np.arange(n, dtype=np.float64)
+    for d_idx, t_idx, lag in [(0, 1, 350), (2, 6, 900), (5, 13, 1450)]:
+        data[d_idx] += (
+            9.5 * psd * templates[t_idx] * np.exp((-2j * np.pi * lag / n) * k)
+        ).astype(np.complex64)
+
+    flat = mf.MatchedFilter(n, ndata=8, ntemplates=nt, device="cpu")
+    flat.set_templates(templates)
+    flat.set_data(data)
+    ref_out = flat.run(binsize=256, threshold=6.0)
+
+    hf = mf.HierarchicalFilter(
+        n, ndata=8, ntemplates=nt, snr=6.0, fd=1e-3, device="cpu"
+    )
+    hf.set_reference(power)
+    hf.set_templates(templates)
+    hf.set_data(data)
+    out = hf.run(binsize=256, threshold=6.0)
+
+    plan = hf._mf
+    assert plan.tier0_cluster_count() == cl0.specs.shape[0]
+    assert plan.tier1_cluster_count() == cl1.specs.shape[0]
+    np.testing.assert_array_equal(out["index"], ref_out["index"])
+    np.testing.assert_allclose(out["value"], ref_out["value"], rtol=1e-5, atol=1e-5)
+
+    # Compare Tier-1 inputs with and without Tier-1 sub-centroids on the same HMF plan
+    ti_with_t1 = plan.tier_inputs()
+    plan.clear_tier1_clusters()
+    assert plan.tier1_cluster_count() == 0
+    hf.run(binsize=256, threshold=6.0)
+    ti_without_t1 = plan.tier_inputs()
+    assert ti_with_t1[1] < ti_without_t1[1]
+
+

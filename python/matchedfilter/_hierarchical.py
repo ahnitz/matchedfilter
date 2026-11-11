@@ -220,10 +220,12 @@ class HierarchicalFilter(MatchedFilter):
         self._q15 = False
         self._tier0_clusters = {}
         self._tier0_cand_cache = {}
+        self._tier1_clusters = {}
         self._clusters_allowed = False
         self._live_templates = None
         self._chosen_csig = ()
         self._synced_t0 = None
+        self._synced_t1 = None
         self._gt0_checked = 0
         # The joint-trial arm this plan runs (_trial): DEFAULT, a lock, or a trial's arm. A plan
         # inside a bank is governed by the bank's trial and runs none of its own.
@@ -512,23 +514,73 @@ class HierarchicalFilter(MatchedFilter):
             return None
         return self._tier0_cluster_for_band(int(ch[0]))
 
+    def _active_tier1_cluster(self, chain=None):
+        """Active Tier-1 sub-centroid `Tier0Cluster` for `chain[1]`, or `None` when disabled."""
+        if self.device.kind != "cpu" or self._gpu is not None:
+            return None
+        ch = self._chain if chain is None else chain
+        if ch is None or len(ch) < 2:
+            return None
+        cl0 = self._active_tier0_cluster(ch)
+        if cl0 is None or cl0.specs.shape[0] >= self.ntemplates:
+            return None
+        tmpl = self._templates_for_clustering()
+        if tmpl is None:
+            return None
+        b0, b1 = int(ch[0]), int(ch[1])
+        key = (b0, b1, id(cl0))
+        if key in self._tier1_clusters:
+            return self._tier1_clusters[key]
+        k0_1 = int(_gatechain.band_offset(self._pending_ref, self.n, b1)) if self._cal_thr is None else 0
+        cl1 = _gatechain.cluster_tier1_from_tier0(
+            tmpl, self._pending_ref, self.n, cl0, b1, k0=k0_1, rho_min=0.985
+        )
+        self._tier1_clusters[key] = cl1
+        return cl1
+
     def _sync_tier0_clusters(self, plan):
-        """Upload or clear Tier-0 pair centroids on CPU `_core.HMF` `plan`."""
+        """Upload or clear Tier-0 and Tier-1 pair centroids on CPU `_core.HMF` `plan`."""
         if plan is None or not hasattr(plan, "set_tier0_clusters"):
             return
         cl = self._active_tier0_cluster()
         tag = (id(plan), None if cl is None else id(cl))
-        if self._synced_t0 == tag and (
+        if self._synced_t0 != tag or not (
             (cl is None and plan.tier0_cluster_count() == 0)
             or (cl is not None and plan.tier0_cluster_count() == cl.specs.shape[0])
         ):
+            if cl is None:
+                if plan.tier0_cluster_count() > 0:
+                    plan.clear_tier0_clusters()
+            else:
+                plan.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad))
+            self._synced_t0 = tag
+        self._sync_tier1_clusters(plan)
+
+    def _sync_tier1_clusters(self, plan):
+        """Upload or clear Tier-1 sub-centroid clusters on CPU `_core.HMF` `plan`."""
+        if plan is None or not hasattr(plan, "set_tier1_clusters"):
             return
-        if cl is None:
-            if plan.tier0_cluster_count() > 0:
-                plan.clear_tier0_clusters()
+        r = self.__dict__.get("_resolved")
+        ch = self._chain
+        disable_for_direct = (
+            ch is not None
+            and len(ch) == 2
+            and r is not None
+            and r.direct_hw is not None
+        )
+        cl1 = None if disable_for_direct else self._active_tier1_cluster(ch)
+        tag1 = (id(plan), None if cl1 is None else id(cl1))
+        if self._synced_t1 == tag1 and (
+            (cl1 is None and plan.tier1_cluster_count() == 0)
+            or (cl1 is not None and plan.tier1_cluster_count() == cl1.specs.shape[0])
+        ):
+            return
+        if cl1 is None:
+            if plan.tier1_cluster_count() > 0:
+                plan.clear_tier1_clusters()
         else:
-            plan.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad))
-        self._synced_t0 = tag
+            plan.set_tier1_clusters(cl1.specs, cl1.offsets, cl1.members, int(cl1.lag_pad))
+        self._synced_t1 = tag1
 
     def _trial_arms(self):
         """DEFAULT, then the screen both ways where the chain's first band has one."""
@@ -829,7 +881,9 @@ class HierarchicalFilter(MatchedFilter):
             self._pending_ref = None
             self._tier0_clusters = {}
             self._tier0_cand_cache = {}
+            self._tier1_clusters = {}
             self._synced_t0 = None
+            self._synced_t1 = None
             if self._mf is not None:
                 if hasattr(self._mf, "set_band_offsets"):
                     self._mf.set_band_offsets(list(self._desired_offsets(self._chain)))
@@ -839,7 +893,9 @@ class HierarchicalFilter(MatchedFilter):
         self._pending_ref = p.copy()
         self._tier0_clusters = {}
         self._tier0_cand_cache = {}
+        self._tier1_clusters = {}
         self._synced_t0 = None
+        self._synced_t1 = None
         if self._pinned is None and self._chain is not None and (self._chosen_csig or self._tier0_cluster_eligible()):
             self._chain = None
             self._mf = None
@@ -1105,15 +1161,19 @@ class HierarchicalFilter(MatchedFilter):
     def set_templates(self, spectra, index=None):
         if index is not None:
             self._clusters_allowed = False
-            if self._tier0_clusters or self._tier0_cand_cache:
+            if self._tier0_clusters or self._tier0_cand_cache or self._tier1_clusters:
                 self._tier0_clusters = {}
                 self._tier0_cand_cache = {}
+                self._tier1_clusters = {}
                 self._synced_t0 = None
+                self._synced_t1 = None
                 self._resolved = None
                 self._ckey = None
                 self.__dict__.pop("_call_plans", None)
                 if self._mf is not None:
                     self._mf.clear_tier0_clusters()
+                    if hasattr(self._mf, "clear_tier1_clusters"):
+                        self._mf.clear_tier1_clusters()
             if self._pinned is None and self._chain is not None and self._chosen_csig:
                 self._chain, self._mf, self._resolved = None, None, None
                 self._ckey = None
@@ -1124,7 +1184,9 @@ class HierarchicalFilter(MatchedFilter):
             self._clusters_allowed = True
             self._tier0_clusters = {}
             self._tier0_cand_cache = {}
+            self._tier1_clusters = {}
             self._synced_t0 = None
+            self._synced_t1 = None
             self._ckey = None
             self.__dict__.pop("_call_plans", None)
             if self._cal_thr is None:
@@ -1151,7 +1213,9 @@ class HierarchicalFilter(MatchedFilter):
         self._clusters_allowed = True
         self._tier0_clusters = {}
         self._tier0_cand_cache = {}
+        self._tier1_clusters = {}
         self._synced_t0 = None
+        self._synced_t1 = None
         if self._cal_thr is None:
             self._resolved = None
         if self._pinned is None and self._chain is not None and (self._chosen_csig or self._tier0_cluster_eligible()):
@@ -1215,10 +1279,12 @@ class HierarchicalFilter(MatchedFilter):
         if h != self._hermitian:
             self._hermitian = h
             self._resolved = None
-            if h and (self._tier0_clusters or self._tier0_cand_cache):
+            if h and (self._tier0_clusters or self._tier0_cand_cache or self._tier1_clusters):
                 self._tier0_clusters = {}
                 self._tier0_cand_cache = {}
+                self._tier1_clusters = {}
                 self._synced_t0 = None
+                self._synced_t1 = None
                 self._ckey = None
                 self.__dict__.pop("_call_plans", None)
                 if self._pinned is None and self._chain is not None and self._chosen_csig:
