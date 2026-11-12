@@ -343,6 +343,10 @@ class _Step(NamedTuple):
     corr_jobs: list     # CPU inner correlation jobs coupled with leaf filtering
 
 
+#: Root transform plans by series length (HierarchicalSearch._root_plan).
+_ROOT_PLANS: Dict[int, object] = {}
+
+
 class HierarchicalSearch:
     """Run a forest of hierarchies over input blocks, delivering peaks through hooks.
 
@@ -382,7 +386,6 @@ class HierarchicalSearch:
         self._kids = {}                  # node -> (inner children, leaf children)
         self._leaf_banks = {}
         self._inner = {}
-        self._root_plans = {}
         self._root_outs = {}             # (root, channel, n) -> output buffer, GPU searches
         for root in self.roots:
             if not isinstance(root, Root):
@@ -487,9 +490,12 @@ class HierarchicalSearch:
         return (not np.iscomplexobj(node.taps)) and self._real_output(self._parent[id(node)])
 
     def _root_plan(self, n):
-        p = self._root_plans.get(n)
+        """The root transform's plan for series length n, shared by every search in the
+        process: a caller that builds a search per root (pycbc builds one per top template)
+        made the same plan, with its twiddle tables, for each."""
+        p = _ROOT_PLANS.get(n)
         if p is None:
-            p = self._root_plans[n] = _core.Root(n)
+            p = _ROOT_PLANS[n] = _core.Root(n)
         return p
 
     def run(self, inputs: Dict[str, BlockInput], windows: Optional[Callable] = None,
