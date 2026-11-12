@@ -30,9 +30,10 @@ with --strict-q15. Dismissing more than the plan always fails.
   python tools/fdr_audit.py --chains auto --window 192,1856  # what chain selection picks
   python tools/fdr_audit.py --chains 256,512,1024 --q15 --json out.json
   python tools/fdr_audit.py --bank 16 --q15                  # tier-0 pair centroids too
+  python tools/fdr_audit.py --bank 64 --group 8 --q15        # centroids of eight, as in production
 
 With --bank NT each case is a bank of NT templates of the profile's output power, in groups
-of four whose members differ by up to a coarse lag, a phase and a small chirp, at the
+of four (--group: another size) whose members differ by up to a coarse lag, a phase and a small chirp, at the
 reference's power: what tier-0 pair centroids
 (gatechain.cluster_tier0_candidates) merge. The library's own HierarchicalFilter runs it at
 the case's chain (MF_CHAIN_FORCE, which leaves clustering to the model, as in production),
@@ -258,12 +259,12 @@ def run_case(job):
     return row
 
 
-def bank_spectra(power, n, nt, band, seed, chirp=3.0):
-    """(nt, n) template signal spectra of output power `power`, in groups of four: the
-    profile's signal delayed by a group's own multiple of 4 n / nt samples, each member
+def bank_spectra(power, n, nt, band, seed, chirp=3.0, group=4):
+    """(nt, n) template signal spectra of output power `power`, in groups of `group`: the
+    profile's signal delayed by a group's own multiple of group * n / nt samples, each member
     delayed further by up to a coarse lag of `band` either way, turned by a random phase, and
     given a quadratic phase of up to `chirp` radians at n / 2 either way. A delay alone a
-    centroid's lag alignment undoes, a chirp it cannot, so a centroid of up to four members
+    centroid's lag alignment undoes, a chirp it cannot, so a centroid of up to `group` members
     (gatechain.cluster_tier0_candidates) retains each differently. Every template keeps the
     reference's power: the gate model assumes the bank's band fractions are the reference's
     (a spectral tilt of k^0.15 put plans with and without centroids 3-20x off on power-law
@@ -275,7 +276,7 @@ def bank_spectra(power, n, nt, band, seed, chirp=3.0):
     amp = np.sqrt(power)
     out = np.empty((nt, n), np.complex64)
     for t in range(nt):
-        delay = (t // 4) * 4 * (n // nt) + rng.uniform(-1, 1) * (n // band)
+        delay = (t // group) * group * (n // nt) + rng.uniform(-1, 1) * (n // band)
         ph = -2 * np.pi * delay * k / n + chirp * rng.uniform(-1, 1) * x + rng.uniform(0, 2 * np.pi)
         out[t] = amp * np.exp(1j * ph)
     return out
@@ -295,7 +296,8 @@ def run_bank_case(job):
                bank=nt)
     if len(chain) < 1:
         return dict(row, error="empty chain")
-    H = bank_spectra(power, n, nt, chain[0], [a["seed"], n, sum(map(ord, name))])
+    H = bank_spectra(power, n, nt, chain[0], [a["seed"], n, sum(map(ord, name))],
+                     group=int(a.get("group") or 4))
     os.environ["MF_CHAIN_FORCE"] = "%d:%s" % (n, ",".join(map(str, chain)))
     os.environ["MF_AUTOTUNE"] = "0"
     flat = mf.MatchedFilter(n, ndata=_B, ntemplates=nt)
@@ -328,6 +330,7 @@ def run_bank_case(job):
                     filters[key] = hf
                     plans[key] = dict(thresholds=[float(x) for x in r.thresholds],
                                       clusters=0 if cl is None else int(cl.specs.shape[0]),
+                                      largest=0 if cl is None else int(np.diff(cl.offsets).max()),
                                       alpha=None if cl is None else float(cl.alpha),
                                       member_alphas=None if cl is None or cl.member_alphas is None
                                       else [float(x) for x in cl.member_alphas],
@@ -406,8 +409,13 @@ def main(argv=None):
     ap.add_argument("--device", default=None,
                     help="also run the device's hierarchical filter (gpu:0: the fp16 coarse gate)")
     ap.add_argument("--bank", type=int, default=0,
-                    help="NT: audit banks of NT templates in groups of four near-duplicates through "
+                    help="NT: audit banks of NT templates in groups of --group near-duplicates through "
                          "HierarchicalFilter, tier-0 pair centroids on and off (see above)")
+    ap.add_argument("--group", type=int, default=4,
+                    help="near-duplicates per group of a --bank (default 4). Production plans "
+                         "cluster 6 to 8 templates: --bank 64 --group 8 audits that size (the model "
+                         "forms clusters above four only when at least eight remain). A 64-template "
+                         "case holds about 11 GB at n=2048: run one profile per process")
     ap.add_argument("--alpha", type=float, default=1e-3, help="family-wise level over the cases")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--json", default=None, help="write every row here")
@@ -415,7 +423,7 @@ def main(argv=None):
     names = a.profiles.split(",") if a.profiles else default_profiles()
     win = None if a.window is None else [int(x) for x in a.window.split(",")]
     opts = dict(snr=a.snr, fd=a.fd, inj=a.inj, window=win, q15=a.q15, seed=a.seed, check=a.check,
-                device=a.device, bank=a.bank)
+                device=a.device, bank=a.bank, group=a.group)
     # one job per (profile, n): its chains share the model's check draws
     jobs = [(nm, n, chains_for(a.chains, n), opts) for n in a.n for nm in names]
     t0 = time.time()

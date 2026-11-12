@@ -21,6 +21,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 - `tools/fdr_audit.py --bank NT`: the centroids against the flat filter, on banks of
   near-duplicate templates through HierarchicalFilter, centroids on and off. The audit's
   one-template banks and pinned chains never ran them.
+- `tools/fdr_audit.py --group G`: the near-duplicates per group of a `--bank` (default 4).
+  The model forms clusters above four only when at least eight remain, so `--bank 16` audited
+  centroids of four while production plans mostly cluster six to eight. `--bank 64 --group 8`
+  forms centroids of eight: 108 cases at n=2048 and 4096 pooled 0.77x the false-dismissal
+  budget (FP32) and 0.73x (Q15), none off its plan's model, the worst case 1.40x, Tier-1
+  sub-centroids active in 72. A 64-template case holds about 11 GB at n=2048 and more at
+  some profiles: run one profile per process.
 - An AVX3 CI job: with HWY_AVX3_DL enabled, AVX-512 runners select AVX3_DL, so plain AVX3 had
   no coverage. It is skipped, with a notice, on a runner without AVX-512.
 - An AVX back end for CPUs with AVX but not AVX2 (Sandy and Ivy Bridge), which ran the
@@ -255,6 +262,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Tier-0 centroids of up to 16 templates, 1-tier centroids, Tier-1 sub-centroids and n=1024
+  layouts on the CPU (b692ec97 .. c67d610a). Production ladder (test27 bank, 27 tops, 6
+  segments, Zen 5, concurrent paired runs against 16f053c3): steady fine stage 10.42 to
+  9.29 s a segment (-10.8%), middle unchanged, segment total 14.76 to 13.65 s (-7.5%).
+  One-off setup grows 8.6 s (65.2 to 73.8 s), most of it `cluster_tier0_candidates` (5.7 to
+  12.5 s), so the change pays back after about 34 segments. Limiting clusters to eight
+  measured the same steady time and about 5 s less setup in two loaded runs (not changed
+  here); limiting them to four cost about 4% of the fine stage.
+
 - The 64-point twiddled codelet is split-radix from 8 lanes up (it was only at 16), and the
   8-lane forward's hand-written n = 2048 half-output path is gone: the generic path with
   split-radix matched it on Zen 3 and Ivy Bridge and ran the fine stage ~3% faster on
@@ -372,6 +388,12 @@ whole job 18% less (222 to 182 s). See
   - no per-band single-tier plans to price the direct refine.
 
 ### Fixed
+
+- The direct refine rounded an odd lag window up to a full SIMD vector only for a series read
+  in place, so a strided lane of a complex series (or a zero-extended block) took the kernel's
+  tail path for its last lags. On arm64 the two paths round 1 ulp apart: the Nightly's
+  `test_a_lane_of_a_complex_series_is_read_in_place` failed there from 02d5f410. The padding
+  now depends on the block alone.
 
 - The gate model's simulation read and rewrote past the end of its records arrays on ARM:
   the records scan stored each vector's records with `CompressBlendedStore`, which on NEON
