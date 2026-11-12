@@ -2,6 +2,7 @@
 automatically select optimal FFT block sizes, and filter continuous series."""
 
 from collections import OrderedDict
+import itertools
 import collections.abc as _abc
 from typing import Any, Optional, Sequence, Union, Tuple, List, Dict
 import threading
@@ -599,6 +600,21 @@ _REF_PROFILE_CACHE = _ReferenceCache()
 _REF_BINNED_CACHE = _ReferenceCache()
 
 
+#: The CPU's single-template plans, one per block length, shared by every group of that length
+#: (_TemplateGroup.get_single_plan).
+_SINGLE_CPU_PLANS: Dict[int, Any] = {}
+_GROUP_SERIAL = itertools.count()
+
+
+def _single_plan_blocks(n):
+    """Blocks a CPU single-template plan of block length n filters per kernel call. One block
+    per call left the kernels' batching unused: a follow-up window of 51,000 samples at
+    n = 1024 took 0.81 ms a block at a time and 0.27 ms in batches of 32 (Zen 5, replay of a
+    search's refilter calls, tools/bench_refilter.py). The batch is held to about 256 KB of
+    block spectra, so it stays in the second-level cache."""
+    return int(max(4, min(32, (1 << 15) // int(n))))
+
+
 class _TemplateGroup:
     """Internal container for a homogeneous batch of templates sharing an FFT size."""
 
@@ -624,6 +640,7 @@ class _TemplateGroup:
         self.device = device
         self.templates_loaded = False
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
+        self._serial = next(_GROUP_SERIAL)       # this group's name in shared plans' records
         self._flat_plan: Optional[Any] = None
         self._corr_plan: Optional[Any] = None
 
@@ -671,37 +688,53 @@ class _TemplateGroup:
         return self._flat_plan
 
     def get_single_plan(self, ti: int, on_cpu: bool = False):
-        """An ungated plan holding only local template ti (a few kept per group): what a
-        single-template call needs, without building the group's whole ungated bank.
-        on_cpu: the CPU's plan even for a GPU group (see TimeDomainFilterBank._single_device)."""
+        """An ungated plan holding only local template ti: what a single-template call needs,
+        without building the group's whole ungated bank. The plan is shared and the template
+        loaded into it when it is not the one already there, so the caller runs the plan
+        before asking for the next one.
+
+        On the CPU every group of one block length shares one plan (_SINGLE_CPU_PLANS), which
+        filters several blocks per kernel call (_single_plan_blocks). A GPU group keeps its
+        own, since a plan there owns a device context (~10 ms to create).
+
+        Parameters
+        ----------
+        ti : int
+            The template, as its row in this group.
+        on_cpu : bool, optional
+            The CPU's plan even for a GPU group (TimeDomainFilterBank._single_device).
+            Default False.
+
+        Returns
+        -------
+        MatchedFilter
+            A one-template plan of this group's block length with template ti loaded.
+        """
         from . import MatchedFilter
-        cache = self.__dict__.setdefault('_single_plans', OrderedDict())
-        plan = cache.get(int(ti))
-        if plan is not None:
-            cache.move_to_end(int(ti))
-            return plan
         from .device import parse as _parse_device
+        # Which plan: the group's own on a GPU, the block length's shared one on the CPU.
         if _parse_device(self.device).kind == 'gpu' and not on_cpu:
-            # A GPU plan owns a device context (~10 ms to create): keep one and load the
-            # template into it. The caller runs the plan before asking for the next one.
             plan = self.__dict__.get('_single_gpu_plan')
-            if self.__dict__.get('_single_gpu_ti') != int(ti):
-                sp = self.full_spectra(slice(int(ti), int(ti) + 1))
-                if plan is None:
-                    plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
-                                                                 device=self.device)
+            if plan is None:
+                plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
+                                                             device=self.device)
+        else:
+            plan = _SINGLE_CPU_PLANS.get(self.n)
+            if plan is None:
+                # 'cpu', not None: None means MF_DEVICE, which would move the CPU's own plan
+                # to a GPU.
+                plan = _SINGLE_CPU_PLANS[self.n] = MatchedFilter(
+                    self.n, ndata=_single_plan_blocks(self.n), ntemplates=1, device='cpu')
+        # Load the template unless the plan holds it. The group's serial names the group: an
+        # id() would be reused by a later group and leave another bank's template loaded.
+        loaded = (self._serial, int(ti))
+        if plan.__dict__.get('_single_loaded') != loaded:
+            sp = self.full_spectra(slice(int(ti), int(ti) + 1))
+            if hasattr(plan, '_settle_deferred'):
                 # Calls deferred in a batch still read the current template: let them finish.
                 plan._settle_deferred()
-                plan.set_templates(np.ascontiguousarray(sp))
-                self._single_gpu_ti = int(ti)
-            return plan
-        sp = self.full_spectra(slice(int(ti), int(ti) + 1))
-        # 'cpu', not None: None means MF_DEVICE, which would move the CPU's own plan to a GPU.
-        plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device='cpu' if on_cpu else self.device)
-        plan.set_templates(np.ascontiguousarray(sp))
-        cache[int(ti)] = plan
-        while len(cache) > 8:
-            cache.popitem(last=False)
+            plan.set_templates(np.ascontiguousarray(sp))
+            plan._single_loaded = loaded
         return plan
 
     def get_correlation_plan(self):
