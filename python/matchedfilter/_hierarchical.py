@@ -114,6 +114,10 @@ def _direct_refine_enabled():
 
 _TIER0_PAIR_CENTROID = True
 _TIER0_MAX_ARITY = 16
+#: Skip building a wider first band's shared screeners when it loses even at the best ratio a
+#: narrower band found (HierarchicalFilter._choose_chain). False builds them for every band
+#: whose lower bound can win, as a check on the rule.
+_TIER0_PRUNE_WIDER = True
 
 
 def _tier0_centroid_enabled():
@@ -1038,6 +1042,7 @@ class HierarchicalFilter(MatchedFilter):
                     }
                     ordered_b0 = sorted((int(b) for b in cand_bands), key=lambda b: (lb_by_b0[b], b))
                     tie_slack = 1.0 + _gatechain.TIE
+                    shared = {}        # band -> the smallest screener-to-template ratio found
                     for b0 in ordered_b0:
                         limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
                         if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
@@ -1060,8 +1065,23 @@ class HierarchicalFilter(MatchedFilter):
                             r_best = max(opt_b, round(math.ceil(nc_prev / rem_div) / nt * 20.0) / 20.0)
                             return bound(r_best) < limit
 
+                        # A wider band shares no better than a narrower one: templates that
+                        # agree over more of the spectrum agree over less of it too (the rule
+                        # every bank of the 171,828-template BNS search obeyed: the 256 band
+                        # reached 0.45-0.60 where the 128 band reached 0.30-0.40). If b0 loses
+                        # even at the best ratio a narrower band found, its screeners are not
+                        # built: that was half of the clustering in a leaf bank's setup, for
+                        # a band that never won.
+                        narrower = [r for b, r in shared.items() if b < b0]
+                        if (_TIER0_PRUNE_WIDER and narrower
+                                and bound(max(opt_map[b0], min(narrower))) >= limit):
+                            self._tier0_clusters[b0] = None
+                            continue
                         raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,
                                                                     pass2=next_can_win)
+                        found = [float(c.ratio) for c in raw_cands if c is not None]
+                        if found:
+                            shared[b0] = min(found)
                         cands = _pareto_tier0_candidates(raw_cands)
                         best_cand = None
                         best_cand_b0_cost = uncl_by_b0[b0]
