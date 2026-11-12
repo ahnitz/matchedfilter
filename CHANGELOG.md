@@ -272,6 +272,17 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Leaf-bank setup no longer builds a wider first band's shared screeners (tier-0 centroids)
+  when that band loses even at the best screener-to-template ratio a narrower band found
+  (`HierarchicalFilter._choose_chain`; `_hierarchical._TIER0_PRUNE_WIDER = False` builds
+  them all). On the 171,828-template BNS search (pycbc PR 5521) every leaf bank built the
+  256 band's screeners and none used them. Leaf-bank setup of an 8-segment job on Zen 5:
+  32.7 to 20.7 s, the job's triggers identical; 202 captured leaf banks: 39.5 to 25.9 ms
+  each, every chain, screener set, retention and threshold unchanged.
+- `HierarchicalSearch` keeps one root transform plan per series length for the process. A
+  caller with a search per root (pycbc: one per top template) built the 2^20-point plan
+  again for each, 0.4 s of a 64-top job.
+
 - A single-template call on the CPU (`filter_series(template_index=k)`, which
   `PeaksContext.refilter` makes once per follow-up trigger) takes the batched follow-up path
   as a batch of one, instead of a one-template plan with its layout, grouping and bin merge
