@@ -1727,6 +1727,21 @@ class TimeDomainFilterBank:
                 block_starts: start sample of block containing each trigger
                 block_lengths: FFT block length used for each trigger
         """
+        # One template on the CPU (a search's follow-up, PeaksContext.refilter): the batched
+        # follow-up path, as a batch of one. It reads the series in place (real, or one lane
+        # of a packed pair), lays the blocks out and merges the bins in C, and keeps the
+        # template's taps and spectrum on the group. The call-at-a-time path below did the
+        # layout, the grouping and the bin merge in Python around a one-template plan: 1.2 ms
+        # a call against 0.2 ms (Zen 5, replay of a search's refilter calls,
+        # tools/bench_refilter.py). It remains for what the batch declines (a resampled
+        # bank, a GPU group, a wrapped plan).
+        if template_index is not None and not getattr(self, '_defer', False):
+            single_out = [None]
+            if TimeDomainFilterBank._cpu_single_td_batch(
+                    [(self, series, dict(windows=windows, binsize=binsize, threshold=threshold,
+                                         template_index=template_index))], single_out):
+                return single_out[0]
+
         ser = self._input_series(series)
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
@@ -2392,7 +2407,10 @@ class TimeDomainFilterBank:
             ))
             job_meta.append((j, entry))
 
-        if not c_jobs or (len(c_jobs) < 2 and len(c_jobs) < len(jobs) and not force_cpu):
+        # One eligible job is still a batch: a call at a time takes this path too
+        # (filter_series), so a job gives the same peaks alone, among other kinds of job, or
+        # with others like it.
+        if not c_jobs:
             return done
 
         # Settle any pending device writes once before reading host/shared buffers in C.

@@ -685,8 +685,9 @@ def test_reference_caches_never_serve_a_recycled_id():
 
 
 def test_single_template_call_equals_the_ungated_bank_for_that_template():
-    """filter_series(template_index=k) runs a one-template plan; it must report exactly what the
-    group's whole ungated plan reports for template k."""
+    """filter_series(template_index=k) reports the peaks the group's whole ungated plan reports
+    for template k: the same samples, and the same values to rounding (the one-template call
+    runs the follow-up batch's kernel, the ungated bank its own)."""
     rng = np.random.default_rng(13)
     counts = list(rng.integers(300, 600, 24))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -703,7 +704,8 @@ def test_single_template_call_equals_the_ungated_bank_for_that_template():
         assert sel.sum() > 0 and len(one.snr) == sel.sum()
         o1 = np.argsort(one.sample_indices); o2 = np.argsort(every.sample_indices[sel])
         np.testing.assert_array_equal(one.sample_indices[o1], every.sample_indices[sel][o2])
-        np.testing.assert_array_equal(one.snr[o1], every.snr[sel][o2])
+        ref = every.snr[sel][o2]
+        np.testing.assert_allclose(one.snr[o1], ref, rtol=0, atol=1e-5 * np.abs(ref).max())
 
 
 def test_gpu_correlation_bank_prices_its_own_layout_and_matches_cpu():

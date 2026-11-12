@@ -165,6 +165,9 @@ runs balance by), `migrate_cost_file.py` (cost-file format migration).
 `real_probe_study.py`, `replay_captured_groups.py`, `replay_partitions.py`,
 `audit_class_execution.py`, `audit_execution_contracts.py`, `audit_kernel_binaries.py`.
 
+**A search's follow-up calls**: `bench_refilter.py` (replay captured single-template
+refilter calls: time per call, first and repeated, and the peaks against the capture).
+
 **A job's setup**: `setup_capture.py` (record a job's banks, references and first calls),
 `setup_replay.py` (rebuild the setup in one process: time and a digest of the decisions),
 `setup_breakdown.py` (the setup's time by part), `setup_decisions_diff.py` (two replays'
