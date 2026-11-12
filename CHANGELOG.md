@@ -21,6 +21,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 - `tools/fdr_audit.py --bank NT`: the centroids against the flat filter, on banks of
   near-duplicate templates through HierarchicalFilter, centroids on and off. The audit's
   one-template banks and pinned chains never ran them.
+- `tools/bench_refilter.py`: replays captured single-template refilter calls of a search
+  (time per call, first and repeated, and the peaks against the capture), and
+  `tests/test_refilter_dense.py`: such calls, alone and batched, against the correlation
+  computed directly (real and strided-lane series, complex taps, windows over several
+  blocks, bin sizes that do not divide the window, a threshold that keeps some bins).
 - `tools/fdr_audit.py --group G`: the near-duplicates per group of a `--bank` (default 4).
   The model forms clusters above four only when at least eight remain, so `--bank 16` audited
   centroids of four while production plans mostly cluster six to eight. `--bank 64 --group 8`
@@ -48,6 +53,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   too.
 
 ### Changed
+
+- A lone single-template job in a `filter_series_many` batch of other kinds of job takes the
+  follow-up batch's path, as two or more already did, and as a single call now does: a job
+  returns the same peaks however it is submitted. Its values differ in rounding from the
+  one-template plan's, which such a job got before.
 
 - The CPU FP16 first gate on ARM gates on its own statistic, each pair's FP16 maximum, as the
   GPU's fp16 tier and the x86 Q15 screen do, in place of an upper bound on the FP32 maximum
@@ -261,6 +271,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
   (tests/test_public_api.py).
 
 ### Performance
+
+- A single-template call on the CPU (`filter_series(template_index=k)`, which
+  `PeaksContext.refilter` makes once per follow-up trigger) takes the batched follow-up path
+  as a batch of one, instead of a one-template plan with its layout, grouping and bin merge
+  in Python. On the 171,828-template BNS search (pycbc PR 5521, 8 segments, Zen 5) a refilter
+  call went from 1.01 to 0.21 ms and the steady loop from 39.3 to 34.3 s (-12.7%); refilter
+  is 1.9% of the search loop (was 8.5%). Replay of 240 captured calls
+  (`tools/bench_refilter.py`): first call of a template 1.17 to 0.23 ms on Zen 5, about
+  -40% on a loaded Haswell and a loaded Ivy Bridge node (wall time). The peaks are the same
+  samples and the values equal to rounding (5e-7 relative); in the job 3 of 543,450 L1
+  follow-up triggers moved between samples of equal magnitude. Direct time-domain
+  correlation over the whole 51,000-sample window was measured and is slower (0.39 against
+  0.22 ms), so the batch keeps it for small lag counts only.
+- What the batched path declines (a resampled bank, a wrapped plan) still runs a
+  one-template plan: every CPU group of a block length now shares one, which filters up to
+  32 blocks per kernel call (first call 1.17 to 0.58 ms on the same replay). Each group kept
+  up to eight one-block plans before.
 
 - Tier-0 centroids of up to 16 templates, 1-tier centroids, Tier-1 sub-centroids and n=1024
   layouts on the CPU (b692ec97 .. c67d610a). Production ladder (test27 bank, 27 tops, 6
