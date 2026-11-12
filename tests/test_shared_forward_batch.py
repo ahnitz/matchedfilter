@@ -235,8 +235,19 @@ def test_multigroup_windows_pack_and_mixed_batch_modes(target):
     ]
     want_mixed = [_reference_via_plan(b, s, kw) for b, s, kw in mixed_jobs]
     got_mixed = mf.TimeDomainFilterBank.filter_series_many(mixed_jobs)
-    for g_res, w_res in zip(got_mixed, want_mixed):
-        _assert_results_identical(g_res, w_res)
+    for (_, _, kw), g_res, w_res in zip(mixed_jobs, got_mixed, want_mixed):
+        if "template_index" in kw:
+            # A single-template job runs the follow-up batch's kernel, the reference the
+            # one-template plan: the same peaks and blocks, values equal to rounding.
+            np.testing.assert_array_equal(g_res.template_indices, w_res.template_indices)
+            np.testing.assert_array_equal(g_res.sample_indices, w_res.sample_indices)
+            np.testing.assert_array_equal(g_res.block_starts, w_res.block_starts)
+            np.testing.assert_array_equal(g_res.block_lengths, w_res.block_lengths)
+            assert g_res.snr.size > 0
+            np.testing.assert_allclose(g_res.snr, w_res.snr, rtol=0,
+                                       atol=1e-5 * np.abs(w_res.snr).max())
+        else:
+            _assert_results_identical(g_res, w_res)
 
 
 def test_hmf_sparse_counts_optional_and_batch_validation(target):
