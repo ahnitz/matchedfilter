@@ -113,3 +113,38 @@ def test_candidate_cache_shares_across_banks_with_distinct_direct_costs(empty_mo
     assert best2["chain"] == best2_cold["chain"]
     assert best2["thresholds"] == best2_cold["thresholds"]
     assert best2["halfwidth"] == best2_cold["halfwidth"]
+
+
+def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypatch):
+    """Planning a chain memoises arrays derived from the signal draws (kept draws, halves,
+    distances, candidates). Once the draws leave their own cache nothing derived from them
+    stays held, so the model's memory follows the draws it still holds."""
+    import gc as pygc
+    monkeypatch.setattr(gc, "_KEPT", OrderedDict())
+    a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    plan = gc.chain_thresholds(a, N, 6.0, 1e-2, (256, 512, 1024), window=WIN)
+    assert plan is not None
+    assert len(gc._KEPT) > 0 and len(gc._CAND_CACHE) > 0
+
+    gc._SIGNAL_CACHE.clear()
+    gc._NOISE_CACHE.clear()
+    del plan
+    pygc.collect()
+    assert len(gc._KEPT) == 0
+    assert len(gc._CAND_CACHE) == 0
+
+
+def test_similar_results_are_bounded_over_all_keys(empty_model, monkeypatch):
+    """The results held for reuse by similar profiles are bounded per kind across keys, the
+    oldest dropped first and an emptied key removed: a long job meets new keys throughout."""
+    monkeypatch.setattr(gc, "_SIMILAR_ORDER", {})
+    monkeypatch.setitem(gc._SIMILAR_MAX, "choice", 3)
+    unit = (np.ones(4, np.float32), np.ones(2))
+    for i in range(5):
+        gc._similar_put("choice", unit, (i,), "result %d" % i)
+    assert sorted(k[1] for k in gc._SIMILAR) == [2, 3, 4]
+    assert [v for lst in gc._SIMILAR.values() for _, v in lst] == ["result 2", "result 3", "result 4"]
+    # a key's own list still keeps only its newest entries
+    for i in range(4):
+        gc._similar_put("plan", unit, ("one key",), i, keep=2)
+    assert [v for _, v in gc._SIMILAR[("plan", "one key")]] == [2, 3]
