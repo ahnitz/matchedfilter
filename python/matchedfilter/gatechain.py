@@ -631,53 +631,19 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
 
         accepted = {}
         mwu_steps = 2 * p_idx
+        W_f64 = np.ascontiguousarray(W, dtype=np.float64)
         for m_arity, bucket in by_arity.items():
             g_ids = [item[0] for item in bucket]
             grp_mat = np.asarray([item[1] for item in bucket], dtype=np.int32)
             dls_mat = np.asarray([item[2] for item in bucket], dtype=np.int64)
             U_raw = (C[grp_mat] * inv_sqrt_v[grp_mat, None]) * exp_all[dls_mat + R]
-            ref_frame = mid_u[g_ids, None, :]
-            g0 = np.sum(W[None, None, :] * ref_frame.conj() * U_raw, axis=2)
-            abs_g0 = np.abs(g0)
-            phase0 = np.where(abs_g0 > 1e-12, g0.conj() / np.maximum(abs_g0, 1e-12), 1.0 + 0.0j)
-            U_tilde = U_raw * phase0[:, :, None]
-
-            mean_vec = np.mean(U_tilde, axis=1)
-            mean_norm = np.sqrt(np.maximum(
-                np.sum((mean_vec.real * mean_vec.real + mean_vec.imag * mean_vec.imag) * W[None, :], axis=1),
-                1e-30,
-            ))
-            c_mean = mean_vec / mean_norm[:, None]
-            ov_mean = np.abs(np.sum(W[None, None, :] * c_mean[:, None, :].conj() * U_raw, axis=2))
-
-            weights = np.ones((len(bucket), m_arity), dtype=np.float64)
-            U_iter = U_tilde.copy()
-            for _ in range(mwu_steps):
-                s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
-                s_norm = np.sqrt(np.maximum(
-                    np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
-                    1e-30,
-                ))
-                c_iter = s_vec / s_norm[:, None]
-                ov = np.sum(W[None, None, :] * c_iter[:, None, :].conj() * U_iter, axis=2)
-                abs_ov = np.abs(ov)
-                rephase = np.where(abs_ov > 1e-12, ov.conj() / np.maximum(abs_ov, 1e-12), 1.0 + 0.0j)
-                U_iter = U_iter * rephase[:, :, None]
-                deficit = np.maximum(1.0 - abs_ov, 0.0)
-                shift_def = deficit - np.min(deficit, axis=1, keepdims=True)
-                weights = weights * np.exp(np.minimum(25.0 * shift_def, 10.0))
-                weights = weights / np.mean(weights, axis=1, keepdims=True)
-
-            s_vec = np.sum(weights[:, :, None] * U_iter, axis=1)
-            s_norm = np.sqrt(np.maximum(
-                np.sum((s_vec.real * s_vec.real + s_vec.imag * s_vec.imag) * W[None, :], axis=1),
-                1e-30,
-            ))
-            c_mwu = s_vec / s_norm[:, None]
-            ov_mwu = np.abs(np.sum(W[None, None, :] * c_mwu[:, None, :].conj() * U_raw, axis=2))
-            use_mwu = np.min(ov_mwu, axis=1) >= np.min(ov_mean, axis=1)
-            c_unit = np.where(use_mwu[:, None], c_mwu, c_mean)
-            exact_ov = np.where(use_mwu[:, None], ov_mwu, ov_mean)
+            # Each group's screener: the mean of its members phased to the merged frame, or
+            # the minimax vector multiplicative weights find, whichever the worst-matched
+            # member overlaps better; and every member's overlap with it (_core.tier0_mwu).
+            c_unit = np.empty((len(bucket), length), dtype=np.complex128)
+            exact_ov = np.empty((len(bucket), m_arity), dtype=np.float64)
+            _c_t0.tier0_mwu(np.ascontiguousarray(U_raw), np.ascontiguousarray(mid_u[g_ids]),
+                            W_f64, int(mwu_steps), c_unit, exact_ov)
             v_mem = v[grp_mat]
             v_bar = np.mean(v_mem, axis=1)
             alpha_mat = np.minimum(1.0, np.sqrt(v_bar[:, None] / v_mem) * exact_ov)
