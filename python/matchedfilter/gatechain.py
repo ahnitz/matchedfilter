@@ -40,6 +40,7 @@ the draws it was made on; the split is part of the chain's plan.
 """
 import math
 import os
+import weakref
 from contextlib import contextmanager
 from collections import OrderedDict
 from itertools import combinations
@@ -1198,10 +1199,32 @@ def _similar_get(kind, p, params):
     return (u, feats), None
 
 
+#: The most entries _SIMILAR holds of each kind over all its keys, the oldest dropped first.
+#: A key's own list is bounded (_similar_put's keep), but a job meets new keys as long as it
+#: runs -- a choice's key holds the cost model, which differs between template groups -- so
+#: the keys were not: a worker of the 171,828-template search added about 290 choices and
+#: plans a top template. A simulation is some 10 MB, the others a few kB.
+_SIMILAR_MAX = {"signal-records": 48, "noise": 256, "plan": 4096, "choice": 8192}
+_SIMILAR_ORDER = {}     # kind -> OrderedDict: id(entry) -> (key, entry), oldest first
+
+
 def _similar_put(kind, u, params, value, keep=None):
-    lst = _SIMILAR.setdefault((kind,) + params, [])
-    lst.append((u, value))
+    key = (kind,) + params
+    lst = _SIMILAR.setdefault(key, [])
+    order = _SIMILAR_ORDER.setdefault(kind, OrderedDict())
+    entry = (u, value)
+    lst.append(entry)
+    order[id(entry)] = (key, entry)
+    for old in lst[:-(keep or _CACHE_MAX)]:
+        order.pop(id(old), None)
     del lst[:-(keep or _CACHE_MAX)]
+    while len(order) > _SIMILAR_MAX.get(kind, 4096):
+        _, (okey, old) = order.popitem(last=False)
+        held = _SIMILAR.get(okey)
+        if held is not None:
+            held[:] = [e for e in held if e is not old]
+            if not held:
+                del _SIMILAR[okey]
 
 
 #: The gate model's stream domain: its draws are _core.gauss_fill's (src/gauss.cc) at this
@@ -2287,6 +2310,33 @@ _KEPT = OrderedDict()
 _KEPT_MAX = 4096
 
 
+def _derived_get(cache, key, *sources):
+    """(True, value) when `cache` holds a value derived from exactly these arrays under
+    `key`, else (False, None)."""
+    hit = cache.get(key)
+    if hit is None or len(hit[0]) != len(sources) or any(r() is not s for r, s in zip(hit[0], sources)):
+        return False, None
+    cache.move_to_end(key)
+    return True, hit[1]
+
+
+def _derived_put(cache, key, sources, value, cap):
+    """Hold `value`, derived from the arrays `sources`, under `key` for as long as they live.
+
+    The key names the sources by identity, so the entry holds weak references to them and is
+    dropped when one is freed: it can neither be served for a new array at a recycled id nor
+    keep the draws alive after their own cache (_SIGNAL_CACHE, _NOISE_CACHE) has let them go.
+    Holding the sources themselves kept every evicted set of draws, and what was derived
+    from it, until `cap` entries had passed."""
+    def drop(ref, cache=cache, key=key):
+        hit = cache.get(key)
+        if hit is not None and any(r is ref for r in hit[0]):
+            del cache[key]
+    cache[key] = (tuple(weakref.ref(x, drop) for x in sources), value)
+    while len(cache) > cap:
+        cache.popitem(last=False)
+
+
 def kept_draws(sig, bands, chain, snr):
     """Coarse maxima of `chain`'s tiers for the draws the fine stage keeps (fine max >= snr).
 
@@ -2297,23 +2347,17 @@ def kept_draws(sig, bands, chain, snr):
     C, F = sig[0], sig[1]
     cols = [bands.index(b) for b in chain]
     key = (id(C), id(F), tuple(cols), float(snr))
-    hit = _KEPT.get(key)
-    if hit is not None and hit[0] is C and hit[1] is F:
-        _KEPT.move_to_end(key)
-        return hit[2]
+    found, out = _derived_get(_KEPT, key, C, F)
+    if found:
+        return out
     # When F broadcasts one fine maximum across all columns (signal_draws), filter C once per
     # (C, F, snr) and slice columns per chain rather than copying and scanning F[:, cols].
     if F.ndim == 2 and F.shape[1] > 0 and F.strides[1] == 0:
         bkey = ("kept_all", id(C), id(F), float(snr))
-        bhit = _KEPT.get(bkey)
-        if bhit is not None and bhit[0] is C and bhit[1] is F:
-            _KEPT.move_to_end(bkey)
-            c_kept = bhit[2]
-        else:
+        found, c_kept = _derived_get(_KEPT, bkey, C, F)
+        if not found:
             c_kept = C[F[:, 0] >= snr]
-            _KEPT[bkey] = (C, F, c_kept)
-            while len(_KEPT) > _KEPT_MAX:
-                _KEPT.popitem(last=False)
+            _derived_put(_KEPT, bkey, (C, F), c_kept, _KEPT_MAX)
         out = c_kept[:, cols]
     else:
         keep = F[:, cols[0]] >= snr
@@ -2321,9 +2365,7 @@ def kept_draws(sig, bands, chain, snr):
             keep = keep | (F[:, c] >= snr)
         out = C[keep][:, cols]
     out.setflags(write=False)
-    _KEPT[key] = (C, F, out)
-    while len(_KEPT) > _KEPT_MAX:
-        _KEPT.popitem(last=False)
+    _derived_put(_KEPT, key, (C, F), out, _KEPT_MAX)
     return out
 
 
@@ -2347,18 +2389,41 @@ def _halves(x):
     contiguous. The detections are independent draws in simulation order, so the halves are
     independent of each other."""
     key = ("halves", id(x))
-    hit = _KEPT.get(key)
-    if hit is not None and hit[0] is x:
-        _KEPT.move_to_end(key)
-        return hit[1], hit[2]
+    found, halves = _derived_get(_KEPT, key, x)
+    if found:
+        return halves
     a = np.ascontiguousarray(x[0::2])
     b = np.ascontiguousarray(x[1::2])
     a.setflags(write=False)
     b.setflags(write=False)
-    _KEPT[key] = (x, a, b)
-    while len(_KEPT) > _KEPT_MAX:
-        _KEPT.popitem(last=False)
+    _derived_put(_KEPT, key, (x,), (a, b), _KEPT_MAX)
     return a, b
+
+
+def _kept_halves(sig, bands, cols, chain, snr):
+    """(search half, fit half) of kept_draws(sig, bands, chain, snr): _halves of it, memoised
+    per draws and chain, without also holding the kept draws they were cut from. Where one
+    fine maximum serves every band (signal_draws), the kept draws of all bands are halved
+    once per draws and a chain's halves are its columns of those; holding the chain's kept
+    draws beside its two halves was a third of what a profile's windows held."""
+    C, F = sig[0], sig[1]
+    if not (F.ndim == 2 and F.shape[1] > 0 and F.strides[1] == 0):
+        return _halves(kept_draws(sig, bands, chain, snr))
+    key = ("kept_halves", id(C), id(F), tuple(cols), float(snr))
+    found, halves = _derived_get(_KEPT, key, C, F)
+    if found:
+        return halves
+    bkey = ("kept_all", id(C), id(F), float(snr))
+    found, c_kept = _derived_get(_KEPT, bkey, C, F)
+    if not found:
+        c_kept = C[F[:, 0] >= snr]
+        _derived_put(_KEPT, bkey, (C, F), c_kept, _KEPT_MAX)
+    a, b = _halves(c_kept)
+    halves = (a[:, cols], b[:, cols])
+    for x in halves:
+        x.setflags(write=False)
+    _derived_put(_KEPT, key, (C, F), halves, _KEPT_MAX)
+    return halves
 
 
 def _distances(sig, lags, bands, chain, snr, n):
@@ -2371,16 +2436,13 @@ def _distances(sig, lags, bands, chain, snr, n):
     b = int(chain[-1])
     col = bands.index(b)
     key = ("dist", id(F), id(fat), id(cat), col, b, float(snr), int(n))
-    hit = _KEPT.get(key)
-    if hit is not None and hit[0] is F and hit[1] is fat and hit[2] is cat:
-        _KEPT.move_to_end(key)
-        return hit[3]
+    found, out = _derived_get(_KEPT, key, F, fat, cat)
+    if found:
+        return out
     keep = F[:, 0] >= snr
     out = np.abs(fat[keep] - cat[keep, col]) / (n // b)
     out.setflags(write=False)
-    _KEPT[key] = (F, fat, cat, out)
-    while len(_KEPT) > _KEPT_MAX:
-        _KEPT.popitem(last=False)
+    _derived_put(_KEPT, key, (F, fat, cat), out, _KEPT_MAX)
     return out
 
 
@@ -2389,10 +2451,9 @@ def _all_halfwidths(dist, allow):
     if dist is None or allow < 0:
         return (None,)
     key = ("hws", id(dist), int(allow))
-    hit = _KEPT.get(key)
-    if hit is not None and hit[0] is dist:
-        _KEPT.move_to_end(key)
-        return hit[1]
+    found, out = _derived_get(_KEPT, key, dist)
+    if found:
+        return out
     if dist.size > allow:
         kth = dist.size - 1 - allow
         hmin = max(1, int(math.ceil(np.partition(dist, kth)[kth])))
@@ -2400,9 +2461,7 @@ def _all_halfwidths(dist, allow):
         hmin = 1
     up = np.ceil(dist[dist > hmin]).astype(np.int64)
     out = (None,) + tuple(sorted({hmin} | {int(h) for h in up}))
-    _KEPT[key] = (dist, out)
-    while len(_KEPT) > _KEPT_MAX:
-        _KEPT.popitem(last=False)
+    _derived_put(_KEPT, key, (dist,), out, _KEPT_MAX)
     return out
 
 
@@ -2552,7 +2611,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     template group or cost model prices them without searching again.
     """
     cols = [bands.index(b) for b in chain]
-    A, B = _halves(kept_draws(sig, bands, chain, snr))
+    A, B = _kept_halves(sig, bands, cols, chain, snr)
     K = int(round(float(fd) * (A.shape[0] + 1))) - 1      # the search half's budget, as the fit's
     fit_j = int(round(float(fd) * (B.shape[0] + 1)))
     if K < 0 or fit_j < 1 or fit_j > B.shape[0]:
@@ -2568,19 +2627,14 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     hws = _halfwidths(dA, allow, cost, chain, n, all_hws=all_hws)
     eff_prune = bool(prune) and len(chain) > 1
     key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), eff_prune, all_hws)
-    hit = _CAND_CACHE.get(key) if key is not None else None
-    if hit is not None and hit[0] is sig[0] and hit[1] is noise:
-        _CAND_CACHE.move_to_end(key)
-        cands = hit[2]
-    else:
+    found, cands = _derived_get(_CAND_CACHE, key, sig[0], noise) if key is not None else (False, None)
+    if not found:
         cand_hws = all_hws if key is not None else hws
         dead = tuple(np.empty(0, np.int64) if h is None else np.flatnonzero(dA_all > h)
                      for h in cand_hws)
         cands = _chain_candidates(A, noise, cols, K, eff_prune, dead)
         if key is not None:
-            _CAND_CACHE[key] = (sig[0], noise, cands)
-            while len(_CAND_CACHE) > _CAND_CACHE_MAX:
-                _CAND_CACHE.popitem(last=False)
+            _derived_put(_CAND_CACHE, key, (sig[0], noise), cands, _CAND_CACHE_MAX)
     best = None
     has_feed = bool(ntemplates and getattr(cost, "feed", None))
     k = len(chain)

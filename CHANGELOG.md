@@ -460,6 +460,16 @@ whole job 18% less (222 to 182 s). See
 
 ### Fixed
 
+- The gate model's memory follows the signal draws it still holds. What a chain's planning
+  derives from a set of draws (kept draws, halves, distances, candidates) was memoised with
+  references to the draws, so draws evicted from their own cache stayed alive, with
+  everything derived from them, until 4096 further entries had passed; the entries now hold
+  weak references and go with the draws. A chain's kept draws are no longer held beside
+  their two halves. The results kept for reuse by similar profiles are bounded over all
+  their keys (they were bounded per key only, and a job meets new keys for as long as it
+  runs). MEASURED on the 171,828-template showcase search, 16 workers, a profile per
+  detector, peak resident memory summed over the workers: 56-58 GB -> 47 GB; steady
+  throughput and setup time unchanged.
 - The continuous correlation's block-size costs gave a fixed cost per block of zero when
   sixteen templates cost more each than two (a loaded node; spectra leaving a 256 KB
   second-level cache), and the layout then put filters in groups of their own, each with its
