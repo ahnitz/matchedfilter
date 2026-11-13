@@ -243,6 +243,27 @@ def test_hierarchical_mode_and_reference():
     assert np.any(mask)
 
 
+def test_reference_solves_the_thresholds_before_the_first_call():
+    """set_reference leaves every hierarchical plan with its thresholds solved, and the first
+    filtering call runs on that same solution rather than solving them again."""
+    from spectral_profiles import make_spectral_profile
+    rng = np.random.default_rng(889)
+    counts = [200, 400]
+    taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.5,
+                                false_dismissal=0.001, fft_lengths=[4096])
+    bank.set_reference(make_spectral_profile('inspiral_canonical', 4096))
+
+    plans = [g.plan for g in bank._groups if g.is_hier]
+    assert plans
+    solved = [p._resolved for p in plans]
+    assert all(r is not None and len(r.thresholds) == len(r.chain) for r in solved)
+
+    data = (rng.standard_normal(65536) + 1j * rng.standard_normal(65536)).astype(np.complex64)
+    bank.filter_series(data)
+    assert all(p._resolved is r for p, r in zip(plans, solved))
+
+
 def test_partition_boundary_no_dropped_templates():
     """Verify that templates near max_batch boundaries with FFT size changes are not dropped."""
     from matchedfilter.time_domain import _partition_templates
