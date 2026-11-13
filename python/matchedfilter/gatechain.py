@@ -3001,11 +3001,16 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
-    # Ties (within the calibration's process-to-process noise) go to the cheaper chain on the
-    # calibration-free flop proxy: deterministic for a given profile, and still a cost. Both
-    # are the searched plans' (plan_chain), so the choice is made on the search half only.
+    # Ties (within the calibration's process-to-process noise) go to the chain with fewer
+    # tiers, then to the cheaper one on the calibration-free flop proxy: deterministic for a
+    # given profile. A tier adds a pass over its survivors that the costs underprice: on the
+    # 171,828-template BNS search (128, 256) and (128, 256, 512) priced within 1% of each
+    # other and the two-tier chain's fine stage took 17% less CPU on Ivy Bridge, 18% less on
+    # Haswell and 3-6% less on Zen 5; the flop proxy chose three tiers. Both are the searched
+    # plans' (plan_chain), so the choice is made on the search half only.
     best = pick_stable(plans, lambda d: d["cost"],
-                       lambda d: (_flop_cost(d["chain"], d["search"]["reach"], n), d["chain"]))
+                       lambda d: (len(d["chain"]), _flop_cost(d["chain"], d["search"]["reach"], n),
+                                  d["chain"]))
     return best, plans
 
 
