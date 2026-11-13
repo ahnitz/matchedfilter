@@ -54,6 +54,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- Chain choice: chains the model prices within `TIE` (5%) of the cheapest are a tie, and the
+  tie now goes to the chain with the fewest tiers (then the flop proxy, which alone decided
+  before and favours an extra tier). On the 171,828-template BNS search (pycbc PR 5521) the
+  model priced (128, 256) and (128, 256, 512) within 1% on every machine and chose three
+  tiers. Fine-stage CPU of the two-tier chain against it, paired runs: Haswell -18% and -9%
+  at SNR 6.0, -26% at 6.5, +3% at 5.5; Ivy Bridge -17% and -4% at 6.0, -7% at 5.5; Zen 5
+  -5% at 6.0, -8% at 6.5, 0 at 5.5 (false dismissal 0.001), -3% at 6.0 with 0.01. Triggers
+  at or above threshold differ by 0.1-0.3% in each direction, each chain's own dismissal.
+  A plan's chain, thresholds and results change wherever such a tie existed.
+
 - A lone single-template job in a `filter_series_many` batch of other kinds of job takes the
   follow-up batch's path, as two or more already did, and as a single call now does: a job
   returns the same peaks however it is submitted. Its values differ in rounding from the
@@ -426,6 +436,14 @@ whole job 18% less (222 to 182 s). See
   - no per-band single-tier plans to price the direct refine.
 
 ### Fixed
+
+- The continuous correlation's block-size costs gave a fixed cost per block of zero when
+  sixteen templates cost more each than two (a loaded node; spectra leaving a 256 KB
+  second-level cache), and the layout then put filters in groups of their own, each with its
+  own forward pass: on a loaded Haswell node five middle filters in five groups ran at half
+  the speed of one group. The fixed cost is now at least half the per-template cost (stored
+  as `corr4`). Middle-stage CPU over four rounds of five tops on that node: -15%; the layout
+  on Zen 5 is unchanged.
 
 - The direct refine rounded an odd lag window up to a full SIMD vector only for a series read
   in place, so a strided lane of a complex series (or a zero-extended block) took the kernel's
