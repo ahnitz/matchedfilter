@@ -282,6 +282,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Shared-screener synthesis in C (`_core.tier0_mwu`): each merged group's screener (the mean
+  of its members or the minimax vector, whichever its worst-matched member overlaps better)
+  was about ninety small numpy iterations per leaf bank. Leaf-bank setup of 202 captured
+  banks of the 171,828-template BNS search, back to back on Zen 5: 39.3 to 34.1 ms per bank;
+  in the job (8 segments, loaded machine) 41.9 to 34.8 s. Every bank's chain, screeners,
+  retention and thresholds are unchanged, and with one cost file and trials off the job's
+  triggers are bit-identical. `tests/test_tier0_mwu.py` keeps the numpy code as the
+  reference.
+
 - Leaf-bank setup no longer builds a wider first band's shared screeners (tier-0 centroids)
   when that band loses even at the best screener-to-template ratio a narrower band found
   (`HierarchicalFilter._choose_chain`; `_hierarchical._TIER0_PRUNE_WIDER = False` builds
