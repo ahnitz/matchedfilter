@@ -1670,6 +1670,11 @@ class TimeDomainFilterBank:
             if g.is_hier and not g.templates_loaded:
                 g.load_templates(g.plan)
                 g.templates_loaded = True
+            # Solve the plan's thresholds now, with the rest of the calibration: left to the
+            # first filtering call, a chain whose plan the choice did not already hold (one
+            # with second-tier shared screeners) solves them inside that call.
+            if g.is_hier and g.plan.device.kind == "cpu" and g.plan._pending_ref is not None:
+                g.plan._resolve()
 
     def set_reference_from_template(
         self,

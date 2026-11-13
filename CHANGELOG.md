@@ -290,6 +290,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- A time-domain bank solves each hierarchical plan's thresholds when its reference is set,
+  with the rest of the calibration. They were solved on the first filtering call, and a chain
+  the choice had not already planned in that form (one with second-tier shared screeners)
+  spent about 100 ms a plan there. MEASURED on the 171,828-template showcase search, 16
+  workers on a Ryzen AI Max+ 395 (Zen 5), steady template throughput per core: 11.6 -> 12.1 M at SNR 6.0
+  / FDR 0.001 with one profile, and 9.6 -> 12.6 M with a profile per detector.
 - Shared-screener synthesis in C (`_core.tier0_mwu`): each merged group's screener (the mean
   of its members or the minimax vector, whichever its worst-matched member overlaps better)
   was about ninety small numpy iterations per leaf bank. Leaf-bank setup of 202 captured
