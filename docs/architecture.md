@@ -457,7 +457,7 @@ prefix:
 - cost models, keyed by n, template count, series group and gate kind on the CPU, and by
   n, device, gate kind and fit on a GPU, with the calls measured appended when they are not
   the defaults (`_calibration.calibrate_costs`, `calibrate_costs_gpu`);
-- prices: `cpu-fft`, `corr3`, `corr-pfft`, `choice` + `direct-lagtap` and `direct-pair`
+- prices: `cpu-fft`, `corr4`, `corr-pfft`, `choice` + `direct-lagtap` and `direct-pair`
   (`_prices`, `_layout`);
 - joint-trial passes: `choice` + `joint` + `bank` or `plan` (`_trial.Trial`);
 - GPU device trials and the single-template side: `choice` + `gpu-single`,

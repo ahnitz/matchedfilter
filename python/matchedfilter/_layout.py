@@ -124,7 +124,8 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     from .device import parse as _parse_device
     dkey = "cpu" if _parse_device(device).kind == "cpu" else str(device)
     from ._prices import price_once
-    key = "corr3,%d" % n if dkey == "cpu" else "corr3,%d,%s" % (n, dkey)
+    # corr4: the fixed cost has a floor (_corr_measure); files with corr3 entries hold zeros
+    key = "corr4,%d" % n if dkey == "cpu" else "corr4,%d,%s" % (n, dkey)
     if (n, dkey) in _CORR_COSTS:
         return _CORR_COSTS[(n, dkey)]
 
@@ -149,7 +150,7 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     """(fixed, per template, per template per output sample) seconds per block through the
     bank's continuous path: 2 and 16 templates with `taps`-tap filters, and 16 with filters
     leaving half the valid span, each the fastest of 5 interleaved rounds
-    (_choice.fastest_of_rounds)."""
+    (_choice.fastest_of_rounds). The fixed cost is at least half the per-template cost."""
     from . import CorrelationFilter
     from ._choice import fastest_of_rounds as _fastest_of_rounds
     from ._filter import _automatic_series_layout
@@ -188,7 +189,13 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     s1 = max((per_block[1] - per_block[0]) / 14.0, 0.0)        # per template at valid[0]
     w = max((per_block[1] - per_block[2]) / (16.0 * (valid[1] - valid[2])), 0.0)
     b = max(s1 - w * valid[0], 0.0)
-    return (max(per_block[0] - 2.0 * s1, 0.0), b, w)
+    # The fixed cost is the block's forward transform and data handling: no less than half a
+    # template's product, inverse transform and store. As a difference of two timings it read
+    # zero whenever sixteen templates cost more each than two -- on a loaded node, or where
+    # sixteen spectra leave the second-level cache (Haswell: 256 KB) -- and a zero fixed cost
+    # makes a group per filter look free: five filters were split into five groups, each
+    # with its own forward pass, at half the speed of one group.
+    return (max(per_block[0] - 2.0 * s1, 0.5 * s1), b, w)
 
 
 def _batch_target(n: int, max_batch: Optional[int]) -> int:
