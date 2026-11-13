@@ -125,6 +125,10 @@ tree = mfs.Root(top_spec, (k0, k1), profile=(w, delta_f), node_id=top_id,
                                                        lags=fine_shifts[i], node_id=mid_ids[i])])
                           for i in range(n_mid)])
 
+# profile: the expected signal power spectrum |h|^2 / S the leaf gates are calibrated on.
+# Where the channels' noise spectra differ (two detectors), give one a channel,
+# profile={ifo: (w[ifo], delta_f) for ifo in ifos}: each channel gets its own leaf banks.
+
 search = mfs.HierarchicalSearch(
     [tree], threshold=6.0, envelope_floor=1.0, context=margin,
     leaf_options=dict(engine="hier", false_dismissal=1e-3, binsize=2048, device="cpu"))

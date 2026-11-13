@@ -6,6 +6,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Added
 
+- `search.Root(profile={channel: (w, delta_f)})`: one reference profile a channel, for
+  channels whose noise spectra differ (two detectors). Each channel then has its own leaf
+  banks, calibrated on its own profile; `HierarchicalSearch.leaf_bank(root, leaf, channel)`
+  returns a channel's bank. A single `(w, delta_f)` is one bank for every channel, as before.
+  Found on the 171,828-template BNS search: gates calibrated on the first detector's profile
+  passed 20-42% of pairs at a 64-bin first tier on the other detector's data, where the model
+  expected 4% (signal power below 64 Hz: 16% of the total with one detector's spectrum, 45%
+  with the other's).
 - Tier-0 pair centroids (fe86f0ed, 5d02d1e3, 3f5fd63b, 88781d6e): on a multi-tier plan of four
   or more templates, the model may gate tier 0 on lag- and phase-aligned centroids of up to
   four templates, its thresholds solved for the centroid's retention, its survivors fanned

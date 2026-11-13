@@ -65,7 +65,10 @@ class Root:
     Its output for an input block D is the real series scale * C2R(conj(spectrum) D) over
     bins [band[0], band[1]) (twice the real part of the analytic series), scale given per
     block by the caller. profile: (w, delta_f), the expected signal power spectrum the leaf
-    banks' gates are calibrated with (TimeDomainFilterBank.set_reference)."""
+    banks' gates are calibrated with (TimeDomainFilterBank.set_reference), or a dict
+    {channel: (w, delta_f)} where the channels' noise spectra differ (two detectors): each
+    channel then has its own leaf banks, calibrated on its own profile. A channel the dict does
+    not name takes the first profile."""
 
     def __init__(self, spectrum, band, children=(), profile=None, node_id=None):
         self.spectrum = np.ascontiguousarray(spectrum, dtype=np.complex64)
@@ -172,7 +175,7 @@ class PeaksContext:
         if not _spans_cover(sup, req):
             raise ValueError("refilter windows %r in channel %r lie outside computed "
                              "series support %r" % (windows, channel, sup))
-        bank = self._search.leaf_bank(self.root, self.leaf)
+        bank = self._search.leaf_bank(self.root, self.leaf, channel)
         return bank.filter_series(ser, windows=windows, binsize=binsize,
                                   threshold=threshold, template_index=template_index)
 
@@ -410,22 +413,35 @@ class HierarchicalSearch:
                 raise TypeError("children are Inner or Leaf nodes")
         self._kids[id(node)] = (inner, leaves)
 
-    def leaf_bank(self, root, leaf):
-        """The TimeDomainFilterBank that searches leaf, below root (built on first use, with
-        root's profile as its reference)."""
-        bank = self._leaf_banks.get(id(leaf))
+    def leaf_bank(self, root, leaf, channel=None):
+        """The TimeDomainFilterBank that searches leaf below root in channel (built on first
+        use, with root's profile for that channel as its reference). Where root has one
+        profile, every channel shares the bank; channel=None is the first profile's bank."""
+        prof = root.profile
+        which = None
+        if isinstance(prof, dict):
+            which = channel if channel in prof else next(iter(prof), None)
+            prof = prof.get(which)
+        bank = self._leaf_banks.get((id(leaf), which))
         if bank is None:
             t0 = time.perf_counter()
             opts = dict(self.leaf_options)
             opts["threshold"] = self.threshold * self.envelope_floor
-            bank = self._leaf_banks[id(leaf)] = TimeDomainFilterBank(
+            bank = self._leaf_banks[(id(leaf), which)] = TimeDomainFilterBank(
                 leaf.taps, leaf.counts, **opts)
-            if root.profile is not None:
+            if prof is not None:
                 # the first reference settles the bank's block sizes and calibrates its gates
-                w, df = root.profile
+                w, df = prof
                 bank.set_reference(w, delta_f=df)
             self.timings["setup"] += time.perf_counter() - t0
         return bank
+
+    def _leaf_block_length(self, root, leaf):
+        """The longest block leaf's banks below root use or may still choose, over root's
+        profiles (one bank a profile)."""
+        prof = root.profile
+        chans = list(prof) if isinstance(prof, dict) and prof else [None]
+        return max(int(self.leaf_bank(root, leaf, c).max_block_length) for c in chans)
 
     def _leaves_below(self, node):
         inner, leaves = self._kids[id(node)]
@@ -437,7 +453,7 @@ class HierarchicalSearch:
         """The most samples any leaf's parent series holds past the leaf's windows below root:
         the longest block any of root's leaf banks uses or may still choose (at least min_pad).
         Builds (and calibrates) every leaf bank below root."""
-        return max([self.min_pad] + [int(self.leaf_bank(root, lf).max_block_length)
+        return max([self.min_pad] + [self._leaf_block_length(root, lf)
                                      for lf in self._leaves_below(root)])
 
     def _batches(self, node, length, root=None):
@@ -515,7 +531,7 @@ class HierarchicalSearch:
         nchunks = max(len(inputs[c].spectra) for c in channels) if channels else 0
         for root in self.roots:
             leaves = list(self._leaves_below(root))
-            pads = {id(lf): max(self.min_pad, int(self.leaf_bank(root, lf).max_block_length))
+            pads = {id(lf): max(self.min_pad, self._leaf_block_length(root, lf))
                     for lf in leaves}
             ahead = None                        # (chunk, channels, held, support) computed early
             for k in range(nchunks):
@@ -659,10 +675,10 @@ class HierarchicalSearch:
         t0 = time.perf_counter()
         jobs, where = [], {}
         for lf in leaves:
-            bank = self.leaf_bank(step.root, lf)
             for c in step.active:
                 w = step.win[(id(lf), c)]
                 if w:
+                    bank = self.leaf_bank(step.root, lf, c)
                     series = step.held[c][id(self._parent[id(lf)])]
                     # one window as a slice: filter_series memoises a slice's layout
                     where[(id(lf), c)] = len(jobs)
