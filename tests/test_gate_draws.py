@@ -84,6 +84,35 @@ def test_rows_of_draws_are_spans_of_the_stream(offset, step, length, rows):
     np.testing.assert_array_equal(got, want * np.repeat(scale, 2)[:length])
 
 
+@pytest.mark.parametrize("offset, step, length, rows", [
+    (0, 4096, 256, 16),            # a retention's band at n = 2048: the start of each row's block
+    (0, 2048, 128, 16),            # n = 1024
+    (0, 8192, 4096, 7),            # two blocks a row
+    (17, 4096, 1602, 9),           # read from inside a block, ends off a step
+])
+def test_rows_not_kept_are_not_drawn(offset, step, length, rows):
+    """With keep (a retention's simulation draws only the rows the plain one kept), the
+    kept rows hold what the fill without it gives them, whichever rows are kept beside them
+    (they are generated in pairs), and the others are left as they were."""
+    scale = np.linspace(0.25, 3.0, (length + 1) // 2, dtype=np.float32)
+    want = np.empty((rows, length), np.float32)
+    _core.gauss_fill_rows(want, SEED, offset, step, scale)
+    rng = np.random.default_rng(rows + length)
+    masks = [np.ones(rows, np.uint8), np.zeros(rows, np.uint8),
+             (np.arange(rows) % 2).astype(np.uint8), (np.arange(rows) % 2 == 0).astype(np.uint8),
+             (np.arange(rows) == rows - 1).astype(np.uint8)]          # the last row alone
+    masks += [(rng.random(rows) < 0.56).astype(np.uint8) for _ in range(6)]
+    for keep in masks:
+        got = np.full((rows, length), -7.0, np.float32)
+        _core.gauss_fill_rows(got, SEED, offset, step, scale, keep)
+        kept = keep.astype(bool)
+        np.testing.assert_array_equal(got[kept], want[kept])
+        assert np.all(got[~kept] == -7.0)
+    with pytest.raises(TypeError):
+        _core.gauss_fill_rows(np.empty((rows, length), np.float32), SEED, offset, step, scale,
+                              np.ones(rows + 1, np.uint8))
+
+
 @pytest.mark.skipif(len(_core.targets()) < 2 if hasattr(_core, "targets") else True,
                     reason="one SIMD target in this build")
 def test_every_isa_draws_the_same_integers():

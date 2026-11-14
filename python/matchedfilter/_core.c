@@ -1222,27 +1222,33 @@ static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyBuffer_Release(&b);
   Py_RETURN_NONE;
 }
-/* gauss_fill_rows(out, seed, offset, step, scale=None): out float32 (rows, len) C-contiguous,
-   out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] (float32, at least
-   (len + 1) // 2 of them) when given: simulate's fill (ap_gauss_fill_rows). */
+/* gauss_fill_rows(out, seed, offset, step, scale=None, keep=None): out float32 (rows, len)
+   C-contiguous, out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2]
+   (float32, at least (len + 1) // 2 of them) when given; with keep (a byte a row) only the
+   rows with a nonzero byte are written: simulate's fill (ap_gauss_fill_rows_kept). */
 static PyObject *M_gauss_fill_rows(PyObject *self,PyObject *args){
-  (void)self; PyObject *o, *so=Py_None; unsigned long long seed, offset, step;
-  if(!PyArg_ParseTuple(args,"OKKK|O",&o,&seed,&offset,&step,&so)) return NULL;
-  Py_buffer b, sb={0}; int has_scale = so!=Py_None;
+  (void)self; PyObject *o, *so=Py_None, *ko=Py_None; unsigned long long seed, offset, step;
+  if(!PyArg_ParseTuple(args,"OKKK|OO",&o,&seed,&offset,&step,&so,&ko)) return NULL;
+  Py_buffer b, sb={0}, kb={0}; int has_scale = so!=Py_None, has_keep = ko!=Py_None;
   if(PyObject_GetBuffer(o,&b,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|PyBUF_ND)<0) return NULL;
   if(has_scale && PyObject_GetBuffer(so,&sb,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&b); return NULL; }
+  if(has_keep && PyObject_GetBuffer(ko,&kb,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){
+    PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb); return NULL;
+  }
   const Py_ssize_t rows = b.ndim==2 ? b.shape[0] : 0, len = b.ndim==2 ? b.shape[1] : 0;
   if(!b.format || strcmp(b.format,"f")!=0 || b.itemsize!=4 || b.ndim!=2
-     || (has_scale && (!sb.format || strcmp(sb.format,"f")!=0 || sb.itemsize!=4 || sb.len/4 < (len+1)/2))){
-    PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb);
-    PyErr_SetString(PyExc_TypeError,"gauss_fill_rows needs a C-contiguous float32 (rows, len) buffer and a float32 scale of (len + 1) // 2 or more");
+     || (has_scale && (!sb.format || strcmp(sb.format,"f")!=0 || sb.itemsize!=4 || sb.len/4 < (len+1)/2))
+     || (has_keep && (kb.itemsize!=1 || kb.len!=rows))){
+    PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb); if(has_keep) PyBuffer_Release(&kb);
+    PyErr_SetString(PyExc_TypeError,"gauss_fill_rows needs a C-contiguous float32 (rows, len) buffer, a float32 scale of (len + 1) // 2 or more and a one-byte keep per row");
     return NULL;
   }
   Py_BEGIN_ALLOW_THREADS
-  ap_gauss_fill_rows((float*)b.buf,(size_t)len,(size_t)rows,(size_t)len,(uint64_t)seed,(uint64_t)offset,
-                     (uint64_t)step,has_scale ? (const float*)sb.buf : NULL);
+  ap_gauss_fill_rows_kept((float*)b.buf,(size_t)len,(size_t)rows,(size_t)len,(uint64_t)seed,(uint64_t)offset,
+                          (uint64_t)step,has_scale ? (const float*)sb.buf : NULL,
+                          has_keep ? (const unsigned char*)kb.buf : NULL);
   Py_END_ALLOW_THREADS
-  PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb);
+  PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb); if(has_keep) PyBuffer_Release(&kb);
   Py_RETURN_NONE;
 }
 /* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex: simulate's
@@ -3946,7 +3952,7 @@ static PyMethodDef methods[]={
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
-  {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
+  {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None, keep=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"l2_bytes",M_l2_bytes,METH_NOARGS,"l2_bytes() -> the per-core L2 cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
