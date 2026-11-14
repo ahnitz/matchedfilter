@@ -194,7 +194,22 @@ def test_a_reference_with_no_power_is_refused_by_name(fill):
     bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=6.0,
                                 false_dismissal=1e-2, fft_lengths=[n], binsize=n)
     bank.set_reference(ref, profile="H1")
+    bad = np.full_like(ref, fill)
     with pytest.raises(ValueError, match="for profile 'L1' holds no power or is not finite"):
-        bank.set_reference(np.full_like(ref, fill), profile="L1")
+        bank.set_reference(bad, profile="L1")
     assert bank.profiles == ("H1",)                          # the refused one was not taken
     assert bank.filter_series(series, profile="H1").template_indices.size > 0
+    # An array found to hold power is not summed again for the next bank given it; it is
+    # remembered only while it lives.
+    from matchedfilter import time_domain
+    assert time_domain._REFERENCES_WITH_POWER[id(ref)]() is ref
+    assert id(bad) not in time_domain._REFERENCES_WITH_POWER     # the refused one is not
+    another = ref.copy()
+    bank.set_reference(another, profile="V1")
+    key = id(another)
+    assert key in time_domain._REFERENCES_WITH_POWER
+    del another
+    bank.__dict__["_refs"].pop("V1")                         # the bank's own hold on it
+    import gc
+    gc.collect()
+    assert key not in time_domain._REFERENCES_WITH_POWER

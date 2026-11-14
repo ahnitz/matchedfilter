@@ -599,6 +599,9 @@ class _ReferenceCache:
 
 
 _REF_PROFILE_CACHE = _ReferenceCache()
+#: id of a reference array found to hold power -> a weak reference to it (the entry goes
+#: when the array does, so an id that is used again is not taken for it)
+_REFERENCES_WITH_POWER = {}
 _REF_BINNED_CACHE = _ReferenceCache()
 
 
@@ -1383,8 +1386,13 @@ class TimeDomainFilterBank:
             # A profile with no power, or one that is not finite, is a noise spectrum that is
             # not positive anywhere or not finite (a detector with no data in the stretch):
             # said here, where the profile is named, and not as a chain that cannot be found.
+            # (one sum finds both: a profile is not negative, so a sum that is positive and
+            # finite has power and no value that is not finite; a top template's leaf banks
+            # are given one array, which is summed once)
             w = np.asarray(reference)
-            if not np.all(np.isfinite(w)) or not np.any(w > 0):
+            seen = _REFERENCES_WITH_POWER.get(id(reference))
+            total = 1.0 if seen is not None and seen() is reference else float(w.sum())
+            if not (total > 0.0 and np.isfinite(total)):
                 which = "" if profile is _SAME_PROFILE else " for profile %r" % (profile,)
                 raise ValueError(
                     "the reference%s holds no power or is not finite (%d of %d values positive, "
@@ -1392,6 +1400,11 @@ class TimeDomainFilterBank:
                     "finite anywhere in the band, as for data that are absent or not finite"
                     % (which, int(np.count_nonzero(w > 0)), w.size,
                        int(np.count_nonzero(~np.isfinite(w)))))
+            try:
+                _REFERENCES_WITH_POWER[id(reference)] = weakref.ref(
+                    reference, lambda _, key=id(reference): _REFERENCES_WITH_POWER.pop(key, None))
+            except TypeError:
+                pass                                 # not an array: checked each time
         if profile is not _SAME_PROFILE:
             if not self.__dict__.get("_refs"):
                 self._first_profile = profile

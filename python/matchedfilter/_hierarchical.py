@@ -1094,6 +1094,165 @@ class HierarchicalFilter(MatchedFilter):
             return (rl, bool(taps[2]), frac)
         return (rl, True) if taps[2] else rl
 
+    def _cluster_candidate_bands(self, cand_bands, templates, snr, tiers, prof):
+        """Build the shared screeners of the first bands that can win, and keep the winner's.
+
+        Each candidate first band is priced with the best screeners it could have (a lower
+        bound) and without any; a band whose bound beats the best chain so far has its
+        screeners built, pass by pass while a further pass can still win, and its
+        candidates priced. The band whose screeners make the cheapest chain keeps them
+        (self._tier0_clusters); every other band is left without.
+
+        Parameters
+        ----------
+        cand_bands : list of int
+            The bands a chain of this plan may start at.
+        templates : numpy.ndarray
+            The plan's templates, for clustering.
+        snr : float
+            The signal strength the plan is calibrated at.
+        tiers : int
+            The most tiers a chain may have.
+        prof : bytes
+            The reference profile's signature (gatemodel._profile_sig).
+        """
+        is_cpu = self.device.kind == "cpu"
+        min_len = 1 if is_cpu else 2
+        tmpl = templates
+        max_k = int(_TIER0_MAX_ARITY)
+        opt_map = {
+            int(b): max(
+                0.15,
+                round(max(1.0 / max_k, _tier0_min_clusters(b, is_cpu) / max(self.ntemplates, 1)) * 20.0) / 20.0,
+            )
+            for b in cand_bands
+        }
+        base_cm = self._cost_model(cluster_ratios={})
+        opt_cm = base_cm.with_tier0_cluster(opt_map, single_tier=is_cpu)
+        _, lb_plans = _gatechain.choose_chain(
+            self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+            cost=opt_cm, max_tiers=tiers, window=self.search_window
+        )
+        best_uncl, uncl_plans = _gatechain.choose_chain(
+            self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+            cost=base_cm, max_tiers=tiers, window=self.search_window
+        )
+        best_upper = best_uncl["cost"] if best_uncl is not None else float("inf")
+        best_b0 = int(best_uncl["chain"][0]) if best_uncl is not None else self.n
+        lb_by_b0 = {
+            int(b0): min(
+                (q["cost"] for q in lb_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
+                default=float("inf"),
+            )
+            for b0 in cand_bands
+        }
+        uncl_by_b0 = {
+            int(b0): min(
+                (q["cost"] for q in uncl_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
+                default=float("inf"),
+            )
+            for b0 in cand_bands
+        }
+        # The band whose screeners won in the last plan for this reference goes
+        # first, the others by their lower bound. The order decides how much is
+        # built: a wider band is not clustered once a narrower one has won
+        # (below), and that needs the narrower one first. A top template's leaf
+        # banks share a reference, so all but the first build one band's
+        # screeners where they built two (the wider band had the lower bound
+        # and never won: 39% of the clustering in a 324-plan capture). Another
+        # reference's winner says nothing here: the rule below is the banks'
+        # habit, not a theorem, and a bank that breaks it keeps its own order.
+        order_key = (self.n, float(snr), float(self.fd), tiers, self.search_window,
+                     str(self.device), tuple(int(b) for b in cand_bands), best_b0,
+                     prof)
+        with _AUTOTUNE_LOCK:
+            won_last = _chains._TIER0_FIRST.get(order_key)
+        ordered_b0 = sorted((int(b) for b in cand_bands),
+                            key=lambda b: (b != won_last, lb_by_b0[b], b))
+        won = None
+        tie_slack = 1.0 + _gatechain.TIE
+        shared = {}        # band -> the smallest screener-to-template ratio found
+        whole = set()      # clustered bands whose ratio is what they can share
+        for b0 in ordered_b0:
+            limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
+            if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
+                continue
+            def bound(ratio, b0=b0):
+                # the cheapest chain from b0 with tier 0 at this centroid ratio
+                # and no loss of signal (alpha 1, no lag padding): a lower bound
+                _, plans_r = _gatechain.choose_chain(
+                    self._pending_ref, self.n, snr, self.fd,
+                    ntemplates=self.ntemplates,
+                    cost=base_cm.with_tier0_cluster({b0: ratio}, single_tier=is_cpu),
+                    max_tiers=tiers,
+                    window=self.search_window, first=b0)
+                return min((q["cost"] for q in plans_r), default=float("inf"))
+
+            def next_can_win(prev_cl, cur_cap=2, limit=limit, bound=bound, opt_b=opt_map[b0]):
+                nt = int(prev_cl.members.size)
+                nc_prev = int(prev_cl.offsets.size) - 1
+                rem_div = max(2, max_k // max(int(cur_cap), 2))
+                r_best = max(opt_b, round(math.ceil(nc_prev / rem_div) / nt * 20.0) / 20.0)
+                return bound(r_best) < limit
+
+            # A wider band shares no better than a narrower one: templates that
+            # agree over more of the spectrum agree over less of it too (the rule
+            # every bank of the 171,828-template BNS search obeyed: the 256 band
+            # reached 0.45-0.60 where the 128 band reached 0.30-0.40). If b0 loses
+            # even at the best ratio a narrower band found, its screeners are not
+            # built: that was half of the clustering in a leaf bank's setup, for
+            # a band that never won.
+            floor = _narrower_bands_floor(shared, whole, b0)
+            if (_TIER0_PRUNE_WIDER and floor is not None
+                    and bound(max(opt_map[b0], floor)) >= limit):
+                self._tier0_clusters[b0] = None
+                continue
+            raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,
+                                                        pass2=next_can_win)
+            found = [float(c.ratio) for c in raw_cands if c is not None]
+            if found:
+                shared[b0] = min(found)
+                if _shares_freely(raw_cands, self._tier0_cand_cache[b0][1],
+                                  _tier0_min_clusters(b0, is_cpu)):
+                    whole.add(b0)
+            cands = _pareto_tier0_candidates(raw_cands)
+            best_cand = None
+            best_cand_b0_cost = uncl_by_b0[b0]
+            for cand in reversed(cands):
+                if bound(cand.ratio) >= min(limit, best_cand_b0_cost):
+                    continue
+                a_q = math.floor(cand.alpha * 200.0 + 1e-9) / 200.0
+                cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio}, single_tier=is_cpu)
+                _, cur_plans = _gatechain.choose_chain(
+                    self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                    cost=cm_b0, max_tiers=tiers, window=self.search_window,
+                    tier0_clusters={b0: (a_q, cand.lag_pad)}, first=b0
+                )
+                cand_b0_cost = min(
+                    (q["cost"] for q in cur_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
+                    default=float("inf"),
+                )
+                if cand_b0_cost < best_cand_b0_cost:
+                    best_cand_b0_cost = cand_b0_cost
+                    best_cand = cand
+            self._tier0_clusters[b0] = best_cand
+            if best_cand is not None and best_cand_b0_cost < best_upper:
+                best_upper = best_cand_b0_cost
+                best_b0 = won = b0
+        # Only the winning band's screeners stay: the plan is then the same in
+        # whatever order the bands were considered (a losing band's, left in,
+        # could still take a chain choice within its tie window, and whether
+        # they were built at all depends on the order).
+        for b0 in ordered_b0:
+            if b0 != won:
+                self._tier0_clusters[b0] = None
+        if won is not None:
+            with _AUTOTUNE_LOCK:
+                _chains._TIER0_FIRST[order_key] = won
+                _chains._TIER0_FIRST.move_to_end(order_key)
+                while len(_chains._TIER0_FIRST) > _chains._TIER0_FIRST_MAX:
+                    _chains._TIER0_FIRST.popitem(last=False)
+
     def _choose_chain(self):
         """The chain this plan runs: the model's choice, which prices every chain for this
         plan's reference (cached per reference profile, _chains._CHAIN_CHOICE), or
@@ -1140,139 +1299,7 @@ class HierarchicalFilter(MatchedFilter):
                             forced_want[0], templates=tmpl, forced_chain=forced_want
                         )
                 else:
-                    max_k = int(_TIER0_MAX_ARITY)
-                    opt_map = {
-                        int(b): max(
-                            0.15,
-                            round(max(1.0 / max_k, _tier0_min_clusters(b, is_cpu) / max(self.ntemplates, 1)) * 20.0) / 20.0,
-                        )
-                        for b in cand_bands
-                    }
-                    base_cm = self._cost_model(cluster_ratios={})
-                    opt_cm = base_cm.with_tier0_cluster(opt_map, single_tier=is_cpu)
-                    _, lb_plans = _gatechain.choose_chain(
-                        self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
-                        cost=opt_cm, max_tiers=tiers, window=self.search_window
-                    )
-                    best_uncl, uncl_plans = _gatechain.choose_chain(
-                        self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
-                        cost=base_cm, max_tiers=tiers, window=self.search_window
-                    )
-                    best_upper = best_uncl["cost"] if best_uncl is not None else float("inf")
-                    best_b0 = int(best_uncl["chain"][0]) if best_uncl is not None else self.n
-                    lb_by_b0 = {
-                        int(b0): min(
-                            (q["cost"] for q in lb_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                            default=float("inf"),
-                        )
-                        for b0 in cand_bands
-                    }
-                    uncl_by_b0 = {
-                        int(b0): min(
-                            (q["cost"] for q in uncl_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                            default=float("inf"),
-                        )
-                        for b0 in cand_bands
-                    }
-                    # The band whose screeners won in the last plan for this reference goes
-                    # first, the others by their lower bound. The order decides how much is
-                    # built: a wider band is not clustered once a narrower one has won
-                    # (below), and that needs the narrower one first. A top template's leaf
-                    # banks share a reference, so all but the first build one band's
-                    # screeners where they built two (the wider band had the lower bound
-                    # and never won: 39% of the clustering in a 324-plan capture). Another
-                    # reference's winner says nothing here: the rule below is the banks'
-                    # habit, not a theorem, and a bank that breaks it keeps its own order.
-                    order_key = (self.n, float(snr), float(self.fd), tiers, self.search_window,
-                                 str(self.device), tuple(int(b) for b in cand_bands), best_b0,
-                                 prof)
-                    with _AUTOTUNE_LOCK:
-                        won_last = _chains._TIER0_FIRST.get(order_key)
-                    ordered_b0 = sorted((int(b) for b in cand_bands),
-                                        key=lambda b: (b != won_last, lb_by_b0[b], b))
-                    won = None
-                    tie_slack = 1.0 + _gatechain.TIE
-                    shared = {}        # band -> the smallest screener-to-template ratio found
-                    whole = set()      # clustered bands whose ratio is what they can share
-                    for b0 in ordered_b0:
-                        limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
-                        if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
-                            continue
-                        def bound(ratio, b0=b0):
-                            # the cheapest chain from b0 with tier 0 at this centroid ratio
-                            # and no loss of signal (alpha 1, no lag padding): a lower bound
-                            _, plans_r = _gatechain.choose_chain(
-                                self._pending_ref, self.n, snr, self.fd,
-                                ntemplates=self.ntemplates,
-                                cost=base_cm.with_tier0_cluster({b0: ratio}, single_tier=is_cpu),
-                                max_tiers=tiers,
-                                window=self.search_window, first=b0)
-                            return min((q["cost"] for q in plans_r), default=float("inf"))
-
-                        def next_can_win(prev_cl, cur_cap=2, limit=limit, bound=bound, opt_b=opt_map[b0]):
-                            nt = int(prev_cl.members.size)
-                            nc_prev = int(prev_cl.offsets.size) - 1
-                            rem_div = max(2, max_k // max(int(cur_cap), 2))
-                            r_best = max(opt_b, round(math.ceil(nc_prev / rem_div) / nt * 20.0) / 20.0)
-                            return bound(r_best) < limit
-
-                        # A wider band shares no better than a narrower one: templates that
-                        # agree over more of the spectrum agree over less of it too (the rule
-                        # every bank of the 171,828-template BNS search obeyed: the 256 band
-                        # reached 0.45-0.60 where the 128 band reached 0.30-0.40). If b0 loses
-                        # even at the best ratio a narrower band found, its screeners are not
-                        # built: that was half of the clustering in a leaf bank's setup, for
-                        # a band that never won.
-                        floor = _narrower_bands_floor(shared, whole, b0)
-                        if (_TIER0_PRUNE_WIDER and floor is not None
-                                and bound(max(opt_map[b0], floor)) >= limit):
-                            self._tier0_clusters[b0] = None
-                            continue
-                        raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,
-                                                                    pass2=next_can_win)
-                        found = [float(c.ratio) for c in raw_cands if c is not None]
-                        if found:
-                            shared[b0] = min(found)
-                            if _shares_freely(raw_cands, self._tier0_cand_cache[b0][1],
-                                              _tier0_min_clusters(b0, is_cpu)):
-                                whole.add(b0)
-                        cands = _pareto_tier0_candidates(raw_cands)
-                        best_cand = None
-                        best_cand_b0_cost = uncl_by_b0[b0]
-                        for cand in reversed(cands):
-                            if bound(cand.ratio) >= min(limit, best_cand_b0_cost):
-                                continue
-                            a_q = math.floor(cand.alpha * 200.0 + 1e-9) / 200.0
-                            cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio}, single_tier=is_cpu)
-                            _, cur_plans = _gatechain.choose_chain(
-                                self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
-                                cost=cm_b0, max_tiers=tiers, window=self.search_window,
-                                tier0_clusters={b0: (a_q, cand.lag_pad)}, first=b0
-                            )
-                            cand_b0_cost = min(
-                                (q["cost"] for q in cur_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                                default=float("inf"),
-                            )
-                            if cand_b0_cost < best_cand_b0_cost:
-                                best_cand_b0_cost = cand_b0_cost
-                                best_cand = cand
-                        self._tier0_clusters[b0] = best_cand
-                        if best_cand is not None and best_cand_b0_cost < best_upper:
-                            best_upper = best_cand_b0_cost
-                            best_b0 = won = b0
-                    # Only the winning band's screeners stay: the plan is then the same in
-                    # whatever order the bands were considered (a losing band's, left in,
-                    # could still take a chain choice within its tie window, and whether
-                    # they were built at all depends on the order).
-                    for b0 in ordered_b0:
-                        if b0 != won:
-                            self._tier0_clusters[b0] = None
-                    if won is not None:
-                        with _AUTOTUNE_LOCK:
-                            _chains._TIER0_FIRST[order_key] = won
-                            _chains._TIER0_FIRST.move_to_end(order_key)
-                            while len(_chains._TIER0_FIRST) > _chains._TIER0_FIRST_MAX:
-                                _chains._TIER0_FIRST.popitem(last=False)
+                    self._cluster_candidate_bands(cand_bands, tmpl, snr, tiers, prof)
 
         direct = self._direct_key()
         csig = self._clusters_sig() if self._cal_thr is None else ()
