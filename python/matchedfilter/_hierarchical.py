@@ -154,6 +154,10 @@ def _pareto_tier0_candidates(raw_cands):
     return kept
 
 
+#: The step the direct refine's bin fractions are priced at (HierarchicalFilter._cost_model).
+_PRICE_FRACTION_STEP = 0.05
+
+
 class _Resolved(NamedTuple):
     """A hierarchical filter's resolved plan (docs/resolved-plan.md), immutable: one is
     computed per set of inputs (HierarchicalFilter._resolve)."""
@@ -930,10 +934,17 @@ class HierarchicalFilter(MatchedFilter):
                                             group=policy.get('series_group', _gatechain.default_series_group(self.n)))
             price = self._direct_price()
             if price is not None:
-                mfrac = max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0)))
+                # The two bin fractions are a template group's own (its valid span against
+                # the output bins), a different number in every group of a bank's siblings,
+                # and they are prices' weights, not thresholds. To a twentieth they are the
+                # same for groups of nearly one length, whose chain searches then are one
+                # search: no two groups of a top template's leaf banks shared a search
+                # otherwise (their cost models differed in these alone).
+                step = _PRICE_FRACTION_STEP
+                mfrac = round(max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0))) / step) * step
+                frac = min(1.0, round(float(getattr(self, "_one_bin_frac", 1.0)) / step) * step)
                 cm = cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
-                                    fraction=getattr(self, "_one_bin_frac", 1.0),
-                                    base=0.25 * cm.refine(0.1), multi_frac=mfrac)
+                                    fraction=frac, base=0.25 * cm.refine(0.1), multi_frac=mfrac)
         is_cpu = self.device.kind == "cpu"
         if cluster_ratios is None:
             csig = self._clusters_sig()
