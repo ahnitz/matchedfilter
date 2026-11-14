@@ -145,11 +145,17 @@ def test_a_bank_holds_a_calibration_per_profile():
     def alone(reference):
         bank = TimeDomainFilterBank(taps, tap_counts=counts, **opts)
         bank.set_reference(reference)
-        return bank.filter_series(series), [tuple(g.plan._chain) for g in bank._groups]
+        return bank.filter_series(series), calibration(bank)
 
-    (want_a, chains_a), (want_b, chains_b) = alone(ref_a), alone(ref_b)
+    def calibration(bank):
+        # Each group's chain and gate thresholds. Which chain a reference gets depends on
+        # the machine's cost model; its thresholds differ between the references on any.
+        resolved = [g.plan._resolve() for g in bank._groups]
+        return [(tuple(r.chain), tuple(np.round(r.thresholds, 4))) for r in resolved]
+
+    (want_a, cal_a), (want_b, cal_b) = alone(ref_a), alone(ref_b)
     want = {"a": want_a, "b": want_b}
-    assert chains_a != chains_b, "the two references plan alike: no test"
+    assert cal_a != cal_b, "the two references calibrate alike: no test"
     bank = TimeDomainFilterBank(taps, tap_counts=counts, **opts)
     bank.set_reference(ref_a, profile="a")
     bank.set_reference(ref_b, profile="b")
@@ -165,7 +171,7 @@ def test_a_bank_holds_a_calibration_per_profile():
     for name in ("a", "b", "a"):
         same(bank.filter_series(series, profile=name), want[name])
         bank.use_profile(name)
-        assert [tuple(g.plan._chain) for g in bank._groups] == (chains_a if name == "a" else chains_b)
+        assert calibration(bank) == (cal_a if name == "a" else cal_b)
     both = TimeDomainFilterBank.filter_series_many(
         [(bank, series, dict(profile="b")), (bank, series, dict(profile="a")), (bank, series, dict(profile="b"))])
     for got, name in zip(both, ("b", "a", "b")):
