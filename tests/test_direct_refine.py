@@ -756,3 +756,25 @@ def test_direct_refine_multi_isa_odd_and_tail_windows(isa, real_quadrature, monk
         mf.set_target(os.environ.get("MF_ISA") or None)
 
 
+
+
+def test_sibling_groups_price_the_direct_refine_alike(monkeypatch):
+    """A template group's cost model carries the share of its blocks whose valid span fits
+    the output bins, its own number in every group. Priced to a twentieth, groups of nearly
+    one length have one cost model -- so one chain search serves them (the search is keyed
+    by the model) -- while groups whose shares really differ keep their own."""
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    n, taps, counts, spec, series, layout, ref, window = _bank(nblocks=8)
+
+    def signature(unsplit, one_bin=1.0):
+        hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, search_window=window)
+        hf.set_reference(ref); hf.set_taps(taps, counts)
+        hf._unsplit_bin_frac, hf._one_bin_frac = unsplit, one_bin
+        cm = hf._cost_model(cluster_ratios={})
+        assert cm.prices_direct((256, 512))
+        return cm.signature()
+
+    assert signature(0.2388) == signature(0.2349) == signature(0.2300)      # 1 - 0.76..0.77
+    assert signature(0.2388) != signature(0.1200)
+    assert signature(0.2388, one_bin=0.99) == signature(0.2388, one_bin=1.0)
+    assert signature(0.2388, one_bin=0.80) != signature(0.2388, one_bin=1.0)

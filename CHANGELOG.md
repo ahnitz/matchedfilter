@@ -290,6 +290,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Template groups of nearly one length share their chain searches: the direct refine's two
+  bin fractions, a group's own numbers and the only thing its cost model differed by from
+  its siblings', are priced to a twentieth (`HierarchicalFilter._cost_model`). MEASURED on
+  the 171,828-template showcase search, 16 workers, leaf setup summed at SNR 6.0 / FDR
+  0.001: 63 -> 54 s with one profile, 158 -> 137 s with a profile per detector (6.5 / 0.001:
+  109 -> 90 s; 6.5 / 0.01: 44 -> 38 s). Chain choices, tier work counts and steady
+  throughput unchanged (four paired runs, order alternated).
 - The gate model plans on signal draws read in a window local to the signal
   (`gatechain.local_window`: four times the longer of the profile's autocorrelation extent
   and the coarsest band's step), with the noise maxima of the window searched, so every
