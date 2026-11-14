@@ -118,8 +118,7 @@ def test_candidate_cache_shares_across_banks_with_distinct_direct_costs(empty_mo
 def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypatch):
     """Planning a chain memoises arrays derived from the signal draws (kept draws, halves,
     distances, candidates). Once the draws leave their own cache nothing derived from them
-    stays held, so the model's memory follows the draws it still holds (in _SIGNAL_CACHE, and
-    in _SIMILAR for profiles alike)."""
+    stays held, so the model's memory follows the draws it still holds."""
     import gc as pygc
     monkeypatch.setattr(gc, "_KEPT", OrderedDict())
     a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
@@ -129,7 +128,6 @@ def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypat
 
     gc._SIGNAL_CACHE.clear()
     gc._NOISE_CACHE.clear()
-    gc._SIMILAR.clear()                 # holds the draws for profiles alike
     del plan
     pygc.collect()
     assert len(gc._KEPT) == 0
