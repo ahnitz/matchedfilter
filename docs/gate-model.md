@@ -559,6 +559,12 @@ A table of draws is held once, column by column (`gatechain._kept_halves`, `_Col
 - A screener retention alters one band (two with a tier-1 retention). Its draws take the
   plain draws' fine maxima and lags and share every other band's column
   (`_beside_plain`, `_shared_with`).
+- A retention of two bands is not simulated: it is its two bands' single retentions side
+  by side (`_beside_singles`), the signal draws and the noise records alike. A band under
+  its retention mixes its own bins of the row's noise with its own bins of one row of
+  independent noise (`_core.simulate`), so its draws are the same whatever the other bands'
+  retentions are: the columns are bit for bit the joint simulation's
+  (`tests/test_draw_columns.py`), and the pair holds nothing the single ones do not.
 - The fine-to-coarse distances are one float32 array per table and last band; a window
   adds the indices of the detections its far noise takes (`_Distances`).
 
@@ -601,8 +607,9 @@ wide as the local one then plans on one set of signal draws.
   such a gate; its plans dismiss 0.02 budgets and the model prices the chosen chain up to
   32% higher. For the profiles with localised power the chosen chain's modelled cost is
   the exact plan's at the median and at most 10-20% above it.
-- A retention's simulation (its band simulated again beside the plain one's records) is
-  released once its draws are read. A worker of the 171,828-template search held one full
+- A retention's simulation (its band simulated again beside the plain one's records, for
+  the rows the plain simulation kept: only those rows' noise is drawn) is released once its
+  draws are read. A worker of the 171,828-template search held one full
   simulation and 7 retentions' for the H1 profile and 23 for the L1 profile, each with its
   own draws for every window.
 
