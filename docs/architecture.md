@@ -207,7 +207,9 @@ Two readers take their statistics from the same simulation:
   draws whose fine statistic reaches `snr` somewhere in the block hold records. The
   simulation runs until it holds the detections asked for (draws whose fine window
   maximum reaches `snr`), however few of its draws a large `snr` keeps, and is extended
-  in place for a larger request: a row's draws depend only on its row.
+  in place for a larger request: a row's draws depend only on its row. A plan reads it in
+  the window local to the signal (`gatechain.local_window`, four times the profile's
+  autocorrelation extent), so every window of a profile plans on one set of signal draws.
 - `gatechain.noise_block_maxima` reads the same draws without the signal: each band's
   noise-only window maximum per block, from which a chain's joint pass rates follow
   (`gatechain._reach`).

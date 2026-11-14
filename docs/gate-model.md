@@ -547,14 +547,68 @@ for k in (1, 2, 3):
              np.median(noise[k]), r.std()))
 ```
 
+# Signals in a window local to them, 2026-11-13
+
+A plan's signal draws are read in a window around the signal (`gatechain.local_window`),
+and its noise maxima in the window the search covers. Every window of a profile at least as
+wide as the local one then plans on one set of signal draws.
+
+- The local window is four times the longer of the profile's autocorrelation extent (its
+  last lag at or above 5% of the peak) and the coarsest band's step, rounded up to a
+  power-of-two number of those steps. A window no wider than that is used as it is.
+- Far from the signal a window holds noise alone, which can only raise a coarse maximum,
+  so a plan made without it sets no gate higher. Near the signal the window matters: a
+  window inside the autocorrelation selects other detections than the search's. On one
+  simulation, a band's fd-quantile in a window of 1, 8 and 16 samples lay up to 20%, 10%
+  and 1.2% above the searched window's; from 32 samples and in the local window it never
+  lay above it. `tests/test_local_window.py` holds that invariant for every band at both
+  budgets, and fails with the window forced to 16 samples.
+- This is not the local lag window the unified simulation replaced (next section). That
+  one had a fixed neighbourhood and paired it with noise drawn elsewhere; a bimodal
+  profile's side lobes fell outside it. This one is the same simulation read in a
+  narrower window whose width follows the profile: the notched profile's is 832-1024
+  samples, the bimodal one's 256.
+- The direct refine looks around the last tier's largest coarse value in the window
+  (`hmf.c refine_direct_pair`), and noise far from the signal can be that: the refine then
+  misses the signal. Draws in the local window cannot show it, so `_distances` pairs each
+  with one block's noise maximum of the searched window and, where that exceeds the draw's
+  own coarse maximum, counts the draw beyond every half-width. On a simulation of the
+  searched window itself the 256 band's coarse maximum lay far from the signal for 3.2-3.5
+  detections in 10,000 at snr 6 (a third of a 0.1% budget; the 512 band's for 0.16); the
+  pairing charges 3.5-3.8. Without it a plan with a direct refine dismissed up to 1.34
+  budgets at fd 1e-3 on the production window; with it at most 1.08.
+- What it costs: a band that carries too little signal to gate has its gate at the local
+  window's noise floor, below the searched window's. For a flat profile every gate is
+  such a gate; its plans dismiss 0.02 budgets and the model prices the chosen chain up to
+  32% higher. For the profiles with localised power the chosen chain's modelled cost is
+  the exact plan's at the median and at most 10-20% above it.
+- A retention's simulation (its band simulated again beside the plain one's records) is
+  released once its draws are read. A worker of the 171,828-template search held one full
+  simulation and 7 retentions' for the H1 profile and 23 for the L1 profile, each with its
+  own draws for every window.
+
+MEASURED (`notes/window_free_2026-11-13`): 379,680 plans on 30 PSD-model profiles and the
+O2 and showcase H1 and L1 profiles (n 1024-4096, snr 5.5-8, fd 1e-2 and 1e-3, every chain
+of up to three tiers, production and whole-block windows, with and without tier-0 and
+tier-1 retention), audited on independent draws of the searched window. Local spans of
+32-256 samples: the cheapest chain's dismissal averaged 0.94-0.95 budgets (exact plan 0.99),
+with 19, 21, 11 and 6 of 2,628 cases beyond 1.5 budgets against the exact plan's 13-15.
+Through `choose_chain` on the six synthetic shapes and a flat profile (252 cases): bimodal
+0.99 budgets mean, 1.25 max (exact 1.03, 1.28). Through the C engine (`tools/fdr_audit.py`,
+six shapes): fd 1e-2 default chains at n 2048 and 4096, 80 cases, 0.879 budgets pooled;
+the model's own chains on the production window at n 1024 and 2048, 1.003 (fd 1e-2) and
+0.912 (fd 1e-3, 4.5 M detections); fd 1e-3 default chains at n 2048, 0.828; a 16-template
+bank with the Q15 screen and tier-0 centroids, 0.792 and 0.604. No case off its plan.
+
 # One simulation for signal and noise, 2026-10-26
 
 The gate model is one simulation (`gatechain._simulate`, `_core.simulate`). Each
 draw is a block's n bins with variance p_k. The fine statistic is their n-point
 transform, and band b's statistic is the b-point transform of bins [0, b). A
 signal arriving at a uniformly random time (16 sub-sample phases) is added
-through linearity. Every maximum is taken over the whole searched window, as the
-engine takes it.
+through linearity. Every maximum is taken over the whole of the window asked for, as
+the engine takes it. (Since 2026-11-13 the planner asks for the signals' maxima in a
+window local to them; see above.)
 
 - `signal_draws` reads each statistic's running-maximum records outward from
   the signal, so any window is two lookups, with the engine's coarse alignment.

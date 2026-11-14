@@ -320,13 +320,15 @@ def test_the_library_model_matches_this_one():
 @pytest.mark.parametrize("fd", [.01, .001, .0001])
 def test_quantile_placement_uses_the_conditional_distribution(fd):
     """The gate is an order statistic of the detections' coarse maxima (draws the fine stage
-    keeps), on the fit half the plan was not searched on: the j-th smallest of M with
-    M + 1 = round(j / fd), whose dismissal on fresh draws averages j / (M + 1) = fd."""
+    keeps, in the window local to the signal: gatechain.local_window), on the fit half the
+    plan was not searched on: the j-th smallest of M with M + 1 = round(j / fd), whose
+    dismissal on fresh draws averages j / (M + 1) = fd."""
     from matchedfilter import gatechain as gc, gatemodel as gm
     p = profile()
     gate = gm.gate_for(p, N, BAND, SNR, fd)
     bands = gc.usable_bands(p, N)
-    sig = gc.signal_draws(p, N, bands, SNR, gc.model_draws(fd)[0])
+    sig = gc.signal_draws(p, N, bands, SNR, gc.model_draws(fd)[0],
+                          window=gc.local_window(p, N, bands))
     fit = np.sort(gc._halves(gc.kept_draws(sig, bands, (BAND,), SNR))[1][:, 0])
     j = gm.fit_order(fd)
     assert fit.size + 1 == round(j / fd)
