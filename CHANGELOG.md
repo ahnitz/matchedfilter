@@ -304,6 +304,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- A screener retention's draws hold only the bands the retention alters, beside the plain
+  draws (`gatechain._Beside`): one or two columns of coarse maxima and of their lags where a
+  whole table and its lags were held, 23 times over for an L1 profile. MEASURED on the
+  171,828-template showcase search, 16 workers, a profile per detector, peak resident memory
+  per worker 1.53-1.70 -> 1.42-1.48 GiB; throughput and setup level.
 - The gate planner holds a profile's draws once, column by column. A chain's detections
   are views of the table's two halves (each chain held its own copies of both: ten to twenty
   chains a table); a screener retention's draws share the plain draws' fine maxima, lags and
