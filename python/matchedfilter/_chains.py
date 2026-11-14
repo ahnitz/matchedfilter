@@ -12,6 +12,6 @@ _CHAIN_CHOICE = {}
 
 
 #: (n, snr, fd, tiers, window, device, candidate bands, the cheapest chain's first band
-#: without shared screeners) -> the first band whose shared screeners
-#: won in the last plan of that kind: the band the next such plan clusters first
+#: without shared screeners, reference profile signature) -> the first band whose shared
+#: screeners won in the last plan for that reference: the band the next one clusters first
 _TIER0_FIRST = {}
