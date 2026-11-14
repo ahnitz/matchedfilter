@@ -9,3 +9,9 @@ _Q15_MODEL = {}
 #: (n, snr, fd, tiers, window, profile signature, device, gate kind, direct) -> (model's
 #: chain, every chain the gate model covers, in modelled cost order)
 _CHAIN_CHOICE = {}
+
+
+#: (n, snr, fd, tiers, window, device, candidate bands, the cheapest chain's first band
+#: without shared screeners) -> the first band whose shared screeners
+#: won in the last plan of that kind: the band the next such plan clusters first
+_TIER0_FIRST = {}
