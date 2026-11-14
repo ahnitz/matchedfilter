@@ -1379,6 +1379,19 @@ class TimeDomainFilterBank:
                 (``profile=``). Default: the profile in use (the bank's only one unless
                 ``use_profile`` or a named reference chose another).
         """
+        if not isinstance(reference, dict):
+            # A profile with no power, or one that is not finite, is a noise spectrum that is
+            # not positive anywhere or not finite (a detector with no data in the stretch):
+            # said here, where the profile is named, and not as a chain that cannot be found.
+            w = np.asarray(reference)
+            if not np.all(np.isfinite(w)) or not np.any(w > 0):
+                which = "" if profile is _SAME_PROFILE else " for profile %r" % (profile,)
+                raise ValueError(
+                    "the reference%s holds no power or is not finite (%d of %d values positive, "
+                    "%d not finite): the noise spectrum it was made from is not positive and "
+                    "finite anywhere in the band, as for data that are absent or not finite"
+                    % (which, int(np.count_nonzero(w > 0)), w.size,
+                       int(np.count_nonzero(~np.isfinite(w)))))
         if profile is not _SAME_PROFILE:
             if not self.__dict__.get("_refs"):
                 self._first_profile = profile

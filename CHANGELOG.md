@@ -535,6 +535,11 @@ whole job 18% less (222 to 182 s). See
 
 ### Fixed
 
+- A bank refuses a reference that holds no power or is not finite when it is set, naming
+  the profile (`TimeDomainFilterBank.set_reference`). A detector with no data in a stretch
+  gives a noise spectrum that is nowhere positive and so an all-zero reference; the job then
+  failed later with "the reference has no localised correlation peak". Found on pycbc's FIR
+  search example run over a stretch without L1 data.
 - The gate model's memory follows the signal draws it still holds. What a chain's planning
   derives from a set of draws (kept draws, halves, distances, candidates) was memoised with
   references to the draws, so draws evicted from their own cache stayed alive, with

@@ -183,3 +183,18 @@ def test_a_bank_holds_a_calibration_per_profile():
         same(got, want[name])
     for g in bank._groups:
         assert g.plan.profiles == (None, "b")                # the first profile is the plans' unnamed one
+
+
+@pytest.mark.parametrize("fill", [0.0, np.nan])
+def test_a_reference_with_no_power_is_refused_by_name(fill):
+    """A detector with no data in a stretch gives a noise spectrum that is nowhere positive
+    (or not finite), and so a reference with no power. The bank says so, naming the profile,
+    where it used to fail later with a message about correlation peaks."""
+    n, taps, counts, spec, series, layout, ref, window = _bank(nblocks=4)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=6.0,
+                                false_dismissal=1e-2, fft_lengths=[n], binsize=n)
+    bank.set_reference(ref, profile="H1")
+    with pytest.raises(ValueError, match="for profile 'L1' holds no power or is not finite"):
+        bank.set_reference(np.full_like(ref, fill), profile="L1")
+    assert bank.profiles == ("H1",)                          # the refused one was not taken
+    assert bank.filter_series(series, profile="H1").template_indices.size > 0
