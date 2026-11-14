@@ -586,6 +586,33 @@ profiles: the first profile built a band that never won in 547 of 1606 plans bef
 last winner went first; setup 64.9 -> 55.8 G instructions over this and the simulation
 changes below, every plan's chain and thresholds unchanged.
 
+By operating point (same replay, base against this rule set, decisions identical at each):
+65.1 -> 56.1 G at SNR 6.0 / FDR 0.001, 75.3 -> 71.5 G at 5.5 / 0.001, 48.6 -> 48.1 G at
+6.5 / 0.001, 34.2 -> 33.9 G at 6.0 / 0.01. At 5.5 the 128 band wins every plan and each plan
+still builds one band that loses (64 in 91 plans, 256 in 82): about a fifth of that point's
+setup, and the price of showing the winner wins.
+
+Measured and not built (2026-11-14), so they are not tried again without a new idea:
+
+- Skipping the losing band at 5.5. The 256 band is not skipped because a lossless screener at
+  the 128 band's ratio (0.35) would win; it really reaches 0.50-0.60. "The wider band's
+  retention is no better" fails in 9 of 93 plans, and remembering that a band lost last time
+  would make a plan depend on the plans before it.
+- Pricing a band's next pass at the retention the last pass reached. The retention never
+  rose with a later pass (1,139 clusterings, four operating points), but the test stopped no
+  pass -- a band loses because its ratio does not get there, not because of its retention --
+  and each new (band, retention) it priced cost a simulation: setup 56.1 -> 64.0 G.
+- Scoring only pairs near each other in a chunk. A template's best partner is a median 17
+  and a 90th percentile 45 places away in chunks of about 80.
+- Keeping pair scores from one pass to the next. A repeated pair always has the same score
+  and shift, but repeats are 6%, 28% and 67% of passes 2, 3 and 4, which are 21%, 11% and
+  10% of the scoring: 11% of it in all, under 2% of setup.
+- Several retentions of a band in one simulation call. The draw is about a fifth of such a
+  simulation; the transform and the record scan are the rest and are per retention.
+- A simulation cache shared between jobs. By the planner's own reuse rule, the profiles of
+  four 2,048 s stretches half an hour to three hours apart are alike for H1 in 4 of 6 pairs
+  and for L1 in none of 3: only processes on the same data would share.
+
 # What the planner holds of a profile's draws, 2026-11-14
 
 A table of draws is held once, column by column (`gatechain._kept_halves`, `_Columns`):
