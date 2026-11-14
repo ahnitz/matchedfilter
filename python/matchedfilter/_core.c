@@ -1205,6 +1205,9 @@ static PyObject *M_series_group(PyObject *self,PyObject *args){
 void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset);   /* src/gauss.cc */
 void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
                         uint64_t offset, uint64_t step, const float *scale);
+void ap_gauss_fill_rows_kept(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
+                             uint64_t offset, uint64_t step, const float *scale,
+                             const unsigned char *keep);
 static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyObject *o; unsigned long long seed, offset;
   if(!PyArg_ParseTuple(args,"OKK",&o,&seed,&offset)) return NULL;
@@ -1552,12 +1555,14 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
       const int B = (int)(nrows-r0 < SIM_ROWS ? nrows-r0 : SIM_ROWS);
       long long ks_batch[64], kn_batch[32];
       memcpy(ks_batch,ks,(size_t)ns*sizeof *ks); memcpy(kn_batch,kn,(size_t)nb*sizeof *kn);
-      ap_gauss_fill_rows(X,xfloats,(size_t)B,(size_t)(2*kfill),(uint64_t)seed,
-                         (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
+      /* a retention's bands read the kept rows only: the others are not drawn */
+      const unsigned char *drawn = (km && !has_noise) ? km+r0 : NULL;
+      ap_gauss_fill_rows_kept(X,xfloats,(size_t)B,(size_t)(2*kfill),(uint64_t)seed,
+                              (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale,drawn);
       if(Xorth){
-        ap_gauss_fill_rows(Xorth,xorth_floats,(size_t)B,(size_t)(2*max_alpha_hi),
-                           (uint64_t)seed^(2ULL<<32),
-                           (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale);
+        ap_gauss_fill_rows_kept(Xorth,xorth_floats,(size_t)B,(size_t)(2*max_alpha_hi),
+                                (uint64_t)seed^(2ULL<<32),
+                                (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale,drawn);
       }
       int kept[SIM_ROWS];
       for(int bi=0;bi<B;bi++) kept[bi] = km ? (km[r0+bi]!=0) : 1;
