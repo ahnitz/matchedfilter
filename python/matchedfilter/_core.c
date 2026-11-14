@@ -613,15 +613,21 @@ static PyTypeObject MFType={
 typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity;
                  int real; /* run_series reads a real series (set_real_series) */
                  int real_stride; /* floats between its samples: 1, or 2 for a complex lane */
-                 int busy; /* a method is running (GUARDED) */ } HMFObject;
+                 int busy; /* a method is running (GUARDED) */
+                 PyObject *owner; /* the HMF whose template storage this one reads (share=), kept alive */ } HMFObject;
 
-/* HMF(n, ndata, ntemplates, bands, series_group=8, k=0): a gate chain of coarse
-   bands (strictly increasing), then the full refine. Thresholds come from Python. */
+/* HMF(n, ndata, ntemplates, bands, series_group=8, k=0, share=None): a gate chain of coarse
+   bands (strictly increasing), then the full refine. Thresholds come from Python. share:
+   another HMF of the same templates (same n, k, ntemplates, data rows), whose
+   full-resolution templates and taps this one reads instead of holding copies. */
 static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   if(self->p){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter already initialised"); return -1; }
   Py_ssize_t n; int nd,nt; PyObject *bands_obj; (void)kw;
-  int group=8; Py_ssize_t k_bins=0;
-  if(!PyArg_ParseTuple(args,"niiO|in",&n,&nd,&nt,&bands_obj,&group,&k_bins)) return -1;
+  int group=8; Py_ssize_t k_bins=0; PyObject *share=Py_None;
+  if(!PyArg_ParseTuple(args,"niiO|inO",&n,&nd,&nt,&bands_obj,&group,&k_bins,&share)) return -1;
+  if(share!=Py_None && (Py_TYPE(share)!=Py_TYPE(self) || !((HMFObject*)share)->p
+                        || ((HMFObject*)share)->owner)){
+    PyErr_SetString(PyExc_TypeError,"share must be an HMF that holds its own templates"); return -1; }
   PyObject *seq=PySequence_Fast(bands_obj,"bands must be a sequence of ints");
   if(!seq) return -1;
   Py_ssize_t nti=PySequence_Fast_GET_SIZE(seq);
@@ -635,7 +641,10 @@ static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   }
   Py_DECREF(seq);
   self->k = (k_bins > 0) ? k_bins : n;
-  self->p = ap_hmf_create_chain((size_t)n,(size_t)self->k,nd,nt,bands,(int)nti,group);
+  self->p = share!=Py_None
+    ? ap_hmf_create_chain_shared(((HMFObject*)share)->p,(size_t)n,(size_t)self->k,nd,nt,bands,(int)nti,group)
+    : ap_hmf_create_chain((size_t)n,(size_t)self->k,nd,nt,bands,(int)nti,group);
+  if(self->p && share!=Py_None){ Py_INCREF(share); self->owner=share; }
   if(!self->p){ PyErr_Format(PyExc_ValueError,
       "no hierarchical plan for n=%zd k=%zd with this chain (bands must be supported "
       "powers of two, strictly increasing and < n)",n,self->k); return -1; }
@@ -643,6 +652,7 @@ static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
 }
 static void HMF_dealloc(HMFObject *self){
   if(self->p) ap_hmf_destroy(self->p);
+  Py_XDECREF(self->owner);
   PyMem_Free(self->peaks);
   Py_TYPE(self)->tp_free((PyObject*)self);
 }

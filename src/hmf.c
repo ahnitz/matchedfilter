@@ -87,6 +87,13 @@ struct ap_hmf_plan {
   FILE *dump;
   float *twiddles,*tw_scratch;
   float *tmpls_half,*prod_scratch;
+  /* Template storage shared with another plan of the same templates (ap_hmf_create_chain_shared):
+     the plan it is shared from, whose full plan, half-spectrum templates and taps this one
+     reads and does not free. full_user, on the plan that owns them, is the plan whose data
+     rows the full plan holds: another plan's are not this one's (hmf_claim_full). */
+  struct ap_hmf_plan *shared_from;
+  const struct ap_hmf_plan *full_user;
+  int taps_shared;
   /* Q15 screen as the first tier's gate (ap_hmf_set_q15) */
   int q15;
   long first_gate_passed;         /* passes of the first tier */
@@ -219,8 +226,37 @@ static inline int hmf_ensure_df(ap_hmf_plan *p,size_t need){
   return 0;
 }
 
+/* The full plan's data rows are whichever plan's last wrote them: a plan that finds another's
+   there forgets that its own are loaded. */
+static inline void hmf_claim_full(ap_hmf_plan *p){
+  ap_hmf_plan *o=p->shared_from ? p->shared_from : p;
+  if(o->full_user!=p){
+    memset(p->dready,0,(size_t)p->nd);
+    o->full_user=p;
+  }
+}
+
+static ap_hmf_plan *hmf_create(size_t n,size_t k,int ndata,int ntmpl,const size_t *bands,
+                               int ntiers,int series_group,ap_hmf_plan *owner);
+
 ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
                                  const size_t *bands,int ntiers,int series_group){
+  return hmf_create(n,k,ndata,ntmpl,bands,ntiers,series_group,NULL);
+}
+
+/* A plan of the same templates as `owner` (same n, k, template count and data rows) with a
+   chain of its own: it reads owner's full-resolution templates, half-spectrum templates and
+   taps instead of holding copies, so the templates of a bank calibrated for several noise
+   profiles exist once. Templates and taps are set on it as on any plan (they are the same
+   values); owner must outlive it. NULL where the two cannot share. */
+ap_hmf_plan *ap_hmf_create_chain_shared(ap_hmf_plan *owner,size_t n,size_t k,int ndata,int ntmpl,
+                                        const size_t *bands,int ntiers,int series_group){
+  if(!owner || owner->shared_from) return NULL;
+  return hmf_create(n,k,ndata,ntmpl,bands,ntiers,series_group,owner);
+}
+
+static ap_hmf_plan *hmf_create(size_t n,size_t k,int ndata,int ntmpl,const size_t *bands,
+                               int ntiers,int series_group,ap_hmf_plan *owner){
   if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)
      ||!bands||ntiers<1||ntiers>AP_HMF_MAX_TIERS) return NULL;
   for(int i=0;i<ntiers;i++){
@@ -240,11 +276,15 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   if((size_t)p->nd > (size_t)INT_MAX / (size_t)ntmpl){
     ap_hmf_destroy(p); return NULL;
   }
+  if(owner && (owner->n!=p->n || owner->k!=p->k || owner->nt!=ntmpl || owner->nd!=p->nd)){
+    ap_hmf_destroy(p); return NULL;
+  }
+  p->shared_from=owner;
   if(p->is_dif){
-    p->full=ap_mf_create(p->k, 2*p->nd, ntmpl);
+    p->full=owner ? owner->full : ap_mf_create(p->k, 2*p->nd, ntmpl);
     p->twiddles=ap_alloc64(2*p->k*sizeof(float));
     p->tw_scratch=ap_alloc64(2*p->k*sizeof(float));
-    p->tmpls_half=ap_alloc64((size_t)ntmpl*2*p->k*sizeof(float));
+    p->tmpls_half=owner ? owner->tmpls_half : ap_alloc64((size_t)ntmpl*2*p->k*sizeof(float));
     p->prod_scratch=ap_alloc64(2*p->n*sizeof(float));
     if(!p->twiddles || !p->tw_scratch || !p->tmpls_half || !p->prod_scratch){
       ap_hmf_destroy(p); return NULL;
@@ -256,7 +296,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
       p->twiddles[2 * j + 1] = (float)sin(angle);
     }
   } else {
-    p->full=ap_mf_create(n, p->nd, ntmpl);
+    p->full=owner ? owner->full : ap_mf_create(n, p->nd, ntmpl);
   }
   { long pbmax=ap_env_int("MF_PBMAX",-1);
     int lw = ap_lane_width();
@@ -312,7 +352,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(!p) return;
   hmf_free_tier0_clusters(p);
   hmf_free_tier1_clusters(p);
-  ap_mf_destroy(p->full);
+  if(!p->shared_from) ap_mf_destroy(p->full);
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     if(tr->mf) ap_mf_destroy(tr->mf);
@@ -330,12 +370,13 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   free(p->dready); free(p->dmirrored); free(p->tready);
   if(p->twiddles) free(p->twiddles);
   if(p->tw_scratch) free(p->tw_scratch);
-  if(p->tmpls_half) free(p->tmpls_half);
+  if(p->tmpls_half && !p->shared_from) free(p->tmpls_half);
   if(p->prod_scratch) free(p->prod_scratch);
   if(p->dump) fclose(p->dump);
   free(p->qpass); free(p->qd); free(p->qt); free(p->qstat); free(p->qidx);
-  if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
-  free(p->tap_len); free(p->dtime); free(p->dhave);  free(p->dx); free(p->dout); free(p->dfd); free(p->dft);
+  if(p->taps && !p->taps_shared){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
+  if(!p->taps_shared) free(p->tap_len);
+  free(p->dtime); free(p->dhave);  free(p->dx); free(p->dout); free(p->dfd); free(p->dft);
   free(p->dir_sub);
   free(p);
 }
@@ -348,6 +389,23 @@ static int set_taps_impl(ap_hmf_plan *p,const float *taps,size_t stride,const in
                          int cplx){
   if(!p||!taps||!counts) return -1;
   for(int t=0;t<p->nt;t++) if(counts[t]<1||(size_t)counts[t]>stride||(size_t)counts[t]>p->n) return -1;
+  if(p->shared_from && p->shared_from->taps && p->shared_from->tap_cplx==(cplx?1:0)
+     && (!p->taps || p->taps_shared)){
+    /* the same templates' taps, held by the plan the templates are shared from */
+    int same=1;
+    for(int t=0;t<p->nt && same;t++) same = p->shared_from->tap_len[t]==(int)counts[t];
+    if(same){
+      if(!p->dx){
+        p->dx=ap_alloc64(2*p->n*sizeof(float));
+        p->dout=ap_alloc64(2*p->n*sizeof(float));
+        if(!p->dx||!p->dout){ free(p->dx); p->dx=NULL; free(p->dout); p->dout=NULL; return -1; }
+      }
+      p->taps=p->shared_from->taps; p->tap_len=p->shared_from->tap_len; p->taps_shared=1;
+      p->tap_cplx=cplx?1:0; p->dx_d=-1; p->dir_lagtap=0;
+      return 0;
+    }
+  }
+  if(p->taps_shared){ p->taps=NULL; p->tap_len=NULL; p->taps_shared=0; }
   if(!p->taps){
     p->taps=calloc((size_t)p->nt,sizeof(*p->taps));
     p->tap_len=calloc((size_t)p->nt,sizeof(int));
@@ -376,8 +434,10 @@ static int set_taps_impl(ap_hmf_plan *p,const float *taps,size_t stride,const in
   p->dir_lagtap=0;
   return 0;
 fail:
-  if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); p->taps=NULL; }
-  free(p->tap_len); p->tap_len=NULL;
+  if(p->taps && !p->taps_shared){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
+  p->taps=NULL;
+  if(!p->taps_shared) free(p->tap_len);
+  p->tap_len=NULL; p->taps_shared=0;
   free(p->dx); p->dx=NULL;
   free(p->dout); p->dout=NULL;
   free(p->dfd); p->dfd=NULL;
@@ -1771,6 +1831,7 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       int d0, int t0, int nt, int nfire,
                       size_t binsize, float threshold,
                       ap_peak *peaks, int *counts, size_t start, size_t end){
+  hmf_claim_full(p);
   if(nfire <= 0) return 0;
   /* Complete negative-frequency bins on any block whose survivor reaches FFT refine. */
   if(p->real_series){

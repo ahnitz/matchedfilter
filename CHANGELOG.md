@@ -6,6 +6,20 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Added
 
+- One set of templates searched in several noise profiles. A `HierarchicalFilter` holds a
+  calibration per profile (`use_profile(name)`: the reference, and the chain, thresholds,
+  shared screeners and compiled tiers that follow from it) over one copy of the templates:
+  every profile's compiled plan reads the first one's full-resolution templates and taps
+  (`_core.HMF(..., share=)`, `ap_hmf_create_chain_shared`). A `TimeDomainFilterBank` takes a
+  reference under a name (`set_reference(..., profile=name)`; the first settles the block
+  sizes) and a filtering call names the profile it runs (`profile=name`, also per job of
+  `filter_series_many` and `correlate_and_filter_many`). `HierarchicalSearch` builds one
+  bank a leaf, with a profile per channel where the root's profile is a mapping; it built a
+  whole bank per channel, each with its own templates. `tests/test_profiles.py`. MEASURED
+  on the 171,828-template showcase search, 16 workers, a profile per detector, peak resident
+  memory per worker 1.59-1.69 -> 1.52-1.55 GiB (one profile: 1.12-1.27, unchanged); steady
+  throughput and leaf setup level with the bank per channel (four operating points, two
+  paired runs each, order alternated: leaf stage within 1.2%).
 - `search.Root(profile={channel: (w, delta_f)})`: one reference profile a channel, for
   channels whose noise spectra differ (two detectors). Each channel then has its own leaf
   banks, calibrated on its own profile; `HierarchicalSearch.leaf_bank(root, leaf, channel)`

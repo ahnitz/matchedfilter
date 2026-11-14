@@ -455,15 +455,15 @@ def _profiles(n=N):
     return {"A": (low, 1.0), "B": (high, 1.0)}
 
 
-def test_a_profile_per_channel_calibrates_one_leaf_bank_per_channel(monkeypatch):
-    """A root whose profile is a dict gives each channel leaf banks referenced on that
-    channel's profile, and each channel's peaks come from its own bank."""
-    given = []
+def test_a_profile_per_channel_is_one_leaf_bank_holding_each(monkeypatch):
+    """A root whose profile is a dict gives every leaf one bank, with a reference for each
+    channel's profile under the channel's name, and each channel's call names its own."""
+    given, ran = [], []
     set_reference = TimeDomainFilterBank.set_reference
 
-    def recording(self, reference, delta_f=None):
-        given.append((self, reference))
-        return set_reference(self, reference, delta_f=delta_f)
+    def recording(self, reference, delta_f=None, **kw):
+        given.append((self, reference, kw.get("profile")))
+        return set_reference(self, reference, delta_f=delta_f, **kw)
     monkeypatch.setattr(TimeDomainFilterBank, "set_reference", recording)
 
     root = _tree(np.random.default_rng(11), inner_counts=(301, 351))
@@ -475,28 +475,32 @@ def test_a_profile_per_channel_calibrates_one_leaf_bank_per_channel(monkeypatch)
     search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
     got = _collect(search, inputs)
     for lf in search._leaves_below(root):
-        a, b = search.leaf_bank(root, lf, "A"), search.leaf_bank(root, lf, "B")
-        assert a is not b
-        assert [w for bank, w in given if bank is a] == [profiles["A"][0]]
-        assert [w for bank, w in given if bank is b] == [profiles["B"][0]]
-        # no channel named, or one the root has no profile for: the first profile's bank
-        assert search.leaf_bank(root, lf) is a and search.leaf_bank(root, lf, "C") is a
+        bank = search.leaf_bank(root, lf, "A")
+        assert search.leaf_bank(root, lf, "B") is bank
+        assert bank.profiles == ("A", "B")
+        assert [(w, name) for b, w, name in given if b is bank] == [
+            (profiles["A"][0], "A"), (profiles["B"][0], "B")]
+        # no channel named, or one the root has no profile for: the first profile
+        assert search.leaf_bank(root, lf) is bank and search.leaf_bank(root, lf, "C") is bank
+        assert search._channel_profile(root, "C") == "A" and search._channel_profile(root, None) == "A"
     # the flat engine's peaks do not depend on the reference: the same as with no profile
     assert [g[:3] for g in got] == [g[:3] for g in plain]
     for g, p in zip(got, plain):
         _assert_same_peaks(g[3], p[3], rtol=0)
 
 
-def test_one_profile_is_one_leaf_bank_for_every_channel():
+def test_one_profile_is_one_calibration_for_every_channel():
     root = _tree(np.random.default_rng(13), inner_counts=(301,))
     root.profile = _profiles()["A"]
     search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
     for lf in search._leaves_below(root):
-        assert search.leaf_bank(root, lf, "A") is search.leaf_bank(root, lf, "B")
-        assert search.leaf_bank(root, lf) is search.leaf_bank(root, lf, "A")
+        bank = search.leaf_bank(root, lf, "A")
+        assert search.leaf_bank(root, lf, "B") is bank and search.leaf_bank(root, lf) is bank
+        assert bank.profiles == (None,)
+        assert search._channel_profile(root, "B") is None
 
 
-def test_refilter_uses_the_channels_own_leaf_bank():
+def test_refilter_runs_the_channels_own_profile():
     root = _tree(np.random.default_rng(14), inner_counts=(301,))
     root.profile = _profiles()
     inputs = _inputs(np.random.default_rng(15), nblocks=1)
@@ -506,7 +510,7 @@ def test_refilter_uses_the_channels_own_leaf_bank():
 
     def on_peaks(ctx):
         def recording(self, *a, **k):
-            used.append(self)
+            used.append((self, k.get("profile")))
             return filter_series(self, *a, **k)
         TimeDomainFilterBank.filter_series = recording
         try:
@@ -514,7 +518,6 @@ def test_refilter_uses_the_channels_own_leaf_bank():
                          template_index=1)
         finally:
             TimeDomainFilterBank.filter_series = filter_series
-        assert used[-1] is search.leaf_bank(root, ctx.leaf, "B")
-        assert used[-1] is not search.leaf_bank(root, ctx.leaf, "A")
+        assert used[-1] == (search.leaf_bank(root, ctx.leaf, "B"), "B")
     search.run(inputs, on_peaks=on_peaks)
     assert used
