@@ -310,8 +310,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   175 -> 138 s (four alternating pairs on a machine under another load of about 24 throughout:
   0.75-0.84 pair by pair), steady throughput level (7.8 against 8.0 M template-s/s a core).
   One `pycbc_inspiral_fir` job of pycbc's FIR search example (11,988 templates, H1 and L1,
-  2,048 s, one core): 447.5 -> 337.3 G instructions, peak resident memory 1.72 -> 1.43 GB,
-  the same triggers; the search after the data conditioning 20.4 -> 11.5 s. In that job the
+  2,048 s, one core) at SNR 6.0 / FDR 0.001: 447.5 -> 337.3 G instructions, peak resident
+  memory 1.72 -> 1.43 GB, the same triggers; the search after the data conditioning
+  20.4 -> 11.5 s. That is the standard point's gain, where the wider-band clustering this
+  removes was concentrated: the same job gained 7% at (5.5, 0.001), 3.9% at (6.5, 0.001)
+  and 1.7% at (6.0, 0.01). (The replay's figures include about 2 G of the replay's own
+  hashing of its inputs, the same before and after.) In that job the
   block-size trial's preparation (both profiles calibrated on every candidate size) is 43.5 G
   against 55.6 G of leaf setup and 28 G of filtering; with a cost file reused from an earlier
   job (`MF_COST_FILE`) it is not run: 288.1 G, 1.23 GB.
