@@ -304,6 +304,28 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
+  setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
+  chain and thresholds unchanged at each step): 64.9 -> 50.2 G; in the 16-worker run, setup
+  161 -> 127 s and then 100 -> 87 s (two sets of paired runs on a loaded machine), steady
+  throughput and triggers unchanged.
+  - The first band a plan builds shared screeners for is the one that won in the last plan
+    for its reference (`_chains._TIER0_FIRST`), the others by lower bound as before. The rule
+    that skips a wider band once a narrower one has won needs the narrower one first; the
+    wider band often had the lower bound and never won (547 of 1606 first-profile plans).
+  - A band is not clustered when another profile's clustering of the same templates shows
+    it losing: once a band has won, the challenger is priced one ratio step better than it
+    shared under the other profile, at that retention
+    (`HierarchicalFilter._tier0_seen_elsewhere`). What it was taken to reach bounds the wider
+    bands. A narrower band whose sharing was not cut short, nor stopped by the least number
+    of screeners a band keeps, bounds a wider band's ratio by its own
+    (`_narrower_bands_floor`), not only by the smallest ratio found.
+  - A retention of several bands (shared screeners at the first tier, sub-screeners at the
+    second) is read from each band's single retention, signal and noise: a band's draws do
+    not depend on the other bands' retentions, so the columns are bit for bit those of the
+    joint simulation, which is no longer run, and nothing more is held for the combination.
+  - A retention's simulation draws noise only for the rows the plain simulation kept
+    (`ap_gauss_fill_rows_kept`: a row mask in the fill, which still generates rows in pairs).
 - A screener retention's draws hold only the bands the retention alters, beside the plain
   draws (`gatechain._Beside`): one or two columns of coarse maxima and of their lags where a
   whole table and its lags were held, 23 times over for an L1 profile. MEASURED on the

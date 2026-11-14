@@ -1133,6 +1133,9 @@ class HierarchicalFilter(MatchedFilter):
                     if want and len(want) <= tiers and all(b < self.n for b in want):
                         forced_want = want
 
+        ref = np.asarray(self._pending_ref, np.float64)
+        prof = _gatechain._gm._profile_sig(ref / ref.sum())
+
         # Lazily cluster only candidate Tier-0 bands whose optimistic lower bound can win
         if self._tier0_cluster_eligible():
             is_cpu = self.device.kind == "cpu"
@@ -1190,11 +1193,9 @@ class HierarchicalFilter(MatchedFilter):
                     # and never won: 39% of the clustering in a 324-plan capture). Another
                     # reference's winner says nothing here: the rule below is the banks'
                     # habit, not a theorem, and a bank that breaks it keeps its own order.
-                    ref_sum = float(np.sum(self._pending_ref, dtype=np.float64))
                     order_key = (self.n, float(snr), float(self.fd), tiers, self.search_window,
                                  str(self.device), tuple(int(b) for b in cand_bands), best_b0,
-                                 _gatechain._gm._profile_sig(
-                                     np.asarray(self._pending_ref, np.float64) / ref_sum))
+                                 prof)
                     with _AUTOTUNE_LOCK:
                         won_last = _chains._TIER0_FIRST.get(order_key)
                     ordered_b0 = sorted((int(b) for b in cand_bands),
@@ -1296,12 +1297,20 @@ class HierarchicalFilter(MatchedFilter):
                         if best_cand is not None and best_cand_b0_cost < best_upper:
                             best_upper = best_cand_b0_cost
                             best_b0 = won = b0
+                    # Only the winning band's screeners stay: the plan is then the same in
+                    # whatever order the bands were considered (a losing band's, left in,
+                    # could still take a chain choice within its tie window, and whether
+                    # they were built at all depends on the order).
+                    for b0 in ordered_b0:
+                        if b0 != won:
+                            self._tier0_clusters[b0] = None
                     if won is not None:
                         with _AUTOTUNE_LOCK:
                             _chains._TIER0_FIRST[order_key] = won
+                            _chains._TIER0_FIRST.move_to_end(order_key)
+                            while len(_chains._TIER0_FIRST) > _chains._TIER0_FIRST_MAX:
+                                _chains._TIER0_FIRST.popitem(last=False)
 
-        ref = np.asarray(self._pending_ref, np.float64)
-        prof = _gatechain._gm._profile_sig(ref / ref.sum())
         direct = self._direct_key()
         csig = self._clusters_sig() if self._cal_thr is None else ()
         key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),

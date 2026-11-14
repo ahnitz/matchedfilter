@@ -44,7 +44,8 @@ def _plan(prune, monkeypatch, spread, forget=True):
     cl = hf._active_tier0_cluster()
     plan = (tuple(hf._chain), None if cl is None else int(cl.specs.shape[0]),
             None if cl is None else round(float(cl.alpha), 4),
-            tuple(np.round(r.thresholds, 5)))
+            tuple(np.round(r.thresholds, 5)),
+            tuple(b for b, c in sorted(hf._tier0_clusters.items()) if c is not None))
     return plan, built
 
 
@@ -83,6 +84,8 @@ def test_the_band_that_won_last_is_clustered_first(monkeypatch):
     told, built_told = _plan(True, monkeypatch, spread=3.0, forget=False)
     assert told == first
     assert built_told[0] == wider and first[0][0] in built_told
+    # whatever was built on the way, the plan holds the winning band's screeners alone
+    assert first[4] == (first[0][0],)
 
 
 def test_the_floor_a_wider_band_inherits_from_the_narrower_ones():
