@@ -112,6 +112,41 @@ def test_a_retention_holds_its_own_band_beside_the_plain_draws(empty_model):
             assert (A.cols[i].base is Ap.cols[i].base) == (c != altered)      # the plain half itself
 
 
+def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_model, monkeypatch):
+    """A band's draws under its retention do not depend on the other bands' retentions, so a
+    retention of two bands is read from the two single ones: the same draws as its own
+    simulation gives, with no simulation of the two together."""
+    p, bands = _profile(), [128, 256, 512]
+    both, one, other = (0.97, 0.995, 1.0), (0.97, 1.0, 1.0), (1.0, 0.995, 1.0)
+    # its own simulation: the single retentions are not used
+    monkeypatch.setattr(gc, "_beside_singles", lambda parts: None)
+    (C, F), (fat, cat) = _draws(p, bands, alphas=both, held=False)
+    monkeypatch.undo()
+    for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS, gc._SIMILAR, gc._SIMILAR_COUNT):
+        c.clear()
+
+    simulated = []
+    simulate = gc._simulate
+
+    def spy(p_, n, bands_, *a, **k):
+        simulated.append(sum(x < 1.0 for x in (k.get("alphas") or ())))
+        return simulate(p_, n, bands_, *a, **k)
+
+    monkeypatch.setattr(gc, "_simulate", spy)
+    (Cs, Fs), (fats, cats) = _draws(p, bands, alphas=both)
+    assert isinstance(Cs, gc._Beside) and sorted(Cs.own) == [0, 1]
+    assert max(simulated) == 1                        # one band at a time
+    np.testing.assert_array_equal(Cs.full(), C)
+    np.testing.assert_array_equal(cats.full(), cat)
+    np.testing.assert_array_equal(Fs, F)
+    np.testing.assert_array_equal(fats, fat)
+    assert not np.array_equal(C[:, 0], Cs.plain[:, 0]) and not np.array_equal(C[:, 1], Cs.plain[:, 1])
+    # the columns are the single retentions' own arrays: nothing more is held for the pair
+    (C1, _), _ = _draws(p, bands, alphas=one)
+    (C2, _), _ = _draws(p, bands, alphas=other)
+    assert Cs.own[0] is C1.own[0] and Cs.own[1] is C2.own[1] and Cs.plain is C1.plain
+
+
 def test_a_retentions_plans_are_those_of_its_own_table(empty_model, monkeypatch):
     """Sharing columns changes nothing a plan rests on: with the sharing switched off (a
     retention's draws held whole) every plan comes out the same."""

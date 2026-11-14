@@ -13,7 +13,7 @@ from spectral_profiles import make_spectral_profile
 _BUILD = gatechain.cluster_tier0_candidates
 
 
-def _plan(prune, monkeypatch, spread):
+def _plan(prune, monkeypatch, spread, forget=True):
     """(chain, screeners, retention, thresholds) and the bands whose screeners were built, for
     a bank of 96 chirp-like templates on an inspiral-like profile at n = 1024."""
     n, nt = 1024, 96
@@ -35,6 +35,8 @@ def _plan(prune, monkeypatch, spread):
     for cache in (gatechain._KEPT, gatechain._CAND_CACHE, gatechain._CHOICE_CACHE,
                   _chains._CHAIN_CHOICE):
         cache.clear()
+    if forget:
+        _chains._TIER0_FIRST.clear()                  # no band is remembered as the last winner
     hf = mf.HierarchicalFilter(n, 64, nt, snr=6.0, fd=1e-3)
     hf.set_reference(power.astype(np.float32))
     hf.set_templates(np.conj(spectra))
@@ -63,3 +65,21 @@ def test_bands_that_can_win_are_still_clustered(monkeypatch):
     full, built_all = _plan(False, monkeypatch, spread=12.0)
     assert pruned == full
     assert built == built_all and len(built) >= 2
+
+
+def test_the_band_that_won_last_is_clustered_first(monkeypatch):
+    """A plan like the last one builds the last one's winning band first, which lets the
+    wider band be skipped whichever of them has the lower bound. The plan is the same."""
+    first, built_first = _plan(True, monkeypatch, spread=3.0)
+    again, built_again = _plan(True, monkeypatch, spread=3.0, forget=False)
+    assert again == first
+    assert first[1] is not None and built_again[0] == first[0][0]    # the winner, first
+    assert set(built_again) <= set(built_first)
+    # and the other way round: told the wider band won last, it is built first -- and the
+    # narrower one after it still wins
+    wider = max(built_first + [2 * first[0][0]])
+    for key in list(_chains._TIER0_FIRST):
+        _chains._TIER0_FIRST[key] = wider
+    told, built_told = _plan(True, monkeypatch, spread=3.0, forget=False)
+    assert told == first
+    assert built_told[0] == wider and first[0][0] in built_told

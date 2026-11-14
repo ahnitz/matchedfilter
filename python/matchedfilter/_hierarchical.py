@@ -1146,7 +1146,20 @@ class HierarchicalFilter(MatchedFilter):
                         )
                         for b0 in cand_bands
                     }
-                    ordered_b0 = sorted((int(b) for b in cand_bands), key=lambda b: (lb_by_b0[b], b))
+                    # The band whose screeners won in the last plan of this kind goes first,
+                    # the others by their lower bound. The order decides only how much is
+                    # built: a wider band is not clustered once a narrower one has won
+                    # (below), and that needs the narrower one first. A top template's leaf
+                    # banks share a reference, so all but the first build one band's
+                    # screeners where they built two (the wider band had the lower bound
+                    # and never won: 39% of the clustering in a 324-plan capture).
+                    order_key = (self.n, float(snr), float(self.fd), tiers, self.search_window,
+                                 str(self.device), tuple(int(b) for b in cand_bands), best_b0)
+                    with _AUTOTUNE_LOCK:
+                        won_last = _chains._TIER0_FIRST.get(order_key)
+                    ordered_b0 = sorted((int(b) for b in cand_bands),
+                                        key=lambda b: (b != won_last, lb_by_b0[b], b))
+                    won = None
                     tie_slack = 1.0 + _gatechain.TIE
                     shared = {}        # band -> the smallest screener-to-template ratio found
                     for b0 in ordered_b0:
@@ -1179,8 +1192,13 @@ class HierarchicalFilter(MatchedFilter):
                         # built: that was half of the clustering in a leaf bank's setup, for
                         # a band that never won.
                         narrower = [r for b, r in shared.items() if b < b0]
+                        # each narrower band whose passes all ran bounds b0's ratio from
+                        # below, so the largest of those binds; one whose passes were cut
+                        # short (it could not win) only counts through the smallest
+                        whole = [r for b, r in shared.items()
+                                 if b < b0 and self._tier0_cand_cache[b][1]]
                         if (_TIER0_PRUNE_WIDER and narrower
-                                and bound(max(opt_map[b0], min(narrower))) >= limit):
+                                and bound(max(opt_map[b0], max(whole) if whole else min(narrower))) >= limit):
                             self._tier0_clusters[b0] = None
                             continue
                         raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,
@@ -1211,7 +1229,10 @@ class HierarchicalFilter(MatchedFilter):
                         self._tier0_clusters[b0] = best_cand
                         if best_cand is not None and best_cand_b0_cost < best_upper:
                             best_upper = best_cand_b0_cost
-                            best_b0 = b0
+                            best_b0 = won = b0
+                    if won is not None:
+                        with _AUTOTUNE_LOCK:
+                            _chains._TIER0_FIRST[order_key] = won
 
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())

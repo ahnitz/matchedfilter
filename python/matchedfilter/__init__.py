@@ -183,6 +183,7 @@ def clear_autotune_cache():
     with _AUTOTUNE_LOCK:
         _chains._CHAIN_CHOICE.clear()
         _chains._Q15_MODEL.clear()
+        _chains._TIER0_FIRST.clear()
         _prices._DIRECT_LAGTAP.clear()
         _prices._DIRECT_PAIR.clear()
     _trial.clear()

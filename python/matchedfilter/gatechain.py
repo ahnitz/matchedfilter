@@ -1406,6 +1406,18 @@ def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=
     if hit is not None:
         _SIGNAL_CACHE.move_to_end(key)
         return hit[0] if not lags_too else hit
+    if al is not None and not _exact and sum(a < 1.0 for a in al) > 1:
+        # A band's draws under its retention are the same whatever the other bands' are
+        # (each mixes its own bins of one row of independent noise, _core.simulate), so a
+        # retention of several bands is its bands' single retentions side by side: their
+        # columns, with nothing simulated that a single one has not been simulated for.
+        hit = _beside_singles([
+            (i, _signal_table(p, n, bands, snr, ndet, seed=seed, window=window, lags_too=True,
+                              alphas=tuple(a if j == i else 1.0 for j, a in enumerate(al))))
+            for i, a in enumerate(al) if a < 1.0])
+        if hit is not None:
+            _cache_put(_SIGNAL_CACHE, key, hit)
+            return hit[0] if not lags_too else hit
     sr_kw = {}
     if any(k0s):
         sr_kw["k0s"] = k0s
@@ -1492,6 +1504,23 @@ def _beside_plain(hit, plain):
         own_c[i].setflags(write=False)
         own_at[i].setflags(write=False)
     return (_Beside(Cp, own_c), Fp), (fatp, _Beside(catp, own_at))
+
+
+def _beside_singles(parts):
+    """The draws of a retention of several bands, from its bands' single retentions: `parts`
+    holds (band index, that band's retention alone as _beside_plain holds it). Returns the
+    table with each of those columns beside the plain draws all of them stand beside, or
+    None when they do not stand beside one plain table (a single retention that was not
+    held as columns)."""
+    own_c, own_at = {}, {}
+    (C0, F0), (fat0, cat0) = parts[0][1]
+    for i, ((C, F), (fat, cat)) in parts:
+        if not (isinstance(C, _Beside) and isinstance(cat, _Beside) and C.plain is C0.plain
+                and cat.plain is cat0.plain and set(C.own) <= {i} and set(cat.own) <= {i}):
+            return None
+        own_c.update(C.own)
+        own_at.update(cat.own)
+    return (_Beside(C0.plain, own_c), F0), (fat0, _Beside(cat0.plain, own_at))
 
 
 def _release_signal_records(sim):
