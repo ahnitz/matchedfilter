@@ -307,7 +307,8 @@ Alpha releases may change the API. Pin a version for reproducible work.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run, setup
-  161 -> 127 s (paired runs on a loaded machine), steady throughput and triggers unchanged.
+  175 -> 138 s (four alternating pairs on a machine under another load of about 24 throughout:
+  0.75-0.84 pair by pair), steady throughput level (7.8 against 8.0 M template-s/s a core).
   One `pycbc_inspiral_fir` job of pycbc's FIR search example (11,988 templates, H1 and L1,
   2,048 s, one core): 447.5 -> 337.3 G instructions, peak resident memory 1.72 -> 1.43 GB,
   the same triggers; the search after the data conditioning 20.4 -> 11.5 s. In that job the
