@@ -290,6 +290,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The gate planner holds a profile's draws once, column by column. A chain's detections
+  are views of the table's two halves (each chain held its own copies of both: ten to twenty
+  chains a table); a screener retention's draws share the plain draws' fine maxima, lags and
+  every band the retention leaves alone; and a window adds a few indices to one array of
+  fine-to-coarse distances a table and last band (it had an array and its two halves of its
+  own). Plans are unchanged (`tests/test_draw_columns.py`). MEASURED on the 171,828-template
+  showcase search, 16 workers, default configuration, peak resident memory per worker:
+  1.40-1.43 -> 1.16-1.25 GiB with one profile, 2.35-2.42 -> 1.61-1.80 GiB with a profile per
+  detector; leaf setup at SNR 6.0 / FDR 0.001 56 -> 52 s and 137 -> 125 s; steady throughput
+  unchanged.
 - Template groups of nearly one length share their chain searches: the direct refine's two
   bin fractions, a group's own numbers and the only thing its cost model differed by from
   its siblings', are priced to a twentieth (`HierarchicalFilter._cost_model`). MEASURED on

@@ -547,6 +547,25 @@ for k in (1, 2, 3):
              np.median(noise[k]), r.std()))
 ```
 
+# What the planner holds of a profile's draws, 2026-11-14
+
+A table of draws is held once, column by column (`gatechain._kept_halves`, `_Columns`):
+
+- A chain's search and fit halves are views of its columns of the table's two halves,
+  held in Fortran order. Each chain used to hold copies of both halves, four times the
+  table over a profile's chains.
+- Each column's few smallest values, which is all the split search reads of it, are found
+  once per column (`_Columns.smallest`).
+- A screener retention alters one band (two with a tier-1 retention). Its draws take the
+  plain draws' fine maxima and lags and share every other band's column
+  (`_beside_plain`, `_shared_with`).
+- The fine-to-coarse distances are one float32 array per table and last band; a window
+  adds the indices of the detections its far noise takes (`_Distances`).
+
+One worker's planner, offline on captured showcase banks over four top templates: 162 ->
+86 MB in use with one profile, 460 -> 184 MB with two; the plans' decisions and the setup
+time unchanged.
+
 # Signals in a window local to them, 2026-11-13
 
 A plan's signal draws are read in a window around the signal (`gatechain.local_window`),
