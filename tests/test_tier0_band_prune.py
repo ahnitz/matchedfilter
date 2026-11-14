@@ -7,7 +7,7 @@ The plan must be the one the full evaluation chooses."""
 import numpy as np
 
 import matchedfilter as mf
-from matchedfilter import _chains, _hierarchical, gatechain
+from matchedfilter import _calibration, _chains, _hierarchical, gatechain
 from spectral_profiles import make_spectral_profile
 
 _BUILD = gatechain.cluster_tier0_candidates
@@ -32,6 +32,17 @@ def _plan(prune, monkeypatch, spread, forget=True):
 
     monkeypatch.setattr(gatechain, "cluster_tier0_candidates", spy)
     monkeypatch.setattr(_hierarchical, "_TIER0_PRUNE_WIDER", prune)
+    # Which bands can win is the cost model's call, and a machine's own model decides it its
+    # own way (on one CI runner no wider band was ever a candidate, so none could be skipped):
+    # these tests are about particular outcomes, so they price on a fixed model (a Zen 5
+    # core's at n = 1024, without the Q15 screen) and without the timed direct refine.
+    fixed = gatechain.CostModel(
+        n, {64: 34.28, 128: 64.01, 256: 145.7, 512: 351.4},
+        {64: [(0.008301, 307.1), (0.09961, 146.4)], 128: [(0.008301, 307.1), (0.09961, 146.4)],
+         256: [(0.008301, 576.2), (0.09961, 258.3)], 512: [(0.008301, 996.2), (0.09961, 561.0)]},
+        [(0.008301, 2150.0), (0.09961, 2050.0)], block=2094.0)
+    monkeypatch.setattr(_calibration, "calibrate_costs", lambda *a, **kw: fixed)
+    monkeypatch.setattr(mf.HierarchicalFilter, "_direct_price", lambda self, *a, **kw: None)
     for cache in (gatechain._KEPT, gatechain._CAND_CACHE, gatechain._CHOICE_CACHE,
                   _chains._CHAIN_CHOICE):
         cache.clear()
