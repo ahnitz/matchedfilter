@@ -547,6 +547,45 @@ for k in (1, 2, 3):
              np.median(noise[k]), r.std()))
 ```
 
+# Which first band gets shared screeners, 2026-11-14
+
+A plan's first tier may run on shared screeners: one screener for a few templates alike in
+the first band (`gatechain.cluster_tier0_candidates`). Which band that is, and with which
+screeners, is settled when the plan chooses its chain
+(`HierarchicalFilter._cluster_candidate_bands`):
+
+- Every candidate first band is priced twice without building anything: with the best
+  screeners it could have (the fewest a band keeps, at no loss of signal), a lower bound,
+  and with none. The cheapest chain without screeners is the cost to beat.
+- A band whose lower bound beats the best so far has its screeners built, pass by pass (two
+  templates a screener, then four, eight, sixteen). After each pass the bound is taken again
+  for what the passes still to come could reach, and they are not run when that cannot win.
+  The candidates built are priced with their own retention, and the cheapest is the band's.
+- A wider band shares no better than a narrower one: this is how the BNS bank's leaf banks
+  behave, not a theorem. So a wider band is not built when it loses even at the ratio a
+  narrower band reached -- the largest ratio among the narrower bands whose sharing was not
+  cut short or stopped at the least number of screeners (`_narrower_bands_floor`,
+  `_shares_freely`), else the smallest found.
+- The rule only helps when the narrower band is built first, and the wider band often has
+  the lower bound. The band that won in the last plan for the same reference is therefore
+  built first (`_chains._TIER0_FIRST`): a top template's leaf banks share a reference, so
+  all but the first build one band where they built two.
+- Only the winning band keeps its screeners. A losing band's, left in, could still take the
+  chain choice inside its tie window, and whether they exist at all depends on the order
+  the bands were tried in; with the winner's alone the plan is the same in any order.
+  `tests/test_tier0_band_prune.py` holds that a plan is the one it has when planned first,
+  whatever bank of its reference was planned before it.
+
+One profile's choice uses nothing of another's. A rule that skipped a band the other
+detector's clustering showed losing was tried and removed (2026-11-14): it made a profile's
+plan depend on the other profile, and `tests/test_profiles.py` holds that each profile runs
+as a plan made for it alone.
+
+MEASURED on a replay of one worker's setup calls from the 171,828-template search, two
+profiles: the first profile built a band that never won in 547 of 1606 plans before the
+last winner went first; setup 64.9 -> 55.8 G instructions over this and the simulation
+changes below, every plan's chain and thresholds unchanged.
+
 # What the planner holds of a profile's draws, 2026-11-14
 
 A table of draws is held once, column by column (`gatechain._kept_halves`, `_Columns`):
