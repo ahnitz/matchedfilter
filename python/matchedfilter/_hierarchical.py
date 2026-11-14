@@ -1118,7 +1118,6 @@ class HierarchicalFilter(MatchedFilter):
         """
         is_cpu = self.device.kind == "cpu"
         min_len = 1 if is_cpu else 2
-        tmpl = templates
         max_k = int(_TIER0_MAX_ARITY)
         opt_map = {
             int(b): max(
@@ -1139,20 +1138,15 @@ class HierarchicalFilter(MatchedFilter):
         )
         best_upper = best_uncl["cost"] if best_uncl is not None else float("inf")
         best_b0 = int(best_uncl["chain"][0]) if best_uncl is not None else self.n
-        lb_by_b0 = {
-            int(b0): min(
-                (q["cost"] for q in lb_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                default=float("inf"),
-            )
-            for b0 in cand_bands
-        }
-        uncl_by_b0 = {
-            int(b0): min(
-                (q["cost"] for q in uncl_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                default=float("inf"),
-            )
-            for b0 in cand_bands
-        }
+
+        def cheapest_from(plans, b0):
+            # the cost of the cheapest priced chain that starts at band b0
+            return min((q["cost"] for q in plans
+                        if len(q["chain"]) >= min_len and q["chain"][0] == b0),
+                       default=float("inf"))
+
+        lb_by_b0 = {int(b0): cheapest_from(lb_plans, b0) for b0 in cand_bands}
+        uncl_by_b0 = {int(b0): cheapest_from(uncl_plans, b0) for b0 in cand_bands}
         # The band whose screeners won in the last plan for this reference goes
         # first, the others by their lower bound. The order decides how much is
         # built: a wider band is not clustered once a narrower one has won
@@ -1207,7 +1201,7 @@ class HierarchicalFilter(MatchedFilter):
                     and bound(max(opt_map[b0], floor)) >= limit):
                 self._tier0_clusters[b0] = None
                 continue
-            raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,
+            raw_cands = self._tier0_candidates_for_band(b0, templates=templates,
                                                         pass2=next_can_win)
             found = [float(c.ratio) for c in raw_cands if c is not None]
             if found:
@@ -1228,10 +1222,7 @@ class HierarchicalFilter(MatchedFilter):
                     cost=cm_b0, max_tiers=tiers, window=self.search_window,
                     tier0_clusters={b0: (a_q, cand.lag_pad)}, first=b0
                 )
-                cand_b0_cost = min(
-                    (q["cost"] for q in cur_plans if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                    default=float("inf"),
-                )
+                cand_b0_cost = cheapest_from(cur_plans, b0)
                 if cand_b0_cost < best_cand_b0_cost:
                     best_cand_b0_cost = cand_b0_cost
                     best_cand = cand
