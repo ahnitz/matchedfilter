@@ -48,7 +48,12 @@ def test_a_plan_holds_a_calibration_per_profile(monkeypatch):
     ref_a, ref_b = _two_references(ref, n)
     alone_a, alone_b = _plan(data, ref_a, monkeypatch), _plan(data, ref_b, monkeypatch)
     want_a, want_b = _run(alone_a, data), _run(alone_b, data)
-    assert tuple(alone_a._chain) != tuple(alone_b._chain), "the two references plan alike: no test"
+    # Which chain a reference gets is the machine's cost model's call (and under load the two
+    # can come out alike); its thresholds differ between the references on any.
+    def calibration(plan):
+        r = plan._resolve()
+        return tuple(r.chain), tuple(np.round(r.thresholds, 4))
+    assert calibration(alone_a) != calibration(alone_b), "the two references calibrate alike: no test"
 
     hf = _plan(data, ref_a, monkeypatch)
     assert hf.profiles == (None,)
