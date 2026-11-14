@@ -7,7 +7,7 @@ The plan must be the one the full evaluation chooses."""
 import numpy as np
 
 import matchedfilter as mf
-from matchedfilter import _chains, _hierarchical, gatechain
+from matchedfilter import _calibration, _chains, _hierarchical, gatechain
 from spectral_profiles import make_spectral_profile
 
 _BUILD = gatechain.cluster_tier0_candidates
@@ -86,14 +86,14 @@ def test_the_band_that_won_last_is_clustered_first(monkeypatch):
 
 
 def test_the_floor_a_wider_band_inherits_from_the_narrower_ones():
-    """Every narrower band that was clustered to the end bounds the wider band's ratio from
+    """Every narrower band whose ratio is what it can share bounds the wider band's from
     below, so the largest of them binds; one cut short does not, beyond the smallest found."""
     floor = _hierarchical._narrower_bands_floor
     ratios = {64: 0.2, 128: 0.35}
     assert floor(ratios, {64, 128}, 256) == 0.35
     assert floor(ratios, {64}, 256) == 0.2            # 128 was cut short: it might reach less
     assert floor(ratios, {128}, 256) == 0.35
-    assert floor(ratios, set(), 256) == 0.2           # none complete: the smallest found
+    assert floor(ratios, set(), 256) == 0.2           # none whole: the smallest found
     assert floor(ratios, {64, 128}, 128) == 0.2       # only the bands narrower than it
     assert floor(ratios, {64, 128}, 64) is None       # nothing narrower
     assert floor({256: 0.5}, {256}, 128) is None
@@ -122,6 +122,15 @@ def _second_profile(rule, monkeypatch, spread):
     monkeypatch.setattr(gatechain, "cluster_tier0_candidates", spy)
     if not rule:
         monkeypatch.setattr(mf.HierarchicalFilter, "_tier0_seen_elsewhere", lambda self, band: None)
+    # Which band wins is the cost model's call, and a machine's own model decides it its own
+    # way: these two tests are about one particular outcome, so they price on a fixed model
+    # (a Zen 5 core's at n = 1024, without the Q15 screen).
+    fixed = gatechain.CostModel(
+        n, {64: 34.28, 128: 64.01, 256: 145.7, 512: 351.4},
+        {64: [(0.008301, 307.1), (0.09961, 146.4)], 128: [(0.008301, 307.1), (0.09961, 146.4)],
+         256: [(0.008301, 576.2), (0.09961, 258.3)], 512: [(0.008301, 996.2), (0.09961, 561.0)]},
+        [(0.008301, 2150.0), (0.09961, 2050.0)], block=2094.0)
+    monkeypatch.setattr(_calibration, "calibrate_costs", lambda *a, **kw: fixed)
     for cache in (gatechain._KEPT, gatechain._CAND_CACHE, gatechain._CHOICE_CACHE,
                   _chains._CHAIN_CHOICE, _chains._TIER0_FIRST):
         cache.clear()

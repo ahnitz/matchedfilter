@@ -119,26 +119,28 @@ _TIER0_MAX_ARITY = 16
 #: whose lower bound can win, as a check on the rule.
 _TIER0_PRUNE_WIDER = True
 
+def _narrower_bands_floor(ratios, whole, band):
+    """The smallest screener-to-template ratio `band` can be expected to reach, from the
+    narrower bands considered before it, or None when there is none.
+
+    ratios maps each such band to the smallest ratio it reached; whole holds those whose
+    ratio is what their templates can share: every pass ran, and no limit on the number of
+    screeners stopped them. A wider band shares no better than a narrower one (the rule the
+    BNS bank's leaf banks obey, not a theorem), so each of those is a floor for `band` and
+    the largest binds. A band that was cut short might have reached less: where no narrower
+    band is whole, only the smallest ratio found is used."""
+    narrower = {b: r for b, r in ratios.items() if b < band}
+    if not narrower:
+        return None
+    held = [r for b, r in narrower.items() if b in whole]
+    return max(held) if held else min(narrower.values())
+
+
 #: How much smaller a screener-to-template ratio a band is allowed to reach under one
 #: profile than it reached under another, when deciding from the other whether to cluster
 #: it at all (HierarchicalFilter._choose_chain): one step of the ratios' quantisation.
 _TIER0_ELSEWHERE_STEP = 0.05
 
-
-def _narrower_bands_floor(ratios, complete, band):
-    """The smallest screener-to-template ratio `band` can be expected to reach, from the
-    narrower bands clustered before it, or None when there is none.
-
-    ratios maps each band clustered so far to the smallest ratio it reached; complete holds
-    those whose passes all ran. A wider band shares no better than a narrower one, so every
-    narrower band's ratio is a floor for `band`, and the largest binds -- among the complete
-    ones: a band whose passes were cut short (it could no longer win) might have reached
-    less, so where no narrower band is complete only the smallest ratio found is used."""
-    narrower = {b: r for b, r in ratios.items() if b < band}
-    if not narrower:
-        return None
-    whole = [r for b, r in narrower.items() if b in complete]
-    return max(whole) if whole else min(narrower.values())
 
 
 def _tier0_centroid_enabled():
@@ -1179,15 +1181,20 @@ class HierarchicalFilter(MatchedFilter):
                         )
                         for b0 in cand_bands
                     }
-                    # The band whose screeners won in the last plan of this kind goes first,
-                    # the others by their lower bound. The order decides only how much is
+                    # The band whose screeners won in the last plan for this reference goes
+                    # first, the others by their lower bound. The order decides how much is
                     # built: a wider band is not clustered once a narrower one has won
                     # (below), and that needs the narrower one first. A top template's leaf
                     # banks share a reference, so all but the first build one band's
                     # screeners where they built two (the wider band had the lower bound
-                    # and never won: 39% of the clustering in a 324-plan capture).
+                    # and never won: 39% of the clustering in a 324-plan capture). Another
+                    # reference's winner says nothing here: the rule below is the banks'
+                    # habit, not a theorem, and a bank that breaks it keeps its own order.
+                    ref_sum = float(np.sum(self._pending_ref, dtype=np.float64))
                     order_key = (self.n, float(snr), float(self.fd), tiers, self.search_window,
-                                 str(self.device), tuple(int(b) for b in cand_bands), best_b0)
+                                 str(self.device), tuple(int(b) for b in cand_bands), best_b0,
+                                 _gatechain._gm._profile_sig(
+                                     np.asarray(self._pending_ref, np.float64) / ref_sum))
                     with _AUTOTUNE_LOCK:
                         won_last = _chains._TIER0_FIRST.get(order_key)
                     ordered_b0 = sorted((int(b) for b in cand_bands),
@@ -1196,6 +1203,7 @@ class HierarchicalFilter(MatchedFilter):
                     tie_slack = 1.0 + _gatechain.TIE
                     shared = {}        # band -> the smallest screener-to-template ratio found
                     assumed = {}       # band not clustered -> the ratio it was taken to reach
+                    whole = set()      # clustered bands whose ratio is what they can share
                     for b0 in ordered_b0:
                         limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
                         if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
@@ -1249,9 +1257,7 @@ class HierarchicalFilter(MatchedFilter):
                                 # what it was taken to share at best bounds the wider bands
                                 assumed[b0] = max(opt_map[b0], r_else - _TIER0_ELSEWHERE_STEP)
                                 continue
-                        floor = _narrower_bands_floor(
-                            {**shared, **assumed},
-                            {b for b in shared if self._tier0_cand_cache[b][1]} | set(assumed), b0)
+                        floor = _narrower_bands_floor({**shared, **assumed}, whole | set(assumed), b0)
                         if (_TIER0_PRUNE_WIDER and floor is not None
                                 and bound(max(opt_map[b0], floor)) >= limit):
                             self._tier0_clusters[b0] = None
@@ -1261,6 +1267,11 @@ class HierarchicalFilter(MatchedFilter):
                         found = [float(c.ratio) for c in raw_cands if c is not None]
                         if found:
                             shared[b0] = min(found)
+                            # its sharing, not a limit on it: every pass ran and the count
+                            # of screeners stayed above the band's least
+                            fewest = min(int(c.offsets.size) - 1 for c in raw_cands if c is not None)
+                            if self._tier0_cand_cache[b0][1] and fewest > _tier0_min_clusters(b0, is_cpu):
+                                whole.add(b0)
                         cands = _pareto_tier0_candidates(raw_cands)
                         best_cand = None
                         best_cand_b0_cost = uncl_by_b0[b0]
