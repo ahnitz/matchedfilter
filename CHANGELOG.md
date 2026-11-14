@@ -308,6 +308,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run, setup
   161 -> 127 s (paired runs on a loaded machine), steady throughput and triggers unchanged.
+  One `pycbc_inspiral_fir` job of pycbc's FIR search example (11,988 templates, H1 and L1,
+  2,048 s, one core): 447.5 -> 337.3 G instructions, peak resident memory 1.72 -> 1.43 GB,
+  the same triggers; the search after the data conditioning 20.4 -> 11.5 s. In that job the
+  block-size trial's preparation (both profiles calibrated on every candidate size) is 43.5 G
+  against 55.6 G of leaf setup and 28 G of filtering; with a cost file reused from an earlier
+  job (`MF_COST_FILE`) it is not run: 288.1 G, 1.23 GB.
   - The first band a plan builds shared screeners for is the one that won in the last plan
     for its reference (`_chains._TIER0_FIRST`), the others by lower bound as before. The rule
     that skips a wider band once a narrower one has won needs the narrower one first; the
