@@ -101,3 +101,31 @@ def test_the_floor_a_wider_band_inherits_from_the_narrower_ones():
     assert floor(ratios, {64, 128}, 64) is None       # nothing narrower
     assert floor({256: 0.5}, {256}, 128) is None
 
+
+
+def test_a_band_stopped_by_a_limit_does_not_bound_a_wider_one():
+    """A band's ratio counts as what it can share only if every pass ran and its screeners
+    stayed above the least a band keeps."""
+    from types import SimpleNamespace
+
+    def cand(count):
+        return SimpleNamespace(offsets=np.zeros(count + 1, np.int32))
+
+    freely = _hierarchical._shares_freely
+    assert freely([cand(40), cand(24), None], True, 8)
+    assert not freely([cand(40), cand(24)], False, 8)          # a pass was cut short
+    assert not freely([cand(40), cand(8)], True, 8)            # stopped at the least
+    assert not freely([None, None], True, 8)                   # nothing was shared
+
+
+def test_the_band_order_memory_is_bounded(monkeypatch):
+    """The memory of which band won holds the last few references: an older one is dropped."""
+    monkeypatch.setattr(_chains, "_TIER0_FIRST_MAX", 1)
+    plan, _ = _plan(True, monkeypatch, spread=3.0)
+    assert len(_chains._TIER0_FIRST) == 1
+    (key, won), = _chains._TIER0_FIRST.items()
+    assert won == plan[0][0]
+    _chains._TIER0_FIRST["another reference"] = 64
+    _chains._TIER0_FIRST.move_to_end(key)                       # the plan's is the newer one
+    again, _ = _plan(True, monkeypatch, spread=3.0, forget=False)
+    assert again == plan and list(_chains._TIER0_FIRST) == [key]

@@ -174,7 +174,8 @@ def get_autotune_state():
 
 def clear_autotune_cache():
     """Forget every workload choice and trial this process made: chain choices, the model's
-    Q15 settings, joint trials (block sizes, chains and screens), the single-device choices
+    Q15 settings, the band each reference clustered first, joint trials (block sizes, chains
+    and screens), the single-device choices
     and the device trials of GPU batches (fusion, follow-ups, interleave), and the CPU forward,
     Q15 tier-0 and direct-refine prices.
     The next use starts afresh from MF_COST_FILE. Machine state is kept: cost models

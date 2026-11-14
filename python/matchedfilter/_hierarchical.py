@@ -119,6 +119,15 @@ _TIER0_MAX_ARITY = 16
 #: whose lower bound can win, as a check on the rule.
 _TIER0_PRUNE_WIDER = True
 
+def _shares_freely(candidates, complete, least):
+    """Whether a band's smallest screener-to-template ratio is what its templates can share
+    and not a limit on it: every pass of its clustering ran (complete) and the fewest
+    screeners any of its candidates has stayed above `least`, the number a band keeps at
+    least (_tier0_min_clusters), where the passes stop of themselves."""
+    counts = [int(c.offsets.size) - 1 for c in candidates if c is not None]
+    return bool(complete and counts and min(counts) > int(least))
+
+
 def _narrower_bands_floor(ratios, whole, band):
     """The smallest screener-to-template ratio `band` can be expected to reach, from the
     narrower bands considered before it, or None when there is none.
@@ -1224,10 +1233,8 @@ class HierarchicalFilter(MatchedFilter):
                         found = [float(c.ratio) for c in raw_cands if c is not None]
                         if found:
                             shared[b0] = min(found)
-                            # its sharing, not a limit on it: every pass ran and the count
-                            # of screeners stayed above the band's least
-                            fewest = min(int(c.offsets.size) - 1 for c in raw_cands if c is not None)
-                            if self._tier0_cand_cache[b0][1] and fewest > _tier0_min_clusters(b0, is_cpu):
+                            if _shares_freely(raw_cands, self._tier0_cand_cache[b0][1],
+                                              _tier0_min_clusters(b0, is_cpu)):
                                 whole.add(b0)
                         cands = _pareto_tier0_candidates(raw_cands)
                         best_cand = None
