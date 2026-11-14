@@ -136,13 +136,6 @@ def _narrower_bands_floor(ratios, whole, band):
     return max(held) if held else min(narrower.values())
 
 
-#: How much smaller a screener-to-template ratio a band is allowed to reach under one
-#: profile than it reached under another, when deciding from the other whether to cluster
-#: it at all (HierarchicalFilter._choose_chain): one step of the ratios' quantisation.
-_TIER0_ELSEWHERE_STEP = 0.05
-
-
-
 def _tier0_centroid_enabled():
     return bool(_TIER0_PAIR_CENTROID)
 
@@ -535,18 +528,6 @@ class HierarchicalFilter(MatchedFilter):
         )
         self._tier0_cand_cache[b] = (cands, not skipped[0])
         return cands
-
-    def _tier0_seen_elsewhere(self, band):
-        """What another profile's clustering of `band` found for this plan's templates: the
-        (ratio, retention, lag padding) of its screeners with the smallest ratio, when every
-        pass of it ran; None when no other profile clustered the band to the end."""
-        best = None
-        for state in self.__dict__.get("_profiles", {}).values():
-            cands, complete = state.get("_tier0_cand_cache", {}).get(int(band), ((), False))
-            for cl in cands if complete else ():
-                if cl is not None and (best is None or cl.ratio < best.ratio):
-                    best = cl
-        return None if best is None else (float(best.ratio), float(best.alpha), int(best.lag_pad))
 
     def _tier0_cluster_for_band(self, band, templates=None, forced_chain=None):
         """Lazily compute and memoize `Tier0Cluster` (or `None`) for `band` under `_pending_ref`."""
@@ -1203,7 +1184,6 @@ class HierarchicalFilter(MatchedFilter):
                     won = None
                     tie_slack = 1.0 + _gatechain.TIE
                     shared = {}        # band -> the smallest screener-to-template ratio found
-                    assumed = {}       # band not clustered -> the ratio it was taken to reach
                     whole = set()      # clustered bands whose ratio is what they can share
                     for b0 in ordered_b0:
                         limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
@@ -1234,31 +1214,7 @@ class HierarchicalFilter(MatchedFilter):
                         # even at the best ratio a narrower band found, its screeners are not
                         # built: that was half of the clustering in a leaf bank's setup, for
                         # a band that never won.
-                        # The same templates clustered at b0 for another profile tell what b0
-                        # can share here: sharing is the templates' far more than the
-                        # noise's. Once a band has won, b0 is not clustered if it loses even
-                        # one ratio step better than it shared there, at that retention.
-                        elsewhere = self._tier0_seen_elsewhere(b0) if won is not None else None
-                        if elsewhere is not None:
-                            r_else, a_else, pad_else = elsewhere
-                            _, plans_e = _gatechain.choose_chain(
-                                self._pending_ref, self.n, snr, self.fd,
-                                ntemplates=self.ntemplates,
-                                cost=base_cm.with_tier0_cluster(
-                                    {b0: max(opt_map[b0], r_else - _TIER0_ELSEWHERE_STEP)},
-                                    single_tier=is_cpu),
-                                max_tiers=tiers, window=self.search_window,
-                                tier0_clusters={b0: (math.floor(a_else * 200.0 + 1e-9) / 200.0,
-                                                     pad_else)},
-                                first=b0)
-                            if min((q["cost"] for q in plans_e
-                                    if len(q["chain"]) >= min_len and q["chain"][0] == b0),
-                                   default=float("inf")) >= limit:
-                                self._tier0_clusters[b0] = None
-                                # what it was taken to share at best bounds the wider bands
-                                assumed[b0] = max(opt_map[b0], r_else - _TIER0_ELSEWHERE_STEP)
-                                continue
-                        floor = _narrower_bands_floor({**shared, **assumed}, whole | set(assumed), b0)
+                        floor = _narrower_bands_floor(shared, whole, b0)
                         if (_TIER0_PRUNE_WIDER and floor is not None
                                 and bound(max(opt_map[b0], floor)) >= limit):
                             self._tier0_clusters[b0] = None
