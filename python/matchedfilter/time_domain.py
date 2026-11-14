@@ -392,6 +392,8 @@ def _max_tiers(device) -> int:
 
 #: Identifies one filter_series_many batch to the plans it defers.
 _BATCH_TOKEN = 0
+#: "the profile in use": the default of the calls that take a profile (None is a profile's name).
+_SAME_PROFILE = object()
 
 #: The configurations each device set's trials have settled (Choice.play's `ran`).
 _GPU_RAN = {}
@@ -1358,7 +1360,8 @@ class TimeDomainFilterBank:
     def set_reference(
         self,
         reference: Union[np.ndarray, Dict[int, np.ndarray]],
-        delta_f: Optional[float] = None
+        delta_f: Optional[float] = None,
+        profile=_SAME_PROFILE,
     ) -> None:
         """Set reference SNR profile across all hierarchical groups.
 
@@ -1368,7 +1371,19 @@ class TimeDomainFilterBank:
                 - 1D array of power spectrum w(f) on fine grid with frequency spacing delta_f, OR
                 - 1D reference profile if all groups share the same block size.
             delta_f: Frequency resolution of fine grid (required when reference is w(f)).
+            profile: optional name of the noise profile this reference calibrates (any
+                hashable). A bank holds one calibration per name over one set of
+                templates: the first reference set also settles the block sizes, a
+                reference under a further name adds that profile's chain, thresholds
+                and screeners, and a filtering call names the profile it runs
+                (``profile=``). Default: the profile in use (the bank's only one unless
+                ``use_profile`` or a named reference chose another).
         """
+        if profile is not _SAME_PROFILE:
+            if not self.__dict__.get("_refs"):
+                self._first_profile = profile
+            self.use_profile(profile)
+        self.__dict__.setdefault("_refs", {})[self.__dict__.get("_profile")] = (reference, delta_f)
         if self._choose_n and not getattr(self, '_n_chosen', False):
             # The first reference settles the block sizes: by cost from a fine-grid
             # profile, else by the valid-fraction rule.
@@ -1482,6 +1497,59 @@ class TimeDomainFilterBank:
     def _restore(self, snap):
         for k, v in snap.items():
             setattr(self, k, v)
+        self._sync_plans()
+
+    # ---- several noise profiles ----------------------------------------------------
+    # A bank's templates are searched in more than one noise -- one detector's and
+    # another's -- with one calibration each: set_reference(..., profile=name) adds a
+    # profile, and a filtering call names the one it runs (profile=name). The templates,
+    # their grouping into block sizes and the compiled plans' template storage are the
+    # bank's, once (HierarchicalFilter.use_profile).
+    def _plan_profile(self, profile):
+        """The name a plan holds `profile` under: None for the bank's first."""
+        return None if profile == self.__dict__.get("_first_profile") else profile
+
+    def _sync_plans(self):
+        """Every built plan of the layout in use on the bank's profile."""
+        key = self._plan_profile(self.__dict__.get("_profile"))
+        for g in self.__dict__.get("_built") or ():
+            plan = getattr(g, "_plan", None)
+            if g.is_hier and plan is not None and hasattr(plan, "use_profile"):
+                plan.use_profile(key)
+
+    def use_profile(self, profile) -> None:
+        """Filter with the calibration of the noise profile `profile` from the next call on
+        (a name a reference was set under; None is the bank's first when it was not named)."""
+        if profile != self.__dict__.get("_profile"):
+            self._profile = profile
+            self._sync_plans()
+
+    @property
+    def profiles(self):
+        """The names of the profiles a reference has been set for, in the order set."""
+        return tuple(self.__dict__.get("_refs", {}))
+
+    @property
+    def _current_ref_key(self):
+        return self.__dict__.get("_ref_keys", {}).get(self.__dict__.get("_profile"))
+
+    @_current_ref_key.setter
+    def _current_ref_key(self, value):
+        if value is None:
+            self.__dict__["_ref_keys"] = {}          # every profile's reference is to be set again
+        else:
+            self.__dict__.setdefault("_ref_keys", {})[self.__dict__.get("_profile")] = value
+
+    def _reapply_references(self):
+        """Give the layout in use every profile's reference (a layout built after they were set)."""
+        home = self.__dict__.get("_profile")
+        self._current_ref_key = None
+        try:
+            for name, (ref, df) in list(self.__dict__.get("_refs", {}).items()):
+                self.use_profile(name)
+                self.set_reference(ref, delta_f=df)
+        finally:
+            self.use_profile(home)
 
     def _ensure_layout(self, rank: int):
         """Materialize the rank-th candidate layout on demand from rank 0's group taps."""
@@ -1506,9 +1574,7 @@ class TimeDomainFilterBank:
                 self._build(*alt)
             finally:
                 self._tap_donor = None
-            ref, rdf = self._layout_ref
-            self._current_ref_key = None
-            self.set_reference(ref, delta_f=rdf)
+            self._reapply_references()
             layouts[rank] = self._snapshot()
             self._restore(layouts[cur])
             self._current_ref_key = prev_ref_key
@@ -1531,9 +1597,7 @@ class TimeDomainFilterBank:
         self._restore(layouts[rank])
         self._layout_rank = rank
         self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
-        ref, df = self._layout_ref
-        self._current_ref_key = None
-        self.set_reference(ref, delta_f=df)          # this layout's groups get it, and templates
+        self._reapply_references()                   # this layout's groups get them, and templates
         self._state_version = getattr(self, '_state_version', 0) + 1
 
     def _lock_layout(self, rank: int) -> None:
@@ -1576,9 +1640,7 @@ class TimeDomainFilterBank:
                     self._tap_donor = None
                 self._layout_rank = rank
                 self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
-                ref, rdf = self._layout_ref
-                self._current_ref_key = None
-                self.set_reference(ref, delta_f=rdf)
+                self._reapply_references()
                 self._state_version = getattr(self, '_state_version', 0) + 1
                 return
             layouts[rank] = layouts[same]
@@ -1627,7 +1689,7 @@ class TimeDomainFilterBank:
         for r in dict.fromkeys(range(len(self._layouts or [None]))):
             self._use_layout(r)
             for p in self._layout_plans(r):
-                p.arm_config(_trial.DEFAULT)
+                p.arm_configs(_trial.DEFAULT)
         self._use_layout(home)
         self._arms_ready = True
 
@@ -1636,7 +1698,7 @@ class TimeDomainFilterBank:
         arms = [_trial.DEFAULT] + [_settings.arm("n", n) for n in self._trial_cands[1:]]
         plans = self._layout_plans(self._arm_rank(_trial.DEFAULT))
         for p in plans:
-            p.arm_config(_trial.DEFAULT)
+            p.arm_configs(_trial.DEFAULT)
         if any(p._q15_ok(tuple(p._chain)) for p in plans if p._chain is not None):
             arms += [_settings.arm("q15", True), _settings.arm("q15", False)]
         return arms
@@ -1648,7 +1710,7 @@ class TimeDomainFilterBank:
         snap = self._ensure_layout(r) if self._layouts else None
         part = tuple((int(b), int(e), int(n)) for b, e, n, _ in
                      (snap.get('_built_layout') if snap is not None else self._built_layout))
-        return part, tuple(p.arm_config(label) for p in self._layout_plans(r))
+        return part, tuple(p.arm_configs(label) for p in self._layout_plans(r))
 
     def _use_arm(self, label) -> None:
         """Run an arm from the next call on."""
@@ -1670,6 +1732,11 @@ class TimeDomainFilterBank:
             if g.is_hier and not g.templates_loaded:
                 g.load_templates(g.plan)
                 g.templates_loaded = True
+            elif (g.is_hier and g.plan.device.kind == "cpu" and g.plan._pending_ref is not None
+                  and g.plan._mf is None):
+                # a further profile of loaded templates: its compiled plan, which reads the
+                # first one's templates
+                g.plan._ensure()
             # Solve the plan's thresholds now, with the rest of the calibration: left to the
             # first filtering call, a chain whose plan the choice did not already hold (one
             # with second-tier shared screeners) solves them inside that call.
@@ -1703,11 +1770,14 @@ class TimeDomainFilterBank:
         windows=None,
         binsize: Optional[int] = None,
         threshold: Optional[float] = None,
-        template_index: Optional[int] = None
+        template_index: Optional[int] = None,
+        profile=_SAME_PROFILE,
     ) -> FilterResults:
         """Filter a continuous series across all template groups (or a specific template).
 
         Parameters:
+            profile: the noise profile whose calibration the call runs with (a name a
+                reference was set under; default: the one in use).
             series: Continuous data series (e.g. complex reference SNR). The
                 hierarchical engine's coarse gate is calibrated for an analytic
                 (positive-frequency) series, which is what pycbc passes.
@@ -1732,6 +1802,8 @@ class TimeDomainFilterBank:
                 block_starts: start sample of block containing each trigger
                 block_lengths: FFT block length used for each trigger
         """
+        if profile is not _SAME_PROFILE:
+            self.use_profile(profile)
         # One template on the CPU (a search's follow-up, PeaksContext.refilter): the batched
         # follow-up path, as a batch of one. It reads the series in place (real, or one lane
         # of a packed pair), lays the blocks out and merges the bins in C, and keeps the
@@ -2303,7 +2375,7 @@ class TimeDomainFilterBank:
             kw = kw or {}
             ti = kw.get("template_index")
             if (ti is None or bank.engine not in ("hier", "flat")
-                    or (set(kw) - {"windows", "binsize", "threshold", "template_index"})):
+                    or (set(kw) - {"windows", "binsize", "threshold", "template_index", "profile"})):
                 continue
             if not force_cpu and _parse_device(bank.device).kind != "cpu":
                 continue
@@ -2448,10 +2520,15 @@ class TimeDomainFilterBank:
         return done
 
     @staticmethod
-    def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold):
-        """Prepare group sub-tasks for a CPU hierarchical sparse filter_series call, or None."""
+    def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, profile=_SAME_PROFILE):
+        """Prepare group sub-tasks for a CPU hierarchical sparse filter_series call, or None.
+        Each entry ends with the name its plan holds the job's profile under: the plans are
+        configured after every job of a batch is prepared, when the bank may be on another."""
         from .device import parse as _parse_device
         from ._filter import MatchedFilter
+        if profile is not _SAME_PROFILE:
+            bank.use_profile(profile)
+        plan_profile = bank._plan_profile(bank.__dict__.get("_profile"))
         if (bank.engine != 'hier' or _parse_device(bank.device).kind != 'cpu'
                 or not np.isfinite(eff_threshold) or eff_threshold < bank.threshold
                 or eff_threshold <= 0.0):
@@ -2530,7 +2607,7 @@ class TimeDomainFilterBank:
                 sl_memo[sl_key] = sl_list
 
             for sub_st, sl, s_min, s_max in sl_list:
-                entries.append((g, sub_st, sl, s_min, s_max, g.plan, ser, bs, eff_threshold))
+                entries.append((g, sub_st, sl, s_min, s_max, g.plan, ser, bs, eff_threshold, plan_profile))
 
         return (W, merge_bs, entries)
 
@@ -2577,7 +2654,7 @@ class TimeDomainFilterBank:
                     continue
                 kw = kw or {}
                 if (bank.engine != 'hier' or kw.get("template_index") is not None
-                        or (set(kw) - {"windows", "binsize", "threshold", "template_index"})):
+                        or (set(kw) - {"windows", "binsize", "threshold", "template_index", "profile"})):
                     continue
                 thr_arg = kw.get("threshold")
                 eff_threshold = bank.threshold if thr_arg is None else float(thr_arg)
@@ -2610,7 +2687,8 @@ class TimeDomainFilterBank:
                     done.add(j)
                     continue
                 prep = TimeDomainFilterBank._prepare_cpu_sparse_job(
-                    bank, ser, W, cache_key, kw.get("binsize"), eff_threshold)
+                    bank, ser, W, cache_key, kw.get("binsize"), eff_threshold,
+                    kw.get("profile", _SAME_PROFILE))
                 if prep is not None:
                     prepared.append((j, prep))
 
@@ -2666,7 +2744,8 @@ class TimeDomainFilterBank:
         ep_modes = {}
         for j, (W, merge_bs, entries) in prepared:
             job_subs = []
-            for g, sub_st, sl, s_min, s_max, active_plan, ser_in, bs, eff_threshold in entries:
+            for g, sub_st, sl, s_min, s_max, active_plan, ser_in, bs, eff_threshold, plan_profile in entries:
+                active_plan.use_profile(plan_profile)
                 nt = active_plan.ntemplates
                 active_plan._require_templates(0, nt)
                 active_plan._dataset = False
@@ -2931,7 +3010,7 @@ class TimeDomainFilterBank:
         dt_filter_total = 0.0
         fallback_leaves = list(independent_leaves)
         allowed_corr_keys = {"windows", "scales", "templates", "out", "out_support", "wait"}
-        allowed_leaf_keys = {"windows", "binsize", "threshold", "template_index"}
+        allowed_leaf_keys = {"windows", "binsize", "threshold", "template_index", "profile"}
         all_ephemeral = retain_radius == 0
 
         # Screen candidate correlation jobs and group compatible multi-detector jobs into cohorts.
@@ -3268,14 +3347,16 @@ class TimeDomainFilterBank:
                             continue
 
                         prep = TimeDomainFilterBank._prepare_cpu_sparse_job(
-                            l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr)
+                            l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr,
+                            l_kw.get("profile", _SAME_PROFILE))
                         if prep is None:
                             cohort_ok = False
                             break
 
                         W_p, merge_bs, entries = prep
                         job_subs = []
-                        for g_f, sub_st, sl, _, _, active_plan, ser_in, bs, thr_f in entries:
+                        for g_f, sub_st, sl, _, _, active_plan, ser_in, bs, thr_f, plan_profile in entries:
+                            active_plan.use_profile(plan_profile)
                             nt_f = active_plan.ntemplates
                             active_plan._require_templates(0, nt_f)
                             active_plan._dataset = False

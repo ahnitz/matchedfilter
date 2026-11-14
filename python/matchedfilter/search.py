@@ -67,8 +67,8 @@ class Root:
     block by the caller. profile: (w, delta_f), the expected signal power spectrum the leaf
     banks' gates are calibrated with (TimeDomainFilterBank.set_reference), or a dict
     {channel: (w, delta_f)} where the channels' noise spectra differ (two detectors): each
-    channel then has its own leaf banks, calibrated on its own profile. A channel the dict does
-    not name takes the first profile."""
+    leaf bank then holds a calibration for every channel's profile over one copy of its
+    templates. A channel the dict does not name takes the first profile."""
 
     def __init__(self, spectrum, band, children=(), profile=None, node_id=None):
         self.spectrum = np.ascontiguousarray(spectrum, dtype=np.complex64)
@@ -177,7 +177,8 @@ class PeaksContext:
                              "series support %r" % (windows, channel, sup))
         bank = self._search.leaf_bank(self.root, self.leaf, channel)
         return bank.filter_series(ser, windows=windows, binsize=binsize,
-                                  threshold=threshold, template_index=template_index)
+                                  threshold=threshold, template_index=template_index,
+                                  profile=self._search._channel_profile(self.root, channel))
 
 
 def _merge(spans):
@@ -413,32 +414,43 @@ class HierarchicalSearch:
                 raise TypeError("children are Inner or Leaf nodes")
         self._kids[id(node)] = (inner, leaves)
 
-    def leaf_bank(self, root, leaf, channel=None):
-        """The TimeDomainFilterBank that searches leaf below root in channel (built on first
-        use, with root's profile for that channel as its reference). Where root has one
-        profile, every channel shares the bank; channel=None is the first profile's bank."""
+    def _channel_profile(self, root, channel):
+        """The name of root's profile that channel is searched with (None where root has
+        one profile for every channel, or none)."""
         prof = root.profile
-        which = None
+        if not isinstance(prof, dict):
+            return None
+        return channel if channel in prof else next(iter(prof), None)
+
+    def leaf_bank(self, root, leaf, channel=None):
+        """The TimeDomainFilterBank that searches leaf below root: one bank for the leaf,
+        built on first use, holding a calibration for each of root's profiles (a noise
+        profile a channel, or one for all). It is given `channel`'s profile as a reference
+        the first time that channel asks; a filtering call names the profile it runs
+        (profile=). The templates and the compiled plans' template storage are the leaf's,
+        once, whatever the number of profiles."""
+        prof = root.profile
+        which = self._channel_profile(root, channel)
         if isinstance(prof, dict):
-            which = channel if channel in prof else next(iter(prof), None)
             prof = prof.get(which)
-        bank = self._leaf_banks.get((id(leaf), which))
+        bank = self._leaf_banks.get(id(leaf))
         if bank is None:
             t0 = time.perf_counter()
             opts = dict(self.leaf_options)
             opts["threshold"] = self.threshold * self.envelope_floor
-            bank = self._leaf_banks[(id(leaf), which)] = TimeDomainFilterBank(
-                leaf.taps, leaf.counts, **opts)
-            if prof is not None:
-                # the first reference settles the bank's block sizes and calibrates its gates
-                w, df = prof
-                bank.set_reference(w, delta_f=df)
+            bank = self._leaf_banks[id(leaf)] = TimeDomainFilterBank(leaf.taps, leaf.counts, **opts)
+            self.timings["setup"] += time.perf_counter() - t0
+        if prof is not None and which not in bank.profiles:
+            # the first reference settles the bank's block sizes; each calibrates its gates
+            t0 = time.perf_counter()
+            w, df = prof
+            bank.set_reference(w, delta_f=df, profile=which)
             self.timings["setup"] += time.perf_counter() - t0
         return bank
 
     def _leaf_block_length(self, root, leaf):
-        """The longest block leaf's banks below root use or may still choose, over root's
-        profiles (one bank a profile)."""
+        """The longest block leaf's bank below root uses or may still choose, once it holds
+        every one of root's profiles."""
         prof = root.profile
         chans = list(prof) if isinstance(prof, dict) and prof else [None]
         return max(int(self.leaf_bank(root, leaf, c).max_block_length) for c in chans)
@@ -682,7 +694,8 @@ class HierarchicalSearch:
                     series = step.held[c][id(self._parent[id(lf)])]
                     # one window as a slice: filter_series memoises a slice's layout
                     where[(id(lf), c)] = len(jobs)
-                    jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w)))
+                    jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w,
+                                                    profile=self._channel_profile(step.root, c))))
         deferred = any(getattr(b, "device", None) is not None
                        and _parse_device(b.device).kind == "gpu"
                        for b, _, _ in jobs)

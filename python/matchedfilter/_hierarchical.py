@@ -261,11 +261,95 @@ class HierarchicalFilter(MatchedFilter):
             return self.device.kind == "cpu" and self.n >= 4
         return self.n <= 65536
 
+    # ---- several noise profiles over one set of templates ------------------------
+    # A plan's templates do not depend on the noise they are searched in; its calibration
+    # does: the reference profile, and what follows from it -- the chain, the thresholds, the
+    # shared screeners and the compiled plan's tiers. A plan holds one calibration per
+    # profile (use_profile) and one copy of the templates: every profile's compiled plan
+    # reads the first one's template storage (_core.HMF(share=)).
+    _PROFILE_STATE = ("_pending_ref", "_cal_thr", "_resolved", "_mf", "_q15", "_tier0_clusters",
+                      "_tier0_cand_cache", "_tier1_clusters", "_chosen_csig", "_synced_t0",
+                      "_synced_t1", "_gt0_checked", "_forced", "_model_chain", "_chain",
+                      "autotune_info", "_choice_key", "_plan_halfwidth", "_refine_reach",
+                      "_execution_policy", "_applied_plan", "_applied_res", "_applied_real",
+                      "_ep_real")
+
+    def use_profile(self, profile):
+        """Run with the calibration held for the noise profile `profile` from the next call
+        on: any hashable name (None is the plan's first, unnamed one). A profile not seen
+        before starts uncalibrated; set its reference (set_reference) while it is in use.
+        The templates, taps and data are the plan's, whatever the profile.
+
+        Parameters
+        ----------
+        profile : hashable or None
+            The name of the profile to use.
+        """
+        if self._gpu is not None and profile != self.__dict__.get("_profile"):
+            raise NotImplementedError("several profiles in one plan are not supported on a GPU")
+        d = self.__dict__
+        if profile == d.get("_profile"):
+            return
+        held = d.setdefault("_profiles", {})
+        if not held and d.get("_mf") is None:
+            # the lone profile has no compiled plan in use: none to read templates from
+            d.pop("_template_owner", None)
+        held[d.get("_profile")] = {a: d.pop(a) for a in self._PROFILE_STATE if a in d}
+        state = held.pop(profile, None)
+        if state is None:
+            state = dict(_pending_ref=None, _cal_thr=None, _resolved=None, _mf=None, _q15=False,
+                         _tier0_clusters={}, _tier0_cand_cache={}, _tier1_clusters={},
+                         _chosen_csig=(), _synced_t0=None, _synced_t1=None, _gt0_checked=0,
+                         _forced=False, _model_chain=None, _chain=self._pinned,
+                         autotune_info={"status": "pinned" if self._pinned else "uninitialized",
+                                        "trials": 0})
+        d.update(state)
+        self._profile = profile
+        if self._mf is not None:
+            self._replay_data(self._mf)             # the data set since this profile last ran
+        order = d.setdefault("_profile_order", [None])
+        if profile not in order:
+            order.append(profile)
+
+    @property
+    def profiles(self):
+        """The names of the profiles this plan holds a calibration for, in the order they
+        were first used (the unnamed first one, None, first)."""
+        return tuple(self.__dict__.get("_profile_order", (None,)))
+
+    def _each_profile(self, call):
+        """call() with each held profile in use in turn, leaving the one in use as it was:
+        [call's results], in the order of `profiles`."""
+        names = self.profiles
+        home = self.__dict__.get("_profile")
+        out = []
+        try:
+            for name in names:
+                self.use_profile(name)
+                out.append(call())
+        finally:
+            self.use_profile(home)
+        return out
+
     def _new_cpu_plan(self, chain):
         self._execution_policy = self._series_policy('hierarchical_series', chain[-1], self.ntemplates)
         grp = int(self._execution_policy.get('series_group', _gatechain.default_series_group(self.n)))
-        plan = _core.HMF(self.n, self.ndata, self.ntemplates, list(chain), grp,
-                         int(getattr(self, 'k', self.n) or self.n))
+        args = (self.n, self.ndata, self.ntemplates, list(chain), grp,
+                int(getattr(self, 'k', self.n) or self.n))
+        # the compiled plan that holds the templates: the first one built, which every other
+        # profile's (and a later chain's) reads where it can -- the same block length, bins
+        # and series group
+        owner = self.__dict__.get("_template_owner") if self.__dict__.get("_profiles") else None
+        plan = None
+        if owner is not None:
+            try:
+                plan = _core.HMF(*args, owner)
+            except (ValueError, TypeError):
+                plan = None
+        if plan is None:
+            plan = _core.HMF(*args)
+            if owner is None:
+                self._template_owner = plan         # (a lone profile's latest plan)
         if self._hermitian:
             plan.set_hermitian(True)
         if getattr(self, "_q15", False) and not plan.set_q15(True):
@@ -309,16 +393,23 @@ class HierarchicalFilter(MatchedFilter):
         q = q if q is not None else (False if self._pinned is not None else self._q15_model(chain))
         return chain, bool(q) and self._q15_ok(chain)
 
+    def arm_configs(self, label):
+        """arm_config(label) of every profile this plan holds, in the order of `profiles`."""
+        return tuple(self._each_profile(lambda: self.arm_config(label)))
+
     def use_arm(self, label):
-        """Run arm label from the next call on."""
+        """Run arm label from the next call on, in every profile."""
         self._arm = str(label)
-        if self._chain is not None:
-            self._set_q15(self.arm_config(label)[1])
+
+        def one():
+            if self._chain is not None:
+                self._set_q15(self.arm_config(label)[1])
+        self._each_profile(one)
 
     def lock_arm(self, label):
-        """Run arm label from now on (a trial's lock)."""
+        """Run arm label from now on (a trial's lock), in every profile."""
         self.use_arm(label)
-        self.autotune_info.update(status="locked", arm=self._arm)
+        self._each_profile(lambda: self.autotune_info.update(status="locked", arm=self._arm))
 
     def _set_q15(self, on):
         """The screen on or off from the next call on."""
@@ -657,6 +748,10 @@ class HierarchicalFilter(MatchedFilter):
         else:
             plan.set_template_batch(0, templates)
             self._sync_tier0_clusters(plan)
+        self._replay_data(plan)
+
+    def _replay_data(self, plan):
+        """Give plan the data held (set_data): each profile's compiled plan has its own rows."""
         if self._held:
             if -1 in self._held:
                 plan.set_data_batch(0, self._held[-1])
@@ -1188,7 +1283,18 @@ class HierarchicalFilter(MatchedFilter):
             _record_cpu_trial(begin)
         return res
 
+    def _recalibrate_other_profiles(self):
+        """The templates or taps changed: the calibrations held for the profiles not in use
+        rested on the old ones. Each keeps its reference and chooses again when next used."""
+        for state in self.__dict__.get("_profiles", {}).values():
+            state.update(_resolved=None, _mf=None, _q15=False, _tier0_clusters={},
+                         _tier0_cand_cache={}, _tier1_clusters={}, _chosen_csig=(),
+                         _synced_t0=None, _synced_t1=None, _chain=self._pinned)
+            for a in ("_applied_plan", "_applied_res", "_applied_real"):
+                state.pop(a, None)
+
     def set_templates(self, spectra, index=None):
+        self._recalibrate_other_profiles()
         if index is not None:
             self._clusters_allowed = False
             if self._tier0_clusters or self._tier0_cand_cache or self._tier1_clusters:
@@ -1284,6 +1390,7 @@ class HierarchicalFilter(MatchedFilter):
         if counts.shape != (self.ntemplates,) or counts.min() < 1 or counts.max() > min(taps.shape[1], self.n):
             raise ValueError("counts must be (ntemplates,) in [1, min(m, n)]")
         self._taps = (taps, counts, cplx)
+        self._recalibrate_other_profiles()
         self._gtaps_info = None
         self.__dict__.pop("_call_plans", None)
         if self._pinned is None and self._chain is not None:

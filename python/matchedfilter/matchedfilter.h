@@ -199,6 +199,12 @@ typedef struct ap_hmf_plan ap_hmf_plan;
 #define AP_HMF_MAX_TIERS 8
 ap_hmf_plan *ap_hmf_create_chain(size_t n, size_t k, int ndata, int ntmpl,
                                  const size_t *bands, int ntiers, int series_group);
+/* A plan of the same templates as `owner` (same n, k, template count and data rows) with a
+   chain of its own, reading owner's full-resolution templates, half-spectrum templates and
+   taps instead of holding copies: the templates of a bank calibrated for several noise
+   profiles exist once. owner must outlive it; NULL where the two cannot share. */
+ap_hmf_plan *ap_hmf_create_chain_shared(ap_hmf_plan *owner, size_t n, size_t k, int ndata, int ntmpl,
+                                        const size_t *bands, int ntiers, int series_group);
 /* One finite threshold per tier, in coarse-output units; a negative value
    marks the plan unconfigured and execution then fails. */
 int ap_hmf_set_thresholds(ap_hmf_plan *p, const float *thr, int ntiers);
