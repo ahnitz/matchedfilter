@@ -112,6 +112,20 @@ def test_a_retention_holds_its_own_band_beside_the_plain_draws(empty_model):
             assert (A.cols[i].base is Ap.cols[i].base) == (c != altered)      # the plain half itself
 
 
+def _altered_bands_per_simulation(monkeypatch):
+    """A list that receives, for every simulation run from here on, the number of bands it
+    alters by a retention."""
+    simulated = []
+    simulate = gc._simulate
+
+    def spy(p_, n, bands_, *a, **k):
+        simulated.append(sum(x < 1.0 for x in (k.get("alphas") or ())))
+        return simulate(p_, n, bands_, *a, **k)
+
+    monkeypatch.setattr(gc, "_simulate", spy)
+    return simulated
+
+
 def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_model, monkeypatch):
     """A band's draws under its retention do not depend on the other bands' retentions, so a
     retention of two bands is read from the two single ones: the same draws as its own
@@ -125,14 +139,7 @@ def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_mo
     for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS, gc._SIMILAR, gc._SIMILAR_COUNT):
         c.clear()
 
-    simulated = []
-    simulate = gc._simulate
-
-    def spy(p_, n, bands_, *a, **k):
-        simulated.append(sum(x < 1.0 for x in (k.get("alphas") or ())))
-        return simulate(p_, n, bands_, *a, **k)
-
-    monkeypatch.setattr(gc, "_simulate", spy)
+    simulated = _altered_bands_per_simulation(monkeypatch)
     (Cs, Fs), (fats, cats) = _draws(p, bands, alphas=both)
     assert isinstance(Cs, gc._Beside) and sorted(Cs.own) == [0, 1]
     assert max(simulated) == 1                        # one band at a time
@@ -154,16 +161,8 @@ def test_noise_under_two_retentions_is_each_bands_own(empty_model, monkeypatch):
     k0s = tuple(gc.band_offset(p, N, b) for b in bands)
     together = gc._noise_records(p, N, bands[:2], nsim, 5, k0s=k0s[:2], alphas=al[:2])
     plain = gc._noise_records(p, N, bands, nsim, 5, k0s=k0s)
-    for c in (gc._NOISE_RECORDS,):
-        c.clear()
-    simulated = []
-    simulate = gc._simulate
-
-    def spy(p_, n, bands_, *a, **k):
-        simulated.append(sum(x < 1.0 for x in (k.get("alphas") or ())))
-        return simulate(p_, n, bands_, *a, **k)
-
-    monkeypatch.setattr(gc, "_simulate", spy)
+    gc._NOISE_RECORDS.clear()
+    simulated = _altered_bands_per_simulation(monkeypatch)
     got = gc._noise_records(p, N, bands, nsim, 5, k0s=k0s, alphas=al)
     assert max(simulated) == 1
     for i in (0, 1):
