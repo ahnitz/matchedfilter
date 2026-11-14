@@ -298,11 +298,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   window's, and charges to its budget the detections whose direct refine noise far from the
   signal would draw away (`tests/test_local_window.py`; `docs/gate-model.md` has the
   379,680-plan audit and the engine's).
-  MEASURED on the 171,828-template showcase search, 16 workers, default configuration, peak
-  resident memory per worker: 1.79 -> 1.36 GiB with one profile, 3.09 -> 2.18 GiB with a
-  profile per detector; leaf setup with a profile per detector 187 -> 156 s summed; steady
-  throughput within run-to-run scatter (12.0 -> 12.1 M template-s/s per core at SNR 6.0 /
-  FDR 0.001, 36.2 -> 36.0 M at 6.5 / 0.01).
+  MEASURED on the 171,828-template showcase search, 16 workers, default configuration, at
+  SNR 6.0 / FDR 0.001, 6.5 / 0.01, 6.5 / 0.001 and 7.0 / 0.01 (two to five runs each). Peak
+  resident memory per worker: 1.75-2.00 -> 1.40-1.45 GiB with one profile, 3.10-3.21 ->
+  2.31-2.56 GiB with a profile per detector. Leaf setup, summed, at 6.0 / 0.001: 67 -> 63 s
+  and 176 -> 156 s. Steady template throughput per core, M: one profile 12.2, 32.4, 17.9,
+  28.9 -> 12.0, 32.8, 17.6, 34.4 (the first and third within the runs' scatter of 3%); a
+  profile per detector 12.7, 38.8, 19.9, 41.0 -> 13.0, 39.4, 20.0, 41.7.
 - A time-domain bank solves each hierarchical plan's thresholds when its reference is set,
   with the rest of the calibration. They were solved on the first filtering call, and a chain
   the choice had not already planned in that form (one with second-tier shared screeners)
