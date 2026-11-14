@@ -1204,9 +1204,8 @@ def _similar_get(kind, p, params):
 #: runs -- a choice's key holds the cost model, which differs between template groups -- so
 #: the keys were not: a worker of the 171,828-template search added about 290 choices and
 #: plans a top template. A simulation is 10-30 MB and is held for the plain profile only (a
-#: retention's is released once its draws are read, signal_draws); a window's draws are a
-#: few MB; the others a few kB.
-_SIMILAR_MAX = {"signal-records": 8, "signal-draws": 64, "noise": 256, "plan": 4096, "choice": 8192}
+#: retention's is released once its draws are read, signal_draws); the others are a few kB.
+_SIMILAR_MAX = {"signal-records": 8, "noise": 256, "plan": 4096, "choice": 8192}
 _SIMILAR_COUNT = {}     # kind -> entries put since the kind was last counted (an upper bound)
 _SIMILAR_SEQ = [0]
 
@@ -1397,13 +1396,6 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
         sr_kw["alphas"] = al
     if _exact:
         sr_kw["_exact"] = True
-    # profiles alike in the gates' response share the draws of a window (_similar_get), as
-    # they share the simulation the draws are read from
-    draw_params = (n, tuple(bands), float(snr), ndet, int(seed), lags, _NF) + extra
-    unit, hit = (None, None) if _exact else _similar_get("signal-draws", p, draw_params)
-    if hit is not None:
-        _cache_put(_SIGNAL_CACHE, key, hit)
-        return hit[0] if not lags_too else hit
     sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed), **sr_kw)
     while True:
         C, F, at = _signal_window(sim, n, bands, lags)
@@ -1419,13 +1411,13 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     C, F, at = C[:end], F[:end], (at[0][:end], at[1][:end])
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
     _cache_put(_SIGNAL_CACHE, key, hit)
-    if not _exact:
-        _similar_put("signal-draws", unit, draw_params, hit)
     if al is not None and not _exact:
         # A retention's simulation is its band simulated again beside the plain one's
         # records. Its draws are read once, in the window local to the signal
-        # (local_window), and those are held; the records are not, and a narrower window
-        # asking for them (one shorter than the local window) simulates the band again.
+        # (local_window), and those are held (here, under the profile simulated: the
+        # planner asks with that profile, _choose_chain's p_base, so a retention's draws and
+        # the plain ones it pairs them with row for row are one simulation's). The records
+        # are not, and a request these draws no longer serve simulates the band again.
         _release_signal_records(sim)
     return hit[0] if not lags_too else hit
 

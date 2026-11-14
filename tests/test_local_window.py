@@ -155,8 +155,7 @@ def test_a_retention_keeps_its_draws_and_not_its_simulation(empty_model):
     sims = list(gc._SIGNAL_RECORDS.values()) + [e[1] for k, es in gc._SIMILAR.items()
                                                 if k[0] == "signal-records" for e in es]
     assert sims and all(s.get("alphas") is None for s in sims)
-    draws = [k for k in gc._SIMILAR if k[0] == "signal-draws"]
-    assert len(draws) == 2                               # the plain profile's and the retention's
+    assert len(gc._SIGNAL_CACHE) == 2                    # the plain profile's draws and the retention's
     # asked again, the retention's plan comes from what is held: nothing is simulated
     before = {id(s): s["rows"] for s in sims}
     gc._PLAN_CACHE.clear()
@@ -371,3 +370,34 @@ def test_a_plan_with_a_direct_refine_keeps_the_budget_on_the_real_window(empty_m
             lost |= np.abs(fat[det] - cat[det, bands.index(chain[-1])]) / (n // chain[-1]) > pl["halfwidth"]
         assert lost.mean() <= fd * (gm._TAIL_RATIO + 3.0 / np.sqrt(fd * det.sum())), (chain, lost.mean() / fd)
     assert windows >= 1, "no chain of the case was planned with a direct refine"
+
+
+def test_a_retentions_draws_pair_with_the_plain_ones_across_profiles_alike(empty_model):
+    """A one-tier chain behind a tier-0 retention is planned on the retention's coarse
+    maxima and the plain draws' lags, row for row, so both must be one simulation's. Here a
+    second profile, alike enough to borrow results (_similar_get) but simulated on its own
+    because the first one's simulation has been let go, is planned after the first. Every
+    plan is made, and the second profile's on its own simulation, whose draws number
+    otherwise. (An earlier version held a retention's draws for profiles alike apart from the
+    plain ones'; when only one of the two was still held it paired two simulations of
+    different lengths, and a worker of the showcase search failed on it.)"""
+    a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    n = 2048
+    rng = np.random.default_rng(3)
+    b = a * (1.0 + 1e-2 * rng.standard_normal(n))
+    bands = gc.usable_bands(a, n)
+    lengths = []
+    for p in (a, b):
+        best, plans = gc.choose_chain(p, n, 6.0, 1e-3, window=_production(n),
+                                      tier0_clusters={128: (0.97, 1), 256: (0.97, 1)})
+        assert best is not None
+        assert any(len(pl["chain"]) == 1 for pl in plans)
+        lengths.append(sorted({v[0][0].shape[0] for v in gc._SIGNAL_CACHE.values()}))
+        # the first profile's simulation and draws are let go; what is held for profiles
+        # alike stays, as when a long job's caches turn over
+        gc._SIGNAL_CACHE.clear()
+        gc._SIGNAL_RECORDS.clear()
+        gc._CHOICE_CACHE.clear()
+        for k in [k for k in gc._SIMILAR if k[0] in ("signal-records", "choice")]:
+            del gc._SIMILAR[k]
+    assert lengths[0] != lengths[1], "the two profiles' simulations kept the same draws: no test"
