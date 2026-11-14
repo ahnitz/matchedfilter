@@ -119,6 +119,27 @@ _TIER0_MAX_ARITY = 16
 #: whose lower bound can win, as a check on the rule.
 _TIER0_PRUNE_WIDER = True
 
+#: How much smaller a screener-to-template ratio a band is allowed to reach under one
+#: profile than it reached under another, when deciding from the other whether to cluster
+#: it at all (HierarchicalFilter._choose_chain): one step of the ratios' quantisation.
+_TIER0_ELSEWHERE_STEP = 0.05
+
+
+def _narrower_bands_floor(ratios, complete, band):
+    """The smallest screener-to-template ratio `band` can be expected to reach, from the
+    narrower bands clustered before it, or None when there is none.
+
+    ratios maps each band clustered so far to the smallest ratio it reached; complete holds
+    those whose passes all ran. A wider band shares no better than a narrower one, so every
+    narrower band's ratio is a floor for `band`, and the largest binds -- among the complete
+    ones: a band whose passes were cut short (it could no longer win) might have reached
+    less, so where no narrower band is complete only the smallest ratio found is used."""
+    narrower = {b: r for b, r in ratios.items() if b < band}
+    if not narrower:
+        return None
+    whole = [r for b, r in narrower.items() if b in complete]
+    return max(whole) if whole else min(narrower.values())
+
 
 def _tier0_centroid_enabled():
     return bool(_TIER0_PAIR_CENTROID)
@@ -512,6 +533,18 @@ class HierarchicalFilter(MatchedFilter):
         )
         self._tier0_cand_cache[b] = (cands, not skipped[0])
         return cands
+
+    def _tier0_seen_elsewhere(self, band):
+        """What another profile's clustering of `band` found for this plan's templates: the
+        (ratio, retention, lag padding) of its screeners with the smallest ratio, when every
+        pass of it ran; None when no other profile clustered the band to the end."""
+        best = None
+        for state in self.__dict__.get("_profiles", {}).values():
+            cands, complete = state.get("_tier0_cand_cache", {}).get(int(band), ((), False))
+            for cl in cands if complete else ():
+                if cl is not None and (best is None or cl.ratio < best.ratio):
+                    best = cl
+        return None if best is None else (float(best.ratio), float(best.alpha), int(best.lag_pad))
 
     def _tier0_cluster_for_band(self, band, templates=None, forced_chain=None):
         """Lazily compute and memoize `Tier0Cluster` (or `None`) for `band` under `_pending_ref`."""
@@ -1162,6 +1195,7 @@ class HierarchicalFilter(MatchedFilter):
                     won = None
                     tie_slack = 1.0 + _gatechain.TIE
                     shared = {}        # band -> the smallest screener-to-template ratio found
+                    assumed = {}       # band not clustered -> the ratio it was taken to reach
                     for b0 in ordered_b0:
                         limit = best_upper * (tie_slack if b0 < best_b0 else 1.0)
                         if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
@@ -1191,14 +1225,35 @@ class HierarchicalFilter(MatchedFilter):
                         # even at the best ratio a narrower band found, its screeners are not
                         # built: that was half of the clustering in a leaf bank's setup, for
                         # a band that never won.
-                        narrower = [r for b, r in shared.items() if b < b0]
-                        # each narrower band whose passes all ran bounds b0's ratio from
-                        # below, so the largest of those binds; one whose passes were cut
-                        # short (it could not win) only counts through the smallest
-                        whole = [r for b, r in shared.items()
-                                 if b < b0 and self._tier0_cand_cache[b][1]]
-                        if (_TIER0_PRUNE_WIDER and narrower
-                                and bound(max(opt_map[b0], max(whole) if whole else min(narrower))) >= limit):
+                        # The same templates clustered at b0 for another profile tell what b0
+                        # can share here: sharing is the templates' far more than the
+                        # noise's. Once a band has won, b0 is not clustered if it loses even
+                        # one ratio step better than it shared there, at that retention.
+                        elsewhere = self._tier0_seen_elsewhere(b0) if won is not None else None
+                        if elsewhere is not None:
+                            r_else, a_else, pad_else = elsewhere
+                            _, plans_e = _gatechain.choose_chain(
+                                self._pending_ref, self.n, snr, self.fd,
+                                ntemplates=self.ntemplates,
+                                cost=base_cm.with_tier0_cluster(
+                                    {b0: max(opt_map[b0], r_else - _TIER0_ELSEWHERE_STEP)},
+                                    single_tier=is_cpu),
+                                max_tiers=tiers, window=self.search_window,
+                                tier0_clusters={b0: (math.floor(a_else * 200.0 + 1e-9) / 200.0,
+                                                     pad_else)},
+                                first=b0)
+                            if min((q["cost"] for q in plans_e
+                                    if len(q["chain"]) >= min_len and q["chain"][0] == b0),
+                                   default=float("inf")) >= limit:
+                                self._tier0_clusters[b0] = None
+                                # what it was taken to share at best bounds the wider bands
+                                assumed[b0] = max(opt_map[b0], r_else - _TIER0_ELSEWHERE_STEP)
+                                continue
+                        floor = _narrower_bands_floor(
+                            {**shared, **assumed},
+                            {b for b in shared if self._tier0_cand_cache[b][1]} | set(assumed), b0)
+                        if (_TIER0_PRUNE_WIDER and floor is not None
+                                and bound(max(opt_map[b0], floor)) >= limit):
                             self._tier0_clusters[b0] = None
                             continue
                         raw_cands = self._tier0_candidates_for_band(b0, templates=tmpl,

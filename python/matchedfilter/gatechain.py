@@ -1968,13 +1968,12 @@ def _noise_records(p, n, bands, nsim, seed, k0s=None, alphas=None):
         have, recs = 0, None
     if 0 < len(sub_idx) < len(bands):
         base_recs = _noise_records(p, n, bands, nsim, seed, k0s=k0s, alphas=None)
-        sub_bands = [bands[i] for i in sub_idx]
-        sub_k0s = tuple(k0s[i] for i in sub_idx)
-        sub_al = tuple(al[i] for i in sub_idx)
-        sub_recs = _noise_records(p, n, sub_bands, nsim, seed, k0s=sub_k0s, alphas=sub_al)
         merged = [_prefix_record(r, nsim) for r in base_recs]
-        for j, i in enumerate(sub_idx):
-            merged[i] = _prefix_record(sub_recs[j], nsim)
+        for i in sub_idx:
+            # each altered band on its own: its noise does not depend on the other bands'
+            # retentions, and a band's is held once whichever retentions it is asked with
+            own = _noise_records(p, n, [bands[i]], nsim, seed, k0s=(k0s[i],), alphas=(al[i],))
+            merged[i] = _prefix_record(own[0], nsim)
         merged_t = tuple(merged)
         _NOISE_RECORDS[key] = (nsim, merged_t)
         _NOISE_RECORDS.move_to_end(key)

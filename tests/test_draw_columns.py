@@ -147,6 +147,33 @@ def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_mo
     assert Cs.own[0] is C1.own[0] and Cs.own[1] is C2.own[1] and Cs.plain is C1.plain
 
 
+def test_noise_under_two_retentions_is_each_bands_own(empty_model, monkeypatch):
+    """The noise records of two altered bands are those of the two simulated together, read
+    from each band's own (which the band's signal retention already made)."""
+    p, bands, al, nsim = gc._norm_profile(_profile(), N), [128, 256, 512], (0.97, 0.995, 1.0), 3000
+    k0s = tuple(gc.band_offset(p, N, b) for b in bands)
+    together = gc._noise_records(p, N, bands[:2], nsim, 5, k0s=k0s[:2], alphas=al[:2])
+    plain = gc._noise_records(p, N, bands, nsim, 5, k0s=k0s)
+    for c in (gc._NOISE_RECORDS,):
+        c.clear()
+    simulated = []
+    simulate = gc._simulate
+
+    def spy(p_, n, bands_, *a, **k):
+        simulated.append(sum(x < 1.0 for x in (k.get("alphas") or ())))
+        return simulate(p_, n, bands_, *a, **k)
+
+    monkeypatch.setattr(gc, "_simulate", spy)
+    got = gc._noise_records(p, N, bands, nsim, 5, k0s=k0s, alphas=al)
+    assert max(simulated) == 1
+    for i in (0, 1):
+        for x, y in zip(got[i], together[i]):
+            np.testing.assert_array_equal(x, y)
+        assert not np.array_equal(got[i][1], plain[i][1])        # the retention moved it
+    for x, y in zip(got[2], plain[2]):
+        np.testing.assert_array_equal(x, y)
+
+
 def test_a_retentions_plans_are_those_of_its_own_table(empty_model, monkeypatch):
     """Sharing columns changes nothing a plan rests on: with the sharing switched off (a
     retention's draws held whole) every plan comes out the same."""
