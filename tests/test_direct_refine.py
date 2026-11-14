@@ -113,7 +113,8 @@ def test_taps_are_checked():
 def test_halfwidth_shares_the_budget(fd):
     """The direct refine's window and the tiers share one budget (gatechain.plan_chain): on the
     fit half of the model's detections, those some tier dismisses or the window misses (the
-    fine maximum further than the half-width from the last tier's coarse maximum) number
+    fine maximum further than the half-width from the last tier's coarse maximum, or that
+    maximum being noise far from the signal) number
     exactly j - 1 (gatemodel.fit_order), so the window's misses come out of the tiers' share
     instead of adding to it. The half-width is a whole number of coarse samples, and the same
     chain priced without the direct refine refines by transform and gives the tiers it all."""
@@ -127,8 +128,13 @@ def test_halfwidth_shares_the_budget(fd):
     rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
     cm = gatechain.CostModel.from_dict(rec["model"]).unscreened()
     direct = cm.with_direct(0.09 * 256 + 4.0)      # ticks per lag of a 256-tap window on Zen 5
-    (C, F), (fat, cat) = gatechain.signal_draws(p, n, bands, 6.0, gatechain.model_draws(fd)[0],
-                                                window=win, lags_too=True)
+    # the model's draws: the signals in the window local to them, the noise in the window
+    # searched, whose maxima also say where far noise would draw the refine away
+    # (gatechain.local_window, _distances)
+    sig, lags = gatechain.signal_draws(p, n, bands, 6.0, gatechain.model_draws(fd)[0],
+                                       window=gatechain.local_window(p, n, bands, win), lags_too=True)
+    C, F = sig
+    noise = gatechain.noise_block_maxima(p, n, bands, nsim=gatechain.model_draws(fd)[1], window=win)
     det = F[:, 0] >= 6.0
     fit = np.zeros(det.sum(), bool)
     fit[1::2] = True                                  # the fit half: every other detection
@@ -145,7 +151,7 @@ def test_halfwidth_shares_the_budget(fd):
         tiers = int(np.count_nonzero(lost[fit]))
         if hw is not None:
             assert isinstance(hw, int) and hw >= 1, (chain, hw)
-            far = np.abs(fat[det] - cat[det, bands.index(chain[-1])]) / (n // chain[-1]) > hw
+            far = gatechain._distances(sig, lags, bands, chain, 6.0, n, noise) > hw
             assert (np.count_nonzero(far[~fit]) == pl["search"]["missed"]
                     <= gatechain._gm.window_allowance(fd, int((~fit).sum()), int(fit.sum()))), chain
             lost |= far

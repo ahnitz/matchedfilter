@@ -1186,7 +1186,7 @@ def _gate_features_uncached(p, n, m):
 def _similar_get(kind, p, params):
     u = (p / np.linalg.norm(p)).astype(np.float32)
     feats = None
-    for (v, fv), val in _SIMILAR.get((kind,) + params, []):
+    for (v, fv), val, _ in _SIMILAR.get((kind,) + params, []):
         if float(np.dot(u, v)) < _REUSE_COS:
             continue
         if feats is None:
@@ -1203,28 +1203,37 @@ def _similar_get(kind, p, params):
 #: A key's own list is bounded (_similar_put's keep), but a job meets new keys as long as it
 #: runs -- a choice's key holds the cost model, which differs between template groups -- so
 #: the keys were not: a worker of the 171,828-template search added about 290 choices and
-#: plans a top template. A simulation is some 10 MB, the others a few kB.
-_SIMILAR_MAX = {"signal-records": 48, "noise": 256, "plan": 4096, "choice": 8192}
-_SIMILAR_ORDER = {}     # kind -> OrderedDict: id(entry) -> (key, entry), oldest first
+#: plans a top template. A simulation is 10-30 MB and is held for the plain profile only (a
+#: retention's is released once its draws are read, signal_draws); a window's draws are a
+#: few MB; the others a few kB.
+_SIMILAR_MAX = {"signal-records": 8, "signal-draws": 64, "noise": 256, "plan": 4096, "choice": 8192}
+_SIMILAR_COUNT = {}     # kind -> entries put since the kind was last counted (an upper bound)
+_SIMILAR_SEQ = [0]
 
 
 def _similar_put(kind, u, params, value, keep=None):
+    """Hold `value` for profiles like the unit profile `u` under (kind,) + params: the key's
+    newest `keep` entries, and of the kind's entries over all keys its newest _SIMILAR_MAX
+    (an eighth are dropped at a time, oldest first, when the bound is passed)."""
     key = (kind,) + params
     lst = _SIMILAR.setdefault(key, [])
-    order = _SIMILAR_ORDER.setdefault(kind, OrderedDict())
-    entry = (u, value)
-    lst.append(entry)
-    order[id(entry)] = (key, entry)
-    for old in lst[:-(keep or _CACHE_MAX)]:
-        order.pop(id(old), None)
+    _SIMILAR_SEQ[0] += 1
+    lst.append((u, value, _SIMILAR_SEQ[0]))
     del lst[:-(keep or _CACHE_MAX)]
-    while len(order) > _SIMILAR_MAX.get(kind, 4096):
-        _, (okey, old) = order.popitem(last=False)
-        held = _SIMILAR.get(okey)
-        if held is not None:
-            held[:] = [e for e in held if e is not old]
-            if not held:
-                del _SIMILAR[okey]
+    cap = _SIMILAR_MAX.get(kind, 4096)
+    _SIMILAR_COUNT[kind] = _SIMILAR_COUNT.get(kind, 0) + 1
+    if _SIMILAR_COUNT[kind] > cap:
+        held = sorted((e[2], k) for k, es in _SIMILAR.items() if k[0] == kind for e in es)
+        drop = len(held) - (cap - cap // 8)
+        if drop > 0:
+            cut = held[drop - 1][0]
+            for k in {k for _, k in held[:drop]}:
+                kept = [e for e in _SIMILAR[k] if e[2] > cut]
+                if kept:
+                    _SIMILAR[k][:] = kept
+                else:
+                    del _SIMILAR[k]
+        _SIMILAR_COUNT[kind] = min(len(held), cap - cap // 8)
 
 
 #: The gate model's stream domain: its draws are _core.gauss_fill's (src/gauss.cc) at this
@@ -1260,11 +1269,69 @@ def _engine_lags(n, bands, window):
     return w0, w1, tuple(c[0] for c in lags), tuple(c[1] for c in lags)
 
 
+#: local_window: the signal's window is this many times the longer of the profile's
+#: autocorrelation extent and the coarsest band's step, and the autocorrelation's extent is its
+#: last lag at or above this fraction of its peak.
+_LOCAL_LOBES = 4
+_LOCAL_TAIL = 0.05
+_LOCAL_WINDOWS = OrderedDict()
+
+
+def local_window(power, n, bands, window=None):
+    """The window the gate model draws its signals in when a search covers `window`: a window
+    around the signal wide enough that a wider one changes nothing a gate's dismissal rests
+    on, or `window` itself where that is no narrower.
+
+    A plan's thresholds are quantiles of the detections' coarse maxima, a detection a signal
+    whose fine statistic reaches snr somewhere in the window. Far from the signal the window
+    holds noise alone, which can only raise a maximum: a plan made without it dismisses no
+    more. Near the signal the window matters: the fine maximum is taken over the samples the
+    signal's autocorrelation reaches, and each band's over its coarse lags beside the signal,
+    so a window inside either selects other detections than the search's (planned on the
+    signal's own sample alone, a gate dismissed 3-9% at a budget of 0.1%). The local window
+    is therefore _LOCAL_LOBES times the longer of the autocorrelation's extent (its last lag
+    at or above _LOCAL_TAIL of the peak, from the profile) and the coarsest band's step,
+    rounded up to a power-of-two number of those steps and centred in the block on the
+    coarsest band's grid. Every window of a profile at least that wide then shares one set of
+    signal draws; the noise maxima stay those of the window searched (noise_block_maxima).
+
+    MEASURED (notes/window_free_2026-11-13, 379,680 plans: 30 PSD-model profiles and the
+    O2 and showcase H1 and L1 profiles, n 1024-4096, snr 5.5-8, fd 1e-2 and 1e-3, every chain
+    of up to three tiers, production and whole-block windows, with and without tier-0 and
+    tier-1 retention): planned on a local window of 32 to 256 samples the cheapest chain's
+    dismissal on independent draws of the real window averaged 0.94-0.95 of the budget
+    (exact plan 0.99) with no more cases beyond 1.5 budgets than the exact plan's; at 16
+    samples, inside these profiles' autocorrelation, it failed at snr 8.
+    """
+    p = _norm_profile(power, n)
+    w0, w1 = (0, int(n)) if window is None else (int(window[0]), int(window[1]))
+    step = int(n) // int(min(bands))
+    key = (_gm._profile_sig(p), int(n), step)
+    span = _LOCAL_WINDOWS.get(key)
+    if span is None:
+        r = np.abs(np.fft.ifft(p))
+        tail = np.flatnonzero(r[1:int(n) // 2 + 1] >= _LOCAL_TAIL * r[0])
+        extent = int(tail[-1]) + 1 if tail.size else 1
+        steps = -(-_LOCAL_LOBES * max(extent, step) // step)
+        span = step * (1 << (steps - 1).bit_length())
+        _LOCAL_WINDOWS[key] = span
+        while len(_LOCAL_WINDOWS) > _CACHE_MAX:
+            _LOCAL_WINDOWS.popitem(last=False)
+    else:
+        _LOCAL_WINDOWS.move_to_end(key)
+    if span >= w1 - w0:
+        return (w0, w1)
+    lo = ((int(n) - span) // 2 // step) * step
+    return (lo, lo + span)
+
+
 #: Rows per block of the signal simulation's arrival draws (_arrivals): a row's arrival depends
 #: only on its row, so a simulation extended in steps draws what one run at once draws.
 _ARRIVAL_ROWS = 1 << 14
-#: The signal simulation per (profile, n, bands, snr, seed): every window's draws come from it
-#: (signal_draws), so a profile's windows share one simulation, extended when one needs more.
+#: The signal simulation per (profile, n, bands, snr, seed), extended when a request needs
+#: more draws. The planner reads it once, in the window local to the signal (local_window),
+#: and a retention's is released when read (signal_draws): what stays is the plain profile's,
+#: beside which a retention's band is simulated.
 _SIGNAL_RECORDS = OrderedDict()
 
 
@@ -1286,8 +1353,10 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     transform of bins [0, b), normalised to unit per-component variance -- the filter's own
     sharing of noise between the tiers and the fine stage -- plus the signal through the
     transforms' linearity (its response at every lag), arriving on a sample or 1/_NF of one
-    apart. The maxima are over the whole window, as the engine's are: no neighbourhood around
-    the signal, no pairing with noise elsewhere in the block (_simulate).
+    apart. The maxima are over the whole of `window`, as the engine's are: no pairing with
+    noise elsewhere in the block (_simulate). The planner asks for the window local to the
+    signal (local_window) and takes the searched window's noise from noise_block_maxima; an
+    audit asks for the searched window itself.
 
     Each draw holds its statistics' running-maximum records outward from the signal, so any
     window around it is two lookups: draw r's signal lies a_r + frac samples into the window,
@@ -1328,14 +1397,14 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
         sr_kw["alphas"] = al
     if _exact:
         sr_kw["_exact"] = True
-    sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed), **sr_kw)
-    skey = ("sim", id(sim), n, tuple(bands), float(snr), ndet, int(seed), lags, _NF, *extra)
-    shit = _SIGNAL_CACHE.get(skey)
-    if shit is not None and shit[0] is sim:
-        _SIGNAL_CACHE.move_to_end(skey)
-        hit = shit[1]
+    # profiles alike in the gates' response share the draws of a window (_similar_get), as
+    # they share the simulation the draws are read from
+    draw_params = (n, tuple(bands), float(snr), ndet, int(seed), lags, _NF) + extra
+    unit, hit = (None, None) if _exact else _similar_get("signal-draws", p, draw_params)
+    if hit is not None:
         _cache_put(_SIGNAL_CACHE, key, hit)
         return hit[0] if not lags_too else hit
+    sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed), **sr_kw)
     while True:
         C, F, at = _signal_window(sim, n, bands, lags)
         det = np.flatnonzero(F >= snr)
@@ -1349,9 +1418,29 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     end = int(det[ndet - 1]) + 1 if ndet > 0 else 0
     C, F, at = C[:end], F[:end], (at[0][:end], at[1][:end])
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
-    _cache_put(_SIGNAL_CACHE, skey, (sim, hit))
     _cache_put(_SIGNAL_CACHE, key, hit)
+    if not _exact:
+        _similar_put("signal-draws", unit, draw_params, hit)
+    if al is not None and not _exact:
+        # A retention's simulation is its band simulated again beside the plain one's
+        # records. Its draws are read once, in the window local to the signal
+        # (local_window), and those are held; the records are not, and a narrower window
+        # asking for them (one shorter than the local window) simulates the band again.
+        _release_signal_records(sim)
     return hit[0] if not lags_too else hit
+
+
+def _release_signal_records(sim):
+    """Drop the simulation `sim` from where it is held for reuse (_SIGNAL_RECORDS, and
+    _SIMILAR's entries for profiles alike)."""
+    for k in [k for k, v in _SIGNAL_RECORDS.items() if v is sim]:
+        del _SIGNAL_RECORDS[k]
+    for k in [k for k, es in _SIMILAR.items() if k[0] == "signal-records" and any(e[1] is sim for e in es)]:
+        kept = [e for e in _SIMILAR[k] if e[1] is not sim]
+        if kept:
+            _SIMILAR[k][:] = kept
+        else:
+            del _SIMILAR[k]
 
 
 def _arrivals(seed, R, row0, rows):
@@ -1391,9 +1480,9 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _ex
     if sim is not None:
         _SIGNAL_RECORDS.move_to_end(key)
     else:
-        # profiles alike in the gates' response share a simulation (_similar_get), whatever
-        # window each searches: a job's banks have nearly one reference profile. It is
-        # extended with its own profile, so it stays one simulation.
+        # profiles alike in the gates' response share a simulation (_similar_get): a job's
+        # banks have nearly one reference profile. It is extended with its own profile, so
+        # it stays one simulation.
         params = (n, tuple(bands), snr, seed, _NF) + extra
         unit, sim = (None, None) if _exact else _similar_get("signal-records", p, params)
         if sim is None:
@@ -1584,7 +1673,7 @@ def _signal_window(sim, n, bands, lags):
                          np.full(t.size, n - 1) if whole else span - 1 - a,
                          np.zeros(t.size, np.int64) if whole else a)
     C = np.empty((t.size, len(bands)), np.float32)
-    cat = np.empty((t.size, len(bands)), np.int64)
+    cat = np.empty((t.size, len(bands)), np.int32)
     for i, b in enumerate(bands):
         R = n // b
         js = t // R
@@ -1600,6 +1689,7 @@ def _signal_window(sim, n, bands, lags):
     fat = fat + w0 + a
     if whole:
         fat %= n
+    fat = fat.astype(np.int32)
     for x in (C, F, fat, cat):
         x.setflags(write=False)
     return C, F, (fat, cat)
@@ -2426,23 +2516,37 @@ def _kept_halves(sig, bands, cols, chain, snr):
     return halves
 
 
-def _distances(sig, lags, bands, chain, snr, n):
+def _distances(sig, lags, bands, chain, snr, n, far=None):
     """Per detection (kept_draws' rows), how far the fine maximum lies from the chain's last
     tier's coarse maximum, in that tier's coarse samples: the direct refine's window of
     half-width h around the coarse maximum holds the fine peak iff this is at most h
-    (hmf.c refine_direct_pair)."""
+    (hmf.c refine_direct_pair).
+
+    far: the noise maxima of the window searched (noise_block_maxima), for draws read in a
+    narrower window (local_window). The engine refines around the last tier's largest coarse
+    value in the window, and noise far from the signal can be that: the refine then looks
+    where the signal is not. Draws in the local window cannot show it, so each is paired
+    with one block's noise maximum of the searched window (stationary noise: what lies far
+    from the signal is independent of what lies beside it), and where that exceeds the
+    draw's own coarse maximum the distance is the band's whole length, beyond any window.
+    The pairing counts the local window's own lags among the far ones, so it errs towards
+    more such draws, which the plan charges to its budget."""
     F = sig[1]
     fat, cat = lags
     b = int(chain[-1])
     col = bands.index(b)
-    key = ("dist", id(F), id(fat), id(cat), col, b, float(snr), int(n))
-    found, out = _derived_get(_KEPT, key, F, fat, cat)
+    key = ("dist", id(F), id(fat), id(cat), col, b, float(snr), int(n), None if far is None else id(far))
+    sources = (F, fat, cat) if far is None else (F, fat, cat, far)
+    found, out = _derived_get(_KEPT, key, *sources)
     if found:
         return out
     keep = F[:, 0] >= snr
     out = np.abs(fat[keep] - cat[keep, col]) / (n // b)
+    if far is not None:
+        own = sig[0][keep, col]
+        out[far[np.arange(own.size) % far.shape[0], col] > own] = float(b)
     out.setflags(write=False)
-    _derived_put(_KEPT, key, (F, fat, cat), out, _KEPT_MAX)
+    _derived_put(_KEPT, key, sources, out, _KEPT_MAX)
     return out
 
 
@@ -2574,7 +2678,7 @@ class _LazyPlan(dict):
 
 
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               memo=None, lags=None, lazy_fit=False, offsets=None):
+               memo=None, lags=None, lazy_fit=False, offsets=None, far=False):
     """The thresholds and direct-refine half-width for `chain` that meet the false-dismissal
     budget fd at minimum modelled cost.
 
@@ -2619,7 +2723,9 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     dA = dB = dA_all = None
     allow = -1
     if lags is not None:
-        dA_all, dB_all = _halves(_distances(sig, lags, bands, chain, snr, n))
+        # far: the signal draws are a narrower window's than the noise's (local_window), so
+        # the refine's coarse maximum may be noise the draws do not hold (_distances)
+        dA_all, dB_all = _halves(_distances(sig, lags, bands, chain, snr, n, noise if far else None))
         allow = _gm.window_allowance(float(fd), A.shape[0], B.shape[0])
         if cost is not None and cost.prices_direct(chain):
             dA, dB = dA_all, dB_all
@@ -2970,7 +3076,9 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     # Resolve the canonical profile in _SIGNAL_RECORDS so base and clustered draws share one realization
     sr_kw = {"k0s": k0s} if any(k0s) else {}
     p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
-    drawn = signal_draws(p_base, n, bands, snr, nsamp, window=win, lags_too=True)
+    # the signals in the window local to them, the noise in the window searched (local_window)
+    sig_win = local_window(p_base, n, bands, win)
+    drawn = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
     if drawn is None:
         return None, []
     sig, lags = drawn
@@ -2993,7 +3101,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             a0, lp0 = t0_map[b0]
             al_b0 = tuple(a0 if b == b0 else 1.0 for b in bands)
             lp_b0 = tuple(lp0 if b == b0 else 0 for b in bands)
-            drawn_b0 = signal_draws(p_base, n, bands, snr, nsamp, window=win,
+            drawn_b0 = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win,
                                     lags_too=True, alphas=al_b0)
             if drawn_b0 is None:
                 continue
@@ -3017,7 +3125,8 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
         else:
             sig_use, noise_use, memo_use, lags_use = sig, noise, memo, lags
         pl = plan_chain(sig_use, noise_use, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, memo=memo_use, lags=lags_use, lazy_fit=True, offsets=offs)
+                        ntemplates=ntemplates, memo=memo_use, lags=lags_use, lazy_fit=True, offsets=offs,
+                        far=sig_win != ((0, int(n)) if win is None else win))
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -3117,12 +3226,13 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         b1 = chain[1] if t1_cl is not None else None
         al_vec = tuple(t0_cl[0] if b == b0 else (t1_cl[0] if b == b1 else 1.0) for b in bands)
         lp_vec = tuple(t0_cl[1] if b == b0 else (t1_cl[1] if b == b1 else 0) for b in bands)
-        drawn = signal_draws(p_base, n, bands, snr, nsamp, window=window, lags_too=True, alphas=al_vec)
+        sig_win = local_window(p_base, n, bands, window)
+        drawn = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True, alphas=al_vec)
         if drawn is None:
             return None
         sig, lags = drawn
         if len(chain) == 1:
-            base_drawn = signal_draws(p_base, n, bands, snr, nsamp, window=window, lags_too=True)
+            base_drawn = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
             if base_drawn is not None:
                 lags = base_drawn[1]
         noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=window,
@@ -3132,7 +3242,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
                 + ((("t1", b1, t1_cl),) if t1_cl is not None else ())
                 + (("l1",) if len(chain) == 1 else ()))
     else:
-        drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True)
+        sig_win = local_window(p, n, bands, window)
+        drawn = signal_draws(p, n, bands, snr, nsamp, window=sig_win, lags_too=True)
         if drawn is None:
             return None
         sig, lags = drawn
@@ -3140,7 +3251,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
                 int(nsim), int(nsamp))
     out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, memo=memo, lags=lags,
-                     offsets=k0_chain)
+                     offsets=k0_chain, far=sig_win != ((0, int(n)) if win is None else win))
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out

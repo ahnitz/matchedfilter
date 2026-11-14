@@ -118,7 +118,8 @@ def test_candidate_cache_shares_across_banks_with_distinct_direct_costs(empty_mo
 def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypatch):
     """Planning a chain memoises arrays derived from the signal draws (kept draws, halves,
     distances, candidates). Once the draws leave their own cache nothing derived from them
-    stays held, so the model's memory follows the draws it still holds."""
+    stays held, so the model's memory follows the draws it still holds (in _SIGNAL_CACHE, and
+    in _SIMILAR for profiles alike)."""
     import gc as pygc
     monkeypatch.setattr(gc, "_KEPT", OrderedDict())
     a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
@@ -128,6 +129,7 @@ def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypat
 
     gc._SIGNAL_CACHE.clear()
     gc._NOISE_CACHE.clear()
+    gc._SIMILAR.clear()                 # holds the draws for profiles alike
     del plan
     pygc.collect()
     assert len(gc._KEPT) == 0
@@ -137,14 +139,16 @@ def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypat
 def test_similar_results_are_bounded_over_all_keys(empty_model, monkeypatch):
     """The results held for reuse by similar profiles are bounded per kind across keys, the
     oldest dropped first and an emptied key removed: a long job meets new keys throughout."""
-    monkeypatch.setattr(gc, "_SIMILAR_ORDER", {})
-    monkeypatch.setitem(gc._SIMILAR_MAX, "choice", 3)
+    monkeypatch.setattr(gc, "_SIMILAR_COUNT", {})
+    monkeypatch.setitem(gc._SIMILAR_MAX, "choice", 8)
     unit = (np.ones(4, np.float32), np.ones(2))
-    for i in range(5):
+    for i in range(40):
         gc._similar_put("choice", unit, (i,), "result %d" % i)
-    assert sorted(k[1] for k in gc._SIMILAR) == [2, 3, 4]
-    assert [v for lst in gc._SIMILAR.values() for _, v in lst] == ["result 2", "result 3", "result 4"]
+        held = sorted(k[1] for k in gc._SIMILAR)
+        assert len(held) <= 8
+        assert held == list(range(i - len(held) + 1, i + 1))      # the newest, no gaps
+    assert len(gc._SIMILAR) >= 7
     # a key's own list still keeps only its newest entries
     for i in range(4):
         gc._similar_put("plan", unit, ("one key",), i, keep=2)
-    assert [v for _, v in gc._SIMILAR[("plan", "one key")]] == [2, 3]
+    assert [e[1] for e in gc._SIMILAR[("plan", "one key")]] == [2, 3]

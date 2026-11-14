@@ -290,6 +290,19 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The gate model plans on signal draws read in a window local to the signal
+  (`gatechain.local_window`: four times the longer of the profile's autocorrelation extent
+  and the coarsest band's step), with the noise maxima of the window searched, so every
+  window of a profile shares one set of signal draws; and a screener retention's simulation
+  is released once its draws are read. A plan made this way sets no gate above the searched
+  window's, and charges to its budget the detections whose direct refine noise far from the
+  signal would draw away (`tests/test_local_window.py`; `docs/gate-model.md` has the
+  379,680-plan audit and the engine's).
+  MEASURED on the 171,828-template showcase search, 16 workers, default configuration, peak
+  resident memory per worker: 1.79 -> 1.36 GiB with one profile, 3.09 -> 2.18 GiB with a
+  profile per detector; leaf setup with a profile per detector 187 -> 156 s summed; steady
+  throughput within run-to-run scatter (12.0 -> 12.1 M template-s/s per core at SNR 6.0 /
+  FDR 0.001, 36.2 -> 36.0 M at 6.5 / 0.01).
 - A time-domain bank solves each hierarchical plan's thresholds when its reference is set,
   with the rest of the calibration. They were solved on the first filtering call, and a chain
   the choice had not already planned in that form (one with second-tier shared screeners)
