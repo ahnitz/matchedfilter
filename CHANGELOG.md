@@ -328,7 +328,7 @@ Alpha releases may change the API. Pin a version for reproducible work.
     not depend on the other bands' retentions, so the columns are bit for bit those of the
     joint simulation, which is no longer run, and nothing more is held for the combination.
   - A retention's simulation draws noise only for the rows the plain simulation kept
-    (`ap_gauss_fill_rows_kept`: a row mask in the fill, which still generates rows in pairs).
+    (`ap_gauss_fill_rows`' `keep`: a row mask in the fill, which still generates rows in pairs).
 - A screener retention's draws hold only the bands the retention alters, beside the plain
   draws (`gatechain._Beside`): one or two columns of coarse maxima and of their lags where a
   whole table and its lags were held, 23 times over for an L1 profile. MEASURED on the

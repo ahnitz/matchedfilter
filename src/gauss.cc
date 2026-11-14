@@ -711,15 +711,11 @@ static void FillRows(float *out, size_t ostride, size_t rows, size_t len, uint64
 extern "C" void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset) {
   if (n) ap_gauss::Fill(out, n, seed, offset);
 }
+/* Rows of draws (see GaussFillRows): with keep, only the rows r with keep[r] nonzero are
+   written; keep NULL writes every row. */
 extern "C" void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len,
                                    uint64_t seed, uint64_t offset, uint64_t step,
-                                   const float *scale) {
-  if (rows && len) ap_gauss::FillRows(out, ostride, rows, len, seed, offset, step, scale, nullptr);
-}
-/* ap_gauss_fill_rows for the rows r with keep[r] nonzero only: the others are not written. */
-extern "C" void ap_gauss_fill_rows_kept(float *out, size_t ostride, size_t rows, size_t len,
-                                        uint64_t seed, uint64_t offset, uint64_t step,
-                                        const float *scale, const unsigned char *keep) {
+                                   const float *scale, const unsigned char *keep) {
   if (rows && len) ap_gauss::FillRows(out, ostride, rows, len, seed, offset, step, scale, keep);
 }
 #endif

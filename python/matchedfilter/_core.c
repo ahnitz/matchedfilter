@@ -1204,10 +1204,8 @@ static PyObject *M_series_group(PyObject *self,PyObject *args){
 }
 void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset);   /* src/gauss.cc */
 void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
-                        uint64_t offset, uint64_t step, const float *scale);
-void ap_gauss_fill_rows_kept(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
-                             uint64_t offset, uint64_t step, const float *scale,
-                             const unsigned char *keep);
+                        uint64_t offset, uint64_t step, const float *scale,
+                        const unsigned char *keep);
 static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyObject *o; unsigned long long seed, offset;
   if(!PyArg_ParseTuple(args,"OKK",&o,&seed,&offset)) return NULL;
@@ -1225,7 +1223,7 @@ static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
 /* gauss_fill_rows(out, seed, offset, step, scale=None, keep=None): out float32 (rows, len)
    C-contiguous, out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2]
    (float32, at least (len + 1) // 2 of them) when given; with keep (a byte a row) only the
-   rows with a nonzero byte are written: simulate's fill (ap_gauss_fill_rows_kept). */
+   rows with a nonzero byte are written: simulate's fill (ap_gauss_fill_rows). */
 static PyObject *M_gauss_fill_rows(PyObject *self,PyObject *args){
   (void)self; PyObject *o, *so=Py_None, *ko=Py_None; unsigned long long seed, offset, step;
   if(!PyArg_ParseTuple(args,"OKKK|OO",&o,&seed,&offset,&step,&so,&ko)) return NULL;
@@ -1244,7 +1242,7 @@ static PyObject *M_gauss_fill_rows(PyObject *self,PyObject *args){
     return NULL;
   }
   Py_BEGIN_ALLOW_THREADS
-  ap_gauss_fill_rows_kept((float*)b.buf,(size_t)len,(size_t)rows,(size_t)len,(uint64_t)seed,(uint64_t)offset,
+  ap_gauss_fill_rows((float*)b.buf,(size_t)len,(size_t)rows,(size_t)len,(uint64_t)seed,(uint64_t)offset,
                           (uint64_t)step,has_scale ? (const float*)sb.buf : NULL,
                           has_keep ? (const unsigned char*)kb.buf : NULL);
   Py_END_ALLOW_THREADS
@@ -1563,12 +1561,12 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
       memcpy(ks_batch,ks,(size_t)ns*sizeof *ks); memcpy(kn_batch,kn,(size_t)nb*sizeof *kn);
       /* a retention's bands read the kept rows only: the others are not drawn */
       const unsigned char *drawn = (km && !has_noise) ? km+r0 : NULL;
-      ap_gauss_fill_rows_kept(X,xfloats,(size_t)B,(size_t)(2*kfill),(uint64_t)seed,
-                              (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale,drawn);
+      ap_gauss_fill_rows(X,xfloats,(size_t)B,(size_t)(2*kfill),(uint64_t)seed,
+                         (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale,drawn);
       if(Xorth){
-        ap_gauss_fill_rows_kept(Xorth,xorth_floats,(size_t)B,(size_t)(2*max_alpha_hi),
-                                (uint64_t)seed^(2ULL<<32),
-                                (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale,drawn);
+        ap_gauss_fill_rows(Xorth,xorth_floats,(size_t)B,(size_t)(2*max_alpha_hi),
+                           (uint64_t)seed^(2ULL<<32),
+                           (uint64_t)(2*(row0+r0)*n),(uint64_t)(2*n),scale,drawn);
       }
       int kept[SIM_ROWS];
       for(int bi=0;bi<B;bi++) kept[bi] = km ? (km[r0+bi]!=0) : 1;
