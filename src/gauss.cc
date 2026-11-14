@@ -385,14 +385,17 @@ static void Fill(const Piece *pc, uint32_t k0, uint32_t k1) {
 
 /* Rows of draws (ap_gauss_fill_rows): out[r * ostride + i] = draw offset + r * step + i of
    stream seed, times scale[i / 2] when scale is given, for r < rows and i < len; rows do not
-   overlap (ostride >= len), and nothing of a row past len is written. Each block a row reads
-   is a piece (Piece), kGroup pieces generated together across blocks and rows. */
+   overlap (ostride >= len), and nothing of a row past len is written. With keep, only the
+   rows r with keep[r] nonzero are drawn (the others are left as they are). Each block a row
+   reads is a piece (Piece), kGroup pieces generated together across blocks and rows. */
 void GaussFillRows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
-                   uint64_t offset, uint64_t step, const float *scale) {
+                   uint64_t offset, uint64_t step, const float *scale,
+                   const unsigned char *keep) {
   const uint32_t k0 = (uint32_t)seed, k1 = (uint32_t)(seed >> 32);
   Piece pend[kGroup];
   size_t np = 0;
   for (size_t r = 0; r < rows; r++) {
+    if (keep && !keep[r]) continue;
     const uint64_t s = offset + r * step, end = s + len;
     float *row = out + r * ostride;
     for (uint64_t pos = s; pos < end;) {
@@ -407,7 +410,7 @@ void GaussFillRows(float *out, size_t ostride, size_t rows, size_t len, uint64_t
 }
 
 void GaussFill(float *out, size_t n, uint64_t seed, uint64_t offset) {
-  GaussFillRows(out, n, 1, n, seed, offset, 0, nullptr);
+  GaussFillRows(out, n, 1, n, seed, offset, 0, nullptr, nullptr);
 }
 
 }  // namespace HWY_NAMESPACE
@@ -652,9 +655,11 @@ static void FillPiece8(const Piece &p, uint32_t k0, uint32_t k1) {
 }
 
 static void GaussFillRows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
-                          uint64_t offset, uint64_t step, const float *scale) {
+                          uint64_t offset, uint64_t step, const float *scale,
+                          const unsigned char *keep) {
   const uint32_t k0 = (uint32_t)seed, k1 = (uint32_t)(seed >> 32);
   for (size_t r = 0; r < rows; r++) {
+    if (keep && !keep[r]) continue;
     const uint64_t s = offset + r * step, end = s + len;
     float *row = out + r * ostride;
     for (uint64_t pos = s; pos < end;) {
@@ -687,16 +692,20 @@ static inline bool use_avx1() {
    N_NEON::ap_gauss::GaussFill, undeclared (see kernel.cc's active()). */
 static void Fill(float *out, size_t n, uint64_t seed, uint64_t offset) {
 #if AP_HAVE_AVX1
-  if (use_avx1()) { avx1::GaussFillRows(out, n, 1, n, seed, offset, 0, nullptr); return; }
+  if (use_avx1()) { avx1::GaussFillRows(out, n, 1, n, seed, offset, 0, nullptr, nullptr); return; }
 #endif
   HWY_DYNAMIC_DISPATCH(GaussFill)(out, n, seed, offset);
 }
 static void FillRows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
-                     uint64_t offset, uint64_t step, const float *scale) {
+                     uint64_t offset, uint64_t step, const float *scale,
+                     const unsigned char *keep) {
 #if AP_HAVE_AVX1
-  if (use_avx1()) { avx1::GaussFillRows(out, ostride, rows, len, seed, offset, step, scale); return; }
+  if (use_avx1()) {
+    avx1::GaussFillRows(out, ostride, rows, len, seed, offset, step, scale, keep);
+    return;
+  }
 #endif
-  HWY_DYNAMIC_DISPATCH(GaussFillRows)(out, ostride, rows, len, seed, offset, step, scale);
+  HWY_DYNAMIC_DISPATCH(GaussFillRows)(out, ostride, rows, len, seed, offset, step, scale, keep);
 }
 }  // namespace ap_gauss
 extern "C" void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset) {
@@ -705,6 +714,12 @@ extern "C" void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offs
 extern "C" void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len,
                                    uint64_t seed, uint64_t offset, uint64_t step,
                                    const float *scale) {
-  if (rows && len) ap_gauss::FillRows(out, ostride, rows, len, seed, offset, step, scale);
+  if (rows && len) ap_gauss::FillRows(out, ostride, rows, len, seed, offset, step, scale, nullptr);
+}
+/* ap_gauss_fill_rows for the rows r with keep[r] nonzero only: the others are not written. */
+extern "C" void ap_gauss_fill_rows_kept(float *out, size_t ostride, size_t rows, size_t len,
+                                        uint64_t seed, uint64_t offset, uint64_t step,
+                                        const float *scale, const unsigned char *keep) {
+  if (rows && len) ap_gauss::FillRows(out, ostride, rows, len, seed, offset, step, scale, keep);
 }
 #endif
