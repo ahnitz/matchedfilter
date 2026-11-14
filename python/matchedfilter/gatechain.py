@@ -2768,7 +2768,8 @@ def _distance_halves(sig, lags, bands, chain, snr, n, far=None):
     found, idx = _derived_get(_KEPT, fkey, C, F, far)
     if not found:
         own = _column(C, col)[F[:, 0] >= snr]
-        rows = np.flatnonzero(far[np.arange(own.size) % far.shape[0], col] > own)
+        # the noise rows, repeated in order to the length of the kept draws
+        rows = np.flatnonzero(np.resize(far[:, col], own.size) > own)
         idx = (rows[rows % 2 == 0] // 2, rows[rows % 2 == 1] // 2)
         _derived_put(_KEPT, fkey, (C, F, far), idx, _KEPT_MAX)
     return _Distances(a, idx[0], b), _Distances(bb, idx[1], b)
