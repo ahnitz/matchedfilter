@@ -28,10 +28,12 @@ def empty_model(monkeypatch):
     monkeypatch.setattr(gc, "_SIMILAR_COUNT", {})
 
 
-def _draws(p, bands, fd=1e-2, alphas=None):
+def _draws(p, bands, fd=1e-2, alphas=None, held=True):
+    """The draws as the planner holds them (held), or written out as plain arrays."""
     kw = {} if alphas is None else {"alphas": alphas}
-    return gc.signal_draws(p, N, bands, SNR, gc.model_draws(fd)[0],
-                           window=gc.local_window(p, N, bands, WINDOWS[0]), lags_too=True, **kw)
+    read = gc._signal_table if held else gc.signal_draws
+    return read(p, N, bands, SNR, gc.model_draws(fd)[0],
+                window=gc.local_window(p, N, bands, WINDOWS[0]), lags_too=True, **kw)
 
 
 def _held_bytes(cache):
@@ -78,27 +80,32 @@ def test_a_chains_columns_are_its_kept_draws_halves(empty_model, chain):
 
 
 def test_a_retention_holds_its_own_band_beside_the_plain_draws(empty_model):
-    """A retention alters one band. Its draws take the plain draws' fine maxima and lags and
-    share every other band's column with them, so what the planner derives from those
-    columns it derives once; the altered band's values are the retention's own."""
+    """A retention alters one band. Held, its draws are the plain draws' arrays -- fine
+    maxima, lags, every other band -- and one column of its own for that band, for the coarse
+    maxima and for their lags; written out (signal_draws) they are the whole table, and what
+    the planner reads of them is that table's."""
     p = _profile()
     bands = gc.usable_bands(p, N)
-    plain = _draws(p, bands)
+    (Cp, Fp), (fatp, catp) = _draws(p, bands)
     alphas = tuple(0.97 if b == 128 else 1.0 for b in bands)
-    kept = _draws(p, bands, alphas=alphas)
-    (C, F), (fat, cat) = kept
-    (Cp, Fp), (fatp, catp) = plain
-    assert F is Fp and fat is fatp
-    shared = gc._shared_with(C)
-    assert shared is not None and shared[0] is Cp
+    (C, F), (fat, cat) = _draws(p, bands, alphas=alphas)
     altered = bands.index(128)
-    assert shared[2] == tuple(i for i in range(len(bands)) if i != altered)
-    assert not np.array_equal(C[:, altered], Cp[:, altered])
+    assert isinstance(C, gc._Beside) and isinstance(cat, gc._Beside)
+    assert C.plain is Cp and cat.plain is catp and F is Fp and fat is fatp
+    assert set(C.own) == {altered} == set(cat.own)
+    assert C.own[altered].nbytes + cat.own[altered].nbytes < 0.3 * (Cp.nbytes + catp.nbytes)
+    (Cw, Fw), (fatw, catw) = _draws(p, bands, alphas=alphas, held=False)
+    assert isinstance(Cw, np.ndarray) and Cw.shape == Cp.shape
+    for i in range(len(bands)):
+        np.testing.assert_array_equal(Cw[:, i], C.column(i))
+        np.testing.assert_array_equal(catw[:, i], cat.column(i))
+        assert np.array_equal(Cw[:, i], Cp[:, i]) == (i != altered)
+    np.testing.assert_array_equal(Fw[:, 0], Fp[:, 0])
     for chain in ((128, 256), (64, 128, 512), (256, 512)):
         cols = [bands.index(b) for b in chain]
         A, B = gc._kept_halves((C, F), bands, cols, chain, SNR)
         Ap, _ = gc._kept_halves((Cp, Fp), bands, cols, chain, SNR)
-        ref = gc.kept_draws((C, F), bands, chain, SNR)
+        ref = gc.kept_draws((Cw, Fw), bands, chain, SNR)
         for i, c in enumerate(cols):
             np.testing.assert_array_equal(A[:, i], ref[0::2, i])
             np.testing.assert_array_equal(B[:, i], ref[1::2, i])
@@ -120,7 +127,7 @@ def test_a_retentions_plans_are_those_of_its_own_table(empty_model, monkeypatch)
         return out
 
     shared = plans()
-    assert any(k[0] == "beside" for k in gc._KEPT)
+    assert any(isinstance(v[0][0], gc._Beside) for v in gc._SIGNAL_CACHE.values())
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_PLAN_CACHE", "_SIGNAL_RECORDS",
               "_NOISE_RECORDS", "_KEPT"):
         getattr(gc, c).clear()
@@ -171,6 +178,10 @@ def test_windows_and_chains_add_almost_nothing_to_what_is_held(empty_model):
     gc.choose_chain(p, N, SNR, fd, cost=cost, window=WINDOWS[0])
     (C, F), (fat, cat) = _draws(p, bands, fd=fd)
     table = C.nbytes + fat.nbytes + cat.nbytes
+    held_tables = lambda: sum(  # noqa: E731  (what the draws' own cache holds)
+        x.nbytes for (c, _), (_, at) in gc._SIGNAL_CACHE.values()
+        for t in (c, at) for x in (t.own.values() if isinstance(t, gc._Beside) else [t]))
+    tables_before = held_tables()
     one = _held_bytes(gc._KEPT)
     assert one < 2.5 * table
     for window in WINDOWS[1:]:
@@ -180,3 +191,4 @@ def test_windows_and_chains_add_almost_nothing_to_what_is_held(empty_model):
     for window in WINDOWS:
         gc.choose_chain(p, N, SNR, fd, cost=cost, window=window, tier0_clusters={128: (0.97, 1)})
     assert _held_bytes(gc._KEPT) - before < 0.5 * table
+    assert held_tables() - tables_before < 0.35 * table       # the retention's two columns

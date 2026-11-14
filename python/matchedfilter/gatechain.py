@@ -1337,6 +1337,23 @@ _SIGNAL_RECORDS = OrderedDict()
 def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=False,
                  alphas=None, _exact=False):
     """Joint draws of every band's coarse window maximum and the fine window maximum under a
+    signal of strength snr: _signal_table's (which has the account of them), as plain
+    arrays. The planner reads the table as it is held, where a retention's draws are its
+    altered bands beside the plain draws (_Beside); here they are written out."""
+    hit = _signal_table(power, n, bands, snr, ndet, seed=seed, window=window, lags_too=True,
+                        alphas=alphas, _exact=_exact)
+    if hit is None:
+        return None
+    (C, F), (fat, cat) = hit
+    if not isinstance(C, _Beside):
+        return hit if lags_too else hit[0]          # the held arrays themselves
+    C, cat = C.full(), cat.full()
+    return ((C, F), (fat, cat)) if lags_too else (C, F)
+
+
+def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=False,
+                  alphas=None, _exact=False):
+    """Joint draws of every band's coarse window maximum and the fine window maximum under a
     signal of strength snr arriving at a uniformly random time in the window.
 
     Returns (C, F), both (M, len(bands)) float32: C[:, i] band i's largest coarse statistic
@@ -1412,8 +1429,8 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
     if al is not None and not _exact:
         # beside the plain draws of the same simulation (read now if they have not been)
-        hit = _beside_plain(hit, signal_draws(p, n, bands, snr, ndet, seed=seed, window=window,
-                                              lags_too=True))
+        hit = _beside_plain(hit, _signal_table(p, n, bands, snr, ndet, seed=seed, window=window,
+                                               lags_too=True))
     _cache_put(_SIGNAL_CACHE, key, hit)
     if al is not None and not _exact:
         # A retention's simulation is its band simulated again beside the plain one's
@@ -1426,37 +1443,55 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     return hit[0] if not lags_too else hit
 
 
+class _Beside:
+    """A retention's table (its coarse maxima, or their lags) held beside the plain draws':
+    `plain` the plain draws' array, `own` the retention's column for each band it alters.
+    Every other column is the plain array's. Stands where the (M, bands) array would."""
+    __slots__ = ("plain", "own", "shape", "__weakref__")
+
+    def __init__(self, plain, own):
+        self.plain, self.own, self.shape = plain, own, plain.shape
+
+    def column(self, c):
+        return self.own[c] if c in self.own else self.plain[:, c]
+
+    def full(self):
+        """The table written out: a copy of the plain one with the altered columns."""
+        out = self.plain.copy()
+        for c, col in self.own.items():
+            out[:, c] = col
+        return out
+
+
+def _column(table, c):
+    """Column c of a table of draws (an array, or a retention's _Beside)."""
+    return table.column(c) if isinstance(table, _Beside) else table[:, c]
+
+
 def _beside_plain(hit, plain):
     """A retention's draws ((C, F), (fat, cat)) as held beside the plain profile's `plain`
-    (the same simulation's without the retention, or None where they are not held): where
-    the two agree -- the fine maxima and their lags always, and every band the retention does
-    not alter -- the retention's take the plain ones' arrays themselves, and the bands they
-    share are noted (_shared_with). What the planner derives from a column it derives once
-    for the plain draws and every retention of them: a retention then holds its own band's
-    column and not a table and its halves over again."""
-    if plain is None:
-        return hit
+    (the same simulation's without the retention): the retention's fine maxima, their lags
+    and every band it does not alter are the plain draws' own, so it holds the plain draws'
+    arrays for those and a column of its own for each band it alters (_Beside) -- one or two
+    columns where a whole table and its lags were held. What the planner derives from a
+    column it derives once for the plain draws and every retention of them. Returned as it
+    is where the two do not agree (never, for one simulation's; it is checked)."""
     (C, F), (fat, cat) = hit
     (Cp, Fp), (fatp, catp) = plain
-    if C.shape != Cp.shape or not np.array_equal(F[:, 0], Fp[:, 0]) or not np.array_equal(fat, fatp):
+    if (isinstance(Cp, _Beside) or C.shape != Cp.shape or not np.array_equal(F[:, 0], Fp[:, 0])
+            or not np.array_equal(fat, fatp)):
         return hit
-    same = tuple(i for i in range(C.shape[1])
-                 if np.array_equal(C[:, i], Cp[:, i]) and np.array_equal(cat[:, i], catp[:, i]))
-    if not same:
+    altered = [i for i in range(C.shape[1])
+               if not (np.array_equal(C[:, i], Cp[:, i]) and np.array_equal(cat[:, i], catp[:, i]))]
+    if len(altered) == C.shape[1]:
         return hit
-    _derived_put(_KEPT, ("beside", id(C)), (C, Cp, catp), same, _KEPT_MAX)
-    return (C, Fp), (fatp, cat)
-
-
-def _shared_with(C):
-    """(the plain draws' C, their coarse lags, the columns shared) for a retention's draws C
-    held beside them (_beside_plain), else None."""
-    hit = _KEPT.get(("beside", id(C)))
-    if hit is None:
-        return None
-    refs, same = hit
-    C_own, Cp, catp = (r() for r in refs)
-    return None if C_own is not C or Cp is None or catp is None else (Cp, catp, same)
+    own_c, own_at = {}, {}
+    for i in altered:
+        own_c[i] = np.ascontiguousarray(C[:, i])
+        own_at[i] = np.ascontiguousarray(cat[:, i])
+        own_c[i].setflags(write=False)
+        own_at[i].setflags(write=False)
+    return (_Beside(Cp, own_c), Fp), (fatp, _Beside(catp, own_at))
 
 
 def _release_signal_records(sim):
@@ -2464,19 +2499,22 @@ def kept_draws(sig, bands, chain, snr):
     elsewhere in the block carries. Memoised per draws (by identity, held so they cannot be
     reused), chain and snr: every template group pricing a profile asks again."""
     C, F = sig[0], sig[1]
+    held = sig[0]                       # what the memo is kept with: a _Beside is written out
+    if isinstance(C, _Beside):
+        C = C.full()
     cols = [bands.index(b) for b in chain]
-    key = (id(C), id(F), tuple(cols), float(snr))
-    found, out = _derived_get(_KEPT, key, C, F)
+    key = (id(held), id(F), tuple(cols), float(snr))
+    found, out = _derived_get(_KEPT, key, held, F)
     if found:
         return out
     # When F broadcasts one fine maximum across all columns (signal_draws), filter C once per
     # (C, F, snr) and slice columns per chain rather than copying and scanning F[:, cols].
     if F.ndim == 2 and F.shape[1] > 0 and F.strides[1] == 0:
-        bkey = ("kept_all", id(C), id(F), float(snr))
-        found, c_kept = _derived_get(_KEPT, bkey, C, F)
+        bkey = ("kept_all", id(held), id(F), float(snr))
+        found, c_kept = _derived_get(_KEPT, bkey, held, F)
         if not found:
             c_kept = C[F[:, 0] >= snr]
-            _derived_put(_KEPT, bkey, (C, F), c_kept, _KEPT_MAX)
+            _derived_put(_KEPT, bkey, (held, F), c_kept, _KEPT_MAX)
         out = c_kept[:, cols]
     else:
         keep = F[:, cols[0]] >= snr
@@ -2484,7 +2522,7 @@ def kept_draws(sig, bands, chain, snr):
             keep = keep | (F[:, c] >= snr)
         out = C[keep][:, cols]
     out.setflags(write=False)
-    _derived_put(_KEPT, key, (C, F), out, _KEPT_MAX)
+    _derived_put(_KEPT, key, (held, F), out, _KEPT_MAX)
     return out
 
 
@@ -2569,22 +2607,20 @@ def _kept_halves(sig, bands, cols, chain, snr):
         a, b = _halves(kept_draws(sig, bands, chain, snr))
         return (_Columns([a[:, i] for i in range(a.shape[1])], [(a, i) for i in range(a.shape[1])]),
                 _Columns([b[:, i] for i in range(b.shape[1])], [(b, i) for i in range(b.shape[1])]))
-    shared = _shared_with(C)
-    if shared is not None:
+    if isinstance(C, _Beside):
         # a retention's draws: the plain draws' halves of the columns they share (F is the
         # plain draws' own, so the kept rows are theirs), its own of the others
-        plain, _, same = shared
-        pa, pb = _kept_table(plain, F, snr)
+        pa, pb = _kept_table(C.plain, F, snr)
         a_cols, b_cols, a_held, b_held = [], [], [], []
         for c in cols:
-            if c in same:
+            if c not in C.own:
                 a_cols.append(pa[:, c]); b_cols.append(pb[:, c])
                 a_held.append((pa, c)); b_held.append((pb, c))
             else:
                 key = ("kept_column", id(C), id(F), int(c), float(snr))
                 found, own = _derived_get(_KEPT, key, C, F)
                 if not found:
-                    kept = C[F[:, 0] >= snr, c]
+                    kept = C.own[c][F[:, 0] >= snr]
                     own = (np.ascontiguousarray(kept[0::2]), np.ascontiguousarray(kept[1::2]))
                     for x in own:
                         x.setflags(write=False)
@@ -2685,26 +2721,25 @@ def _distance_halves(sig, lags, bands, chain, snr, n, far=None):
     fat, cat = lags
     b = int(chain[-1])
     col = bands.index(b)
-    shared = _shared_with(sig[0])
-    if shared is not None and col in shared[2]:
+    C = sig[0]
+    if isinstance(C, _Beside) and col not in C.own:
         # a retention that leaves the last band alone: the plain draws' distances are its own
-        sig, cat = (shared[0], F), shared[1]
+        C, cat = C.plain, cat.plain
     key = ("dist32", id(F), id(fat), id(cat), col, b, float(snr), int(n))
     found, base = _derived_get(_KEPT, key, F, fat, cat)
     if not found:
         keep = F[:, 0] >= snr
-        base = (np.abs(fat[keep] - cat[keep, col]) / (n // b)).astype(np.float32)
+        base = (np.abs(fat[keep] - _column(cat, col)[keep]) / (n // b)).astype(np.float32)
         base.setflags(write=False)
         _derived_put(_KEPT, key, (F, fat, cat), base, _KEPT_MAX)
     a, bb = _halves(base)
     none = np.empty(0, np.int64)
     if far is None:
         return _Distances(a, none, b), _Distances(bb, none, b)
-    C = sig[0]
     fkey = ("far", id(C), id(F), col, float(snr), id(far))
     found, idx = _derived_get(_KEPT, fkey, C, F, far)
     if not found:
-        own = C[F[:, 0] >= snr, col]
+        own = _column(C, col)[F[:, 0] >= snr]
         rows = np.flatnonzero(far[np.arange(own.size) % far.shape[0], col] > own)
         idx = (rows[rows % 2 == 0] // 2, rows[rows % 2 == 1] // 2)
         _derived_put(_KEPT, fkey, (C, F, far), idx, _KEPT_MAX)
@@ -3252,7 +3287,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
     # the signals in the window local to them, the noise in the window searched (local_window)
     sig_win = local_window(p_base, n, bands, win)
-    drawn = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
+    drawn = _signal_table(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
     if drawn is None:
         return None, []
     sig, lags = drawn
@@ -3275,7 +3310,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             a0, lp0 = t0_map[b0]
             al_b0 = tuple(a0 if b == b0 else 1.0 for b in bands)
             lp_b0 = tuple(lp0 if b == b0 else 0 for b in bands)
-            drawn_b0 = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win,
+            drawn_b0 = _signal_table(p_base, n, bands, snr, nsamp, window=sig_win,
                                     lags_too=True, alphas=al_b0)
             if drawn_b0 is None:
                 continue
@@ -3401,12 +3436,12 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         al_vec = tuple(t0_cl[0] if b == b0 else (t1_cl[0] if b == b1 else 1.0) for b in bands)
         lp_vec = tuple(t0_cl[1] if b == b0 else (t1_cl[1] if b == b1 else 0) for b in bands)
         sig_win = local_window(p_base, n, bands, window)
-        drawn = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True, alphas=al_vec)
+        drawn = _signal_table(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True, alphas=al_vec)
         if drawn is None:
             return None
         sig, lags = drawn
         if len(chain) == 1:
-            base_drawn = signal_draws(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
+            base_drawn = _signal_table(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
             if base_drawn is not None:
                 lags = base_drawn[1]
         noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=window,
@@ -3417,7 +3452,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
                 + (("l1",) if len(chain) == 1 else ()))
     else:
         sig_win = local_window(p, n, bands, window)
-        drawn = signal_draws(p, n, bands, snr, nsamp, window=sig_win, lags_too=True)
+        drawn = _signal_table(p, n, bands, snr, nsamp, window=sig_win, lags_too=True)
         if drawn is None:
             return None
         sig, lags = drawn
