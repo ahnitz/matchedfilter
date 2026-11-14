@@ -129,3 +129,19 @@ def test_the_band_order_memory_is_bounded(monkeypatch):
     _chains._TIER0_FIRST.move_to_end(key)                       # the plan's is the newer one
     again, _ = _plan(True, monkeypatch, spread=3.0, forget=False)
     assert again == plan and list(_chains._TIER0_FIRST) == [key]
+
+
+def test_a_plan_does_not_depend_on_the_bank_planned_before_it(monkeypatch):
+    """Banks of one reference follow one another (a top template's leaf banks), and each
+    takes the band the last one's screeners won at as the first to build. Its plan is the
+    one it has when planned first: for every ordered pair of three banks that share tightly,
+    loosely and not at all."""
+    spreads = (2.0, 5.0, 12.0)
+    alone = {s: _plan(True, monkeypatch, spread=s)[0] for s in spreads}
+    assert len({plan[:2] for plan in alone.values()}) >= 2                # not one plan thrice
+    for before in spreads:
+        for after in spreads:
+            if before != after:
+                _plan(True, monkeypatch, spread=before)
+                plan, _ = _plan(True, monkeypatch, spread=after, forget=False)
+                assert plan == alone[after], (before, after)
