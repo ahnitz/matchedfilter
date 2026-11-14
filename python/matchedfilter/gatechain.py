@@ -1410,6 +1410,10 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     end = int(det[ndet - 1]) + 1 if ndet > 0 else 0
     C, F, at = C[:end], F[:end], (at[0][:end], at[1][:end])
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
+    if al is not None and not _exact:
+        # beside the plain draws of the same simulation (read now if they have not been)
+        hit = _beside_plain(hit, signal_draws(p, n, bands, snr, ndet, seed=seed, window=window,
+                                              lags_too=True))
     _cache_put(_SIGNAL_CACHE, key, hit)
     if al is not None and not _exact:
         # A retention's simulation is its band simulated again beside the plain one's
@@ -1420,6 +1424,39 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
         # are not, and a request these draws no longer serve simulates the band again.
         _release_signal_records(sim)
     return hit[0] if not lags_too else hit
+
+
+def _beside_plain(hit, plain):
+    """A retention's draws ((C, F), (fat, cat)) as held beside the plain profile's `plain`
+    (the same simulation's without the retention, or None where they are not held): where
+    the two agree -- the fine maxima and their lags always, and every band the retention does
+    not alter -- the retention's take the plain ones' arrays themselves, and the bands they
+    share are noted (_shared_with). What the planner derives from a column it derives once
+    for the plain draws and every retention of them: a retention then holds its own band's
+    column and not a table and its halves over again."""
+    if plain is None:
+        return hit
+    (C, F), (fat, cat) = hit
+    (Cp, Fp), (fatp, catp) = plain
+    if C.shape != Cp.shape or not np.array_equal(F[:, 0], Fp[:, 0]) or not np.array_equal(fat, fatp):
+        return hit
+    same = tuple(i for i in range(C.shape[1])
+                 if np.array_equal(C[:, i], Cp[:, i]) and np.array_equal(cat[:, i], catp[:, i]))
+    if not same:
+        return hit
+    _derived_put(_KEPT, ("beside", id(C)), (C, Cp, catp), same, _KEPT_MAX)
+    return (C, Fp), (fatp, cat)
+
+
+def _shared_with(C):
+    """(the plain draws' C, their coarse lags, the columns shared) for a retention's draws C
+    held beside them (_beside_plain), else None."""
+    hit = _KEPT.get(("beside", id(C)))
+    if hit is None:
+        return None
+    refs, same = hit
+    C_own, Cp, catp = (r() for r in refs)
+    return None if C_own is not C or Cp is None or catp is None else (Cp, catp, same)
 
 
 def _release_signal_records(sim):
@@ -2482,30 +2519,107 @@ def _halves(x):
     return a, b
 
 
+class _Columns:
+    """A chain's columns of one half of a table's detections, without a copy of them: `cols`
+    the tier's columns, each a contiguous 1-D view of the table's half (held column by
+    column, _kept_halves). Reads like the (M, k) array it stands for where the planner reads
+    one: shape, S[:, i], S[rows, i]."""
+    __slots__ = ("cols", "held", "shape")
+
+    def __init__(self, cols, held=None):
+        self.cols = tuple(cols)
+        # per column, (the array that holds it, which of its columns): what a column's
+        # memos are kept with, a view being made anew for every chain
+        self.held = tuple(held) if held is not None else tuple((c, 0) for c in self.cols)
+        self.shape = (int(self.cols[0].shape[0]), len(self.cols))
+
+    def __getitem__(self, key):
+        rows, i = key
+        return self.cols[i][rows]
+
+    def smallest(self, i, m):
+        """_smallest of column i, held with the column: every chain through a band, every
+        window and cost model asks for the same few of the same column."""
+        owner, which = self.held[i]
+        key = ("smallest", id(owner), int(which), int(m))
+        found, out = _derived_get(_KEPT, key, owner)
+        if not found:
+            out = _smallest(self.cols[i], m)
+            out.setflags(write=False)
+            _derived_put(_KEPT, key, (owner,), out, _KEPT_MAX)
+        return out
+
+    def score(self, thresholds):
+        """Per detection, the smallest of its columns less their thresholds (_fit)."""
+        out = self.cols[0] - np.float64(thresholds[0])
+        for col, t in zip(self.cols[1:], thresholds[1:]):
+            np.minimum(out, col - np.float64(t), out=out)
+        return out
+
+
 def _kept_halves(sig, bands, cols, chain, snr):
-    """(search half, fit half) of kept_draws(sig, bands, chain, snr): _halves of it, memoised
-    per draws and chain, without also holding the kept draws they were cut from. Where one
-    fine maximum serves every band (signal_draws), the kept draws of all bands are halved
-    once per draws and a chain's halves are its columns of those; holding the chain's kept
-    draws beside its two halves was a third of what a profile's windows held."""
+    """(search half, fit half) of kept_draws(sig, bands, chain, snr), as _halves of it would
+    be, each a _Columns. Where one fine maximum serves every band (signal_draws), the kept
+    draws of all bands are halved once per draws, column by column (Fortran order), and a
+    chain's halves are views of its columns: every chain of every window and cost model of a
+    profile reads the same two arrays, where each held its own copies of both halves (ten to
+    twenty chains a table, four times the table)."""
     C, F = sig[0], sig[1]
     if not (F.ndim == 2 and F.shape[1] > 0 and F.strides[1] == 0):
-        return _halves(kept_draws(sig, bands, chain, snr))
-    key = ("kept_halves", id(C), id(F), tuple(cols), float(snr))
+        a, b = _halves(kept_draws(sig, bands, chain, snr))
+        return (_Columns([a[:, i] for i in range(a.shape[1])], [(a, i) for i in range(a.shape[1])]),
+                _Columns([b[:, i] for i in range(b.shape[1])], [(b, i) for i in range(b.shape[1])]))
+    shared = _shared_with(C)
+    if shared is not None:
+        # a retention's draws: the plain draws' halves of the columns they share (F is the
+        # plain draws' own, so the kept rows are theirs), its own of the others
+        plain, _, same = shared
+        pa, pb = _kept_table(plain, F, snr)
+        a_cols, b_cols, a_held, b_held = [], [], [], []
+        for c in cols:
+            if c in same:
+                a_cols.append(pa[:, c]); b_cols.append(pb[:, c])
+                a_held.append((pa, c)); b_held.append((pb, c))
+            else:
+                key = ("kept_column", id(C), id(F), int(c), float(snr))
+                found, own = _derived_get(_KEPT, key, C, F)
+                if not found:
+                    kept = C[F[:, 0] >= snr, c]
+                    own = (np.ascontiguousarray(kept[0::2]), np.ascontiguousarray(kept[1::2]))
+                    for x in own:
+                        x.setflags(write=False)
+                    _derived_put(_KEPT, key, (C, F), own, _KEPT_MAX)
+                a_cols.append(own[0]); b_cols.append(own[1])
+                a_held.append((own[0], 0)); b_held.append((own[1], 0))
+        return _Columns(a_cols, a_held), _Columns(b_cols, b_held)
+    a, b = _kept_table(C, F, snr)
+    return (_Columns([a[:, c] for c in cols], [(a, c) for c in cols]),
+            _Columns([b[:, c] for c in cols], [(b, c) for c in cols]))
+
+
+def _kept_table(C, F, snr):
+    """The two halves (even rows, odd rows) of the draws C whose fine maximum F reaches snr,
+    each in Fortran order: a column of either is contiguous."""
+    key = ("kept_columns", id(C), id(F), float(snr))
     found, halves = _derived_get(_KEPT, key, C, F)
-    if found:
-        return halves
-    bkey = ("kept_all", id(C), id(F), float(snr))
-    found, c_kept = _derived_get(_KEPT, bkey, C, F)
     if not found:
-        c_kept = C[F[:, 0] >= snr]
-        _derived_put(_KEPT, bkey, (C, F), c_kept, _KEPT_MAX)
-    a, b = _halves(c_kept)
-    halves = (a[:, cols], b[:, cols])
-    for x in halves:
-        x.setflags(write=False)
-    _derived_put(_KEPT, key, (C, F), halves, _KEPT_MAX)
+        kept = C[F[:, 0] >= snr]
+        halves = (np.asfortranarray(kept[0::2]), np.asfortranarray(kept[1::2]))
+        for x in halves:
+            x.setflags(write=False)
+        _derived_put(_KEPT, key, (C, F), halves, _KEPT_MAX)
     return halves
+
+
+#: One buffer the C search reads the shape of its detections from (it reads nothing else of
+#: them, _core.chain_candidates): grown to the largest (M, k) asked, so no call allocates.
+_SHAPE_ONLY = [np.empty(0, np.float32)]
+
+
+def _shape_only(M, k):
+    if _SHAPE_ONLY[0].size < M * k:
+        _SHAPE_ONLY[0] = np.empty(M * k, np.float32)
+    return _SHAPE_ONLY[0][:M * k].reshape(M, k)
 
 
 def _distances(sig, lags, bands, chain, snr, n, far=None):
@@ -2523,33 +2637,96 @@ def _distances(sig, lags, bands, chain, snr, n, far=None):
     draw's own coarse maximum the distance is the band's whole length, beyond any window.
     The pairing counts the local window's own lags among the far ones, so it errs towards
     more such draws, which the plan charges to its budget."""
+    A, B = _distance_halves(sig, lags, bands, chain, snr, n, far)
+    out = np.empty(A.size + B.size, np.float64)
+    out[0::2], out[1::2] = A.values(), B.values()
+    return out
+
+
+class _Distances:
+    """One half of a table's detections' _distances, without an array per window: `base`
+    the distances in the draws' own window (float32: whole coarse samples over a power of
+    two, exact), shared by every window; `far` the few detections (indices into the half,
+    ascending) that noise far from the signal draws the refine away from in the window
+    searched, which lie beyond every half-width (at `limit`, the band's length)."""
+    __slots__ = ("base", "far", "limit", "size", "__weakref__")
+
+    def __init__(self, base, far, limit):
+        self.base, self.far, self.limit, self.size = base, far, float(limit), int(base.size)
+
+    def beyond(self, h):
+        """Indices of the detections beyond half-width h, ascending."""
+        out = np.flatnonzero(self.base > h)
+        return np.union1d(out, self.far) if self.far.size else out
+
+    def mask_beyond(self, h):
+        out = self.base > h
+        if self.far.size:
+            out[self.far] = True
+        return out
+
+    def count_beyond(self, h):
+        return int(np.count_nonzero(self.base > h)) + int(np.count_nonzero(self.base[self.far] <= h))
+
+    def values(self):
+        """The distances as one array (a copy), the far ones at the limit."""
+        out = self.base.astype(np.float64)
+        out[self.far] = self.limit
+        return out
+
+
+def _distance_halves(sig, lags, bands, chain, snr, n, far=None):
+    """(search half, fit half) of _distances(sig, lags, bands, chain, snr, n, far), each a
+    _Distances: the draws' own distances halved once per draws and last band, whatever the
+    window, and per window only the indices of the detections its far noise takes
+    (_distances has what they are). A window's own array of distances and its two halves
+    were a megabyte and a half for a few dozen such detections."""
     F = sig[1]
     fat, cat = lags
     b = int(chain[-1])
     col = bands.index(b)
-    key = ("dist", id(F), id(fat), id(cat), col, b, float(snr), int(n), None if far is None else id(far))
-    sources = (F, fat, cat) if far is None else (F, fat, cat, far)
-    found, out = _derived_get(_KEPT, key, *sources)
-    if found:
-        return out
-    keep = F[:, 0] >= snr
-    out = np.abs(fat[keep] - cat[keep, col]) / (n // b)
-    if far is not None:
-        own = sig[0][keep, col]
-        out[far[np.arange(own.size) % far.shape[0], col] > own] = float(b)
-    out.setflags(write=False)
-    _derived_put(_KEPT, key, sources, out, _KEPT_MAX)
-    return out
+    shared = _shared_with(sig[0])
+    if shared is not None and col in shared[2]:
+        # a retention that leaves the last band alone: the plain draws' distances are its own
+        sig, cat = (shared[0], F), shared[1]
+    key = ("dist32", id(F), id(fat), id(cat), col, b, float(snr), int(n))
+    found, base = _derived_get(_KEPT, key, F, fat, cat)
+    if not found:
+        keep = F[:, 0] >= snr
+        base = (np.abs(fat[keep] - cat[keep, col]) / (n // b)).astype(np.float32)
+        base.setflags(write=False)
+        _derived_put(_KEPT, key, (F, fat, cat), base, _KEPT_MAX)
+    a, bb = _halves(base)
+    none = np.empty(0, np.int64)
+    if far is None:
+        return _Distances(a, none, b), _Distances(bb, none, b)
+    C = sig[0]
+    fkey = ("far", id(C), id(F), col, float(snr), id(far))
+    found, idx = _derived_get(_KEPT, fkey, C, F, far)
+    if not found:
+        own = C[F[:, 0] >= snr, col]
+        rows = np.flatnonzero(far[np.arange(own.size) % far.shape[0], col] > own)
+        idx = (rows[rows % 2 == 0] // 2, rows[rows % 2 == 1] // 2)
+        _derived_put(_KEPT, fkey, (C, F, far), idx, _KEPT_MAX)
+    return _Distances(a, idx[0], b), _Distances(bb, idx[1], b)
 
 
 def _all_halfwidths(dist, allow):
     """Cost-independent candidate half-widths (None, hmin, ...) for search half `dist`."""
     if dist is None or allow < 0:
         return (None,)
-    key = ("hws", id(dist), int(allow))
-    found, out = _derived_get(_KEPT, key, dist)
-    if found:
-        return out
+    if isinstance(dist, _Distances):
+        key = ("hws", id(dist.base), dist.far.tobytes(), int(allow))
+        found, out = _derived_get(_KEPT, key, dist.base)
+        if found:
+            return out
+        source, dist = (dist.base,), dist.values()
+    else:
+        key = ("hws", id(dist), int(allow))
+        found, out = _derived_get(_KEPT, key, dist)
+        if found:
+            return out
+        source = (dist,)
     if dist.size > allow:
         kth = dist.size - 1 - allow
         hmin = max(1, int(math.ceil(np.partition(dist, kth)[kth])))
@@ -2557,7 +2734,7 @@ def _all_halfwidths(dist, allow):
         hmin = 1
     up = np.ceil(dist[dist > hmin]).astype(np.int64)
     out = (None,) + tuple(sorted({hmin} | {int(h) for h in up}))
-    _derived_put(_KEPT, key, (dist,), out, _KEPT_MAX)
+    _derived_put(_KEPT, key, source, out, _KEPT_MAX)
     return out
 
 
@@ -2717,7 +2894,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     if lags is not None:
         # far: the signal draws are a narrower window's than the noise's (local_window), so
         # the refine's coarse maximum may be noise the draws do not hold (_distances)
-        dA_all, dB_all = _halves(_distances(sig, lags, bands, chain, snr, n, noise if far else None))
+        dA_all, dB_all = _distance_halves(sig, lags, bands, chain, snr, n, noise if far else None)
         allow = _gm.window_allowance(float(fd), A.shape[0], B.shape[0])
         if cost is not None and cost.prices_direct(chain):
             dA, dB = dA_all, dB_all
@@ -2728,7 +2905,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     found, cands = _derived_get(_CAND_CACHE, key, sig[0], noise) if key is not None else (False, None)
     if not found:
         cand_hws = all_hws if key is not None else hws
-        dead = tuple(np.empty(0, np.int64) if h is None else np.flatnonzero(dA_all > h)
+        dead = tuple(np.empty(0, np.int64) if h is None else dA_all.beyond(h)
                      for h in cand_hws)
         cands = _chain_candidates(A, noise, cols, K, eff_prune, dead)
         if key is not None:
@@ -2790,7 +2967,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         q15 = bool(cost.first_tier(chain[0], reach[1])[1])
     else:
         q15 = False
-    missed = 0 if hw is None else int(np.count_nonzero(dA > hw))
+    missed = 0 if hw is None else dA.count_beyond(hw)
     search_info = dict(thresholds=th, reach=reach, halfwidth=hw, missed=missed, K=K)
     offs = (0,) * len(chain) if offsets is None else tuple(int(x) for x in offsets)
     if lazy_fit:
@@ -2831,9 +3008,9 @@ def _fit(B, dist, thresholds, hw, fd):
     if j < 1 or j > M:
         return None
     th = np.asarray(thresholds, np.float64)
-    score = (B - th).min(axis=1)
+    score = B.score(th) if isinstance(B, _Columns) else (B - th).min(axis=1)
     if hw is not None:
-        out = dist > hw
+        out = dist.mask_beyond(hw) if isinstance(dist, _Distances) else dist > hw
         if np.count_nonzero(out) >= j:
             hw = None
         else:
@@ -2854,9 +3031,13 @@ def _chain_candidates(S, noise, cols, K, prune, dead):
     M, k = S.shape
     # The earlier tiers' thresholds sit at index <= K of their sorted columns; the last
     # tier's is the rem-th smallest alive value with rem + dismissed <= K.
-    low = [_smallest(S[:, i], K + 1) for i in range(k - 1)]
+    if isinstance(S, _Columns):
+        low = [S.smallest(i, K + 1) for i in range(k - 1)]
+        last_order = S.smallest(k - 1, K + 1)
+    else:
+        low = [_smallest(S[:, i], K + 1) for i in range(k - 1)]
+        last_order = _smallest(S[:, k - 1], K + 1)
     low_val = [S[o, i] for i, o in enumerate(low)]
-    last_order = _smallest(S[:, k - 1], K + 1)
     last_val = S[last_order, k - 1]
     out = []
     Nn = noise.shape[0]
@@ -2932,7 +3113,8 @@ def _chain_candidates(S, noise, cols, K, prune, dead):
 
     if _C_SEARCH and all(len(o) == K + 1 for o in low) and len(last_order) == K + 1:
         from . import _core
-        return _core.chain_candidates(np.ascontiguousarray(S, np.float32), Nc, tuple(low),
+        shape = _shape_only(M, k) if isinstance(S, _Columns) else np.ascontiguousarray(S, np.float32)
+        return _core.chain_candidates(shape, Nc, tuple(low),
                                       tuple(np.ascontiguousarray(v, np.float32) for v in low_val),
                                       np.ascontiguousarray(last_order, np.int64),
                                       np.ascontiguousarray(last_val, np.float32),
