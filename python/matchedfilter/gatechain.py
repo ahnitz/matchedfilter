@@ -283,40 +283,37 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                 uz_ok = sym_r2[node_u, z_arr] >= f2_floor
                 if not (np.any(uw_ok) or np.any(uz_ok)):
                     continue
-                best_gain = -1.0
+                # The best swap over every free node v after u, as the loop over v found it:
+                # for each v its best edge with u on w's side and with u on z's side (the
+                # first of equal gains), and of all of those the first of the largest gain.
+                later = free_arr[idx_u + 1:]
+                vs = later[~used[later]]
                 best_swap = None
-                for idx_v in range(idx_u + 1, free_arr.size):
-                    node_v = int(free_arr[idx_v])
-                    if used[node_v]:
-                        continue
-                    hit1 = np.flatnonzero(uw_ok & (sym_r2[node_v, z_arr] >= f2_floor))
-                    if hit1.size > 0:
-                        gains1 = sym_r2[node_u, w_arr[hit1]] + sym_r2[node_v, z_arr[hit1]]
-                        k1 = int(hit1[int(np.argmax(gains1))])
-                        sc1 = float(sym_r2[node_u, w_arr[k1]] + sym_r2[node_v, z_arr[k1]])
-                        if sc1 > best_gain:
-                            w_n, z_n = int(w_arr[k1]), int(z_arr[k1])
-                            best_gain = sc1
-                            best_swap = (
-                                k1,
-                                node_v,
-                                (node_u, w_n) if node_u < w_n else (w_n, node_u),
-                                (node_v, z_n) if node_v < z_n else (z_n, node_v),
-                            )
-                    hit2 = np.flatnonzero(uz_ok & (sym_r2[node_v, w_arr] >= f2_floor))
-                    if hit2.size > 0:
-                        gains2 = sym_r2[node_u, z_arr[hit2]] + sym_r2[node_v, w_arr[hit2]]
-                        k2 = int(hit2[int(np.argmax(gains2))])
-                        sc2 = float(sym_r2[node_u, z_arr[k2]] + sym_r2[node_v, w_arr[k2]])
-                        if sc2 > best_gain:
-                            w_n, z_n = int(w_arr[k2]), int(z_arr[k2])
-                            best_gain = sc2
-                            best_swap = (
-                                k2,
-                                node_v,
-                                (node_u, z_n) if node_u < z_n else (z_n, node_u),
-                                (node_v, w_n) if node_v < w_n else (w_n, node_v),
-                            )
+                if vs.size:
+                    v_w = sym_r2[np.ix_(vs, w_arr)]
+                    v_z = sym_r2[np.ix_(vs, z_arr)]
+                    gain_w = np.where(uw_ok[None, :] & (v_z >= f2_floor),
+                                      sym_r2[node_u, w_arr][None, :] + v_z, -np.inf)
+                    gain_z = np.where(uz_ok[None, :] & (v_w >= f2_floor),
+                                      sym_r2[node_u, z_arr][None, :] + v_w, -np.inf)
+                    edge_w, edge_z = gain_w.argmax(axis=1), gain_z.argmax(axis=1)
+                    each = np.arange(vs.size)
+                    gains = np.stack([gain_w[each, edge_w], gain_z[each, edge_z]], axis=1).ravel()
+                    first = int(gains.argmax())
+                    if gains[first] > -1.0:
+                        node_v = int(vs[first // 2])
+                        if first % 2 == 0:
+                            e_idx = int(edge_w[first // 2])
+                            mine, theirs = int(w_arr[e_idx]), int(z_arr[e_idx])
+                        else:
+                            e_idx = int(edge_z[first // 2])
+                            mine, theirs = int(z_arr[e_idx]), int(w_arr[e_idx])
+                        best_swap = (
+                            e_idx,
+                            node_v,
+                            (node_u, mine) if node_u < mine else (mine, node_u),
+                            (node_v, theirs) if node_v < theirs else (theirs, node_v),
+                        )
                 if best_swap is not None:
                     e_idx, node_v, e1, e2 = best_swap
                     used[node_u] = True
