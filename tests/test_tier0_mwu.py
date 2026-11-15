@@ -104,3 +104,27 @@ def test_rejects_mismatched_shapes():
     with pytest.raises(ValueError):
         _core.tier0_mwu(U.astype(np.complex64), np.zeros((2, 8), np.complex128), W, 4,
                         np.empty((2, 8), np.complex128), np.empty((2, 3)))
+
+
+@pytest.mark.parametrize("m, nb", [(2, 1), (2, 37), (3, 8), (5, 19), (8, 64), (16, 5)])
+def test_a_groups_result_does_not_depend_on_its_batch(m, nb):
+    """The groups of a call are computed several to a vector, a group a lane. Each lane does
+    the one-group routine's operations in its order, so the bytes are that routine's (plain=1)
+    for any count of groups, and for a group alone or among others."""
+    rng = np.random.default_rng([m, nb])
+    K = 96
+    U, ref, W = _groups(rng, nb, m, K, 0.3)
+    U[0, 0] = 0.0                                            # the guards' side of each select
+    out = {}
+    for plain in (0, 1):
+        c = np.empty((nb, K), np.complex128)
+        ov = np.empty((nb, m), np.float64)
+        _core.tier0_mwu(U, ref, W, 4, c, ov, plain)
+        out[plain] = (c, ov)
+    assert out[0][0].tobytes() == out[1][0].tobytes()
+    assert out[0][1].tobytes() == out[1][1].tobytes()
+    last = nb - 1                                            # alone: a batch of its repeats
+    c = np.empty((1, K), np.complex128)
+    ov = np.empty((1, m), np.float64)
+    _core.tier0_mwu(U[last:], ref[last:], W, 4, c, ov)
+    assert c.tobytes() == out[1][0][last:].tobytes() and ov.tobytes() == out[1][1][last:].tobytes()

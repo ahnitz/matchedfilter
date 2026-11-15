@@ -404,6 +404,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   retention and thresholds are unchanged, and with one cost file and trials off the job's
   triggers are bit-identical. `tests/test_tier0_mwu.py` keeps the numpy code as the
   reference.
+- That synthesis several groups to a vector (`src/tier0_mwu.cc`): a group in each lane, each
+  lane doing the one-group routine's operations in its order (the file is built with
+  floating-point contraction off; `hypot` and `exp` stay libm's, per lane), so every screener
+  is bit for bit the one-group routine's, which stays as `tier0_mwu(..., plain=1)` for the
+  test that says so. Replayed setup of the showcase search's captured leaf banks on Zen 5:
+  3.5% (SNR 6.0) to 4.7% (5.5) fewer instructions, every screener set and plan unchanged.
 
 - Leaf-bank setup no longer builds a wider first band's shared screeners (tier-0 centroids)
   when that band loses even at the best screener-to-template ratio a narrower band found

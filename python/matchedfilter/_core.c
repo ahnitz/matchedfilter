@@ -2456,139 +2456,23 @@ static PyObject *M_tier0_refine_lags(PyObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
-/* One group's shared screener (gatechain.cluster_tier0_candidates): the unit-norm vector over a
-   band of K bins that its m members, each phase-aligned to it, overlap best in the worst case.
-   u: the members, (m, K) complex128, lag-aligned. ref: the frame they are first phased to,
-   (K,). w: the K real weights of the inner product <a, b> = sum_k w[k] conj(a[k]) b[k].
-   Two candidates are made and the one whose smallest member overlap is larger is kept (the
-   mean on a tie going to the minimax one, as >=):
-     the mean of the members phased to ref, normalised;
-     a minimax vector by `steps` rounds of multiplicative weights: the weighted sum of the
-     members, normalised; each member rephased to it; each weight multiplied by
-     exp(min(25 (deficit - smallest deficit), 10)), deficit = max(1 - overlap, 0), then the
-     weights scaled to mean 1.
-   c_out: the kept vector (K complex128). ov_out: its overlap with each member as given (m).
-   work: 2 m K + 4 K + 2 m doubles. Plain double arithmetic: the same on every SIMD target. */
-static void tier0_mwu_one(const double *u, const double *ref, const double *w, Py_ssize_t m,
-                          Py_ssize_t K, int steps, double *c_out, double *ov_out, double *work){
-  double *ut=work;                  /* members as iterated, (m, K) complex */
-  double *cm=ut+2*m*K;              /* the mean candidate, K complex */
-  double *cw=cm+2*K;                /* the minimax candidate, K complex */
-  double *wt=cw+2*K;                /* weights, m */
-  double *om=wt+m;                  /* the mean candidate's overlaps, m */
-  /* phase every member to the reference frame */
-  for(Py_ssize_t j=0;j<m;j++){
-    const double *uj=u+2*j*K;
-    double gr=0.0, gi=0.0;
-    for(Py_ssize_t k=0;k<K;k++){
-      const double ar=w[k]*ref[2*k], ai=-w[k]*ref[2*k+1];
-      gr+=ar*uj[2*k]-ai*uj[2*k+1];
-      gi+=ar*uj[2*k+1]+ai*uj[2*k];
-    }
-    const double ag=hypot(gr,gi);
-    double pr=1.0, pi=0.0;
-    if(ag>1e-12){ pr=gr/ag; pi=-gi/ag; }
-    double *tj=ut+2*j*K;
-    for(Py_ssize_t k=0;k<K;k++){
-      tj[2*k]=uj[2*k]*pr-uj[2*k+1]*pi;
-      tj[2*k+1]=uj[2*k]*pi+uj[2*k+1]*pr;
-    }
-  }
-  /* the mean candidate and its overlaps with the members as given */
-  double nrm=0.0;
-  for(Py_ssize_t k=0;k<K;k++){
-    double sr=0.0, si=0.0;
-    for(Py_ssize_t j=0;j<m;j++){ sr+=ut[2*(j*K+k)]; si+=ut[2*(j*K+k)+1]; }
-    sr/=(double)m; si/=(double)m;
-    cm[2*k]=sr; cm[2*k+1]=si;
-    nrm+=(sr*sr+si*si)*w[k];
-  }
-  nrm=sqrt(nrm>1e-30 ? nrm : 1e-30);
-  for(Py_ssize_t k=0;k<2*K;k++) cm[k]/=nrm;
-  double min_mean=INFINITY;
-  for(Py_ssize_t j=0;j<m;j++){
-    const double *uj=u+2*j*K;
-    double gr=0.0, gi=0.0;
-    for(Py_ssize_t k=0;k<K;k++){
-      const double ar=w[k]*cm[2*k], ai=-w[k]*cm[2*k+1];
-      gr+=ar*uj[2*k]-ai*uj[2*k+1];
-      gi+=ar*uj[2*k+1]+ai*uj[2*k];
-    }
-    om[j]=hypot(gr,gi);
-    if(om[j]<min_mean) min_mean=om[j];
-  }
-  /* the minimax candidate: steps rounds of multiplicative weights, then the final sum */
-  for(Py_ssize_t j=0;j<m;j++) wt[j]=1.0;
-  for(int it=0;it<=steps;it++){
-    nrm=0.0;
-    for(Py_ssize_t k=0;k<K;k++){
-      double sr=0.0, si=0.0;
-      for(Py_ssize_t j=0;j<m;j++){ sr+=wt[j]*ut[2*(j*K+k)]; si+=wt[j]*ut[2*(j*K+k)+1]; }
-      cw[2*k]=sr; cw[2*k+1]=si;
-      nrm+=(sr*sr+si*si)*w[k];
-    }
-    nrm=sqrt(nrm>1e-30 ? nrm : 1e-30);
-    for(Py_ssize_t k=0;k<2*K;k++) cw[k]/=nrm;
-    if(it==steps) break;
-    double dmin=INFINITY;
-    for(Py_ssize_t j=0;j<m;j++){
-      double *tj=ut+2*j*K;
-      double gr=0.0, gi=0.0;
-      for(Py_ssize_t k=0;k<K;k++){
-        const double ar=w[k]*cw[2*k], ai=-w[k]*cw[2*k+1];
-        gr+=ar*tj[2*k]-ai*tj[2*k+1];
-        gi+=ar*tj[2*k+1]+ai*tj[2*k];
-      }
-      const double ag=hypot(gr,gi);
-      double pr=1.0, pi=0.0;
-      if(ag>1e-12){ pr=gr/ag; pi=-gi/ag; }
-      for(Py_ssize_t k=0;k<K;k++){
-        const double xr=tj[2*k], xi=tj[2*k+1];
-        tj[2*k]=xr*pr-xi*pi;
-        tj[2*k+1]=xr*pi+xi*pr;
-      }
-      const double d=1.0-ag>0.0 ? 1.0-ag : 0.0;
-      ov_out[j]=d;                                   /* the deficit, for the weights below */
-      if(d<dmin) dmin=d;
-    }
-    double mean=0.0;
-    for(Py_ssize_t j=0;j<m;j++){
-      const double e=25.0*(ov_out[j]-dmin);
-      wt[j]*=exp(e<10.0 ? e : 10.0);
-      mean+=wt[j];
-    }
-    mean/=(double)m;
-    for(Py_ssize_t j=0;j<m;j++) wt[j]/=mean;
-  }
-  double min_mwu=INFINITY;
-  for(Py_ssize_t j=0;j<m;j++){
-    const double *uj=u+2*j*K;
-    double gr=0.0, gi=0.0;
-    for(Py_ssize_t k=0;k<K;k++){
-      const double ar=w[k]*cw[2*k], ai=-w[k]*cw[2*k+1];
-      gr+=ar*uj[2*k]-ai*uj[2*k+1];
-      gi+=ar*uj[2*k+1]+ai*uj[2*k];
-    }
-    ov_out[j]=hypot(gr,gi);
-    if(ov_out[j]<min_mwu) min_mwu=ov_out[j];
-  }
-  if(min_mwu>=min_mean){
-    memcpy(c_out,cw,2*(size_t)K*sizeof(double));
-  }else{
-    memcpy(c_out,cm,2*(size_t)K*sizeof(double));
-    memcpy(ov_out,om,(size_t)m*sizeof(double));
-  }
-}
+/* Each group's shared screener (src/tier0_mwu.cc): a group in each vector lane, and the plain
+   routine it reproduces bit for bit. Both return 0, or -1 when out of memory. */
+int ap_tier0_mwu(const double *u, const double *ref, const double *w, long long nb, long long m,
+                 long long K, int steps, double *c_out, double *ov_out);
+int ap_tier0_mwu_plain(const double *u, const double *ref, const double *w, long long nb,
+                       long long m, long long K, int steps, double *c_out, double *ov_out);
 
-/* tier0_mwu(U, ref, w, steps, c_out, ov_out): tier0_mwu_one for each of nb groups of m members.
-   U (nb, m, K) complex128, ref (nb, K) complex128, w (K) float64; c_out (nb, K) complex128 and
-   ov_out (nb, m) float64 are written. */
+/* tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): the shared screener of each of nb groups
+   of m members, and its members' overlaps. U (nb, m, K) complex128, ref (nb, K) complex128,
+   w (K) float64; c_out (nb, K) complex128 and ov_out (nb, m) float64 are written. plain=1 runs
+   the one-group routine group by group: the same bytes, for the test that says so. */
 static PyObject *M_tier0_mwu(PyObject *self,PyObject *args){
   (void)self;
   Py_buffer u={0}, rf={0}, w={0}, co={0}, ov={0};
   PyObject *uo, *rfo, *wo, *coo, *ovo;
-  int steps=0, got=0, ok=1;
-  if(!PyArg_ParseTuple(args,"OOOiOO",&uo,&rfo,&wo,&steps,&coo,&ovo)) return NULL;
+  int steps=0, plain=0, got=0, ok=1;
+  if(!PyArg_ParseTuple(args,"OOOiOO|i",&uo,&rfo,&wo,&steps,&coo,&ovo,&plain)) return NULL;
   if(PyObject_GetBuffer(uo,&u,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=1;
   if(ok){ if(PyObject_GetBuffer(rfo,&rf,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=2; }
   if(ok){ if(PyObject_GetBuffer(wo,&w,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=3; }
@@ -2606,8 +2490,9 @@ static PyObject *M_tier0_mwu(PyObject *self,PyObject *args){
            && co.shape[0]==nb && co.shape[1]==K && ov.shape[0]==nb && ov.shape[1]==m;
     }
   }
-  double *work = ok ? (double*)malloc((size_t)(2*m*K+4*K+2*m)*sizeof(double)) : NULL;
-  if(ok && !work){ ok=0; PyErr_NoMemory(); }
+  if(ok && (plain ? ap_tier0_mwu_plain : ap_tier0_mwu)(
+       (const double*)u.buf,(const double*)rf.buf,(const double*)w.buf,(long long)nb,(long long)m,
+       (long long)K,steps,(double*)co.buf,(double*)ov.buf)!=0){ ok=0; PyErr_NoMemory(); }
   if(!ok){
     if(got>=1) PyBuffer_Release(&u);
     if(got>=2) PyBuffer_Release(&rf);
@@ -2617,10 +2502,6 @@ static PyObject *M_tier0_mwu(PyObject *self,PyObject *args){
     if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_mwu: invalid buffer shapes or dtypes");
     return NULL;
   }
-  for(Py_ssize_t b=0;b<nb;b++)
-    tier0_mwu_one((const double*)u.buf+2*b*m*K,(const double*)rf.buf+2*b*K,(const double*)w.buf,
-                  m,K,steps,(double*)co.buf+2*b*K,(double*)ov.buf+b*m,work);
-  free(work);
   PyBuffer_Release(&u); PyBuffer_Release(&rf); PyBuffer_Release(&w);
   PyBuffer_Release(&co); PyBuffer_Release(&ov);
   Py_RETURN_NONE;
@@ -3945,7 +3826,7 @@ static PyMethodDef methods[]={
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
-  {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, ref, w, steps, c_out, ov_out): each group's shared screener (mean or minimax) and its members' overlaps"},
+  {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
