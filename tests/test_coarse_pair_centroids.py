@@ -561,6 +561,25 @@ def test_adaptive_arity_k4_partition_variance_and_minimax():
     assert min_minimax > min_unweighted + 1e-3
 
 
+@pytest.mark.parametrize("smallest, merged", [(0.81, True), (0.79, False)])
+def test_a_merge_needs_its_members_variances_within_a_fifth(smallest, merged):
+    """Two pairs merge into one screener only if the smallest member variance is at least 0.80
+    of the largest. A quad whose variances are 1, 0.86, 0.92 and `smallest` pairs up either
+    way (every pair that can form is within the pair rule's 0.85, and so are the pairs'
+    means), and the four become one group at 0.81 and stay two pairs at 0.79; the untouched
+    quad beside it merges in both."""
+    n, b0 = 2048, 128
+    power, _, bank = _make_quad_correlated_bank(n, 8, b0, chain_drift=0.15, seed=5150)
+    for member, variance in enumerate((1.0, 0.86, 0.92, smallest)):
+        bank[member] *= math.sqrt(variance)
+    _, cl_k4 = gc.cluster_tier0_candidates(bank, power, n, b0, max_arity=4)
+    groups = sorted(sorted(int(t) for t in cl_k4.members[a:b])
+                    for a, b in zip(cl_k4.offsets[:-1], cl_k4.offsets[1:]))
+    assert [4, 5, 6, 7] in groups
+    assert ([0, 1, 2, 3] in groups) == merged
+    assert sorted(t for g in groups for t in g) == list(range(8))
+
+
 def test_cost_driven_selection_chooses_k4_vs_k2_vs_unclustered(monkeypatch):
     """Cost-model selection picks unclustered, k=2 pairs, or k=4 quads according to bank structure."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")

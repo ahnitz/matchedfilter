@@ -176,3 +176,28 @@ def test_a_window_too_wide_for_the_law_is_simulated(setting, monkeypatch):
     assert not gc._law_applies(N, wide)
     monkeypatch.setenv("MF_SIGNAL_LAW", "0")
     assert not gc._law_applies(N, window)
+
+
+def test_three_profiles_planned_in_turn_are_drawn_once_each(setting, monkeypatch):
+    """A job's banks alternate between profiles (two top templates' banks under two detectors
+    plan on three that are not alike). Three profiles' draws are held, so going round them
+    again draws nothing and reads the same tables."""
+    from matchedfilter import _signal_law
+    p, bands, window = setting
+    monkeypatch.setattr(_signal_law, "_DRAWS", OrderedDict())
+    drawn = []
+    draw = _signal_law._draw
+    monkeypatch.setattr(_signal_law, "_draw", lambda *a, **k: drawn.append(1) or draw(*a, **k))
+    monkeypatch.setenv("MF_SIGNAL_LAW", "1")
+    tilt = np.linspace(0.3, 3.0, N)
+    profiles = [p, p * tilt / (p * tilt).sum(), p / tilt / (p / tilt).sum()]
+    tables = []
+    for _ in range(2):
+        for q in profiles:
+            for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS):
+                c.clear()                               # the table is read from the held draws
+            tables.append(np.array(gc._signal_table(q, N, bands, SNR, 3000, seed=5, window=window)[0]))
+    assert len(drawn) == 3
+    for first, again in zip(tables[:3], tables[3:]):
+        assert np.array_equal(first, again)
+    assert not np.array_equal(tables[0], tables[1]) and not np.array_equal(tables[0], tables[2])
