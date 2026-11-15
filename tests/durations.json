@@ -160,6 +160,7 @@
  "test_series_planning": 0.0,
  "test_shard": 0.0,
  "test_shared_forward_batch": 3.05,
+ "test_signal_law": 7.0,
  "test_single_plan_reuse": 0.0,
  "test_sparse_window_layout": 0.01,
  "test_spirv": 11.93,

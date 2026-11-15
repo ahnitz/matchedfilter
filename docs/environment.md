@@ -97,6 +97,7 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | Variable | Default | Effect |
 |---|---|---|
 | `MF_AUTOTUNE=0` | on | No timed trials: the model's choices stand. |
+| `MF_SIGNAL_LAW=0` | on | Simulate the gate planner's signal table everywhere (it is otherwise drawn from the samples' joint law wherever that holds). |
 | `MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...` | unset | Pin the gate chain (cross-device comparisons; results depend on the chain). |
 | `MF_TRIAL_ROUNDS` | 5 | Paired rounds before a joint trial decides (it takes up to twice as many). |
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |

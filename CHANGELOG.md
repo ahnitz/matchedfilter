@@ -304,6 +304,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The gate planner's signal table is drawn from the joint law of the samples it reads, not
+  simulated (`matchedfilter._signal_law`; `MF_SIGNAL_LAW=0` simulates as before). A band's
+  statistic is the fine statistic's own bins restricted to the band, so the fine samples
+  around a signal's arrival and each band's nearest coarse samples are one Gaussian vector
+  whose covariances are sums over the profile's bins; coarse samples further away are the
+  largest of as many independent noise samples. Chains, a shared screener's retention and
+  the lags of the maxima are read from the one vector; a profile's draws are held while it
+  is planned, so a retention draws nothing again. It stands in only for a window of at most
+  half the block: a profile whose correlations span the block is planned on the whole block
+  and simulated, and the simulation remains the reference the law is tested against
+  (`tests/test_signal_law.py`). MEASURED, 171,828-template search, 16 workers, a profile per
+  detector, quiet machine, law against simulation on the same code: setup 83.4 and 85.0 s ->
+  73.0 and 73.7 s at SNR 6.0 / FDR 0.001 and 110.7 -> 81.6 s at 5.5, steady throughput and
+  peak memory level. Dismissal of the reference's kept triggers within 0.5 of threshold at
+  5.5 (budget 0.100%): H1 0.117% +- 0.010, L1 0.091% +- 0.008 with the law, 0.099% and 0.124%
+  simulated. One `pycbc_inspiral_fir` job of the FIR search example without a cost file:
+  440.4 -> 398.0 billion instructions.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a

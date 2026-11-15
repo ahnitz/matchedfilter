@@ -99,6 +99,10 @@ VARS: Tuple[Var, ...] = (
     # Measurement overrides
     Var("MF_AUTOTUNE", "override", "py", "on", "No timed trials: the model's choices stand.",
         usage="MF_AUTOTUNE=0", kind="flag", value=True),
+    Var("MF_SIGNAL_LAW", "override", "py", "on",
+        "Simulate the gate planner's signal table everywhere (it is otherwise drawn from the "
+        "samples' joint law wherever that holds).",
+        usage="MF_SIGNAL_LAW=0", kind="flag", value=True),
     Var("MF_CHAIN_FORCE", "override", "py", "unset",
         "Pin the gate chain (cross-device comparisons; results depend on the chain).",
         usage="MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...", kind="text"),

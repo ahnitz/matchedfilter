@@ -64,6 +64,14 @@ def pytest_sessionstart(session):
         raise pytest.UsageError("MF_ISA=%s requested, but the backend is %s" % (want, have))
 
 
+@pytest.fixture
+def simulated(monkeypatch):
+    """The gate planner's signal table from the simulation, whatever MF_SIGNAL_LAW says: for
+    a test of what the simulation itself does (one set of draws for every window, its
+    records, what its simulations share), which the law's draws do not do."""
+    monkeypatch.setenv("MF_SIGNAL_LAW", "0")
+
+
 # --- time limits in a slow environment ---------------------------------------
 def scaled(seconds):
     """A subprocess time limit, scaled by TEST_TIMEOUT_SCALE (default 1): tools/sanitize.sh

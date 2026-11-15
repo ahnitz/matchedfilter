@@ -613,6 +613,47 @@ Measured and not built (2026-11-14), so they are not tried again without a new i
   four 2,048 s stretches half an hour to three hours apart are alike for H1 in 4 of 6 pairs
   and for L1 in none of 3: only processes on the same data would share.
 
+# The signal table from the samples' joint law, 2026-11-15
+
+The planner's signal table -- per detection the largest fine statistic and each band's
+largest coarse statistic near the signal, and where they lie -- used to come from a
+simulation of whole blocks: n noise bins, a signal, a transform for the fine statistic and
+one for every band. It now comes from the joint law of the few samples it reads
+(`matchedfilter._signal_law`):
+
+- A band's statistic is the fine statistic's own bins restricted to the band. Every fine
+  and coarse sample is therefore one linear function of the same independent Gaussian bins,
+  and two samples' covariance is the sum over the bins they share of
+  `p_k exp(2 pi i k (x_i - x_j) / n)` over the two statistics' norms. The signal's mean is
+  the same sum against its arrival, times its strength. Given the fine value at the arrival
+  a band's sample does not depend on the signal's strength at all.
+- A draw is the fine samples at the 8 lags either side of the arrival and each band's 8
+  nearest coarse samples (a band with at most 8 lags in the window: all of them), drawn
+  from that Gaussian per arrival class (the arrival's lag against the coarsest grid, 16
+  fractions of a sample). Coarse lags not drawn count as independent noise: the largest of
+  N of them has the distribution `(1 - exp(-x^2 / 2))^N`.
+- Nothing is drawn again for a chain (its bands are in the one vector), for a shared
+  screener's retention (the band's stored samples mixed with noise of the band's own), or
+  for the half-width table (the lags of the maxima).
+- It holds where a profile's correlations die out inside the block. `_law_applies` lets
+  it stand in for a window of at most half the block, which is the planner's own window
+  (`local_window`) for realistic profiles (128-256 lags of 1024-4096); a steep red spectrum
+  or narrow lines put that window at the whole block, and such a profile is simulated.
+  Without the rule a single-tier gate planned on a f^-2 profile dismissed 9.1% of true
+  detections at a 5% budget.
+
+The simulation is unchanged, is what `MF_SIGNAL_LAW=0` runs, and is what the law is tested
+against: every band's dismissal at the simulation's 0.1 / 1 / 10% thresholds, chains' joint
+dismissal, a retention, the lags, and the plan that comes out (`tests/test_signal_law.py`).
+Tests of what the simulation itself does (one set of draws for every window, its records,
+its sharing) ask for it (`simulated` in tests/conftest.py). The noise-only tables are still
+simulated.
+
+MEASURED (16 workers, 171,828-template search, quiet machine, same code with the law off
+and on): setup 83.4 / 85.0 -> 73.0 / 73.7 s at SNR 6.0 / FDR 0.001, 110.7 -> 81.6 s at 5.5;
+steady throughput and peak memory level; real-data dismissal within 0.5 of threshold at 5.5
+(budget 0.100%) H1 0.117%, L1 0.091% against 0.099% and 0.124% simulated.
+
 # What the planner holds of a profile's draws, 2026-11-14
 
 A table of draws is held once, column by column (`gatechain._kept_halves`, `_Columns`):

@@ -126,6 +126,7 @@ def _altered_bands_per_simulation(monkeypatch):
     return simulated
 
 
+@pytest.mark.usefixtures("simulated")
 def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_model, monkeypatch):
     """A band's draws under its retention do not depend on the other bands' retentions, so a
     retention of two bands is read from the two single ones: the same draws as its own
@@ -136,6 +137,7 @@ def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_mo
     monkeypatch.setattr(gc, "_beside_singles", lambda parts: None)
     (C, F), (fat, cat) = _draws(p, bands, alphas=both, held=False)
     monkeypatch.undo()
+    monkeypatch.setenv("MF_SIGNAL_LAW", "0")          # (undone with the rest: `simulated`)
     for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS, gc._SIMILAR, gc._SIMILAR_COUNT):
         c.clear()
 

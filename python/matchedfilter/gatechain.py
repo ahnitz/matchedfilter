@@ -1373,6 +1373,35 @@ def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=F
     return ((C, F), (fat, cat)) if lags_too else (C, F)
 
 
+def _law_applies(n, window):
+    """Whether the signal table for `window` of an n-point block is drawn from the samples'
+    joint law (_signal_law) and not simulated: MF_SIGNAL_LAW, and a window of at most half
+    the block. The law draws the samples next to the signal and takes the others as
+    independent noise, which holds where the profile's correlations die out well inside the
+    block -- there the planner's own window (local_window) is a small part of it. A profile
+    whose correlations span the block (a steep red spectrum, narrow lines) is planned on the
+    whole block, and simulated."""
+    return _signal_law_enabled() and 2 * (int(window[1]) - int(window[0])) <= int(n)
+
+
+def _law_profile(p, n, bands, snr, k0s):
+    """The profile whose draws (_signal_law) stand for `p`'s: p itself, or an earlier profile
+    alike in the gates' response (_similar_get), as a job's banks' simulations are shared."""
+    params = (n, tuple(bands), float(snr), tuple(k0s))
+    unit, base = _similar_get("law-profile", p, params)
+    if base is None:
+        _similar_put("law-profile", unit, params, p, keep=_RECORDS_MAX)
+        return p
+    return base
+
+
+def _signal_law_enabled():
+    """Whether the planner's signal table is drawn from the samples' joint law (_signal_law)
+    where that holds (_law_applies), and not simulated: on unless MF_SIGNAL_LAW=0."""
+    from . import _config
+    return bool(_config.get("MF_SIGNAL_LAW"))
+
+
 def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=False,
                   alphas=None, _exact=False):
     """Joint draws of every band's coarse window maximum and the fine window maximum under a
@@ -1440,6 +1469,18 @@ def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=
         if hit is not None:
             _cache_put(_SIGNAL_CACHE, key, hit)
             return hit[0] if not lags_too else hit
+    if not _exact and _law_applies(n, (lags[0], lags[1])):
+        # the draws from the samples' joint law (_signal_law): no simulation
+        from . import _signal_law
+        C, F, at = _signal_law.signal_table(
+            p, n, bands, [_band_slice(n, b, k0) for b, k0 in zip(bands, k0s)], float(snr), ndet,
+            int(seed), lags, alphas=al, nf=_NF)
+        hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
+        if al is not None:
+            hit = _beside_plain(hit, _signal_table(p, n, bands, snr, ndet, seed=seed, window=window,
+                                                   lags_too=True))
+        _cache_put(_SIGNAL_CACHE, key, hit)
+        return hit[0] if not lags_too else hit
     sr_kw = {}
     if any(k0s):
         sr_kw["k0s"] = k0s
@@ -3335,7 +3376,9 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
         return None, []
     # Resolve the canonical profile in _SIGNAL_RECORDS so base and clustered draws share one realization
     sr_kw = {"k0s": k0s} if any(k0s) else {}
-    p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
+    p_base = (_law_profile(p, n, bands, float(snr), k0s)
+              if _law_applies(n, local_window(p, n, bands, win))
+              else _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"])
     # the signals in the window local to them, the noise in the window searched (local_window)
     sig_win = local_window(p_base, n, bands, win)
     drawn = _signal_table(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
@@ -3482,7 +3525,9 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         k0s = tuple(off_map[b] for b in bands)
         Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
         sr_kw = {"k0s": k0s} if any(k0s) else {}
-        p_base = _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"]
+        p_base = (_law_profile(p, n, bands, float(snr), k0s)
+                  if _law_applies(n, local_window(p, n, bands, window))
+                  else _signal_records(p, n, bands, Fb, float(snr), nsamp, _SEED, **sr_kw)["p"])
         b1 = chain[1] if t1_cl is not None else None
         al_vec = tuple(t0_cl[0] if b == b0 else (t1_cl[0] if b == b1 else 1.0) for b in bands)
         lp_vec = tuple(t0_cl[1] if b == b0 else (t1_cl[1] if b == b1 else 0) for b in bands)

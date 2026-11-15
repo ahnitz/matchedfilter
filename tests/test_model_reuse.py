@@ -115,6 +115,7 @@ def test_candidate_cache_shares_across_banks_with_distinct_direct_costs(empty_mo
     assert best2["halfwidth"] == best2_cold["halfwidth"]
 
 
+@pytest.mark.usefixtures("simulated")
 def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypatch):
     """Planning a chain memoises arrays derived from the signal draws (kept draws, halves,
     distances, candidates). Once the draws leave their own cache nothing derived from them

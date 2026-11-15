@@ -118,6 +118,7 @@ def test_a_window_no_wider_than_the_local_one_is_used_as_it_is():
 
 # ---- one set of draws for every window ------------------------------------------------------
 
+@pytest.mark.usefixtures("simulated")
 def test_every_wide_window_of_a_profile_plans_on_one_set_of_signal_draws(empty_model, monkeypatch):
     p, n = PROFILES["o4 broadband"]()
     calls = []
@@ -134,6 +135,7 @@ def test_every_wide_window_of_a_profile_plans_on_one_set_of_signal_draws(empty_m
     assert len(gc._NOISE_CACHE) == 4
 
 
+@pytest.mark.usefixtures("simulated")
 def test_a_short_window_is_planned_on_its_own_draws(empty_model, monkeypatch):
     p, n = PROFILES["o4 broadband"]()
     calls = []
@@ -144,6 +146,7 @@ def test_a_short_window_is_planned_on_its_own_draws(empty_model, monkeypatch):
     assert calls == [short]
 
 
+@pytest.mark.usefixtures("simulated")
 def test_a_retention_keeps_its_draws_and_not_its_simulation(empty_model):
     """A tier-0 retention's band is simulated again beside the plain simulation. Once its
     draws are read the simulation is let go: only the plain profile's records stay."""
@@ -269,6 +272,7 @@ def _gate_quantiles(p, n, bands, snr, window, ndet=60000):
     return np.array([[np.quantile(C[det, i], q) for q in (1e-2, 1e-3)] for i in range(len(bands))])
 
 
+@pytest.mark.usefixtures("simulated")
 @pytest.mark.parametrize("name", list(PROFILES))
 @pytest.mark.parametrize("snr", [5.5, 8.0])
 def test_the_local_window_never_sets_a_gate_above_the_real_windows(empty_model, name, snr):
@@ -372,6 +376,7 @@ def test_a_plan_with_a_direct_refine_keeps_the_budget_on_the_real_window(empty_m
     assert windows >= 1, "no chain of the case was planned with a direct refine"
 
 
+@pytest.mark.usefixtures("simulated")
 def test_a_retentions_draws_pair_with_the_plain_ones_across_profiles_alike(empty_model):
     """A one-tier chain behind a tier-0 retention is planned on the retention's coarse
     maxima and the plain draws' lags, row for row, so both must be one simulation's. Here a

@@ -101,6 +101,7 @@ def _all_alike(ps, what):
     assert ps[worst] * len(ps) > ALPHA, (what, worst, ps[worst], len(ps))
 
 
+@pytest.mark.usefixtures("simulated")
 @pytest.mark.parametrize("window", [None, (192, 1856), (300, 900)])
 @pytest.mark.parametrize("name", ["f^0", "f^-1", "bimodal_resonance"])
 def test_signal_draws_noise_is_the_noise_simulation(name, window):
