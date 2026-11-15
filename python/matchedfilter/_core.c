@@ -2456,6 +2456,81 @@ static PyObject *M_tier0_refine_lags(PyObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
+long long ap_tier0_match(
+    const int64_t *order, long long count, long long nodes, const float *U, const double *v,
+    const float *sr, const float *si, const int64_t *shift_lags, long long K, long long nsh,
+    double floor, const int32_t *sizes, long long size_cap, long long chunk, int32_t *a,
+    int32_t *b, int64_t *dl);                                          /* src/tier0_match.cc */
+/* tier0_match(order, U, v, Sr, Si, shift_lags, floor, sizes, size_cap, chunk, a, b, dl) -> count
+   The matching of a level's vectors into pairs, chunk by chunk (src/tier0_match.cc).
+   order (count) int64, the nodes in the order they are chunked; U (nodes, K) complex64; v
+   (nodes) float64; Sr, Si (nsh, K) float32 and shift_lags (nsh) int64, the coarse shifts in
+   the order they are tried; sizes (nodes) int32 with size_cap, or None; chunk the nodes a
+   chunk holds. Written: a, b (at least count // 2) int32 and dl int64, a pair's smaller
+   index, its larger and the lag of the larger against the smaller. Returns the number of
+   pairs. */
+static PyObject *M_tier0_match(PyObject *self,PyObject *args){
+  (void)self;
+  enum { iORD,iU,iV,iSR,iSI,iSL,iSZ,oA,oB,oDL, NUSED };
+  static const char *fmt[NUSED]={"q","Zf","d","f","f","q","i","i","i","q"};
+  static const int ndim[NUSED]={1,2,1,2,2,1,1,1,1,1};
+  PyObject *o[NUSED];
+  Py_buffer b[NUSED];
+  double floor=0.0;
+  long long size_cap=0, chunk=0;
+  int have[NUSED]={0}, ok=1;
+  if(!PyArg_ParseTuple(args,"OOOOOOdOLLOOO",&o[iORD],&o[iU],&o[iV],&o[iSR],&o[iSI],&o[iSL],
+       &floor,&o[iSZ],&size_cap,&chunk,&o[oA],&o[oB],&o[oDL])) return NULL;
+  for(int i=0;i<NUSED && ok;i++){
+    if(i==iSZ && o[i]==Py_None) continue;
+    const int flags = PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(i>=oA ? PyBUF_WRITABLE : 0);
+    if(PyObject_GetBuffer(o[i],&b[i],flags)<0){ ok=0; break; }
+    have[i]=1;
+    const char *f=b[i].format ? b[i].format : "B";
+    /* int64 arrives as "l" or "q", int32 as "i" or "l", by platform */
+    const int same = !strcmp(f,fmt[i])
+        || (fmt[i][0]=='q' && !strcmp(f,"l") && b[i].itemsize==8)
+        || (fmt[i][0]=='i' && !strcmp(f,"l") && b[i].itemsize==4);
+    if(!same || b[i].ndim!=ndim[i]) ok=0;
+  }
+  Py_ssize_t count=0, nodes=0, K=0, nsh=0;
+  if(ok){
+    count=b[iORD].shape[0]; nodes=b[iU].shape[0]; K=b[iU].shape[1]; nsh=b[iSR].shape[0];
+    ok = K>=1 && nsh>=1 && chunk>=2 && b[iV].shape[0]==nodes && b[iSR].shape[1]==K
+         && b[iSI].shape[0]==nsh && b[iSI].shape[1]==K && b[iSL].shape[0]==nsh
+         && (!have[iSZ] || b[iSZ].shape[0]==nodes)
+         && b[oA].shape[0]>=count/2 && b[oB].shape[0]>=count/2 && b[oDL].shape[0]>=count/2;
+  }
+  if(ok){
+    /* the nodes named exist, each once: a node in two pairs would overrun the outputs */
+    const int64_t *ord=(const int64_t*)b[iORD].buf;
+    char *seen=(char*)calloc((size_t)nodes+1,1);
+    if(!seen){ for(int i=0;i<NUSED;i++) if(have[i]) PyBuffer_Release(&b[i]); return PyErr_NoMemory(); }
+    for(Py_ssize_t i=0;i<count && ok;i++){
+      ok = ord[i]>=0 && ord[i]<nodes && !seen[ord[i]];
+      if(ok) seen[ord[i]]=1;
+    }
+    free(seen);
+  }
+  long long n=0;
+  if(ok){
+    Py_BEGIN_ALLOW_THREADS
+    n=ap_tier0_match((const int64_t*)b[iORD].buf,(long long)count,(long long)nodes,
+        (const float*)b[iU].buf,(const double*)b[iV].buf,(const float*)b[iSR].buf,
+        (const float*)b[iSI].buf,(const int64_t*)b[iSL].buf,(long long)K,(long long)nsh,floor,
+        have[iSZ] ? (const int32_t*)b[iSZ].buf : NULL,size_cap,chunk,
+        (int32_t*)b[oA].buf,(int32_t*)b[oB].buf,(int64_t*)b[oDL].buf);
+    Py_END_ALLOW_THREADS
+  }
+  for(int i=0;i<NUSED;i++) if(have[i]) PyBuffer_Release(&b[i]);
+  if(!ok){
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_match: invalid buffer shapes, dtypes or indices");
+    return NULL;
+  }
+  if(n<0) return PyErr_NoMemory();
+  return PyLong_FromLongLong(n);
+}
+
 long long ap_tier0_pass(
     const double *C, const double *inv_sqrt_v, const double *v, const double *w,
     const double *exp_all, const float *shifts, const int64_t *shift_lags, long long K,
@@ -3925,6 +4000,7 @@ static PyMethodDef methods[]={
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
+  {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},
   {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> count: one pass of the shared-screener merging, every candidate merge made a group with a screener or turned down"},
   {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},

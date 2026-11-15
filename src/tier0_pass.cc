@@ -23,7 +23,8 @@
  * einsum), a complex number over a real one is multiplied by the real's reciprocal, and a
  * modulus is hi sqrt(1 + (lo / hi)^2) with a fused 1 + q^2, numpy's own on AVX-512 (it is
  * hypot() elsewhere, so numpy's results differed between machines in the last place; these
- * do not). The float32 coarse shift sums run bin after bin where numpy called BLAS: two
+ * do not). The float32 coarse shift sums run bin after bin (a shift a vector lane) where numpy
+ * called BLAS: two
  * shifts equal to rounding can order the other way, and the refinement that follows usually
  * lands on the same lag. Built with floating-point contraction off (setup.py). */
 #include <math.h>
@@ -39,6 +40,9 @@ extern "C" void ap_tier0_refine_lags(const double *prod_ab, const double *exp_al
                                      const int64_t *pdl, long long npairs, long long len,
                                      long long R, long long half_span, int64_t *out_dl,
                                      double *out_g);
+extern "C" void ap_tier0_coarse_sums(const float *xr, const float *xi, const float *sr,
+                                     const float *si, long long K, long long nshp, float *re,
+                                     float *im);
 extern "C" int ap_tier0_mwu(const double *u, const double *ref, const double *w, long long nb,
                             long long m, long long K, int steps, double *c_out,
                             double *ov_out);
@@ -136,6 +140,15 @@ extern "C" long long ap_tier0_pass(
   std::vector<int64_t> lag((size_t)kept_members), fine((size_t)kept_members);
   std::vector<Cx> ua((size_t)K), ub((size_t)K);
   std::vector<double> power((size_t)K);
+  // the coarse shifts a lane each (src/tier0_mwu.cc): transposed, padded to 16
+  const long long nshp = (nsh + 15) / 16 * 16;
+  std::vector<float> sr((size_t)(K * nshp), 0.0f), si((size_t)(K * nshp), 0.0f);
+  for (long long s = 0; s < nsh; s++)
+    for (long long k = 0; k < K; k++) {
+      sr[k * nshp + s] = shifts[2 * (s * K + k)];
+      si[k * nshp + s] = shifts[2 * (s * K + k) + 1];
+    }
+  std::vector<float> xr((size_t)K), xi((size_t)K), re((size_t)nshp), im((size_t)nshp);
   long long row = 0;
   for (long long q = 0; q < nk; q++) {
     const long long g = kept[q];
@@ -173,17 +186,16 @@ extern "C" long long ap_tier0_pass(
         un[k] = mul(ct[k], real(inv_sqrt_v[t]));
         pr[k] = mul(mul(real(w[k]), Cx{f[k].r, -f[k].i}), un[k]);
       }
+      for (long long k = 0; k < K; k++) {
+        xr[k] = (float)pr[k].r;
+        xi[k] = (float)pr[k].i;
+      }
+      ap_tier0_coarse_sums(xr.data(), xi.data(), sr.data(), si.data(), K, nshp, re.data(),
+                           im.data());
       float best = -1.0f;
       long long at = 0;
       for (long long s = 0; s < nsh; s++) {
-        const float *sh = shifts + 2 * s * K;
-        float re = 0.0f, im = 0.0f;
-        for (long long k = 0; k < K; k++) {
-          const float xr = (float)pr[k].r, xi = (float)pr[k].i;
-          re += xr * sh[2 * k] - xi * sh[2 * k + 1];
-          im += xr * sh[2 * k + 1] + xi * sh[2 * k];
-        }
-        const float mag = modulusf(re, im);
+        const float mag = modulusf(re[s], im[s]);
         if (mag > best) { best = mag; at = s; }
       }
       lag[row] = shift_lags[at];

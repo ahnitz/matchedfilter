@@ -1,4 +1,8 @@
-/* A group's shared screener (gatechain.cluster_tier0_candidates), for many groups at once.
+/* Kernels of the shared-screener merging that run several independent sums at once, each in a
+ * vector lane and each as the plain loop would: a group's shared screener for many groups
+ * (below), and a vector's sums against the coarse shifts (CoarseSums).
+ *
+ * A group's shared screener (gatechain.cluster_tier0_candidates), for many groups at once.
  *
  * One group: the unit-norm vector over a band of K bins that its m members, each phase-aligned
  * to it, overlap best in the worst case.
@@ -215,6 +219,28 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
   return 0;
 }
 
+/* A vector's sums against every coarse shift (src/tier0_pass.cc), a shift a lane:
+   re[s] + i im[s] = sum_k x[k] shift_s[k] in float32, bin after bin, each lane the plain
+   loop's operations. x (K) as xr, xi; the shifts transposed, (K, nshp) each of sr and si,
+   nshp a multiple of 16 (the lanes past the shifts there are hold zeros). */
+void CoarseSums(const float *xr, const float *xi, const float *sr, const float *si,
+                long long K, long long nshp, float *re, float *im) {
+  const hn::ScalableTag<float> d;
+  using V = hn::Vec<decltype(d)>;
+  const long long N = (long long)hn::Lanes(d);
+  for (long long s0 = 0; s0 < nshp; s0 += N) {
+    V ar = hn::Zero(d), ai = hn::Zero(d);
+    for (long long k = 0; k < K; k++) {
+      const V a = hn::Set(d, xr[k]), b = hn::Set(d, xi[k]);
+      const V cr = hn::LoadU(d, sr + k * nshp + s0), ci = hn::LoadU(d, si + k * nshp + s0);
+      ar = hn::Add(ar, hn::Sub(hn::Mul(a, cr), hn::Mul(b, ci)));
+      ai = hn::Add(ai, hn::Add(hn::Mul(a, ci), hn::Mul(b, cr)));
+    }
+    hn::StoreU(ar, d, re + s0);
+    hn::StoreU(ai, d, im + s0);
+  }
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ap_t0mwu
 HWY_AFTER_NAMESPACE();
@@ -222,6 +248,7 @@ HWY_AFTER_NAMESPACE();
 #if HWY_ONCE
 namespace ap_t0mwu {
 HWY_EXPORT(MwuBatch);
+HWY_EXPORT(CoarseSums);
 
 /* The plain routine, one group: what the batched one reproduces lane by lane, and its test's
    reference. work: 2 m K + 4 K + 2 m doubles. */
@@ -346,6 +373,12 @@ extern "C" int ap_tier0_mwu(const double *u, const double *ref, const double *w,
                             long long m, long long K, int steps, double *c_out,
                             double *ov_out) {
   return HWY_DYNAMIC_DISPATCH(ap_t0mwu::MwuBatch)(u, ref, w, nb, m, K, steps, c_out, ov_out);
+}
+/* A vector's float32 sums against every coarse shift (CoarseSums above). */
+extern "C" void ap_tier0_coarse_sums(const float *xr, const float *xi, const float *sr,
+                                     const float *si, long long K, long long nshp, float *re,
+                                     float *im) {
+  HWY_DYNAMIC_DISPATCH(ap_t0mwu::CoarseSums)(xr, xi, sr, si, K, nshp, re, im);
 }
 /* The same by the plain routine, group by group. */
 extern "C" int ap_tier0_mwu_plain(const double *u, const double *ref, const double *w,

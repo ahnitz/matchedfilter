@@ -122,7 +122,8 @@ SOURCES = (
      # every product and sum its own operation: a group's result is the same in any vector lane
      ("src/tier0_mwu.cc", CXX + ARCH + ["-ffp-contract=off"], DEFS),
      # numpy's arithmetic, operation for operation
-     ("src/tier0_pass.cc", CXX + ARCH + ["-ffp-contract=off"], DEFS)]
+     ("src/tier0_pass.cc", CXX + ARCH + ["-ffp-contract=off"], DEFS),
+     ("src/tier0_match.cc", CXX + ARCH + ["-ffp-contract=off"], DEFS)]
     + ([("src/kernel_avx1.cc", CXX + AVX1_ARCH, DEFS + AVX1)] if AVX1 else [])
     + [(s, CXX + ARCH, DEFS) for s in HWY_SRC]   # same baseline, or the
                                                  # dispatch tables disagree

@@ -350,6 +350,17 @@ Alpha releases may change the API. Pin a version for reproducible work.
   the last place, and the routine's does not. `tests/test_tier0_pass.py` keeps the numpy
   code as the reference. MEASURED, same search and machine, three alternating pairs: setup
   65.3, 64.9 and 63.9 s -> 61.9, 61.8 and 61.7 s, steady rate level.
+- The matching of a level's vectors into pairs in C++ (`src/tier0_match.cc`,
+  `_core.tier0_match`): the chunks' pair scores, the greedy selection, the swaps that place
+  left-overs and the second round over what the chunks left were a trip through numpy per
+  chunk, about 29,000 a pass of the showcase search. One difference from the numpy code:
+  where a row held equal candidate scores its order was that of numpy's partial sort and is
+  now the column's (no such case in the replayed setup, whose screener sets are bit for bit
+  what they were at SNR 5.5, 6.0 and 7.0). The coarse shift search of `tier0_pass` runs a
+  shift a vector lane. `tests/test_tier0_match.py` keeps the numpy code, with the swap
+  search `gatechain._best_swap` that only it used, as the reference. MEASURED, same search
+  and machine, three alternating pairs: setup 63.3, 62.3 and 62.6 s -> 57.8, 57.8 and
+  57.5 s, steady rate level.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a

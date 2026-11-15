@@ -122,60 +122,6 @@ def _band_slice(n, b, k0):
     return k0, min(k0 + int(b), int(n) // 2)
 
 
-def _best_swap(scores, u, vs, w_arr, z_arr, floor):
-    """The swap that pairs two unmatched nodes by breaking one matched pair.
-
-    A matched pair (w, z) can be replaced by (u, w) and (v, z), or by (u, z) and (v, w),
-    when both new pairs score at least ``floor``; the swap's gain is the two new scores'
-    sum. For the unmatched node ``u`` this returns the swap of largest gain over the nodes
-    ``vs``: of equal gains, the first v in ``vs``, for a v the swap with u on w's side
-    before the one with u on z's side, and on a side the first pair.
-
-    Parameters
-    ----------
-    scores : numpy.ndarray
-        ``(m, m)`` symmetric pair scores.
-    u : int
-        The unmatched node being placed.
-    vs : numpy.ndarray
-        The other unmatched nodes it may be placed with, in the order they are tried.
-    w_arr, z_arr : numpy.ndarray
-        The matched pairs: pair ``e`` is ``(w_arr[e], z_arr[e])``.
-    floor : float
-        The least score a pair may have.
-
-    Returns
-    -------
-    tuple or None
-        ``(e, v, (a, b), (c, d))``: the pair ``e`` to replace by ``(a, b)``, which holds u,
-        and the new pair ``(c, d)``, which holds v, each with its smaller node first; None
-        when no swap exists.
-    """
-    if not vs.size:
-        return None
-    v_w = scores[np.ix_(vs, w_arr)]
-    v_z = scores[np.ix_(vs, z_arr)]
-    u_w, u_z = scores[u, w_arr], scores[u, z_arr]
-    # the gain of each (v, pair) with u on w's side, and with u on z's side
-    gain_w = np.where((u_w >= floor)[None, :] & (v_z >= floor), u_w[None, :] + v_z, -np.inf)
-    gain_z = np.where((u_z >= floor)[None, :] & (v_w >= floor), u_z[None, :] + v_w, -np.inf)
-    pair_w, pair_z = gain_w.argmax(axis=1), gain_z.argmax(axis=1)
-    each = np.arange(vs.size)
-    # per v: (best on w's side, best on z's side), then the first of the largest over all
-    gains = np.stack([gain_w[each, pair_w], gain_z[each, pair_z]], axis=1).ravel()
-    first = int(gains.argmax())
-    if not gains[first] > -1.0:
-        return None
-    v = int(vs[first // 2])
-    if first % 2 == 0:
-        e = int(pair_w[first // 2])
-        mine, theirs = int(w_arr[e]), int(z_arr[e])
-    else:
-        e = int(pair_z[first // 2])
-        mine, theirs = int(z_arr[e]), int(w_arr[e])
-    return e, v, (min(u, mine), max(u, mine)), (min(v, theirs), max(v, theirs))
-
-
 def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4,
                              pass2=None):
     """Build hierarchical Tier-0 centroid banks up to ``max_arity`` (``k <= 2, 4, 8, 16``).
@@ -281,118 +227,24 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     coarse_rho_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
     floor2 = coarse_rho_floor * coarse_rho_floor
 
-    def _match_subset(sub_idx, U_arr, v_arr, f2_floor, sizes=None, size_cap=2):
-        from . import _core
-        m_c = int(sub_idx.size)
-        if m_c < 2:
-            return [], [], []
-        U_c = U_arr[sub_idx]
-        v_c = np.ascontiguousarray(v_arr[sub_idx], dtype=np.float64)
-        Ur = np.ascontiguousarray(U_c.real, dtype=np.float32)
-        Ui = np.ascontiguousarray(U_c.imag, dtype=np.float32)
-        best_rho2 = np.empty((m_c, m_c), dtype=np.float32)
-        best_s = np.empty((m_c, m_c), dtype=np.int32)
-        _core.tier0_pair_scores(Ur, Ui, Sr, Si, v_c, best_rho2, best_s)
-        if sizes is not None:
-            sz_c = sizes[sub_idx]
-            best_rho2[sz_c[:, None] + sz_c[None, :] > size_cap] = -1.0
-        ri = np.arange(m_c)[:, None]
-        if m_c > 9:
-            top_cols = np.argpartition(-best_rho2, kth=7, axis=1)[:, :8]
-            top_vals = best_rho2[ri, top_cols]
-            ia_loc, kb_loc = np.nonzero(top_vals >= f2_floor)
-            ib_loc = top_cols[ia_loc, kb_loc]
-            cand_r2 = top_vals[ia_loc, kb_loc]
-        else:
-            ia_loc, ib_loc = np.nonzero(best_rho2 >= f2_floor)
-            cand_r2 = best_rho2[ia_loc, ib_loc]
-        if ia_loc.size == 0:
-            return [], [], []
-        order = np.argsort(-cand_r2, kind="stable")
-        used = np.zeros(m_c, dtype=bool)
-        local_pairs = []
-        for idx in order:
-            a_l = int(ia_loc[idx])
-            b_l = int(ib_loc[idx])
-            if used[a_l] or used[b_l]:
-                continue
-            used[a_l] = True
-            used[b_l] = True
-            local_pairs.append((a_l, b_l) if a_l < b_l else (b_l, a_l))
-        # Resolve 3-edge augmenting swaps (u - w - z - v) when greedy matching strands two nodes
-        if sizes is None and m_c - 2 * len(local_pairs) >= 2 and local_pairs:
-            sym_r2 = best_rho2 + best_rho2.T
-            free_arr = np.flatnonzero(~used)
-            w_arr = np.array([p[0] for p in local_pairs], dtype=np.int32)
-            z_arr = np.array([p[1] for p in local_pairs], dtype=np.int32)
-            uw_mat = (sym_r2[np.ix_(free_arr, w_arr)] >= f2_floor).astype(np.float32)
-            uz_mat = (sym_r2[np.ix_(free_arr, z_arr)] >= f2_floor).astype(np.float32)
-            aug_adj = np.triu(uw_mat @ uz_mat.T + uz_mat @ uw_mat.T, k=1)
-            cand_us = np.flatnonzero(np.any(aug_adj > 0.0, axis=1))
-            for idx_u in cand_us:
-                node_u = int(free_arr[idx_u])
-                if used[node_u]:
-                    continue
-                if not (np.any(sym_r2[node_u, w_arr] >= f2_floor)
-                        or np.any(sym_r2[node_u, z_arr] >= f2_floor)):
-                    continue
-                later = free_arr[idx_u + 1:]
-                best_swap = _best_swap(sym_r2, node_u, later[~used[later]], w_arr, z_arr,
-                                       f2_floor)
-                if best_swap is not None:
-                    e_idx, node_v, e1, e2 = best_swap
-                    used[node_u] = True
-                    used[node_v] = True
-                    local_pairs[e_idx] = e1
-                    local_pairs.append(e2)
-                    w_arr[e_idx] = e1[0]
-                    z_arr[e_idx] = e1[1]
-                    w_arr = np.append(w_arr, e2[0])
-                    z_arr = np.append(z_arr, e2[1])
-        out_a, out_b, out_dl = [], [], []
-        for a_l, b_l in local_pairs:
-            ta = int(sub_idx[a_l])
-            tb = int(sub_idx[b_l])
-            dl_ab = int(dls_ord[best_s[a_l, b_l]])
-            if ta < tb:
-                out_a.append(ta)
-                out_b.append(tb)
-                out_dl.append(dl_ab)
-            else:
-                out_a.append(tb)
-                out_b.append(ta)
-                out_dl.append(-dl_ab)
-        return out_a, out_b, out_dl
-
     from . import _core as _cmod
     l2_b = int(_cmod.l2_bytes()) if hasattr(_cmod, "l2_bytes") else 0
     l2_b = l2_b if l2_b > 0 else 262144
     chunk_size = max(48, min(192, ((l2_b * 3 // 4) // (16 * max(length, 1)) // 16) * 16))
+    match_lags = np.ascontiguousarray(dls_ord, dtype=np.int64)
 
-    def _run_chunked_matching(order_idx, total_nodes, U_arr, v_arr, f2_floor, sizes=None, size_cap=2):
-        a_list, b_list, dl_list = [], [], []
-        paired_flag = np.zeros(total_nodes, dtype=bool)
-        for c_start in range(0, order_idx.size, chunk_size):
-            ca, cb, cdl = _match_subset(
-                order_idx[c_start:c_start + chunk_size], U_arr, v_arr, f2_floor, sizes, size_cap
-            )
-            if ca:
-                paired_flag[ca] = True
-                paired_flag[cb] = True
-                a_list.extend(ca)
-                b_list.extend(cb)
-                dl_list.extend(cdl)
-        rem = order_idx[~paired_flag[order_idx]]
-        if rem.size >= 2:
-            for c_start in range(0, rem.size, chunk_size):
-                ca, cb, cdl = _match_subset(
-                    rem[c_start:c_start + chunk_size], U_arr, v_arr, f2_floor, sizes, size_cap
-                )
-                if ca:
-                    a_list.extend(ca)
-                    b_list.extend(cb)
-                    dl_list.extend(cdl)
-        return a_list, b_list, dl_list
+    def _run_chunked_matching(order_idx, U_arr, v_arr, f2_floor, sizes=None, size_cap=2):
+        # The nodes' pairs (_core.tier0_match): a chunk of neighbours at a time scored,
+        # matched greedily and its left-overs placed by breaking a pair, then the chunks'
+        # left-overs matched once more. Returns (smaller index, larger, lag of the larger).
+        half = int(order_idx.size) // 2
+        out_a = np.empty(half, dtype=np.int32)
+        out_b = np.empty(half, dtype=np.int32)
+        out_dl = np.empty(half, dtype=np.int64)
+        count = _cmod.tier0_match(
+            np.ascontiguousarray(order_idx, dtype=np.int64), U_arr, v_arr, Sr, Si, match_lags,
+            float(f2_floor), sizes, int(size_cap), int(chunk_size), out_a, out_b, out_dl)
+        return out_a[:count], out_b[:count], out_dl[:count]
 
     def _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad):
         # (k <= 4 members at 0.96 at their build lag met the engine at ~0.99)
@@ -420,18 +272,13 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                             lag_pad=lpad, ratio=rat, alpha=eff_a,
                             member_alphas=np.asarray(alphas_arr, np.float32))
 
-    pair_a_list, pair_b_list, pair_dl_list = _run_chunked_matching(
-        perm, nt, U64, v, floor2
-    )
+    pa, pb, pdl = _run_chunked_matching(perm, U64, v, floor2)
     max_nc = int(0.85 * nt)
-    npairs = len(pair_a_list)
+    npairs = int(pa.size)
     if npairs == 0 or (nt - npairs) > max_nc:
         return empty_ret
 
     # Pass 1: vectorized exact complex128 lag refinement and unit-variance pair synthesis
-    pa = np.asarray(pair_a_list, dtype=np.int32)
-    pb = np.asarray(pair_b_list, dtype=np.int32)
-    pdl = np.asarray(pair_dl_list, dtype=np.int64)
     Ca_u = C[pa] * inv_sqrt_v[pa, None]
     Cb_u = C[pb] * inv_sqrt_v[pb, None]
     prod_ab = (W[None, :] * Ca_u.conj()) * Cb_u
@@ -574,18 +421,17 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         f_meanc = np.sum(uc_pow[valid_cur_idx] * k_f32[None, :], axis=1)
         permc = valid_cur_idx[np.argsort(f_meanc, kind="stable")]
 
-        ca_list, cb_list, cdl_list = _run_chunked_matching(
-            permc, cur_nc, Uc_64, cur_v, f2_hi, sizes=sz_cur, size_cap=pass_cap
+        ca_arr, cb_arr, cdl_arr = _run_chunked_matching(
+            permc, Uc_64, cur_v, f2_hi, sizes=sz_cur, size_cap=pass_cap
         )
-        if not ca_list:
+        if not ca_arr.size:
             break
+        ca_arr, cb_arr = ca_arr.astype(np.int64), cb_arr.astype(np.int64)
 
         # Every candidate merge made a group with one screener, or turned down
         # (_core.tier0_pass): its members aligned in the two clusters' common frame, their
         # screener synthesised, and the group accepted if every member keeps alpha_floor of
         # its SNR
-        ca_arr = np.asarray(ca_list, dtype=np.int64)
-        cb_arr = np.asarray(cb_list, dtype=np.int64)
         grp_offsets = np.empty(ca_arr.size + 1, dtype=np.int32)
         grp_members = np.empty(int((sz_cur[ca_arr] + sz_cur[cb_arr]).sum()), dtype=np.int32)
         grp_alphas = np.empty(grp_members.size, dtype=np.float64)
@@ -596,7 +442,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         if not _c_t0.tier0_pass(
                 C, inv_sqrt_v, v, W, exp_all, shifts64, pass_lags, int(s_step - 1), cur_vecs_128,
                 inv_sqrt_vc, cur_offsets, cur_members, ca_arr, cb_arr,
-                np.asarray(cdl_list, dtype=np.int64), 2 * p_idx, alpha_floor,
+                cdl_arr, 2 * p_idx, alpha_floor,
                 took, c_vecs_128, v_bar, dl_reach, grp_members, grp_offsets, grp_alphas):
             break
         accepted = {}
