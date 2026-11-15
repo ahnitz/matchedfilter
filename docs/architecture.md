@@ -478,6 +478,15 @@ it repeatedly. Without one, each process measures afresh, and two processes can 
 differently on timing noise; every choice still meets the budget, but pairs near a gate can
 be refined in one process and not in another.
 
+A process without one also pays for the measuring. MEASURED 2026-11-14 on one
+`pycbc_inspiral_fir` job of pycbc's FIR search example (11,988 templates, H1 and L1,
+2,048 s, SNR 5.5 / FDR 0.001, one core): 426 G instructions without a cost file against
+about 360 G with one reused from an earlier job. The difference is the block-size trial:
+its preparation calibrates both profiles at the second block size (39 G, of which 28 G
+are twenty simulations at n = 2048), and that arm is then played (32 of 100 trial calls;
+all eight banks locked the model's first choice). Nothing prepared at cost goes unplayed,
+so the saving is the file's alone: a workflow whose jobs share one runs the trial once.
+
 ## Configuration
 
 Every environment variable the package, the C extension and the tools read is declared
