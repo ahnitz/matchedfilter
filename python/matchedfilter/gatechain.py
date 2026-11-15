@@ -227,9 +227,8 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     coarse_rho_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
     floor2 = coarse_rho_floor * coarse_rho_floor
 
-    from . import _core as _cmod
-    l2_b = int(_cmod.l2_bytes()) if hasattr(_cmod, "l2_bytes") else 0
-    l2_b = l2_b if l2_b > 0 else 262144
+    from . import _core
+    l2_b = int(_core.l2_bytes()) or 262144
     chunk_size = max(48, min(192, ((l2_b * 3 // 4) // (16 * max(length, 1)) // 16) * 16))
     match_lags = np.ascontiguousarray(dls_ord, dtype=np.int64)
 
@@ -241,7 +240,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         out_a = np.empty(half, dtype=np.int32)
         out_b = np.empty(half, dtype=np.int32)
         out_dl = np.empty(half, dtype=np.int64)
-        count = _cmod.tier0_match(
+        count = _core.tier0_match(
             np.ascontiguousarray(order_idx, dtype=np.int64), U_arr, v_arr, Sr, Si, match_lags,
             float(f2_floor), sizes, int(size_cap), int(chunk_size), out_a, out_b, out_dl)
         return out_a[:count], out_b[:count], out_dl[:count]
@@ -276,14 +275,13 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
     # complex128, made clusters of two where the two are coherent to rho_min, with the
     # pair's screener and its members' retentions; every other template a cluster of its own
     pa, pb, pdl = _run_chunked_matching(perm, U64, v, floor2)
-    from . import _core as _c_t0
     level_128 = np.empty((nt, length), dtype=np.complex128)
     level_v = np.empty(nt, dtype=np.float64)
     level_dl = np.empty(nt, dtype=np.int64)
     level_offsets = np.empty(nt + 1, dtype=np.int32)
     members = np.empty(nt, dtype=np.int32)
     alphas = np.empty(nt, dtype=np.float64)
-    nc, max_abs_dl = _c_t0.tier0_pair_level(
+    nc, max_abs_dl = _core.tier0_pair_level(
         C, inv_sqrt_v, v, W, exp_all, int(s_step - 1), float(rho_min), int(0.85 * nt),
         pa, pb, pdl, level_128, level_v, level_dl, level_offsets, members, alphas)
     if nc == 0:
@@ -345,7 +343,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         next_offsets = np.empty(cur_nc + 1, dtype=np.int32)
         members_hi = np.empty(nt, dtype=np.int32)
         alphas_hi = cur_alphas.copy()
-        merged, max_dl_hi = _c_t0.tier0_pass(
+        merged, max_dl_hi = _core.tier0_pass(
             C, inv_sqrt_v, v, W, exp_all, shifts64, pass_lags, int(s_step - 1), cur_vecs_128,
             inv_sqrt_vc, cur_v, cur_dl, cur_offsets, cur_members, ca_arr, cb_arr, cdl_arr,
             2 * p_idx, alpha_floor,
