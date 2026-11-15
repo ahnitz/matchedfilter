@@ -2456,6 +2456,105 @@ static PyObject *M_tier0_refine_lags(PyObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
+long long ap_tier0_pass(
+    const double *C, const double *inv_sqrt_v, const double *v, const double *w,
+    const double *exp_all, const float *shifts, const int64_t *shift_lags, long long K,
+    long long R, long long nsh, long long half_span, const double *cur,
+    const double *inv_sqrt_vc, const int32_t *cur_offsets, const int32_t *cur_members,
+    const int64_t *ca, const int64_t *cb, const int64_t *cdl, long long ncand, int steps,
+    double alpha_floor, uint8_t *accepted, double *screener, double *v_bar, int64_t *reach,
+    int32_t *members, int32_t *offsets, double *alpha);                  /* src/tier0_pass.cc */
+/* tier0_pass(C, inv_sqrt_v, v, w, exp_all, shifts, shift_lags, half_span, cur, inv_sqrt_vc,
+              cur_offsets, cur_members, ca, cb, cdl, steps, alpha_floor,
+              accepted, screener, v_bar, reach, members, offsets, alpha) -> count
+   One pass of the shared-screener merging (src/tier0_pass.cc): every candidate merge of two
+   clusters (ca, cb, the second lagged cdl) made a group with a screener, or turned down.
+   Inputs: C (nt, K) complex128; inv_sqrt_v, v (nt) float64; w (K) float64; exp_all
+   (2 R + 1, K) complex128; shifts (nsh, K) complex64 and shift_lags (nsh) int64; cur (nc, K)
+   complex128; inv_sqrt_vc (nc) float64; cur_offsets (nc + 1) and cur_members int32; ca, cb,
+   cdl (ncand) int64. Written: accepted (ncand) bool; screener (ncand, K) complex128; v_bar
+   (ncand) float64; reach (ncand) int64; members and alpha (the candidates' member counts
+   summed) int32 and float64; offsets (ncand + 1) int32. Returns the number accepted. */
+static PyObject *M_tier0_pass(PyObject *self,PyObject *args){
+  (void)self;
+  enum { NB=24 };
+  static const char *fmt[NB]={"Zd","d","d","d","Zd","Zf","q","Zd","d","i","i","q","q","q",
+                              "?","Zd","d","q","i","i","d", 0,0,0};
+  static const int ndim[NB]={2,1,1,1,2,2,1,2,1,1,1,1,1,1, 1,2,1,1,1,1,1, 0,0,0};
+  enum { iC,iIV,iV,iW,iEX,iSH,iSL,iCUR,iIVC,iCO,iCM,iCA,iCB,iCDL,
+         oACC,oSCR,oVB,oRE,oMEM,oOFF,oAL, NUSED };
+  PyObject *o[NUSED];
+  Py_buffer b[NUSED];
+  long long half_span=0;
+  int steps=0, got=0, ok=1;
+  double alpha_floor=0.0;
+  if(!PyArg_ParseTuple(args,"OOOOOOOLOOOOOOOidOOOOOOO",&o[iC],&o[iIV],&o[iV],&o[iW],&o[iEX],
+       &o[iSH],&o[iSL],&half_span,&o[iCUR],&o[iIVC],&o[iCO],&o[iCM],&o[iCA],&o[iCB],&o[iCDL],
+       &steps,&alpha_floor,&o[oACC],&o[oSCR],&o[oVB],&o[oRE],&o[oMEM],&o[oOFF],&o[oAL]))
+    return NULL;
+  for(int i=0;i<NUSED && ok;i++){
+    const int flags = PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(i>=oACC ? PyBUF_WRITABLE : 0);
+    if(PyObject_GetBuffer(o[i],&b[i],flags)<0){ ok=0; break; }
+    got=i+1;
+    const char *f=b[i].format ? b[i].format : "B";
+    /* int64 arrives as "l" or "q", int32 as "i" or "l", by platform */
+    const int same = !strcmp(f,fmt[i])
+        || (fmt[i][0]=='q' && !strcmp(f,"l") && b[i].itemsize==8)
+        || (fmt[i][0]=='i' && !strcmp(f,"l") && b[i].itemsize==4);
+    if(!same || b[i].ndim!=ndim[i]) ok=0;
+  }
+  Py_ssize_t nt=0, K=0, nlag=0, nsh=0, nc=0, ncand=0, total=0;
+  if(ok){
+    nt=b[iC].shape[0]; K=b[iC].shape[1]; nlag=b[iEX].shape[0]; nsh=b[iSH].shape[0];
+    nc=b[iCUR].shape[0]; ncand=b[iCA].shape[0]; total=b[oMEM].shape[0];
+    ok = K>=1 && nsh>=1 && (nlag&1) && half_span>=0 && steps>=0
+         && b[iIV].shape[0]==nt && b[iV].shape[0]==nt && b[iW].shape[0]==K
+         && b[iEX].shape[1]==K && b[iSH].shape[1]==K && b[iSL].shape[0]==nsh
+         && b[iCUR].shape[1]==K && b[iIVC].shape[0]==nc && b[iCO].shape[0]==nc+1
+         && b[iCB].shape[0]==ncand && b[iCDL].shape[0]==ncand
+         && b[oACC].shape[0]==ncand && b[oSCR].shape[0]==ncand && b[oSCR].shape[1]==K
+         && b[oVB].shape[0]==ncand && b[oRE].shape[0]==ncand && b[oOFF].shape[0]==ncand+1
+         && b[oAL].shape[0]==total;
+  }
+  if(ok){
+    /* the clusters named exist, their members are templates, the lags are shifts' */
+    const int32_t *co=(const int32_t*)b[iCO].buf, *cm=(const int32_t*)b[iCM].buf;
+    const int64_t *ca=(const int64_t*)b[iCA].buf, *cb=(const int64_t*)b[iCB].buf;
+    const int64_t *sl=(const int64_t*)b[iSL].buf;
+    const long long R=(nlag-1)/2;
+    Py_ssize_t need=0;
+    for(Py_ssize_t c=0;c<nc && ok;c++) ok = co[c]>=0 && co[c]<=co[c+1];
+    if(ok && nc>0) ok = co[nc]<=b[iCM].shape[0];
+    for(Py_ssize_t i=0;ok && nc>0 && i<co[nc];i++) ok = cm[i]>=0 && cm[i]<nt;
+    for(Py_ssize_t g=0;g<ncand && ok;g++){
+      ok = ca[g]>=0 && ca[g]<nc && cb[g]>=0 && cb[g]<nc && ca[g]!=cb[g];
+      if(ok) need += (co[ca[g]+1]-co[ca[g]]) + (co[cb[g]+1]-co[cb[g]]);
+    }
+    for(Py_ssize_t s=0;s<nsh && ok;s++) ok = sl[s]>=-R && sl[s]<=R;
+    if(ok) ok = need==total;
+  }
+  long long count=0;
+  if(ok){
+    Py_BEGIN_ALLOW_THREADS
+    count=ap_tier0_pass((const double*)b[iC].buf,(const double*)b[iIV].buf,
+        (const double*)b[iV].buf,(const double*)b[iW].buf,(const double*)b[iEX].buf,
+        (const float*)b[iSH].buf,(const int64_t*)b[iSL].buf,(long long)K,(long long)(nlag-1)/2,
+        (long long)nsh,half_span,(const double*)b[iCUR].buf,(const double*)b[iIVC].buf,
+        (const int32_t*)b[iCO].buf,(const int32_t*)b[iCM].buf,(const int64_t*)b[iCA].buf,
+        (const int64_t*)b[iCB].buf,(const int64_t*)b[iCDL].buf,(long long)ncand,steps,
+        alpha_floor,(uint8_t*)b[oACC].buf,(double*)b[oSCR].buf,(double*)b[oVB].buf,
+        (int64_t*)b[oRE].buf,(int32_t*)b[oMEM].buf,(int32_t*)b[oOFF].buf,(double*)b[oAL].buf);
+    Py_END_ALLOW_THREADS
+  }
+  for(int i=0;i<got;i++) PyBuffer_Release(&b[i]);
+  if(!ok){
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pass: invalid buffer shapes, dtypes or indices");
+    return NULL;
+  }
+  if(count<0) return PyErr_NoMemory();
+  return PyLong_FromLongLong(count);
+}
+
 /* Each group's shared screener (src/tier0_mwu.cc): a group in each vector lane, and the plain
    routine it reproduces bit for bit. Both return 0, or -1 when out of memory. */
 int ap_tier0_mwu(const double *u, const double *ref, const double *w, long long nb, long long m,
@@ -3826,6 +3925,7 @@ static PyMethodDef methods[]={
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
+  {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> count: one pass of the shared-screener merging, every candidate merge made a group with a screener or turned down"},
   {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},

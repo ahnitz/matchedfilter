@@ -635,6 +635,12 @@ one for every band. It now comes from the joint law of the few samples it reads
 - Nothing is drawn again for a chain (its bands are in the one vector), for a shared
   screener's retention (the band's stored samples mixed with noise of the band's own), or
   for the half-width table (the lags of the maxima).
+- Three profiles' draws are held (`_signal_law._DRAWS`, about 29 MB each at 96,000
+  detections and a block of 1024): the samples, which of them lie in the window, and each
+  draw's first lag and arrival class, from which a sample's block lag is read. A job's banks
+  alternate between the top templates they hang under, and two top templates under two
+  detectors plan on three profiles that are not alike; with two held every other bank drew
+  its profile again (setup 72.6 -> 66.7 s on the search below when the third was added).
 - It holds where a profile's correlations die out inside the block. `_law_applies` lets
   it stand in for a window of at most half the block, which is the planner's own window
   (`local_window`) for realistic profiles (128-256 lags of 1024-4096); a steep red spectrum

@@ -340,6 +340,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
   the banks like it is one array for all of them. MEASURED, same search and machine, three
   alternating pairs: setup 65.8, 67.0 and 67.3 s -> 65.1, 65.0 and 64.7 s, steady rate
   level; every plan of the replayed setup unchanged.
+- A pass of the shared-screener merging in C++ (`src/tier0_pass.cc`, `_core.tier0_pass`):
+  every candidate merge's members, the frame they are aligned in, their lags, the screener
+  and the retentions that accept or turn the group down were some forty numpy operations a
+  pass. The routine does the numpy code's arithmetic operation for operation (its pairwise
+  sums, a complex number over a real one by the reciprocal, the modulus numpy's AVX-512 loop
+  computes), so on the replayed setup of the showcase search every screener set is bit for
+  bit what it was at SNR 5.5, 6.0 and 7.0; numpy's own modulus differs between machines in
+  the last place, and the routine's does not. `tests/test_tier0_pass.py` keeps the numpy
+  code as the reference. MEASURED, same search and machine, three alternating pairs: setup
+  65.3, 64.9 and 63.9 s -> 61.9, 61.8 and 61.7 s, steady rate level.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a
