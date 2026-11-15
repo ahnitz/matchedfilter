@@ -122,6 +122,60 @@ def _band_slice(n, b, k0):
     return k0, min(k0 + int(b), int(n) // 2)
 
 
+def _best_swap(scores, u, vs, w_arr, z_arr, floor):
+    """The swap that pairs two unmatched nodes by breaking one matched pair.
+
+    A matched pair (w, z) can be replaced by (u, w) and (v, z), or by (u, z) and (v, w),
+    when both new pairs score at least ``floor``; the swap's gain is the two new scores'
+    sum. For the unmatched node ``u`` this returns the swap of largest gain over the nodes
+    ``vs``: of equal gains, the first v in ``vs``, for a v the swap with u on w's side
+    before the one with u on z's side, and on a side the first pair.
+
+    Parameters
+    ----------
+    scores : numpy.ndarray
+        ``(m, m)`` symmetric pair scores.
+    u : int
+        The unmatched node being placed.
+    vs : numpy.ndarray
+        The other unmatched nodes it may be placed with, in the order they are tried.
+    w_arr, z_arr : numpy.ndarray
+        The matched pairs: pair ``e`` is ``(w_arr[e], z_arr[e])``.
+    floor : float
+        The least score a pair may have.
+
+    Returns
+    -------
+    tuple or None
+        ``(e, v, (a, b), (c, d))``: the pair ``e`` to replace by ``(a, b)``, which holds u,
+        and the new pair ``(c, d)``, which holds v, each with its smaller node first; None
+        when no swap exists.
+    """
+    if not vs.size:
+        return None
+    v_w = scores[np.ix_(vs, w_arr)]
+    v_z = scores[np.ix_(vs, z_arr)]
+    u_w, u_z = scores[u, w_arr], scores[u, z_arr]
+    # the gain of each (v, pair) with u on w's side, and with u on z's side
+    gain_w = np.where((u_w >= floor)[None, :] & (v_z >= floor), u_w[None, :] + v_z, -np.inf)
+    gain_z = np.where((u_z >= floor)[None, :] & (v_w >= floor), u_z[None, :] + v_w, -np.inf)
+    pair_w, pair_z = gain_w.argmax(axis=1), gain_z.argmax(axis=1)
+    each = np.arange(vs.size)
+    # per v: (best on w's side, best on z's side), then the first of the largest over all
+    gains = np.stack([gain_w[each, pair_w], gain_z[each, pair_z]], axis=1).ravel()
+    first = int(gains.argmax())
+    if not gains[first] > -1.0:
+        return None
+    v = int(vs[first // 2])
+    if first % 2 == 0:
+        e = int(pair_w[first // 2])
+        mine, theirs = int(w_arr[e]), int(z_arr[e])
+    else:
+        e = int(pair_z[first // 2])
+        mine, theirs = int(z_arr[e]), int(w_arr[e])
+    return e, v, (min(u, mine), max(u, mine)), (min(v, theirs), max(v, theirs))
+
+
 def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4,
                              pass2=None):
     """Build hierarchical Tier-0 centroid banks up to ``max_arity`` (``k <= 2, 4, 8, 16``).
@@ -279,41 +333,12 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                 node_u = int(free_arr[idx_u])
                 if used[node_u]:
                     continue
-                uw_ok = sym_r2[node_u, w_arr] >= f2_floor
-                uz_ok = sym_r2[node_u, z_arr] >= f2_floor
-                if not (np.any(uw_ok) or np.any(uz_ok)):
+                if not (np.any(sym_r2[node_u, w_arr] >= f2_floor)
+                        or np.any(sym_r2[node_u, z_arr] >= f2_floor)):
                     continue
-                # The best swap over every free node v after u, as the loop over v found it:
-                # for each v its best edge with u on w's side and with u on z's side (the
-                # first of equal gains), and of all of those the first of the largest gain.
                 later = free_arr[idx_u + 1:]
-                vs = later[~used[later]]
-                best_swap = None
-                if vs.size:
-                    v_w = sym_r2[np.ix_(vs, w_arr)]
-                    v_z = sym_r2[np.ix_(vs, z_arr)]
-                    gain_w = np.where(uw_ok[None, :] & (v_z >= f2_floor),
-                                      sym_r2[node_u, w_arr][None, :] + v_z, -np.inf)
-                    gain_z = np.where(uz_ok[None, :] & (v_w >= f2_floor),
-                                      sym_r2[node_u, z_arr][None, :] + v_w, -np.inf)
-                    edge_w, edge_z = gain_w.argmax(axis=1), gain_z.argmax(axis=1)
-                    each = np.arange(vs.size)
-                    gains = np.stack([gain_w[each, edge_w], gain_z[each, edge_z]], axis=1).ravel()
-                    first = int(gains.argmax())
-                    if gains[first] > -1.0:
-                        node_v = int(vs[first // 2])
-                        if first % 2 == 0:
-                            e_idx = int(edge_w[first // 2])
-                            mine, theirs = int(w_arr[e_idx]), int(z_arr[e_idx])
-                        else:
-                            e_idx = int(edge_z[first // 2])
-                            mine, theirs = int(z_arr[e_idx]), int(w_arr[e_idx])
-                        best_swap = (
-                            e_idx,
-                            node_v,
-                            (node_u, mine) if node_u < mine else (mine, node_u),
-                            (node_v, theirs) if node_v < theirs else (theirs, node_v),
-                        )
+                best_swap = _best_swap(sym_r2, node_u, later[~used[later]], w_arr, z_arr,
+                                       f2_floor)
                 if best_swap is not None:
                     e_idx, node_v, e1, e2 = best_swap
                     used[node_u] = True
