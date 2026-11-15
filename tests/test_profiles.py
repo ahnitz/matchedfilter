@@ -106,7 +106,10 @@ def test_the_templates_are_held_once(monkeypatch):
     before = used()
     keep.append(_core.HMF(n, 1, nt, [64, 128], group, n, own))
     shared = used() - before
-    assert shared < 0.6 * alone, (shared, alone)
+    # (a sanitizer's allocator answers mallinfo2 with zeros: the nightly ASan/UBSan job
+    # runs the rest of this test, not the comparison)
+    if alone > 0:
+        assert shared < 0.6 * alone, (shared, alone)
     with pytest.raises((ValueError, TypeError)):
         _core.HMF(n, 1, nt + 1, chain, group, n, own)        # not the same templates
     with pytest.raises((ValueError, TypeError)):
