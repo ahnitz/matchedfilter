@@ -579,29 +579,32 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         if not ca_list:
             break
 
-        # Filter candidates by group variance compatibility and align members in [-R, +R]
-        cand_groups = []
-        cand_pairs = []
-        cand_cdl = []
-        for ca_i, cb_i, dl_ab in zip(ca_list, cb_list, cdl_list):
-            grp = sorted(
-                int(x)
-                for x in list(cur_members[cur_offsets[ca_i]:cur_offsets[ca_i + 1]])
-                + list(cur_members[cur_offsets[cb_i]:cur_offsets[cb_i + 1]])
-            )
-            v_grp = v[grp]
-            if float(v_grp.min()) < 0.80 * float(v_grp.max()):
-                continue
-            cand_groups.append(grp)
-            cand_pairs.append((ca_i, cb_i))
-            cand_cdl.append(int(dl_ab))
-        if not cand_groups:
+        # Each candidate merge's members, sorted: the two clusters' member lists, end to end
+        ca_all = np.asarray(ca_list, dtype=np.int64)
+        cb_all = np.asarray(cb_list, dtype=np.int64)
+        part_len = np.stack((sz_cur[ca_all], sz_cur[cb_all]), axis=1).ravel()
+        part_start = np.stack((cur_offsets[ca_all], cur_offsets[cb_all]), axis=1).ravel()
+        mem_arr = cur_members[np.repeat(part_start - (np.cumsum(part_len) - part_len), part_len)
+                              + np.arange(int(part_len.sum()))]
+        grp_lens = sz_cur[ca_all] + sz_cur[cb_all]
+        ref_rep = np.repeat(np.arange(ca_all.size), grp_lens)
+        mem_arr = mem_arr[np.lexsort((mem_arr, ref_rep))]
+        # Keep the merges whose members' variances are compatible (smallest >= 0.80 largest)
+        grp_start = np.cumsum(grp_lens) - grp_lens
+        v_mem = v[mem_arr]
+        keep_grp = ~(np.minimum.reduceat(v_mem, grp_start)
+                     < 0.80 * np.maximum.reduceat(v_mem, grp_start))
+        if not keep_grp.any():
             break
+        mem_arr = mem_arr[np.repeat(keep_grp, grp_lens)]
+        grp_lens = grp_lens[keep_grp]
+        grp_start = np.cumsum(grp_lens) - grp_lens
+        ref_rep = np.repeat(np.arange(grp_lens.size), grp_lens)
 
         # Center lag frame at the midpoint of the two merged centroids so lags stay in [-R, +R]
-        ca_arr = np.asarray([cp[0] for cp in cand_pairs], dtype=np.int32)
-        cb_arr = np.asarray([cp[1] for cp in cand_pairs], dtype=np.int32)
-        cdl_arr = np.clip(np.asarray(cand_cdl, dtype=np.int64), -R, R)
+        ca_arr = ca_all[keep_grp]
+        cb_arr = cb_all[keep_grp]
+        cdl_arr = np.clip(np.asarray(cdl_list, dtype=np.int64)[keep_grp], -R, R)
         ua = cur_vecs_128[ca_arr] * inv_sqrt_vc[ca_arr, None]
         ub_s = (cur_vecs_128[cb_arr] * inv_sqrt_vc[cb_arr, None]) * exp_all[cdl_arr + R]
         ip_ab = np.einsum("ij,ij->i", W[None, :] * ua.conj(), ub_s)
@@ -613,9 +616,6 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             1e-30,
         ))
         mid_u = mid_raw / mid_norm[:, None]
-        grp_lens = np.asarray([len(g) for g in cand_groups], dtype=np.int32)
-        ref_rep = np.repeat(np.arange(len(cand_groups), dtype=np.int32), grp_lens)
-        mem_arr = np.asarray([tj for g in cand_groups for tj in g], dtype=np.int32)
         prod_p = (W[None, :] * mid_u[ref_rep].conj()) * (C[mem_arr] * inv_sqrt_v[mem_arr, None])
 
         g_coarse_p = prod_p.astype(np.complex64) @ shifts64.T
@@ -644,27 +644,21 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                     best_dl_p = np.where(better_p, cdl_p, best_dl_p)
                 dl_p = best_dl_p
 
-        by_arity = {}
-        pos_dl = 0
-        for idx_g, grp in enumerate(cand_groups):
-            m_arity = len(grp)
-            dls_grp = [int(x) for x in dl_p[pos_dl:pos_dl + m_arity]]
-            pos_dl += m_arity
-            by_arity.setdefault(m_arity, []).append((idx_g, grp, dls_grp))
-
+        # Groups of one size are synthesised together: (groups, members) index tables
         accepted = {}
         mwu_steps = 2 * p_idx
         W_f64 = np.ascontiguousarray(W, dtype=np.float64)
-        for m_arity, bucket in by_arity.items():
-            g_ids = [item[0] for item in bucket]
-            grp_mat = np.asarray([item[1] for item in bucket], dtype=np.int32)
-            dls_mat = np.asarray([item[2] for item in bucket], dtype=np.int64)
+        for m_arity in np.unique(grp_lens).tolist():
+            g_ids = np.flatnonzero(grp_lens == m_arity)
+            rows = grp_start[g_ids][:, None] + np.arange(m_arity)[None, :]
+            grp_mat = mem_arr[rows]
+            dls_mat = dl_p[rows].astype(np.int64)
             U_raw = (C[grp_mat] * inv_sqrt_v[grp_mat, None]) * exp_all[dls_mat + R]
             # Each group's screener: the mean of its members phased to the merged frame, or
             # the minimax vector multiplicative weights find, whichever the worst-matched
             # member overlaps better; and every member's overlap with it (_core.tier0_mwu).
-            c_unit = np.empty((len(bucket), length), dtype=np.complex128)
-            exact_ov = np.empty((len(bucket), m_arity), dtype=np.float64)
+            c_unit = np.empty((g_ids.size, length), dtype=np.complex128)
+            exact_ov = np.empty((g_ids.size, m_arity), dtype=np.float64)
             _c_t0.tier0_mwu(np.ascontiguousarray(U_raw), np.ascontiguousarray(mid_u[g_ids]),
                             W_f64, int(mwu_steps), c_unit, exact_ov)
             v_mem = v[grp_mat]
@@ -673,23 +667,24 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             c_vecs_128 = np.sqrt(v_bar)[:, None] * c_unit
             c_vecs_64 = c_vecs_128.astype(np.complex64)
 
-            for row_k, gid in enumerate(g_ids):
-                if float(alpha_mat[row_k].min()) >= alpha_floor:
-                    accepted[gid] = (
-                        c_vecs_64[row_k],
-                        c_vecs_128[row_k],
-                        float(v_bar[row_k]),
-                        grp_mat[row_k],
-                        alpha_mat[row_k],
-                        int(np.max(np.abs(dls_mat[row_k]))),
-                    )
+            # A group is accepted when every member keeps alpha_floor of its SNR
+            dl_reach = np.max(np.abs(dls_mat), axis=1)
+            for row_k in np.flatnonzero(alpha_mat.min(axis=1) >= alpha_floor).tolist():
+                accepted[int(g_ids[row_k])] = (
+                    c_vecs_64[row_k],
+                    c_vecs_128[row_k],
+                    float(v_bar[row_k]),
+                    grp_mat[row_k],
+                    alpha_mat[row_k],
+                    int(dl_reach[row_k]),
+                )
 
         if not accepted:
             break
 
         merged_gid = np.full(cur_nc, -1, dtype=np.int32)
         merged_partner = np.full(cur_nc, -1, dtype=np.int32)
-        for gid, (ca_i, cb_i) in enumerate(cand_pairs):
+        for gid, (ca_i, cb_i) in enumerate(zip(ca_arr.tolist(), cb_arr.tolist())):
             if gid in accepted:
                 lo_c, hi_c = (ca_i, cb_i) if ca_i < cb_i else (cb_i, ca_i)
                 merged_gid[lo_c] = gid
