@@ -272,116 +272,25 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
                             lag_pad=lpad, ratio=rat, alpha=eff_a,
                             member_alphas=np.asarray(alphas_arr, np.float32))
 
+    # The first level (_core.tier0_pair_level): the templates' pairs, their lags refined in
+    # complex128, made clusters of two where the two are coherent to rho_min, with the
+    # pair's screener and its members' retentions; every other template a cluster of its own
     pa, pb, pdl = _run_chunked_matching(perm, U64, v, floor2)
-    max_nc = int(0.85 * nt)
-    npairs = int(pa.size)
-    if npairs == 0 or (nt - npairs) > max_nc:
-        return empty_ret
-
-    # Pass 1: vectorized exact complex128 lag refinement and unit-variance pair synthesis
-    Ca_u = C[pa] * inv_sqrt_v[pa, None]
-    Cb_u = C[pb] * inv_sqrt_v[pb, None]
-    prod_ab = (W[None, :] * Ca_u.conj()) * Cb_u
-
-    sub_offs = np.arange(-(s_step - 1), s_step, dtype=np.int64) if s_step > 1 else None
     from . import _core as _c_t0
-    if hasattr(_c_t0, "tier0_refine_lags"):
-        best_dl = np.empty(npairs, dtype=np.int64)
-        g_vec = np.empty(npairs, dtype=np.complex128)
-        _c_t0.tier0_refine_lags(
-            np.ascontiguousarray(prod_ab, dtype=np.complex128),
-            exp_all,
-            np.ascontiguousarray(pdl, dtype=np.int64),
-            int(R),
-            int(s_step - 1) if s_step > 1 else 0,
-            best_dl,
-            g_vec,
-        )
-        pdl = best_dl
-    elif sub_offs is not None:
-        best_abs = np.full(npairs, -1.0, dtype=np.float64)
-        best_dl = pdl.copy()
-        g_vec = np.zeros(npairs, dtype=np.complex128)
-        for off_val in sub_offs:
-            cdl = np.clip(pdl + int(off_val), -R, R)
-            g_cur = np.einsum("ij,ij->i", prod_ab, exp_all[cdl + R])
-            abs_cur = np.abs(g_cur)
-            better = abs_cur > best_abs
-            best_abs = np.where(better, abs_cur, best_abs)
-            best_dl = np.where(better, cdl, best_dl)
-            g_vec = np.where(better, g_cur, g_vec)
-        pdl = best_dl
-    else:
-        g_vec = np.einsum("ij,ij->i", prod_ab, exp_all[pdl + R])
-
-    rho_vec = np.abs(g_vec)
-    keep_mask = rho_vec >= float(rho_min)
-    if not np.all(keep_mask):
-        pa = pa[keep_mask]
-        pb = pb[keep_mask]
-        pdl = pdl[keep_mask]
-        Ca_u = Ca_u[keep_mask]
-        Cb_u = Cb_u[keep_mask]
-        g_vec = g_vec[keep_mask]
-        rho_vec = rho_vec[keep_mask]
-        npairs = int(pa.size)
-        if npairs == 0 or (nt - npairs) > max_nc:
-            return empty_ret
-
-    Cb_u_s = Cb_u * exp_all[pdl + R]
-    u_psi = g_vec.conj() / rho_vec
-    target_v = 0.5 * (v[pa] + v[pb])
-    pair_vecs_128 = (
-        (np.sqrt(target_v) / np.sqrt(2.0 * (1.0 + rho_vec)))[:, None]
-        * (Ca_u + u_psi[:, None] * Cb_u_s)
-    )
-    pair_vecs = pair_vecs_128.astype(np.complex64)
-
-    base_ret = np.sqrt(0.5 * (1.0 + rho_vec))
-    alphas = np.ones(nt, dtype=np.float64)
-    alphas[pa] = np.minimum(1.0, np.sqrt(target_v / v[pa]) * base_ret)
-    alphas[pb] = np.minimum(1.0, np.sqrt(target_v / v[pb]) * base_ret)
-    max_abs_dl = int(np.max(np.abs(pdl))) if npairs > 0 else 0
-
-    partner = np.full(nt, -1, dtype=np.int32)
-    pair_slot = np.full(nt, -1, dtype=np.int32)
-    partner[pa] = pb
-    partner[pb] = pa
-    pair_slot[pa] = np.arange(npairs, dtype=np.int32)
-
-    nc = nt - npairs
-    band_vecs = np.empty((nc, length), dtype=np.complex64)
-    band_vecs_128 = np.empty((nc, length), dtype=np.complex128) if cap_arity > 2 else None
-    v_cl2 = np.empty(nc, dtype=np.float64) if cap_arity > 2 else None
-    dl_cl2 = np.zeros(nc, dtype=np.int64) if cap_arity > 2 else None
-    offsets = np.empty(nc + 1, dtype=np.int32)
+    level_128 = np.empty((nt, length), dtype=np.complex128)
+    level_v = np.empty(nt, dtype=np.float64)
+    level_dl = np.empty(nt, dtype=np.int64)
+    level_offsets = np.empty(nt + 1, dtype=np.int32)
     members = np.empty(nt, dtype=np.int32)
-    ci = 0
-    m_pos = 0
-    for t in range(nt):
-        b = int(partner[t])
-        if b >= 0 and b < t:
-            continue
-        offsets[ci] = m_pos
-        if b > t:
-            slot = int(pair_slot[t])
-            band_vecs[ci] = pair_vecs[slot]
-            if cap_arity > 2:
-                band_vecs_128[ci] = pair_vecs_128[slot]
-                v_cl2[ci] = target_v[slot]
-                dl_cl2[ci] = abs(int(pdl[slot]))
-            members[m_pos] = t
-            members[m_pos + 1] = b
-            m_pos += 2
-        else:
-            band_vecs[ci] = C[t].astype(np.complex64)
-            if cap_arity > 2:
-                band_vecs_128[ci] = C[t]
-                v_cl2[ci] = v[t]
-            members[m_pos] = t
-            m_pos += 1
-        ci += 1
-    offsets[ci] = m_pos
+    alphas = np.empty(nt, dtype=np.float64)
+    nc, max_abs_dl = _c_t0.tier0_pair_level(
+        C, inv_sqrt_v, v, W, exp_all, int(s_step - 1), float(rho_min), int(0.85 * nt),
+        pa, pb, pdl, level_128, level_v, level_dl, level_offsets, members, alphas)
+    if nc == 0:
+        return empty_ret
+    band_vecs_128 = level_128[:nc]
+    band_vecs = band_vecs_128.astype(np.complex64)
+    v_cl2, dl_cl2, offsets = level_v[:nc], level_dl[:nc], level_offsets[:nc + 1]
 
     cl_k2 = _pack_cluster(band_vecs, offsets, members, alphas, max_abs_dl)
     out_levels = [cl_k2]
@@ -390,7 +299,6 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
 
     # Passes 2..num_slots: iterative hierarchical matching + minimax weight synthesis up to cap_arity
     cur_nc = nc
-    cur_vecs = band_vecs
     cur_vecs_128 = band_vecs_128
     cur_v = v_cl2
     cur_dl = dl_cl2
@@ -428,95 +336,31 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             break
         ca_arr, cb_arr = ca_arr.astype(np.int64), cb_arr.astype(np.int64)
 
-        # Every candidate merge made a group with one screener, or turned down
-        # (_core.tier0_pass): its members aligned in the two clusters' common frame, their
-        # screener synthesised, and the group accepted if every member keeps alpha_floor of
-        # its SNR
-        grp_offsets = np.empty(ca_arr.size + 1, dtype=np.int32)
-        grp_members = np.empty(int((sz_cur[ca_arr] + sz_cur[cb_arr]).sum()), dtype=np.int32)
-        grp_alphas = np.empty(grp_members.size, dtype=np.float64)
-        took = np.zeros(ca_arr.size, dtype=bool)
-        c_vecs_128 = np.empty((ca_arr.size, length), dtype=np.complex128)
-        v_bar = np.empty(ca_arr.size, dtype=np.float64)
-        dl_reach = np.empty(ca_arr.size, dtype=np.int64)
-        if not _c_t0.tier0_pass(
-                C, inv_sqrt_v, v, W, exp_all, shifts64, pass_lags, int(s_step - 1), cur_vecs_128,
-                inv_sqrt_vc, cur_offsets, cur_members, ca_arr, cb_arr,
-                cdl_arr, 2 * p_idx, alpha_floor,
-                took, c_vecs_128, v_bar, dl_reach, grp_members, grp_offsets, grp_alphas):
-            break
-        accepted = {}
-        for gid in np.flatnonzero(took).tolist():
-            m_lo, m_hi = int(grp_offsets[gid]), int(grp_offsets[gid + 1])
-            accepted[gid] = (
-                c_vecs_128[gid].astype(np.complex64),
-                c_vecs_128[gid],
-                float(v_bar[gid]),
-                grp_members[m_lo:m_hi],
-                grp_alphas[m_lo:m_hi],
-                int(dl_reach[gid]),
-            )
-
-        merged_gid = np.full(cur_nc, -1, dtype=np.int32)
-        merged_partner = np.full(cur_nc, -1, dtype=np.int32)
-        for gid, (ca_i, cb_i) in enumerate(zip(ca_arr.tolist(), cb_arr.tolist())):
-            if gid in accepted:
-                lo_c, hi_c = (ca_i, cb_i) if ca_i < cb_i else (cb_i, ca_i)
-                merged_gid[lo_c] = gid
-                merged_partner[lo_c] = hi_c
-                merged_partner[hi_c] = lo_c
-
-        need_next = p_idx < num_slots
-        nc_hi = cur_nc - len(accepted)
-        band_vecs_hi = np.empty((nc_hi, length), dtype=np.complex64)
-        band_vecs_hi_128 = np.empty((nc_hi, length), dtype=np.complex128) if need_next else None
-        v_hi = np.empty(nc_hi, dtype=np.float64) if need_next else None
-        dl_hi = np.zeros(nc_hi, dtype=np.int64)
-        offsets_hi = np.empty(nc_hi + 1, dtype=np.int32)
+        # The next level (_core.tier0_pass): every candidate merge's members aligned in the
+        # two clusters' common frame and their screener synthesised; a merge whose members
+        # all keep alpha_floor of their SNR replaces its two clusters
+        next_128 = np.empty((cur_nc, length), dtype=np.complex128)
+        next_v = np.empty(cur_nc, dtype=np.float64)
+        next_dl = np.empty(cur_nc, dtype=np.int64)
+        next_offsets = np.empty(cur_nc + 1, dtype=np.int32)
         members_hi = np.empty(nt, dtype=np.int32)
         alphas_hi = cur_alphas.copy()
-        max_dl_hi = 0
-        ci_hi = 0
-        m_pos_hi = 0
-        for c_idx in range(cur_nc):
-            other_c = int(merged_partner[c_idx])
-            if other_c >= 0 and other_c < c_idx:
-                continue
-            offsets_hi[ci_hi] = m_pos_hi
-            if other_c > c_idx:
-                c_vec, c_vec128, v_val, grp_row, a_row, dl_row = accepted[int(merged_gid[c_idx])]
-                band_vecs_hi[ci_hi] = c_vec
-                if need_next:
-                    band_vecs_hi_128[ci_hi] = c_vec128
-                    v_hi[ci_hi] = v_val
-                dl_hi[ci_hi] = dl_row
-                m_len = int(grp_row.size)
-                members_hi[m_pos_hi:m_pos_hi + m_len] = grp_row
-                alphas_hi[grp_row] = a_row
-                if dl_row > max_dl_hi:
-                    max_dl_hi = dl_row
-                m_pos_hi += m_len
-            else:
-                band_vecs_hi[ci_hi] = cur_vecs[c_idx]
-                if need_next:
-                    band_vecs_hi_128[ci_hi] = cur_vecs_128[c_idx]
-                    v_hi[ci_hi] = cur_v[c_idx]
-                dl_val = int(cur_dl[c_idx])
-                dl_hi[ci_hi] = dl_val
-                s0, s1 = int(cur_offsets[c_idx]), int(cur_offsets[c_idx + 1])
-                m_len = s1 - s0
-                members_hi[m_pos_hi:m_pos_hi + m_len] = cur_members[s0:s1]
-                if dl_val > max_dl_hi:
-                    max_dl_hi = dl_val
-                m_pos_hi += m_len
-            ci_hi += 1
-        offsets_hi[ci_hi] = m_pos_hi
+        merged, max_dl_hi = _c_t0.tier0_pass(
+            C, inv_sqrt_v, v, W, exp_all, shifts64, pass_lags, int(s_step - 1), cur_vecs_128,
+            inv_sqrt_vc, cur_v, cur_dl, cur_offsets, cur_members, ca_arr, cb_arr, cdl_arr,
+            2 * p_idx, alpha_floor,
+            next_128, next_v, next_dl, next_offsets, members_hi, alphas_hi)
+        if not merged:
+            break
+        nc_hi = cur_nc - merged
+        band_vecs_hi_128 = next_128[:nc_hi]
+        band_vecs_hi = band_vecs_hi_128.astype(np.complex64)
+        v_hi, dl_hi, offsets_hi = next_v[:nc_hi], next_dl[:nc_hi], next_offsets[:nc_hi + 1]
 
         cl_hi = _pack_cluster(band_vecs_hi, offsets_hi, members_hi, alphas_hi, max_dl_hi)
         out_levels.append(cl_hi)
         prev_cl = cl_hi
         cur_nc = nc_hi
-        cur_vecs = band_vecs_hi
         cur_vecs_128 = band_vecs_hi_128
         cur_v = v_hi
         cur_dl = dl_hi

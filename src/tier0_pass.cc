@@ -95,20 +95,22 @@ double pairwise(const double *a, long long n) {
 
 }  // namespace
 
-/* accepted (ncand): 1 for a group that is accepted. members, alpha (the candidates' member
-   counts summed) and offsets (ncand + 1): every candidate's sorted members and, for an
-   accepted one, their retentions. screener (ncand, K) complex128, v_bar and reach (ncand),
-   written for the accepted: the group's screener, its mean variance and its largest member
-   lag in absolute value. shifts (nsh, K) complex64 are the coarse shifts and shift_lags
-   their lags. Returns the number accepted, or -1 when out of memory. */
-extern "C" long long ap_tier0_pass(
+namespace {
+
+/* Every candidate made a group or turned down. accepted (ncand): 1 for a group that is
+   accepted. members, alpha (the candidates' member counts summed) and offsets (ncand + 1):
+   every candidate's sorted members and, for an accepted one, their retentions. screener
+   (ncand, K) complex128, v_bar and reach (ncand), written for the accepted: the group's
+   screener, its mean variance and its largest member lag in absolute value. shifts (nsh, K)
+   complex64 are the coarse shifts and shift_lags their lags. Returns the number accepted. */
+long long Groups(
     const double *C, const double *inv_sqrt_v, const double *v, const double *w,
     const double *exp_all, const float *shifts, const int64_t *shift_lags, long long K,
     long long R, long long nsh, long long half_span, const double *cur,
     const double *inv_sqrt_vc, const int32_t *cur_offsets, const int32_t *cur_members,
     const int64_t *ca, const int64_t *cb, const int64_t *cdl, long long ncand, int steps,
     double alpha_floor, uint8_t *accepted, double *screener, double *v_bar, int64_t *reach,
-    int32_t *members, int32_t *offsets, double *alpha) try {
+    int32_t *members, int32_t *offsets, double *alpha) {
   const Cx *Cz = (const Cx *)C, *ex = (const Cx *)exp_all, *cz = (const Cx *)cur;
   // 1. every candidate's members, sorted; those whose variances are compatible go on
   std::vector<long long> kept;
@@ -242,7 +244,7 @@ extern "C" long long ap_tier0_pass(
     }
     if (ap_tier0_mwu((const double *)turned.data(), (const double *)refs.data(), w, nb, m, K,
                      steps, (double *)made.data(), overlap.data()) != 0)
-      return -1;
+      throw std::bad_alloc();
     for (long long x = 0; x < nb; x++) {
       const long long q = bucket[x], g = kept[q];
       const int32_t *mem = members + offsets[g];
@@ -270,6 +272,165 @@ extern "C" long long ap_tier0_pass(
     }
   }
   return count;
+}
+
+}  // namespace
+
+/* A pass: the level's clusters (cur (nc, K) complex128, variances cur_v, largest member lags
+   cur_dl, members cur_members[cur_offsets[c] : cur_offsets[c + 1]]) and the candidate merges
+   (ca, cb, cdl) in, the next level out. A merge that is accepted (see the top of this file)
+   stands where the smaller of its two clusters stood, with its screener, its members' mean
+   variance, its largest member lag and its members sorted; every other cluster stays as it
+   is. next (nc, K), next_v, next_dl (nc), next_offsets (nc + 1) and next_members (the
+   templates) take the next level's clusters, the first nc less the number accepted of them;
+   alphas (the templates' retentions, in and out) gets the accepted groups' members'; *reach
+   the largest lag of the next level. shifts (nsh, K) complex64 are the coarse shifts and
+   shift_lags their lags. Returns the number accepted (0: nothing is written), or -1 when out
+   of memory. */
+extern "C" long long ap_tier0_pass(
+    const double *C, const double *inv_sqrt_v, const double *v, const double *w,
+    const double *exp_all, const float *shifts, const int64_t *shift_lags, long long K,
+    long long R, long long nsh, long long half_span, const double *cur,
+    const double *inv_sqrt_vc, const double *cur_v, const int64_t *cur_dl,
+    const int32_t *cur_offsets, const int32_t *cur_members, long long nc, const int64_t *ca,
+    const int64_t *cb, const int64_t *cdl, long long ncand, int steps, double alpha_floor,
+    double *next, double *next_v, int64_t *next_dl, int32_t *next_offsets,
+    int32_t *next_members, double *alphas, int64_t *reach) try {
+  long long total = 0;
+  for (long long g = 0; g < ncand; g++)
+    total += (cur_offsets[ca[g] + 1] - cur_offsets[ca[g]])
+             + (cur_offsets[cb[g] + 1] - cur_offsets[cb[g]]);
+  std::vector<uint8_t> accepted((size_t)ncand);
+  std::vector<double> screener((size_t)(2 * ncand * K)), v_bar((size_t)ncand), alpha((size_t)total);
+  std::vector<int64_t> far((size_t)ncand);
+  std::vector<int32_t> members((size_t)total), offsets((size_t)ncand + 1);
+  const long long count = Groups(
+      C, inv_sqrt_v, v, w, exp_all, shifts, shift_lags, K, R, nsh, half_span, cur, inv_sqrt_vc,
+      cur_offsets, cur_members, ca, cb, cdl, ncand, steps, alpha_floor, accepted.data(),
+      screener.data(), v_bar.data(), far.data(), members.data(), offsets.data(), alpha.data());
+  if (count == 0) return 0;
+  // the group a cluster went into, and the cluster it went there with
+  std::vector<long long> group((size_t)nc, -1), partner((size_t)nc, -1);
+  for (long long g = 0; g < ncand; g++) {
+    if (!accepted[g]) continue;
+    const long long lo = ca[g] < cb[g] ? ca[g] : cb[g], hi = ca[g] < cb[g] ? cb[g] : ca[g];
+    group[lo] = g;
+    partner[lo] = hi;
+    partner[hi] = lo;
+  }
+  long long at = 0, pos = 0;
+  int64_t largest = 0;
+  for (long long c = 0; c < nc; c++) {
+    if (partner[c] >= 0 && partner[c] < c) continue;
+    next_offsets[at] = (int32_t)pos;
+    if (partner[c] > c) {
+      const long long g = group[c];
+      memcpy(next + 2 * at * K, screener.data() + 2 * g * K, (size_t)(2 * K) * sizeof(double));
+      next_v[at] = v_bar[g];
+      next_dl[at] = far[g];
+      for (int32_t p = offsets[g]; p < offsets[g + 1]; p++) {
+        next_members[pos++] = members[p];
+        alphas[members[p]] = alpha[p];
+      }
+    } else {
+      memcpy(next + 2 * at * K, cur + 2 * c * K, (size_t)(2 * K) * sizeof(double));
+      next_v[at] = cur_v[c];
+      next_dl[at] = cur_dl[c];
+      for (int32_t p = cur_offsets[c]; p < cur_offsets[c + 1]; p++)
+        next_members[pos++] = cur_members[p];
+    }
+    largest = next_dl[at] > largest ? next_dl[at] : largest;
+    at++;
+  }
+  next_offsets[at] = (int32_t)pos;
+  *reach = largest;
+  return count;
+} catch (const std::bad_alloc &) {
+  return -1;
+}
+
+/* The first level: the templates' pairs (pa, pb, the second lagged pdl against the first,
+   from ap_tier0_match) made clusters of two, every other template a cluster of its own.
+   A pair's lag is refined within half_span (ap_tier0_refine_lags) and the pair is kept if
+   the two unit vectors' coherence rho there reaches rho_min; its screener is the two added
+   in phase, scaled to their mean variance, and each member's retention
+   sqrt(mean variance / its own) sqrt((1 + rho) / 2), at most 1. level (nt, K) complex128,
+   level_v, level_dl (nt), offsets (nt + 1), members (nt) take the clusters, in the order of
+   their first member; alphas (nt) every template's retention; *reach the largest pair lag.
+   Returns the number of clusters; 0 when no pair is kept or they leave more than max_nc
+   clusters (nothing is to be used); -1 when out of memory. */
+extern "C" long long ap_tier0_pair_level(
+    const double *C, const double *inv_sqrt_v, const double *v, const double *w,
+    const double *exp_all, long long nt, long long K, long long R, long long half_span,
+    double rho_min, long long max_nc, const int32_t *pa, const int32_t *pb, const int64_t *pdl,
+    long long npairs, double *level, double *level_v, int64_t *level_dl, int32_t *offsets,
+    int32_t *members, double *alphas, int64_t *reach) try {
+  if (npairs == 0 || nt - npairs > max_nc) return 0;
+  const Cx *Cz = (const Cx *)C, *ex = (const Cx *)exp_all;
+  std::vector<Cx> ua((size_t)(npairs * K)), ub((size_t)(npairs * K)), prod((size_t)(npairs * K));
+  for (long long i = 0; i < npairs; i++) {
+    const Cx *a = Cz + (long long)pa[i] * K, *b = Cz + (long long)pb[i] * K;
+    Cx *x = ua.data() + i * K, *y = ub.data() + i * K, *pr = prod.data() + i * K;
+    for (long long k = 0; k < K; k++) {
+      x[k] = mul(a[k], real(inv_sqrt_v[pa[i]]));
+      y[k] = mul(b[k], real(inv_sqrt_v[pb[i]]));
+      pr[k] = mul(mul(real(w[k]), Cx{x[k].r, -x[k].i}), y[k]);
+    }
+  }
+  std::vector<int64_t> lag((size_t)npairs);
+  std::vector<Cx> g((size_t)npairs);
+  ap_tier0_refine_lags((const double *)prod.data(), exp_all, pdl, npairs, K, R, half_span,
+                       lag.data(), (double *)g.data());
+  // the pairs coherent enough, and the template each is paired with
+  std::vector<long long> slot((size_t)nt, -1), partner((size_t)nt, -1);
+  std::vector<double> rho((size_t)npairs);
+  long long kept = 0;
+  for (long long i = 0; i < npairs; i++) {
+    rho[i] = modulus(g[i]);
+    if (!(rho[i] >= rho_min)) continue;
+    kept++;
+    partner[pa[i]] = pb[i];
+    partner[pb[i]] = pa[i];
+    slot[pa[i]] = i;
+  }
+  if (kept == 0 || nt - kept > max_nc) return 0;
+  for (long long t = 0; t < nt; t++) alphas[t] = 1.0;
+  long long at = 0, pos = 0;
+  int64_t largest = 0;
+  Cx *out = (Cx *)level;
+  for (long long t = 0; t < nt; t++) {
+    if (partner[t] >= 0 && partner[t] < t) continue;
+    offsets[at] = (int32_t)pos;
+    if (partner[t] > t) {
+      const long long i = slot[t], b = partner[t];
+      const Cx *x = ua.data() + i * K, *y = ub.data() + i * K, *turn = ex + (lag[i] + R) * K;
+      const Cx psi = over(Cx{g[i].r, -g[i].i}, rho[i]);
+      const double target = 0.5 * (v[t] + v[b]);
+      const double coef = sqrt(target) / sqrt(2.0 * (1.0 + rho[i]));
+      const double base = sqrt(0.5 * (1.0 + rho[i]));
+      for (long long k = 0; k < K; k++) {
+        const Cx s = mul(psi, mul(y[k], turn[k]));
+        out[at * K + k] = mul(real(coef), Cx{x[k].r + s.r, x[k].i + s.i});
+      }
+      const double ra = sqrt(target / v[t]) * base, rb = sqrt(target / v[b]) * base;
+      alphas[t] = ra < 1.0 ? ra : 1.0;
+      alphas[b] = rb < 1.0 ? rb : 1.0;
+      level_v[at] = target;
+      level_dl[at] = lag[i] < 0 ? -lag[i] : lag[i];
+      largest = level_dl[at] > largest ? level_dl[at] : largest;
+      members[pos++] = (int32_t)t;
+      members[pos++] = (int32_t)b;
+    } else {
+      memcpy(out + at * K, Cz + t * K, (size_t)K * sizeof(Cx));
+      level_v[at] = v[t];
+      level_dl[at] = 0;
+      members[pos++] = (int32_t)t;
+    }
+    at++;
+  }
+  offsets[at] = (int32_t)pos;
+  *reach = largest;
+  return at;
 } catch (const std::bad_alloc &) {
   return -1;
 }

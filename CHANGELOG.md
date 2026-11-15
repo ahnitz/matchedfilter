@@ -361,6 +361,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   search `gatechain._best_swap` that only it used, as the reference. MEASURED, same search
   and machine, three alternating pairs: setup 63.3, 62.3 and 62.6 s -> 57.8, 57.8 and
   57.5 s, steady rate level.
+- The first level and the levels' rebuilding in C++ (`src/tier0_pass.cc`):
+  `_core.tier0_pair_level` makes the templates' coherent pairs clusters of two (lags refined,
+  pair screeners, retentions) and `_core.tier0_pass` now writes the next level itself; both
+  were numpy blocks ending in a Python loop over the templates or the clusters. Screener
+  sets of the replayed setup bit for bit what they were at SNR 5.5, 6.0 and 7.0. MEASURED,
+  same search and machine, three alternating pairs: setup 57.0, 58.6 and 58.1 s -> 55.2,
+  55.6 and 54.6 s, steady rate level.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a

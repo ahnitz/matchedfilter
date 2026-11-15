@@ -2531,103 +2531,203 @@ static PyObject *M_tier0_match(PyObject *self,PyObject *args){
   return PyLong_FromLongLong(n);
 }
 
+/* The buffers of a tier0_pass / tier0_pair_level call: n objects, formats fmt ("Zd"
+   complex128, "d" float64, "q" int64, "i" int32) and dimensions ndim; those from index
+   first_out on are written. Returns 1 with every buffer held, or 0 with none (an error is
+   set unless the fault is a format or dimension: the caller then sets its own). */
+static int tier0_buffers(PyObject **o, Py_buffer *b, int n, const char *const *fmt,
+                         const int *ndim, int first_out){
+  for(int i=0;i<n;i++){
+    const int flags = PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(i>=first_out ? PyBUF_WRITABLE : 0);
+    int ok = PyObject_GetBuffer(o[i],&b[i],flags)==0;
+    if(ok){
+      const char *f=b[i].format ? b[i].format : "B";
+      /* int64 arrives as "l" or "q", int32 as "i" or "l", by platform */
+      ok = (!strcmp(f,fmt[i])
+            || (fmt[i][0]=='q' && !strcmp(f,"l") && b[i].itemsize==8)
+            || (fmt[i][0]=='i' && !strcmp(f,"l") && b[i].itemsize==4))
+           && b[i].ndim==ndim[i];
+      if(!ok) PyBuffer_Release(&b[i]);
+    }
+    if(!ok){
+      for(int j=0;j<i;j++) PyBuffer_Release(&b[j]);
+      return 0;
+    }
+  }
+  return 1;
+}
+
 long long ap_tier0_pass(
     const double *C, const double *inv_sqrt_v, const double *v, const double *w,
     const double *exp_all, const float *shifts, const int64_t *shift_lags, long long K,
     long long R, long long nsh, long long half_span, const double *cur,
-    const double *inv_sqrt_vc, const int32_t *cur_offsets, const int32_t *cur_members,
-    const int64_t *ca, const int64_t *cb, const int64_t *cdl, long long ncand, int steps,
-    double alpha_floor, uint8_t *accepted, double *screener, double *v_bar, int64_t *reach,
-    int32_t *members, int32_t *offsets, double *alpha);                  /* src/tier0_pass.cc */
+    const double *inv_sqrt_vc, const double *cur_v, const int64_t *cur_dl,
+    const int32_t *cur_offsets, const int32_t *cur_members, long long nc, const int64_t *ca,
+    const int64_t *cb, const int64_t *cdl, long long ncand, int steps, double alpha_floor,
+    double *next, double *next_v, int64_t *next_dl, int32_t *next_offsets,
+    int32_t *next_members, double *alphas, int64_t *reach);              /* src/tier0_pass.cc */
 /* tier0_pass(C, inv_sqrt_v, v, w, exp_all, shifts, shift_lags, half_span, cur, inv_sqrt_vc,
-              cur_offsets, cur_members, ca, cb, cdl, steps, alpha_floor,
-              accepted, screener, v_bar, reach, members, offsets, alpha) -> count
-   One pass of the shared-screener merging (src/tier0_pass.cc): every candidate merge of two
-   clusters (ca, cb, the second lagged cdl) made a group with a screener, or turned down.
+              cur_v, cur_dl, cur_offsets, cur_members, ca, cb, cdl, steps, alpha_floor,
+              next, next_v, next_dl, next_offsets, next_members, alphas) -> (count, reach)
+   One pass of the shared-screener merging (src/tier0_pass.cc): the level's clusters and the
+   candidate merges of two of them (ca, cb, the second lagged cdl) in, the next level out.
    Inputs: C (nt, K) complex128; inv_sqrt_v, v (nt) float64; w (K) float64; exp_all
    (2 R + 1, K) complex128; shifts (nsh, K) complex64 and shift_lags (nsh) int64; cur (nc, K)
-   complex128; inv_sqrt_vc (nc) float64; cur_offsets (nc + 1) and cur_members int32; ca, cb,
-   cdl (ncand) int64. Written: accepted (ncand) bool; screener (ncand, K) complex128; v_bar
-   (ncand) float64; reach (ncand) int64; members and alpha (the candidates' member counts
-   summed) int32 and float64; offsets (ncand + 1) int32. Returns the number accepted. */
+   complex128; inv_sqrt_vc, cur_v (nc) float64; cur_dl (nc) int64; cur_offsets (nc + 1) and
+   cur_members (nt) int32; ca, cb, cdl (ncand) int64. Written when count > 0: next (nc, K)
+   complex128, next_v (nc) float64, next_dl (nc) int64, next_offsets (nc + 1) and
+   next_members (nt) int32, the next level's nc - count clusters first; alphas (nt) float64,
+   the templates' retentions, in and out. Returns the number of merges accepted and the
+   next level's largest member lag. */
 static PyObject *M_tier0_pass(PyObject *self,PyObject *args){
   (void)self;
-  enum { NB=24 };
-  static const char *fmt[NB]={"Zd","d","d","d","Zd","Zf","q","Zd","d","i","i","q","q","q",
-                              "?","Zd","d","q","i","i","d", 0,0,0};
-  static const int ndim[NB]={2,1,1,1,2,2,1,2,1,1,1,1,1,1, 1,2,1,1,1,1,1, 0,0,0};
-  enum { iC,iIV,iV,iW,iEX,iSH,iSL,iCUR,iIVC,iCO,iCM,iCA,iCB,iCDL,
-         oACC,oSCR,oVB,oRE,oMEM,oOFF,oAL, NUSED };
+  enum { iC,iIV,iV,iW,iEX,iSH,iSL,iCUR,iIVC,iCV,iCD,iCO,iCM,iCA,iCB,iCDL,
+         oN,oNV,oND,oNO,oNM,oAL, NUSED };
+  static const char *const fmt[NUSED]={"Zd","d","d","d","Zd","Zf","q","Zd","d","d","q","i","i",
+                                       "q","q","q", "Zd","d","q","i","i","d"};
+  static const int ndim[NUSED]={2,1,1,1,2,2,1,2,1,1,1,1,1,1,1,1, 2,1,1,1,1,1};
   PyObject *o[NUSED];
   Py_buffer b[NUSED];
   long long half_span=0;
-  int steps=0, got=0, ok=1;
+  int steps=0;
   double alpha_floor=0.0;
-  if(!PyArg_ParseTuple(args,"OOOOOOOLOOOOOOOidOOOOOOO",&o[iC],&o[iIV],&o[iV],&o[iW],&o[iEX],
-       &o[iSH],&o[iSL],&half_span,&o[iCUR],&o[iIVC],&o[iCO],&o[iCM],&o[iCA],&o[iCB],&o[iCDL],
-       &steps,&alpha_floor,&o[oACC],&o[oSCR],&o[oVB],&o[oRE],&o[oMEM],&o[oOFF],&o[oAL]))
+  if(!PyArg_ParseTuple(args,"OOOOOOOLOOOOOOOOOidOOOOOO",&o[iC],&o[iIV],&o[iV],&o[iW],&o[iEX],
+       &o[iSH],&o[iSL],&half_span,&o[iCUR],&o[iIVC],&o[iCV],&o[iCD],&o[iCO],&o[iCM],&o[iCA],
+       &o[iCB],&o[iCDL],&steps,&alpha_floor,&o[oN],&o[oNV],&o[oND],&o[oNO],&o[oNM],&o[oAL]))
     return NULL;
-  for(int i=0;i<NUSED && ok;i++){
-    const int flags = PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(i>=oACC ? PyBUF_WRITABLE : 0);
-    if(PyObject_GetBuffer(o[i],&b[i],flags)<0){ ok=0; break; }
-    got=i+1;
-    const char *f=b[i].format ? b[i].format : "B";
-    /* int64 arrives as "l" or "q", int32 as "i" or "l", by platform */
-    const int same = !strcmp(f,fmt[i])
-        || (fmt[i][0]=='q' && !strcmp(f,"l") && b[i].itemsize==8)
-        || (fmt[i][0]=='i' && !strcmp(f,"l") && b[i].itemsize==4);
-    if(!same || b[i].ndim!=ndim[i]) ok=0;
+  if(!tier0_buffers(o,b,NUSED,fmt,ndim,oN)){
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pass: invalid buffer dtypes or dimensions");
+    return NULL;
   }
-  Py_ssize_t nt=0, K=0, nlag=0, nsh=0, nc=0, ncand=0, total=0;
+  const Py_ssize_t nt=b[iC].shape[0], K=b[iC].shape[1], nlag=b[iEX].shape[0];
+  const Py_ssize_t nsh=b[iSH].shape[0], nc=b[iCUR].shape[0], ncand=b[iCA].shape[0];
+  int ok = K>=1 && nsh>=1 && (nlag&1) && half_span>=0 && steps>=0
+       && b[iIV].shape[0]==nt && b[iV].shape[0]==nt && b[iW].shape[0]==K
+       && b[iEX].shape[1]==K && b[iSH].shape[1]==K && b[iSL].shape[0]==nsh
+       && b[iCUR].shape[1]==K && b[iIVC].shape[0]==nc && b[iCV].shape[0]==nc
+       && b[iCD].shape[0]==nc && b[iCO].shape[0]==nc+1 && b[iCM].shape[0]==nt
+       && b[iCB].shape[0]==ncand && b[iCDL].shape[0]==ncand
+       && b[oN].shape[0]==nc && b[oN].shape[1]==K && b[oNV].shape[0]==nc
+       && b[oND].shape[0]==nc && b[oNO].shape[0]==nc+1 && b[oNM].shape[0]==nt
+       && b[oAL].shape[0]==nt;
   if(ok){
-    nt=b[iC].shape[0]; K=b[iC].shape[1]; nlag=b[iEX].shape[0]; nsh=b[iSH].shape[0];
-    nc=b[iCUR].shape[0]; ncand=b[iCA].shape[0]; total=b[oMEM].shape[0];
-    ok = K>=1 && nsh>=1 && (nlag&1) && half_span>=0 && steps>=0
-         && b[iIV].shape[0]==nt && b[iV].shape[0]==nt && b[iW].shape[0]==K
-         && b[iEX].shape[1]==K && b[iSH].shape[1]==K && b[iSL].shape[0]==nsh
-         && b[iCUR].shape[1]==K && b[iIVC].shape[0]==nc && b[iCO].shape[0]==nc+1
-         && b[iCB].shape[0]==ncand && b[iCDL].shape[0]==ncand
-         && b[oACC].shape[0]==ncand && b[oSCR].shape[0]==ncand && b[oSCR].shape[1]==K
-         && b[oVB].shape[0]==ncand && b[oRE].shape[0]==ncand && b[oOFF].shape[0]==ncand+1
-         && b[oAL].shape[0]==total;
-  }
-  if(ok){
-    /* the clusters named exist, their members are templates, the lags are shifts' */
+    /* the clusters partition templates, a candidate names two clusters, and a cluster is in
+       at most one candidate; the shifts' lags are lags there are */
     const int32_t *co=(const int32_t*)b[iCO].buf, *cm=(const int32_t*)b[iCM].buf;
     const int64_t *ca=(const int64_t*)b[iCA].buf, *cb=(const int64_t*)b[iCB].buf;
     const int64_t *sl=(const int64_t*)b[iSL].buf;
     const long long R=(nlag-1)/2;
-    Py_ssize_t need=0;
-    for(Py_ssize_t c=0;c<nc && ok;c++) ok = co[c]>=0 && co[c]<=co[c+1];
-    if(ok && nc>0) ok = co[nc]<=b[iCM].shape[0];
+    char *seen=(char*)calloc((size_t)nc+1,1);
+    if(!seen){ for(int i=0;i<NUSED;i++) PyBuffer_Release(&b[i]); return PyErr_NoMemory(); }
+    ok = nc==0 || co[0]==0;
+    for(Py_ssize_t c=0;c<nc && ok;c++) ok = co[c]<=co[c+1];
+    if(ok && nc>0) ok = co[nc]<=nt;
     for(Py_ssize_t i=0;ok && nc>0 && i<co[nc];i++) ok = cm[i]>=0 && cm[i]<nt;
     for(Py_ssize_t g=0;g<ncand && ok;g++){
-      ok = ca[g]>=0 && ca[g]<nc && cb[g]>=0 && cb[g]<nc && ca[g]!=cb[g];
-      if(ok) need += (co[ca[g]+1]-co[ca[g]]) + (co[cb[g]+1]-co[cb[g]]);
+      ok = ca[g]>=0 && ca[g]<nc && cb[g]>=0 && cb[g]<nc && ca[g]!=cb[g]
+           && !seen[ca[g]] && !seen[cb[g]];
+      if(ok) seen[ca[g]]=seen[cb[g]]=1;
     }
     for(Py_ssize_t s=0;s<nsh && ok;s++) ok = sl[s]>=-R && sl[s]<=R;
-    if(ok) ok = need==total;
+    free(seen);
   }
   long long count=0;
+  int64_t reach=0;
   if(ok){
     Py_BEGIN_ALLOW_THREADS
     count=ap_tier0_pass((const double*)b[iC].buf,(const double*)b[iIV].buf,
         (const double*)b[iV].buf,(const double*)b[iW].buf,(const double*)b[iEX].buf,
         (const float*)b[iSH].buf,(const int64_t*)b[iSL].buf,(long long)K,(long long)(nlag-1)/2,
         (long long)nsh,half_span,(const double*)b[iCUR].buf,(const double*)b[iIVC].buf,
-        (const int32_t*)b[iCO].buf,(const int32_t*)b[iCM].buf,(const int64_t*)b[iCA].buf,
-        (const int64_t*)b[iCB].buf,(const int64_t*)b[iCDL].buf,(long long)ncand,steps,
-        alpha_floor,(uint8_t*)b[oACC].buf,(double*)b[oSCR].buf,(double*)b[oVB].buf,
-        (int64_t*)b[oRE].buf,(int32_t*)b[oMEM].buf,(int32_t*)b[oOFF].buf,(double*)b[oAL].buf);
+        (const double*)b[iCV].buf,(const int64_t*)b[iCD].buf,
+        (const int32_t*)b[iCO].buf,(const int32_t*)b[iCM].buf,(long long)nc,
+        (const int64_t*)b[iCA].buf,(const int64_t*)b[iCB].buf,(const int64_t*)b[iCDL].buf,
+        (long long)ncand,steps,alpha_floor,(double*)b[oN].buf,(double*)b[oNV].buf,
+        (int64_t*)b[oND].buf,(int32_t*)b[oNO].buf,(int32_t*)b[oNM].buf,(double*)b[oAL].buf,
+        &reach);
     Py_END_ALLOW_THREADS
   }
-  for(int i=0;i<got;i++) PyBuffer_Release(&b[i]);
+  for(int i=0;i<NUSED;i++) PyBuffer_Release(&b[i]);
   if(!ok){
-    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pass: invalid buffer shapes, dtypes or indices");
+    PyErr_SetString(PyExc_ValueError,"tier0_pass: invalid buffer shapes or indices");
     return NULL;
   }
   if(count<0) return PyErr_NoMemory();
-  return PyLong_FromLongLong(count);
+  return Py_BuildValue("LL",count,(long long)reach);
+}
+
+long long ap_tier0_pair_level(
+    const double *C, const double *inv_sqrt_v, const double *v, const double *w,
+    const double *exp_all, long long nt, long long K, long long R, long long half_span,
+    double rho_min, long long max_nc, const int32_t *pa, const int32_t *pb, const int64_t *pdl,
+    long long npairs, double *level, double *level_v, int64_t *level_dl, int32_t *offsets,
+    int32_t *members, double *alphas, int64_t *reach);                   /* src/tier0_pass.cc */
+/* tier0_pair_level(C, inv_sqrt_v, v, w, exp_all, half_span, rho_min, max_nc, pa, pb, pdl,
+                    level, level_v, level_dl, offsets, members, alphas) -> (nc, reach)
+   The first level of the shared-screener merging (src/tier0_pass.cc): the templates' pairs
+   (pa < pb int32, pdl int64: the second's lag against the first) made clusters of two where
+   they are coherent enough, every other template a cluster of its own. Inputs as
+   tier0_pass. Written when nc > 0: level (nt, K) complex128, level_v (nt) float64, level_dl
+   (nt) int64, offsets (nt + 1) and members (nt) int32, the nc clusters first; alphas (nt)
+   float64. Returns the number of clusters (0: no pair is kept, or more than max_nc clusters
+   are left) and the largest pair lag. */
+static PyObject *M_tier0_pair_level(PyObject *self,PyObject *args){
+  (void)self;
+  enum { iC,iIV,iV,iW,iEX,iPA,iPB,iPD, oL,oLV,oLD,oOF,oME,oAL, NUSED };
+  static const char *const fmt[NUSED]={"Zd","d","d","d","Zd","i","i","q", "Zd","d","q","i","i","d"};
+  static const int ndim[NUSED]={2,1,1,1,2,1,1,1, 2,1,1,1,1,1};
+  PyObject *o[NUSED];
+  Py_buffer b[NUSED];
+  long long half_span=0, max_nc=0;
+  double rho_min=0.0;
+  if(!PyArg_ParseTuple(args,"OOOOOLdLOOOOOOOOO",&o[iC],&o[iIV],&o[iV],&o[iW],&o[iEX],&half_span,
+       &rho_min,&max_nc,&o[iPA],&o[iPB],&o[iPD],&o[oL],&o[oLV],&o[oLD],&o[oOF],&o[oME],&o[oAL]))
+    return NULL;
+  if(!tier0_buffers(o,b,NUSED,fmt,ndim,oL)){
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pair_level: invalid buffer dtypes or dimensions");
+    return NULL;
+  }
+  const Py_ssize_t nt=b[iC].shape[0], K=b[iC].shape[1], nlag=b[iEX].shape[0];
+  const Py_ssize_t npairs=b[iPA].shape[0];
+  const long long R=(nlag-1)/2;
+  int ok = K>=1 && (nlag&1) && half_span>=0
+       && b[iIV].shape[0]==nt && b[iV].shape[0]==nt && b[iW].shape[0]==K && b[iEX].shape[1]==K
+       && b[iPB].shape[0]==npairs && b[iPD].shape[0]==npairs
+       && b[oL].shape[0]==nt && b[oL].shape[1]==K && b[oLV].shape[0]==nt && b[oLD].shape[0]==nt
+       && b[oOF].shape[0]==nt+1 && b[oME].shape[0]==nt && b[oAL].shape[0]==nt;
+  if(ok){
+    /* a pair names two templates, the smaller first, a template is in at most one pair, and
+       a pair's lag is a lag there is */
+    const int32_t *pa=(const int32_t*)b[iPA].buf, *pb=(const int32_t*)b[iPB].buf;
+    const int64_t *pd=(const int64_t*)b[iPD].buf;
+    char *seen=(char*)calloc((size_t)nt+1,1);
+    if(!seen){ for(int i=0;i<NUSED;i++) PyBuffer_Release(&b[i]); return PyErr_NoMemory(); }
+    for(Py_ssize_t i=0;i<npairs && ok;i++){
+      ok = pa[i]>=0 && pa[i]<pb[i] && pb[i]<nt && !seen[pa[i]] && !seen[pb[i]]
+           && pd[i]>=-R && pd[i]<=R;
+      if(ok) seen[pa[i]]=seen[pb[i]]=1;
+    }
+    free(seen);
+  }
+  long long nc=0;
+  int64_t reach=0;
+  if(ok){
+    Py_BEGIN_ALLOW_THREADS
+    nc=ap_tier0_pair_level((const double*)b[iC].buf,(const double*)b[iIV].buf,
+        (const double*)b[iV].buf,(const double*)b[iW].buf,(const double*)b[iEX].buf,
+        (long long)nt,(long long)K,R,half_span,rho_min,max_nc,(const int32_t*)b[iPA].buf,
+        (const int32_t*)b[iPB].buf,(const int64_t*)b[iPD].buf,(long long)npairs,
+        (double*)b[oL].buf,(double*)b[oLV].buf,(int64_t*)b[oLD].buf,(int32_t*)b[oOF].buf,
+        (int32_t*)b[oME].buf,(double*)b[oAL].buf,&reach);
+    Py_END_ALLOW_THREADS
+  }
+  for(int i=0;i<NUSED;i++) PyBuffer_Release(&b[i]);
+  if(!ok){
+    PyErr_SetString(PyExc_ValueError,"tier0_pair_level: invalid buffer shapes or indices");
+    return NULL;
+  }
+  if(nc<0) return PyErr_NoMemory();
+  return Py_BuildValue("LL",nc,(long long)reach);
 }
 
 /* Each group's shared screener (src/tier0_mwu.cc): a group in each vector lane, and the plain
@@ -4001,7 +4101,8 @@ static PyMethodDef methods[]={
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
   {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},
-  {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> count: one pass of the shared-screener merging, every candidate merge made a group with a screener or turned down"},
+  {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> (count, reach): one pass of the shared-screener merging, a level's clusters and candidate merges in, the next level out"},
+  {"tier0_pair_level",M_tier0_pair_level,METH_VARARGS,"tier0_pair_level(...) -> (nc, reach): the first level of the shared-screener merging, the templates' coherent pairs made clusters of two"},
   {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
