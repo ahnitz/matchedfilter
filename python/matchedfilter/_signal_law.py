@@ -38,10 +38,13 @@ _NEAR = 8
 #: Draws a pass makes at once.
 _CHUNK = 1 << 16
 _DOMAIN_LAW = 7
-#: The draws held for the profiles being planned (a detector's each): a retention's table is
-#: read from its profile's draws, not drawn again. About 40 MB a profile at 96,000 draws.
+#: The draws held for the profiles being planned: a retention's table is read from its
+#: profile's draws, not drawn again. About 29 MB a profile at 96,000 draws and a block of
+#: 1024. Three: a job's banks alternate between the top templates they hang under, and two
+#: top templates' banks under two detectors plan on three profiles that are not alike
+#: (gatechain._law_profile); holding two, every other bank drew its profile again.
 _DRAWS = OrderedDict()
-_DRAWS_MAX = 2
+_DRAWS_MAX = 3
 
 
 def _stream(seed):
@@ -182,7 +185,8 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
 
     whole = span >= n
     cols = classes[0][1]
-    kept = []                # per pass and class: (F, fine lag, top, spot, samples, lags, inside)
+    # per pass and class: (F, fine lag, top, spot, samples, inside, first lag, class)
+    kept = []
     have, part = 0, 0
     while have < ndet:
         rng = np.random.default_rng([int(seed), _DOMAIN_LAW, part])
@@ -212,7 +216,8 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
             if not keep.size:
                 continue
             base = (w0 + a[rows[keep]] - tc)[:, None]
-            xs, lags_, ins, top, spot = [], [], [], np.empty((keep.size, nb), np.float32), np.empty((keep.size, nb), np.int32)
+            xs, ins = [], []
+            top, spot = np.empty((keep.size, nb), np.float32), np.empty((keep.size, nb), np.int32)
             for i, (c, near, count) in enumerate(cols):
                 lag = (base + pos[None, c:c + near]).astype(np.int32)
                 if whole:
@@ -221,7 +226,6 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
                     j = lag // steps[i]
                     inside = (j >= c0[i]) & (j < c1[i])
                 xs.append(np.where(inside, x[keep, c:c + near], 0))
-                lags_.append(lag)
                 ins.append(inside)
                 # the band's lags that were not drawn: the largest of that many independent
                 # noise samples, at one of the band's lags
@@ -230,16 +234,19 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
                 spot[:, i] = (c0[i] + rng.integers(0, int(c1[i] - c0[i]), keep.size)) * steps[i]
                 far = np.sqrt(-2.0 * np.log1p(-np.minimum(u ** (1.0 / np.maximum(others, 1)), 1.0 - 1e-12)))
                 top[:, i] = np.where(others > 0, far, -1.0)
-            kept.append((F[keep], fine_lag[keep, best[keep]].astype(np.int32), top, spot, xs, lags_, ins))
+            kept.append((F[keep], fine_lag[keep, best[keep]].astype(np.int32), top, spot, xs, ins,
+                         base[:, 0].astype(np.int32), np.full(keep.size, tc, np.int16)))
             have += keep.size
         part += 1
     # the draws in an order that does not follow the classes (the last pass is cut short)
     order = np.random.default_rng([int(seed), _DOMAIN_LAW, 1 << 30]).permutation(have)[:ndet]
     rows_of = lambda j: np.concatenate([q[j] for q in kept])[order]
     band_of = lambda j, i: np.concatenate([q[j][i] for q in kept])[order]
+    # a sample's block lag is its draw's first lag plus the sample's place in its class
+    places = [np.array([pos[c:c + near] for pos, _, _, _ in classes]) for c, near, _ in cols]
     return dict(F=rows_of(0), fat=rows_of(1), top=rows_of(2), spot=rows_of(3),
-                x=[band_of(4, i) for i in range(nb)], lag=[band_of(5, i) for i in range(nb)],
-                inside=[band_of(6, i) for i in range(nb)], own=own, whole=whole)
+                x=[band_of(4, i) for i in range(nb)], inside=[band_of(5, i) for i in range(nb)],
+                first=rows_of(6), cls=rows_of(7), places=places, own=own, whole=whole)
 
 
 def _column(draws, i, n, seed, alpha=1.0):
@@ -254,8 +261,8 @@ def _column(draws, i, n, seed, alpha=1.0):
             g.view(np.complex64).reshape(x.shape) @ draws["own"][i])
     mod = np.where(draws["inside"][i], np.abs(x), np.float32(-1.0))
     best = mod.argmax(axis=1)
-    rows = np.arange(mod.shape[0])
-    val, where = mod[rows, best], draws["lag"][i][rows, best]
+    val = mod[np.arange(mod.shape[0]), best]
+    where = draws["first"] + draws["places"][i][draws["cls"], best]
     top = draws["top"][:, i]
     where = np.where(top > val, draws["spot"][:, i], where)
     val = np.maximum(val, top)

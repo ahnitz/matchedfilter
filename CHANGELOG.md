@@ -321,6 +321,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   5.5 (budget 0.100%): H1 0.117% +- 0.010, L1 0.091% +- 0.008 with the law, 0.099% and 0.124%
   simulated. One `pycbc_inspiral_fir` job of the FIR search example without a cost file:
   440.4 -> 398.0 billion instructions.
+- The law's draws are held for three profiles, not two, each in less memory. A job's banks
+  alternate between the top templates they hang under, and two top templates' banks under
+  two detectors plan on three profiles that are not alike: holding two, every other bank
+  drew its profile again (185 draws over the 16 workers' two passes, 0.19 s each, where a
+  worker's banks and block-size trial plan on 8 profiles). A sample's
+  block lag is no longer stored per draw and sample but read from the draw's first lag and
+  the sample's place in its arrival class (42 -> 29 MB a profile at a block of 1024).
+  MEASURED, same search and machine, three alternating pairs: setup 72.6, 72.9 and 72.2 s
+  -> 66.5, 66.7 and 67.0 s; resident memory of the 16 workers 21.8 against 21.7 GiB; every
+  plan unchanged. The steady rate read 12.9 against 12.6 M template-s/s a core with every
+  stage 2-5% slower, the detector-side stages that this does not touch included: with
+  less of the run in setup the workers filter at once more of the time.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a
