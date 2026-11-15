@@ -65,6 +65,29 @@ _SIG_MEMO = {}
 _SIG_MEMO_MIN = 1 << 16
 
 
+#: What is known of a normalised profile that cannot change. gatechain._norm_profile returns
+#: read-only arrays; a planning call hands the one it made to every table and window it asks
+#: for, and a profile that stands in for others like it (gatechain._similar_get) is the same
+#: array for every bank. Its signature and band offsets are kept by the array's identity
+#: while it lives: id -> (weakref, {fact: value}).
+_FROZEN = {}
+
+
+def _freeze(profile):
+    """Make `profile` read-only and start keeping facts for it; returns it."""
+    import weakref
+    profile.setflags(write=False)
+    key = id(profile)
+    _FROZEN[key] = (weakref.ref(profile, lambda _r, k=key: _FROZEN.pop(k, None)), {})
+    return profile
+
+
+def _frozen_facts(power):
+    """The facts kept for `power` (a dict to read and add to) if _freeze made it, else None."""
+    hit = _FROZEN.get(id(power))
+    return hit[1] if hit is not None and hit[0]() is power else None
+
+
 def _profile_sig(power):
     """Signature of a profile's shape: its normalised bins to 2^-32 of the total, so only
     profiles equal to float rounding share it. (A 24-bin, 1%-quantised signature let profiles
@@ -73,6 +96,11 @@ def _profile_sig(power):
     which compares what the gates depend on (gatechain._similar_get)."""
     if power is None:
         return b""
+    facts = _frozen_facts(power)
+    if facts is not None:
+        if "sig" not in facts:
+            facts["sig"] = _profile_sig_uncached(power)
+        return facts["sig"]
     if isinstance(power, np.ndarray) and power.size >= _SIG_MEMO_MIN and power.flags.c_contiguous:
         import weakref
         owner = power

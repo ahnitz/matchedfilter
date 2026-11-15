@@ -1081,6 +1081,16 @@ def band_offset(power, n, b):
     n, b = int(n), int(b)
     if b >= n // 2 or b < 1:
         return 0
+    facts = _gm._frozen_facts(power)
+    if facts is None:
+        return _band_offset(power, n, b)
+    if ("k0", n, b) not in facts:
+        facts["k0", n, b] = _band_offset(power, n, b)
+    return facts["k0", n, b]
+
+
+def _band_offset(power, n, b):
+    """band_offset's computation, for 1 <= b < n // 2."""
     p = np.asarray(power, dtype=np.float64)
     if p.shape != (n,) or not np.all(np.isfinite(p)):
         return 0
@@ -1139,10 +1149,14 @@ def enumerate_chains(n, max_tiers=3, floor=_MIN_BAND, bands=None):
 
 
 def _norm_profile(power, n):
+    """`power` as a float64 profile of unit sum, read-only (gatemodel._freeze: its signature
+    and band offsets are kept with it). A profile this returned is returned as it is."""
+    if _gm._frozen_facts(power) is not None and power.shape == (n,):
+        return power
     p = np.asarray(power, dtype=np.float64)
     if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any() or p.sum() <= 0):
         raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
-    return p / p.sum()
+    return _gm._freeze(p / p.sum())
 
 
 def _key(p, n, bands, *rest):

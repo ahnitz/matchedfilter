@@ -167,6 +167,36 @@ def test_cyclic_slot_wrapping_identity():
         assert np.allclose(coarse_corr, fine_corr[::stride], rtol=1e-12, atol=1e-12)
 
 
+def test_a_normalised_profile_is_frozen_and_keeps_what_follows_from_it():
+    """gatechain._norm_profile returns a read-only array, and returns it as it is when handed
+    it again: a planning call normalises once whatever it asks for. The array's signature and
+    band offsets are kept with it, the same values as for a plain copy, and go when it does."""
+    import gc
+    from matchedfilter import gatemodel
+    n = 4096
+    wall = np.zeros(n)
+    wall[300:n // 2] = np.arange(300, n // 2, dtype=np.float64) ** -2.3     # nothing below a wall
+    held = len(gatemodel._FROZEN)
+    p = gatechain._norm_profile(3.0 * wall, n)
+    assert not p.flags.writeable and abs(p.sum() - 1.0) < 1e-12
+    assert gatechain._norm_profile(p, n) is p
+    plain = p.copy()                                    # not frozen: computed each time
+    assert gatechain._norm_profile(plain, n) is not plain
+    offsets = [gatechain.band_offset(p, n, b) for b in (64, 128, 256, 512)]
+    assert offsets == [gatechain.band_offset(plain, n, b) for b in (64, 128, 256, 512)]
+    assert max(offsets) > 0                             # the wall moves a band
+    assert offsets == [gatechain.band_offset(p, n, b) for b in (64, 128, 256, 512)]
+    assert gatemodel._profile_sig(p) == gatemodel._profile_sig(plain)
+    facts = gatemodel._frozen_facts(p)
+    assert facts["sig"] == gatemodel._profile_sig(plain) and facts["k0", n, 128] == offsets[1]
+    assert gatemodel._frozen_facts(plain) is None and gatemodel._frozen_facts(p[:8]) is None
+    with pytest.raises(ValueError):
+        gatechain._norm_profile(p, n // 2)              # a frozen profile of another length
+    del p, facts
+    gc.collect()
+    assert len(gatemodel._FROZEN) == held
+
+
 def test_band_offset_preserves_dc_profiles_and_unlocks_seismic_wall_tiers():
     """Verify band_offset returns 0 for DC-peaked profiles and unlocks small tiers above f_low."""
     n = 4096

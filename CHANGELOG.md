@@ -333,6 +333,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   plan unchanged. The steady rate read 12.9 against 12.6 M template-s/s a core with every
   stage 2-5% slower, the detector-side stages that this does not touch included: with
   less of the run in setup the workers filter at once more of the time.
+- The planner normalises a profile once. `gatechain._norm_profile` returns a read-only
+  array and returns such an array as it is, and the array's signature and band offsets are
+  kept with it (`gatemodel._freeze`): a chain choice normalised its profile five times,
+  hashed it three times and solved each band's offset twice, and a profile standing in for
+  the banks like it is one array for all of them. MEASURED, same search and machine, three
+  alternating pairs: setup 65.8, 67.0 and 67.3 s -> 65.1, 65.0 and 64.7 s, steady rate
+  level; every plan of the replayed setup unchanged.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a
