@@ -171,7 +171,7 @@ matchedfilter timing also includes the product and peak scan.
 
 ## Documentation
 
-- [Documentation index](https://github.com/ahnitz/matchedfilter/blob/main/docs/README.md): current guides, development tools, and research history.
+- [Documentation index](https://github.com/ahnitz/matchedfilter/blob/main/docs/README.md): every reference page.
 - [Architecture](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md): the API, the layers, the gate model and the measured choices, for developers.
 - [Usage guide](https://ahnitz.github.io/matchedfilter/using-it.html): inputs, normalization, devices and API behavior.
 - [Examples](https://ahnitz.github.io/matchedfilter/demo.html): noise and injected signals.
