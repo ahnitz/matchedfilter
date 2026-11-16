@@ -2341,6 +2341,166 @@ static PyTypeObject RootType={
   .tp_doc="Root(n): the root stage of a hierarchical search, to a real series of n samples",
 };
 
+/* plan_best: the cheapest of a chain's candidate plans (gatechain.plan_chain), priced as its
+   Python loop prices them on a CostModel, operation for operation. */
+enum { PB_ROWS=64, PB_TIERS=8 };
+typedef struct { int n; double fs[PB_ROWS], vs[PB_ROWS]; } pb_table;
+
+/* A (log densities, values) pair of equal-length tuples of floats into t. 0 on success. */
+static int pb_read(PyObject *pair, pb_table *t){
+  if(!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair)!=2) return -1;
+  PyObject *fs=PyTuple_GET_ITEM(pair,0), *vs=PyTuple_GET_ITEM(pair,1);
+  if(!PyTuple_Check(fs) || !PyTuple_Check(vs)) return -1;
+  const Py_ssize_t n=PyTuple_GET_SIZE(fs);
+  if(n<1 || n>PB_ROWS || PyTuple_GET_SIZE(vs)!=n) return -1;
+  for(Py_ssize_t i=0;i<n;i++){
+    t->fs[i]=PyFloat_AsDouble(PyTuple_GET_ITEM(fs,i));
+    t->vs[i]=PyFloat_AsDouble(PyTuple_GET_ITEM(vs,i));
+  }
+  t->n=(int)n;
+  return PyErr_Occurred() ? -1 : 0;
+}
+
+/* gatechain._interp_clamped */
+static double pb_interp(double x, const pb_table *t){
+  const double *fs=t->fs, *vs=t->vs;
+  if(x<=fs[0]) return vs[0];
+  if(x>=fs[t->n-1]) return vs[t->n-1];
+  int j=0;
+  const int last=t->n-2;
+  while(j<last && fs[j+1]<=x) j++;
+  const double dx=fs[j+1]-fs[j];
+  if(dx==0.0) return vs[j+1];
+  const double dy=vs[j+1]-vs[j];
+  if(dy==0.0) return vs[j];
+  return (x-fs[j])*(dy/dx)+vs[j];
+}
+/* CostModel._interp: a table's value at density f */
+static double pb_cost(const pb_table *t, double f){
+  return pb_interp(log(f>1e-12 ? f : 1e-12), t);
+}
+
+/* plan_best(cands, hws, first, later, refine, direct) -> (cost, candidate, last) or None
+   cands: the list gatechain._chain_candidates returns, (earlier thresholds, earlier reach,
+   lasts) each, lasts a (threshold, reach) or None per half-width. hws: the half-widths, an
+   int or None each. first: (cost per pair of the dense first tier, None) or (that, (the
+   screen's cost per pair, its cost per pair passed, the screen's excess table, tie)).
+   later: per later tier (its sparse table, its sparse table behind a screen). refine: the
+   refine table. direct: None, or (base, per lag, lags per half-width step, fraction, None or
+   (share, the last tier's sparse table)). A table is (log densities, values), tuples of
+   floats. Returns the cheapest plan's cost and where it is (the first of equal costs), or
+   None when no candidate has a last tier. */
+static PyObject *M_plan_best(PyObject *self,PyObject *args){
+  (void)self;
+  PyObject *cands,*hws,*first,*later,*refine,*direct;
+  if(!PyArg_ParseTuple(args,"O!O!O!O!OO",&PyList_Type,&cands,&PyTuple_Type,&hws,
+                       &PyTuple_Type,&first,&PyTuple_Type,&later,&refine,&direct)) return NULL;
+  pb_table t_refine, t_excess, t_last, t_plain[PB_TIERS], t_screened[PB_TIERS];
+  const Py_ssize_t nl=PyTuple_GET_SIZE(later), nh=PyTuple_GET_SIZE(hws);
+  int ok = nl>=1 && nl<=PB_TIERS && nh<=PB_ROWS && PyTuple_GET_SIZE(first)==2
+           && pb_read(refine,&t_refine)==0;
+  for(Py_ssize_t i=0;ok && i<nl;i++){
+    PyObject *pair=PyTuple_GET_ITEM(later,i);
+    ok = PyTuple_Check(pair) && PyTuple_GET_SIZE(pair)==2
+         && pb_read(PyTuple_GET_ITEM(pair,0),&t_plain[i])==0
+         && pb_read(PyTuple_GET_ITEM(pair,1),&t_screened[i])==0;
+  }
+  double dense=0.0, sc_dense=0.0, sc_recheck=0.0, tie=0.0;
+  int has_screen=0;
+  if(ok){
+    dense=PyFloat_AsDouble(PyTuple_GET_ITEM(first,0));
+    PyObject *sc=PyTuple_GET_ITEM(first,1);
+    if(sc!=Py_None){
+      ok = PyTuple_Check(sc) && PyTuple_GET_SIZE(sc)==4 && pb_read(PyTuple_GET_ITEM(sc,2),&t_excess)==0;
+      if(ok){
+        has_screen=1;
+        sc_dense=PyFloat_AsDouble(PyTuple_GET_ITEM(sc,0));
+        sc_recheck=PyFloat_AsDouble(PyTuple_GET_ITEM(sc,1));
+        tie=PyFloat_AsDouble(PyTuple_GET_ITEM(sc,3));
+      }
+    }
+  }
+  int prices_dir=0, has_last=0;
+  double dbase=0.0, dlag=0.0, dfrac=1.0, dmfrac=0.0;
+  long long R=0;
+  if(ok && direct!=Py_None){
+    ok = PyTuple_Check(direct) && PyTuple_GET_SIZE(direct)==5;
+    if(ok){
+      prices_dir=1;
+      dbase=PyFloat_AsDouble(PyTuple_GET_ITEM(direct,0));
+      dlag=PyFloat_AsDouble(PyTuple_GET_ITEM(direct,1));
+      R=PyLong_AsLongLong(PyTuple_GET_ITEM(direct,2));
+      dfrac=PyFloat_AsDouble(PyTuple_GET_ITEM(direct,3));
+      PyObject *ls=PyTuple_GET_ITEM(direct,4);
+      if(ls!=Py_None){
+        ok = PyTuple_Check(ls) && PyTuple_GET_SIZE(ls)==2 && pb_read(PyTuple_GET_ITEM(ls,1),&t_last)==0;
+        if(ok){ has_last=1; dmfrac=PyFloat_AsDouble(PyTuple_GET_ITEM(ls,0)); }
+      }
+    }
+  }
+  /* a half-width's direct price does not depend on the candidate */
+  int hw_set[PB_ROWS];
+  double hw_price[PB_ROWS];
+  for(Py_ssize_t h=0;ok && h<nh;h++){
+    PyObject *hw=PyTuple_GET_ITEM(hws,h);
+    hw_set[h] = hw!=Py_None;
+    hw_price[h] = hw_set[h] ? dbase + dlag*(double)(2*PyLong_AsLongLong(hw)*R+1) : 0.0;
+  }
+  if(!ok || PyErr_Occurred()){
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"plan_best: invalid tables");
+    return NULL;
+  }
+  const Py_ssize_t nc=PyList_GET_SIZE(cands);
+  int found=0;
+  double best=0.0;
+  Py_ssize_t best_c=0, best_h=0;
+  for(Py_ssize_t ci=0;ci<nc;ci++){
+    PyObject *cand=PyList_GET_ITEM(cands,ci);
+    if(!PyTuple_Check(cand) || PyTuple_GET_SIZE(cand)!=3) goto bad;
+    PyObject *preach=PyTuple_GET_ITEM(cand,1), *lasts=PyTuple_GET_ITEM(cand,2);
+    if(!PyTuple_Check(preach) || PyTuple_GET_SIZE(preach)!=nl+1
+       || !PyTuple_Check(lasts)) goto bad;
+    /* a last per half-width, as far as both go */
+    const Py_ssize_t nlast = PyTuple_GET_SIZE(lasts)<nh ? PyTuple_GET_SIZE(lasts) : nh;
+    /* CostModel.first_tier_for: the dense tier, or the screen where it is no dearer */
+    const double r1=PyFloat_AsDouble(PyTuple_GET_ITEM(preach,1));
+    double c_prefix=dense;
+    int screened=0;
+    if(has_screen){
+      const double x = r1>1e-6 ? r1 : 1e-6;
+      const double grown = x*exp(pb_interp(log(x),&t_excess));
+      const double passed = grown<1.0 ? grown : 1.0;
+      const double cq = sc_dense + passed*sc_recheck;
+      if(cq <= dense*(1.0+tie)){ c_prefix=cq; screened=1; }
+    }
+    for(Py_ssize_t i=0;i<nl;i++){
+      const double ri=PyFloat_AsDouble(PyTuple_GET_ITEM(preach,i+1));
+      c_prefix += ri*pb_cost(screened ? &t_screened[i] : &t_plain[i], ri);
+    }
+    for(Py_ssize_t h=0;h<nlast;h++){
+      PyObject *last=PyTuple_GET_ITEM(lasts,h);
+      if(last==Py_None) continue;
+      if(!PyTuple_Check(last) || PyTuple_GET_SIZE(last)!=2) goto bad;
+      const double f=PyFloat_AsDouble(PyTuple_GET_ITEM(last,1));
+      double r_cost=pb_cost(&t_refine,f);
+      if(hw_set[h] && prices_dir){
+        double d_cost=hw_price[h];
+        if(has_last && f>=0.05) d_cost += dmfrac*pb_cost(&t_last,f);
+        d_cost = d_cost<r_cost ? d_cost : r_cost;
+        r_cost = (1.0-dfrac)*r_cost + dfrac*d_cost;
+      }
+      const double c=c_prefix+f*r_cost;
+      if(!found || c<best){ found=1; best=c; best_c=ci; best_h=h; }
+    }
+  }
+  if(PyErr_Occurred()) return NULL;
+  if(!found) Py_RETURN_NONE;
+  return Py_BuildValue("dnn",best,best_c,best_h);
+bad:
+  if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"plan_best: invalid candidates");
+  return NULL;
+}
+
 int ap_tier0_pair_scores(const float *ur, const float *ui, const float *sr, const float *si,
                          const double *v, long long mc, long long len, long long nsh,
                          float *r2, int32_t *bs);                       /* src/tier0.cc */
@@ -4100,6 +4260,7 @@ static PyMethodDef methods[]={
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
+  {"plan_best",M_plan_best,METH_VARARGS,"plan_best(cands, hws, first, later, refine, direct) -> (cost, candidate, last) or None: the cheapest of a chain's candidate plans on a CostModel"},
   {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},
   {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> (count, reach): one pass of the shared-screener merging, a level's clusters and candidate merges in, the next level out"},
   {"tier0_pair_level",M_tier0_pair_level,METH_VARARGS,"tier0_pair_level(...) -> (nc, reach): the first level of the shared-screener merging, the templates' coherent pairs made clusters of two"},

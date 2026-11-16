@@ -2677,6 +2677,17 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         b_last = int(chain[-1]) if prices_dir else 0
         has_last_sparse = bool(prices_dir and dmfrac > 0.0 and b_last in cost._sparse)
         R = n // b_last if prices_dir else 0
+        tables = None if has_feed or not _C_PRICING else _pricing_tables(
+            cost, chain, prices_dir, dbase, dlag, R, dfrac, dmfrac if has_last_sparse else None)
+        if tables is not None:
+            # every candidate priced in C (_core.plan_best), as the loop below prices them
+            from . import _core
+            found = _core.plan_best(cands, tuple(hws), *tables)
+            if found is not None:
+                c, at, which = found
+                pth, preach, lasts = cands[at]
+                best = (c, pth + (lasts[which][0],), preach + (lasts[which][1],), hws[which])
+            cands = ()
         for pth, preach, lasts in cands:
             c_prefix, screened = cost.first_tier_for(chain, preach[1])
             for idx_t, bt in enumerate(later, 1):
@@ -2735,6 +2746,65 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     return dict(chain=tuple(chain), offsets=offs, thresholds=thresholds,
                 reach=tuple(_reach(noise, cols, thresholds)), halfwidth=halfwidth, cost=c,
                 q15=q15, search=search_info)
+
+
+#: plan_chain prices a chain's candidates on a CostModel in C (_core.plan_best; the Python
+#: loop in plan_chain is the reference, the same plan to the bit). False runs the Python one
+#: (tests compare them).
+_C_PRICING = True
+
+
+def _pricing_tables(cost, chain, prices_dir, dbase, dlag, R, dfrac, dmfrac):
+    """What _core.plan_best needs of a CostModel to price `chain`'s candidates as
+    CostModel.first_tier_for, sparse_for and refine do: (first, later, refine, direct), or
+    None where a table is longer than the routine holds.
+
+    Parameters
+    ----------
+    cost : CostModel
+        The model the chain is priced on.
+    chain : sequence of int
+        The chain's bands, at least two.
+    prices_dir : bool
+        Whether the model prices a direct refine for the chain.
+    dbase, dlag, R, dfrac : float, float, int, float
+        The direct refine's base price, its price per lag, the lags a half-width step
+        covers and the fraction of blocks it applies to.
+    dmfrac : float or None
+        The share of the last tier's sparse price a direct refine adds, None for none.
+
+    Returns
+    -------
+    tuple or None
+        ``first``: (dense first tier's cost per pair, None or (the screen's cost per pair,
+        its cost per pair passed, its excess table, TIE)); ``later``: per later tier (its
+        sparse table, the one behind a screen); ``refine``: the refine table; ``direct``:
+        None or (dbase, dlag, R, dfrac, None or (dmfrac, the last tier's sparse table)). A
+        table is (log densities, values).
+    """
+    b = int(chain[0])
+    ratio = (getattr(cost, "tier0_ratios", None) or {}).get(b, 1.0)
+    sc = cost.screen.get(b)
+    screen = None
+    if sc is not None and sc["excess"]:
+        screen = (sc["dense"] * ratio, sc["recheck"], _log_table(sc["excess"], "ratio"), TIE)
+    later = []
+    for bt in chain[1:]:
+        plain = _log_table(cost._sparse[int(bt)], "cost")
+        behind = cost.screen.get(int(bt))
+        later.append((plain, _log_table(behind["sparse"], "cost")
+                      if behind is not None and behind.get("sparse") else plain))
+    refine = _log_table(cost._refine, "cost")
+    direct = None
+    if prices_dir:
+        last = None if dmfrac is None else (dmfrac, _log_table(cost._sparse[int(chain[-1])], "cost"))
+        direct = (float(dbase), float(dlag), int(R), float(dfrac), last)
+    tables = [refine] + [t for pair in later for t in pair]
+    tables += [screen[2]] if screen else []
+    tables += [direct[4][1]] if direct and direct[4] else []
+    if len(later) > 8 or any(len(t[0]) > 64 for t in tables):
+        return None
+    return (cost.dense[b] * ratio, screen), tuple(later), refine, direct
 
 
 def _fit(B, dist, thresholds, hw, fd):

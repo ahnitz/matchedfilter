@@ -368,6 +368,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
   sets of the replayed setup bit for bit what they were at SNR 5.5, 6.0 and 7.0. MEASURED,
   same search and machine, three alternating pairs: setup 57.0, 58.6 and 58.1 s -> 55.2,
   55.6 and 54.6 s, steady rate level.
+- A chain's candidate plans priced in C (`_core.plan_best`): `gatechain.plan_chain` priced
+  each of about 69 candidates of a chain in a Python loop over the cost model's first tier,
+  later tiers and refine, 2.8 million iterations a pass of the showcase search. The routine
+  does the loop's arithmetic operation for operation on the model's tables
+  (`gatechain._pricing_tables`); the loop stays for a model with a feed (GPU) and as the
+  reference (`gatechain._C_PRICING`, `tests/test_plan_pricing.py`: the same plans at the
+  same costs with a Q15 screen, shared screeners' ratios and a direct refine). Every plan
+  of the replayed setup unchanged at SNR 5.5, 6.0 and 7.0. MEASURED, same search and
+  machine, three alternating pairs: setup 55.5, 55.3 and 55.3 s -> 52.1, 52.7 and 52.2 s,
+  steady rate level.
 - A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
   setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
   chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a
