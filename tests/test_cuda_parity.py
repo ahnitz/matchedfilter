@@ -3,7 +3,7 @@
 Every test here runs on real NVIDIA hardware and compares against the CPU (or a
 float64 reference), never the GPU against itself. Without a CUDA device they skip.
 
-Defects (docs/gpu-parity-plan.md A3/A4, F):
+Defects:
 - two-tier chains ran tier 1's band with tier 0's templates and threshold;
 - grouped run_series unpacked 4-tuples as pairs (ValueError) and computed
   every window over every row;

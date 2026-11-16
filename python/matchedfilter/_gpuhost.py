@@ -3,8 +3,7 @@
 Everything here is pure Python/NumPy over plain integers and arrays: what to dispatch and
 how results are laid out, never how. Each backend keeps its own submission mechanism
 (command buffers and fences, streams and graphs, Metal command buffers) and calls these
-helpers for the parts that must agree across backends. See docs/cross-platform-review.md
-section 3.1 for the layer this is growing into.
+helpers for the parts that must agree across backends.
 """
 
 from collections import OrderedDict

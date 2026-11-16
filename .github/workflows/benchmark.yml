@@ -220,9 +220,6 @@ jobs:
           if ls docs/measurements/bench/*.json 1> /dev/null 2>&1; then
             inputs+=(docs/measurements/bench/*.json)
           fi
-          if [ ${#inputs[@]} -eq 0 ]; then
-            inputs+=(docs/measurements/authenticamd-*.json docs/measurements/genuineintel-*.json)
-          fi
           python tools/build_report.py "${inputs[@]}" --root . --require-demo \
                  --out site/index.html
       - uses: actions/upload-artifact@v4

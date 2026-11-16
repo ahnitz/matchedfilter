@@ -17,7 +17,7 @@ before adding, so no sum of re and im forms first). The transform's adds therefo
 wrap: within the contract they equal saturating adds bit for bit, and are cheaper
 (Zen 5: 72.7 to 69.2 TSC ticks per pair at N = 256). The final |z|^2 sum saturates.
 
-For partial AVX-512 N256 template groups, [tail packing](cpu-q15-tail-packing.md)
+For partial AVX-512 N256 template groups, tail packing
 uses the spare lanes for additional data blocks with the same search window.
 Each useful lane retains the original quantized operands and arithmetic.
 
@@ -77,8 +77,7 @@ the margin still applies to `ap_mf_q15_screen` called on its own
 
 ## Selection
 
-The screen is one dimension of the joint trial (`_trial`, docs/gate-model.md, "One joint
-trial"): its arms `q15=1` and `q15=0` run beside the block-size arms, in the same paired
+The screen is one dimension of the joint trial (`_trial`): its arms `q15=1` and `q15=0` run beside the block-size arms, in the same paired
 rounds. Each plan's chain is the cost model's under every arm; the chain is not an arm.
 Each arm gets an untimed settling run, followed by one timed run, on identical input; the
 arm order reverses on the next round. Decisions use paired ratios to the default
@@ -238,7 +237,7 @@ name the sparse fit (`_calibration.calibrate_costs_gpu`). The record below is as
 on 2026-10-09.
 
 A first tier that reports an upper bound of the FP32 statistic (Vulkan fp16 coarse with
-`MF_VK_C16_BOUND`, docs/vulkan-8060s-roofline.md section 10) passes a superset of the pairs
+`MF_VK_C16_BOUND`) passes a superset of the pairs
 the gate model's noise draws assume; the extra pairs go straight to the next stage. That is
 safe but was unpriced. Now, backend-neutrally:
 

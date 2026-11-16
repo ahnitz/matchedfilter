@@ -1,5 +1,4 @@
-"""Every caller-supplied range and size reaching the C core is checked without overflow
-(docs/robustness-plan.md, B6). Until 2026-10-22 several checks formed lo + count or a
+"""Every caller-supplied range and size reaching the C core is checked without overflow. Until 2026-10-22 several checks formed lo + count or a
 product of counts in int or Py_ssize_t: a value near the type's maximum wrapped, the check
 passed, and the kernel read or wrote out of bounds. Each case must raise and leave the
 output untouched."""

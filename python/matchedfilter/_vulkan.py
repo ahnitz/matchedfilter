@@ -83,7 +83,7 @@ def _platform_note():
         return (" -- macOS ships no Vulkan driver. An Apple GPU is reached "
                 "through the Metal backend instead, which device='gpu' "
                 "selects on its own; only code asking for Vulkan by name "
-                "lands here (see docs/gpu-notes.md)")
+                "lands here")
     return ""
 
 

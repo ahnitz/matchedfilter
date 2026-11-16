@@ -46,8 +46,7 @@ measurements.
 | fp16 coarse tier | GPU (Vulkan, CUDA, Metal; Slang; the first tier) | the fp16 transform's maximum | none | `src/gpu/tierb.slang` |
 
 u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval). CUDA's
-tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
-([cuda-l40s-roofline.md](cuda-l40s-roofline.md), Phase 7).
+tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted.
 
 ## The two forms
 

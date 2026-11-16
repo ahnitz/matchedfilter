@@ -34,7 +34,7 @@ Vulkan), so the same command runs the full harness on every GPU.
 
 The NEON fp16 gate (src/gate16.cc) reports its statistic through MF_GATE16_DEBUG and is
 measured by tools/gate16_error.py on ARM; an adapter belongs here once the gate is exposed
-per call (as q15_screen is). See docs/cross-platform-review.md section 6.
+per call (as q15_screen is).
 """
 import argparse
 import json

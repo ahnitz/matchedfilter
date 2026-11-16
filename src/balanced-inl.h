@@ -109,8 +109,8 @@ typedef struct {
  * pair-batched alternate at 256..1024 for measured wide-batch shapes, while
  * preserving balanced execution for small, sparse and narrow-window calls.
  * Lanes span templates, so D*T alone is not a useful occupancy criterion.
- * See docs/cpu-plan.md and tools/bench_pairbatch.py for ingestion-inclusive
- * measurements and the dispatch rule. MF_PBMAX remains an explicit override. */
+ * See tools/bench_pairbatch.py for ingestion-inclusive measurements and the
+ * dispatch rule. MF_PBMAX remains an explicit override. */
 static inline int pairbatch_size(size_t N){
   if(N>2048u||!esupported((int)N)) return 0;
   size_t lim = 128u;

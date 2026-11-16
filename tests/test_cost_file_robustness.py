@@ -1,4 +1,4 @@
-"""MF_COST_FILE never loses data, and processes sharing it agree (docs/robustness-plan.md, B1).
+"""MF_COST_FILE never loses data, and processes sharing it agree.
 
 Until 2026-10-21 a damaged file (truncated, garbage, a JSON list) read as empty and the
 next write replaced it with one record: every stored model and lock was gone, silently.

@@ -1,6 +1,6 @@
 """Backend-neutral geometry of the packed (fp16) coarse kernel, shared by the Vulkan and
-Metal hosts (docs/cross-platform-review.md: one launch rule, so hosts and harnesses that
-dispatch a coarse build directly cannot disagree)."""
+Metal hosts (one launch rule, so hosts and harnesses that dispatch a coarse build
+directly cannot disagree)."""
 from . import _config, _costfile
 import re
 from ._choice import _log_autotune

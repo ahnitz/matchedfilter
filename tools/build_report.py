@@ -822,7 +822,7 @@ def md(text):
             # Take this line unconditionally, THEN gather. Gathering first
             # lets a line that reached here but fails the continuation test --
             # a "|" that begins prose rather than a table row, as
-            # docs/coarse-narrow.md does with "|P|^2 -- the energy family" --
+            # a page once did with "|P|^2 -- the energy family" --
             # leave i where it was and loop forever emitting empty paragraphs.
             # Every branch in this loop must consume at least one line.
             buf = [lines[i]]; i += 1
@@ -1439,16 +1439,9 @@ NOTES = [("docs/hierarchical.md", "The hierarchical filter",
           "The four-step transform, the split layout, and the fused peak scan."),
          ("docs/simd.md", "The SIMD layer",
           "How one source produces AVX-512, AVX2, SSE4 and NEON kernels."),
-         ("docs/coarse-narrow.md", "A narrower coarse pass",
-          "Measurements on how far the first stage can be narrowed."),
-         ("docs/machine-notes.md", "Zen 5 instruction notes",
-          "Measured issue rates, not vendor documentation."),
-         ("docs/gpu-notes.md", "The GPU backend",
-          "How the Vulkan path is built and dispatched, and the measurements "
-          "that contradicted the plan."),
-         ("docs/roadmap.md", "What is left, and what is closed",
-          "Three live avenues, what shipped, and the many that measurement "
-          "ruled out.")]
+         ("docs/architecture.md", "Architecture",
+          "The API, the layers, the gate model, the cost models and the "
+          "measured choices.")]
 
 #: (file, nav label, page kind, argument, nav group).  The groups answer the
 #: four questions a reader arrives with, in the order they arrive with them:

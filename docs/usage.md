@@ -132,9 +132,7 @@ supported with the same block-local indices.
 
 Templates must be set first. A later `run()` requires another `set_data()`
 call because series execution reuses the data slots. GPU execution is
-synchronous. See the source documentation for
-[GPU FFTs and shared storage](https://github.com/ahnitz/matchedfilter/blob/main/docs/gpu-forward-and-arrays.md)
-for memory and interoperability details.
+synchronous.
 
 ## Analysis windows on a filter bank
 
@@ -281,9 +279,6 @@ Host DLPack arrays are supported. Arbitrary CUDA or ROCm device allocations
 are not imported through this interface. Finish producer writes before
 filtering; cross-library GPU stream synchronization is not provided. Returned
 peaks use ordinary NumPy storage.
-
-The [CPU/GPU parity audit of 2026-09-26](https://github.com/ahnitz/matchedfilter/blob/main/docs/cpu-gpu-parity.md)
-records buffer ownership, cache lifetime and interoperability limits as they were then.
 
 ## Measured choices and reproducibility
 

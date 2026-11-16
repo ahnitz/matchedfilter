@@ -283,8 +283,7 @@ population or noise.
   P(plan > 1.25 fd) is 5% by construction. On independent draws (`tools/split_bias.py`: 10
   profiles x 30 model seeds, 16M check detections at fd 1e-3, n = 2048 and 4096, one to
   three tiers, every chain's plan and the pick, with and without a direct refine) the
-  pooled mean is 0.996-1.006 of fd and 4-6% of plans exceed 1.25 fd
-  ([the 2026-10-29 log entry](gate-model.md#one-false-dismissal-budget-per-plan-2026-10-29)).
+  pooled mean is 0.996-1.006 of fd and 4-6% of plans exceed 1.25 fd.
   The gate model's one seed gives every profile the same underlying noise, so a job's
   plans share one draw's luck.
 

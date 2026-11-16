@@ -1,4 +1,4 @@
-"""One filter object per thread (docs/robustness-plan.md, B7). The methods release the GIL
+"""One filter object per thread. The methods release the GIL
 while the kernels run; until 2026-10-22 a second thread could call into the same object
 meanwhile and corrupt its buffers silently. Now that call raises."""
 import threading

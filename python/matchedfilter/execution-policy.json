@@ -12,7 +12,7 @@
       "templates_min": 32,
       "templates_max": 64,
       "series_group": 4,
-      "evidence": "docs/haswell-series-grouping.md"
+      "evidence": "Haswell series-grouping study, 2026-09"
     }
   ]
 }

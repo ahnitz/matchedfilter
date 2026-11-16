@@ -1,5 +1,5 @@
 """A cost model is stored under what it measured: the series group the plans run, not the
-one requested (docs/robustness-plan.md, B9a), and the calls it was measured with. MF_DGROUP
+one requested, and the calls it was measured with. MF_DGROUP
 and the 4 MB held-spectra cap change the group a hierarchical plan runs; the calibration
 used to be keyed by the requested group, so a model measured at a forced group was adopted
 by later processes at the default."""

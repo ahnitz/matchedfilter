@@ -1,7 +1,6 @@
 # Coverage follow-up: state transitions and transfer costs
 
-September 26, 2026. Builds on `gpu-cache-correctness.md`. Existing CPU
-tuning work in the shared tree was preserved.
+First written September 26, 2026.
 
 ## Source distribution checks
 
@@ -171,8 +170,7 @@ study remain separate work; this follow-up does not claim to close them.
 The subsequent CPU/GPU audit adds initialization/subrange validation,
 shape-preserving output reuse, threshold reset/reference/first-stage state
 transitions, raw dtype checks, and refinement counters that count work rather
-than detections. See [the parity audit](cpu-gpu-parity.md) for remaining feature
-and operational differences. Final shared-checkout validation: 595 passed,
+than detections. Final shared-checkout validation: 595 passed,
 5 skipped on CPU plus Radeon 8060S.
 
 ## CI launch-directory and dependency regression
@@ -197,8 +195,6 @@ JSON output, and an uncovered calibration row in the same run.
 
 ## Audit cleanup coverage
 
-See [audit-cleanup.md](audit-cleanup.md) for the strict file/explicit calibration
-contract, memory limits, cost-selection tooling, and measured performance.
 New tests cover native output overruns and malformed layouts, optional magnitude
 storage and scratch resizing, CPU/GPU refusal without calibration, explicit
 settings without table access, rescaling already-ingested templates after a
@@ -254,5 +250,4 @@ than accidentally testing only AVX-512 on a wider host. It compares thresholded
 peak-only magnitudes against the ordinary CPU path at empirical dismissal rates
 0.01 and 0.001; GPU coverage remains conditional on actual hardware. Bank-level
 kernel binding is also covered by the existing selector, multi-bin and crossing
-count tests. Performance evidence and rejected dispatch variants are recorded
-in `docs/haswell-series-grouping.md` and its dated audit directory.
+count tests.

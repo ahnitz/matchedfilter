@@ -32,7 +32,7 @@ PROFILES = {
     "early flow 20": lambda: (_psd("aLIGOEarlyHighSensitivityP1200087|flow=20|fcut=400"), 2048),
     "a+ n 4096": lambda: (_psd("aLIGOAPlusDesignSensitivityT1800042|flow=20|fcut=1024", 4096), 4096),
     "o2 measured": lambda: (np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64), 2048),
-    # the shapes an earlier local window failed on (docs/gate-model.md): side lobes far from the
+    # the shapes an earlier local window failed on: side lobes far from the
     # peak, line notches that ring for hundreds of lags, and no localised power at all
     "bimodal": lambda: (_shape("bimodal_resonance"), 2048),
     "notched lines": lambda: (_shape("notched_lines"), 2048),

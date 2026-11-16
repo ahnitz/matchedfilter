@@ -1,4 +1,4 @@
-"""A filter owns the data it is given (docs/robustness-plan.md, B5).
+"""A filter owns the data it is given.
 
 Until 2026-10-22 the hierarchical plan kept the caller's pointer: the refine ingests the
 full spectrum lazily, so a caller that reused its buffer after set_data -- the natural

@@ -60,7 +60,7 @@ MANIFEST_SCHEMA = 2
 #: source would not reproduce the shipped kernels and an identical-codegen proof would be
 #: meaningless. Official release shader-slang v2026.18.2,
 #: slang-2026.18.2-linux-x86_64.tar.gz, sha256
-#: 8a097d4365e1cab10265d0b0d77b461b5d30576f99ddc0521a35723c34cad816 (docs/gpu-handover.md).
+#: 8a097d4365e1cab10265d0b0d77b461b5d30576f99ddc0521a35723c34cad816.
 #: MF_SLANGC_ANY_VERSION=1 builds with another version anyway (for experiments only).
 SLANGC_VERSION = "2026.18.2"
 

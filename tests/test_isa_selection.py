@@ -1,5 +1,5 @@
 """MF_ISA restricts the process, set_target changes only what it says, and a plan keeps its
-kernel for every call (docs/robustness-plan.md, B3).
+kernel for every call.
 
 Until 2026-10-21: an invalid MF_ISA printed an error and the next kernel call segfaulted;
 set_target(None) dropped MF_ISA (under MF_ISA=SSE4 it switched back to the widest target,

@@ -3,8 +3,7 @@
 Measured October 20, 2026 (UTC), at revision `4fd8b0d4` on `main` (the L40S node at
 `2725cdcc`, which changes only tests and benchmark data since): the code after the
 backend unification (stage U) and the Vulkan binding-limit fix below. This recalculates
-[the October 13 comparison](teaser-fleet-20261013.md); earlier pages are kept for
-history. Every run's timing blocks are in the recorded JSON.
+the October 13 comparison. Every run's timing blocks are in the recorded JSON.
 
 **A correction.** On Radeon GPUs (RADV: the 8060S and the RENOIR) a full correlation
 whose output reached 4 GiB wrote nothing and returned normally: one Vulkan storage
@@ -229,8 +228,7 @@ Rows slower than before, beyond their spread:
   the same chains. A paired run of the October 13 code (`2b3cac13`) and this one, same
   timing script, alternating, put the steady call at 0.119–0.124 ms against
   0.127–0.130 ms: about 7 µs of host time per call. The 512 × 512 calls and the
-  pipelined search are not slower (the stage U paired ladders; [performance
-  status](../performance-status.md)), so it is a fixed per-call cost that only tiny
+  pipelined search are not slower (the stage U paired ladders), so it is a fixed per-call cost that only tiny
   calls show; where it is spent is not yet located.
 - RENOIR GPU, full output at 16 × 512: 15.92 → 18.38 ms against a single October 3
   run; its own three runs here are 16.88, 18.38 and 18.42 ms with the same choices, so

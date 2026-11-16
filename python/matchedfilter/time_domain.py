@@ -239,8 +239,7 @@ def _settle(replay, built, clock=None):
     the batch's contexts' recordings) and runs within _SETTLE_TOL of the replay before, at
     most _SETTLE_REPLAYS times. Settled by builds alone, a round's first configuration timed
     10-25% slower than its second use (dev3, Renoir RADV), and the arm played first in a
-    round read 14-21% slower than the same configuration played later
-    (docs/trial-statistics-gpu.md); settled to time, the order made no difference."""
+    round read 14-21% slower than the same configuration played later; settled to time, the order made no difference."""
     clock = clock or time.perf_counter
     prev = None
     for n in range(1, _SETTLE_REPLAYS + 1):

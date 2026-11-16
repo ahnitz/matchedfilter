@@ -37,8 +37,6 @@ For subsequent changes, pass `--performance-baseline=.local/metal-performance.js
 instead. Keep the hardware and Python/NumPy environment unchanged. The suite
 also compares grouped windows against separate submissions and Metal's
 single-bin specialization against the general kernel within the same run.
-See the [M2 optimization measurements](measurements/metal-2026-09-26.md)
-for workloads, results, and remaining limitations.
 
 Test runtime source compilation on a system without the Metal compiler as
 well as precompiled libraries where available. A machine with Command Line

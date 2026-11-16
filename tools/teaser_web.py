@@ -28,7 +28,7 @@ def fleet_comparison(root):
     m_dir = Path(root)/'docs/measurements'
     teaser_files = sorted(m_dir.glob('teaser-fleet-*.json')) if m_dir.is_dir() else []
     if not teaser_files:
-        path = Path(root)/'docs/measurements/teaser-fleet-20260928.json'
+        path = Path(root)/'docs/measurements/teaser-fleet-20261020.json'
         if not path.is_file():
             return ''
         teaser_files = [path]

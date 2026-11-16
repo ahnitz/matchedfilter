@@ -1,4 +1,4 @@
-"""The hierarchical search on every GPU, written once (stage U2.6, docs/unification-plan.md).
+"""The hierarchical search on every GPU, written once.
 
 One recording per call shape runs every stage on the device, the counts never reaching the
 host between them:

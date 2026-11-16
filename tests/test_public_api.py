@@ -1,4 +1,4 @@
-"""The public interface (docs/robustness-plan.md, decision 5): the package root's __all__,
+"""The public interface: the package root's __all__,
 the public submodules, and gatechain's documented functions. Everything else is private
 and may move. A rename or removal here is a deliberate API change, noted in CHANGELOG."""
 import importlib

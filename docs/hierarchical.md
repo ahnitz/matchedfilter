@@ -29,8 +29,7 @@ requested conditional false-dismissal quantile at the constructor's `snr`
 bound on every plan, population or finite realization. Each plan's budget
 rests on about a hundred dismissed draws, so individual plans scatter about
 it; see
-[what `fd` means](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md#what-fd-means)
-and the [dated model log](https://github.com/ahnitz/matchedfilter/blob/main/docs/gate-model.md).
+[what `fd` means](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md#what-fd-means).
 
 ```python
 hf = matchedfilter.HierarchicalFilter(n, ndata=16, ntemplates=32,

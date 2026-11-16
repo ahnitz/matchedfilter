@@ -1,6 +1,6 @@
 """The hierarchical GPU run_series fires where the CPU dismisses.
 
-Found by the iteration loop (docs/iteration-plan.md) from a code reading:
+Found from a code reading:
 the two _run_series_gpu implementations disagree about the 1/n that the C
 applies on the way in. MatchedFilter's divides; HierarchicalFilter's does
 not.

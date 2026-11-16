@@ -5,8 +5,7 @@
 
 Each NAME is a group of A/A logs (glob patterns allowed; .gz read as gzip), e.g.
 ``dev2-replay=runs/*.jsonl``, optionally only the records whose fields have the given values
-(``rounds.jsonl.gz@machine=dev2&set=offs|full``: the checked-in evidence of
-docs/trial-statistics.md).
+(``rounds.jsonl.gz@machine=dev2&set=offs|full``).
 A log holds, for every round of every paired trial a process ran, the preference's time and
 the A/A arm's: the preference run a second time, settled and timed like a candidate and never
 a sample (_choice.Choice.play). The A/A log ratio x = log(t_AA / t_preference) of a round is
@@ -39,7 +38,7 @@ independence: the correlation of successive rounds, the spread of contest means 
 rates with a contest effect of that size added), and the rules run on the sequences in their
 order. A challenger with gain g has log ratio log(1 - g) + x: its noise is the A/A arm's.
 Rates far below one over the number of logged rounds rest on the model's tails, not on
-observation; the report gives both. The table for D8 (docs/trial-statistics.md) leads.
+observation; the report gives both. The table of rule error and power leads.
 """
 import argparse
 import copy

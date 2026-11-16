@@ -47,7 +47,7 @@ whose misses are 8% and 5% of their dismissals, and the plans' total dismissal a
 samples), so where its own misses reach the fit's count the plan refines by transform.
 That branch is taken on the fit half, so it is not covered by the fit's exactness: the
 search offers only windows whose predictive probability of it is within what the tail
-bound leaves (`gatemodel.window_allowance`, docs/gate-model.md, 2026-10-29).
+bound leaves (`gatemodel.window_allowance`).
 
 A pinned chain's first tier runs without the Q15 screen, so its plan is priced that way
 (`HierarchicalFilter._thresholds`): a one-tier chain's tier then reports its lag, and its

@@ -6,7 +6,7 @@
 Runs tools/ladder.py once per mode under coverage (the `coverage` package, importable from
 this interpreter), measuring the matchedfilter package only, then prints each module's
 covered fraction and every function or method no mode executed. Those functions are the
-deletion candidates of docs/convergence-plan.md: code no backend's production run reaches is
+deletion candidates: code no backend's production run reaches is
 either removed or kept with a test that says why.
 
 Run it on each backend's machine (the ladder's --device chooses the backend); the CPU is

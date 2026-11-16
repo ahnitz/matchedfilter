@@ -1,4 +1,4 @@
-"""GPU operations written once, over a thin per-API driver (stage U, docs/unification-plan.md).
+"""GPU operations written once, over a thin per-API driver.
 
 A backend Context (Vulkan, CUDA, Metal) inherits Executor and supplies only driver
 primitives -- how to allocate, record, submit and read back on its API. Every decision an
