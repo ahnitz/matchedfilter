@@ -24,7 +24,7 @@ LAYERS = (
                 "_screeners"}),
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),
     ("backends", {"_vkcompute", "_cudacompute", "_mtlcompute"}),
-    ("workloads", {"time_domain", "search", "_roofline", "__init__", "_layout", "_filter",
+    ("workloads", {"time_domain", "_batches", "search", "_roofline", "__init__", "_layout", "_filter",
                    "_hierarchical", "_calibration"}),
     ("applications", {"benchmark", "tutorial", "demo", "precision"}),
 )

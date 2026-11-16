@@ -261,7 +261,7 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
 
 
 def window_results(hit, counts, starts, idx, val, template, n, by_count=True):
-    """FilterResults of one follow-up window, as TimeDomainFilterBank._items_batch orders them:
+    """FilterResults of one follow-up window, as _batches._items_batch orders them:
     the (block, bin) pairs where ``hit`` holds, by the block's bin count, then block, then bin
     -- the order filter_series' one call per bin count gives -- or, by_count False (a window
     whose blocks carry bin phases: filter_series makes one call), by block, then bin.
@@ -510,7 +510,7 @@ def followup_layout(jobs, ctx, max_rows=None):
 
 def assemble_followups(layout, read):
     """Each job's FilterResults from a device run of followup_layout's groups, ordered as
-    TimeDomainFilterBank._items_batch orders them. read(group) gives the group's (idx, val),
+    _batches._items_batch orders them. read(group) gives the group's (idx, val),
     each (entries, nbins), read once per group."""
     reads = {}
     empty = None

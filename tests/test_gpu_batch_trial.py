@@ -1,11 +1,11 @@
-"""A batch of GPU banks is always fused (time_domain._fuse_close) and equals its direct calls;
+"""A batch of GPU banks is always fused (_batches._fuse_close) and equals its direct calls;
 the device trials that remain (where follow-ups run, the kernels' slots) play on the batches
 themselves, and no trial chooses whether to fuse."""
 import numpy as np
 import pytest
 from conftest import usable_gpu_reason
 
-from matchedfilter import TimeDomainFilterBank
+from matchedfilter import TimeDomainFilterBank, _batches
 
 
 def test_batches_are_fused_and_equal_their_direct_calls(monkeypatch, tmp_path):
@@ -32,8 +32,8 @@ def test_batches_are_fused_and_equal_their_direct_calls(monkeypatch, tmp_path):
         banks.append(b)
     S = 1 << 17
     closes = []
-    orig = td._fuse_close
-    monkeypatch.setattr(td, "_fuse_close", lambda jobs: closes.append(orig(jobs)) or closes[-1])
+    orig = _batches._fuse_close
+    monkeypatch.setattr(_batches, "_fuse_close", lambda jobs: closes.append(orig(jobs)) or closes[-1])
     for _ in range(6):
         xs = []
         for _ in banks:

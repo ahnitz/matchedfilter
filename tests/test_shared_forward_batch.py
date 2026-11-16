@@ -73,7 +73,7 @@ def _make_bank(rng, n_templates, tap_counts, complex_taps=False, fft_lengths=(20
 
 
 def _reference_via_plan(bank, series, kwargs):
-    """Reference FilterResults bypassing TimeDomainFilterBank._cpu_sparse_batch."""
+    """Reference FilterResults bypassing _batches._cpu_sparse_batch."""
     bank._defer = -1
     try:
         res = bank.filter_series(series, **(kwargs or {}))
