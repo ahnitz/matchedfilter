@@ -35,7 +35,7 @@ with --strict-q15. Dismissing more than the plan always fails.
 With --bank NT each case is a bank of NT templates of the profile's output power, in groups
 of four (--group: another size) whose members differ by up to a coarse lag, a phase and a small chirp, at the
 reference's power: what tier-0 pair screeners
-(gatechain.cluster_tier0_candidates) merge. The library's own HierarchicalFilter runs it at
+(_screeners.cluster_tier0_candidates) merge. The library's own HierarchicalFilter runs it at
 the case's chain (MF_CHAIN_FORCE, which leaves clustering to the model, as in production),
 with the screeners ("t0c") and without ("flat0"), each at its own plan's thresholds, and each
 injection is of one template, searched by that template's row. A clustered plan's thresholds
@@ -60,6 +60,7 @@ import sys
 import time
 
 import numpy as np
+from matchedfilter import _screeners
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _d in (os.path.join(ROOT, "tests"), ROOT):
@@ -265,7 +266,7 @@ def bank_spectra(power, n, nt, band, seed, chirp=3.0, group=4):
     delayed further by up to a coarse lag of `band` either way, turned by a random phase, and
     given a quadratic phase of up to `chirp` radians at n / 2 either way. A delay alone a
     screener's lag alignment undoes, a chirp it cannot, so a screener of up to `group` members
-    (gatechain.cluster_tier0_candidates) retains each differently. Every template keeps the
+    (_screeners.cluster_tier0_candidates) retains each differently. Every template keeps the
     reference's power: the gate model assumes the bank's band fractions are the reference's
     (a spectral tilt of k^0.15 put plans with and without screeners 3-20x off on power-law
     profiles), and a large chirp spreads the template in time, losing flat-filter SNR (28

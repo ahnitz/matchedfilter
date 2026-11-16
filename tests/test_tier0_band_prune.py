@@ -7,10 +7,11 @@ The plan must be the one the full evaluation chooses."""
 import numpy as np
 
 import matchedfilter as mf
+from matchedfilter import _screeners
 from matchedfilter import _calibration, _chains, _hierarchical, gatechain
 from spectral_profiles import make_spectral_profile
 
-_BUILD = gatechain.cluster_tier0_candidates
+_BUILD = _screeners.cluster_tier0_candidates
 
 
 def _plan(prune, monkeypatch, spread, forget=True):
@@ -30,7 +31,7 @@ def _plan(prune, monkeypatch, spread, forget=True):
         built.append(int(band))
         return _BUILD(spectra, power, n, band, **kw)
 
-    monkeypatch.setattr(gatechain, "cluster_tier0_candidates", spy)
+    monkeypatch.setattr(_screeners, "cluster_tier0_candidates", spy)
     monkeypatch.setattr(_hierarchical, "_TIER0_PRUNE_WIDER", prune)
     # Which bands can win is the cost model's call, and a machine's own model decides it its
     # own way (on one CI runner no wider band was ever a candidate, so none could be skipped):

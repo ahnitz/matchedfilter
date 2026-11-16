@@ -1,4 +1,4 @@
-"""The levels of the shared-screener merging (gatechain.cluster_tier0_candidates), in C++:
+"""The levels of the shared-screener merging (_screeners.cluster_tier0_candidates), in C++:
 _core.tier0_pair_level makes the templates' coherent pairs clusters of two, and
 _core.tier0_pass turns a level and its candidate merges of two clusters into the next, each
 merge a group with one screener or turned down. Checked against the numpy code they
@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core
+from matchedfilter import _screeners
 
 
 def _reference(C, inv_sqrt_v, v, W, exp_all, shifts64, dls, s_step, cur, inv_sqrt_vc,

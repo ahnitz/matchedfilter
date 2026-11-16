@@ -16,6 +16,7 @@ from test_shared_screeners import (
     _make_quad_correlated_bank,
 )
 from test_gpu_tier0_feed import _ptx_entry_params, _read_ptx, _StubBuf, _stub_cuda_context
+from matchedfilter import _screeners
 
 
 def test_cuda_ptx_compactc_abi_and_buffer_sizing(monkeypatch):
@@ -228,7 +229,7 @@ def test_gpu_compactc_nan_inf_fails_open():
     hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5, fd=0.01, device="gpu")
     hf.set_reference(power)
     hf.set_templates(templates)
-    cl = gc.cluster_tier0_templates(templates, power, n, 128, max_arity=4)
+    cl = _screeners.cluster_tier0_templates(templates, power, n, 128, max_arity=4)
     assert cl is not None
 
     # Corrupt data row 0 with Inf so fp16/fp32 Tier 0 produces NaN/Inf and must fail open

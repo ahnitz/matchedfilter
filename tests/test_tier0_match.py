@@ -1,4 +1,4 @@
-"""_core.tier0_match pairs a level's vectors (gatechain.cluster_tier0_candidates): a chunk of
+"""_core.tier0_match pairs a level's vectors (_screeners.cluster_tier0_candidates): a chunk of
 neighbours at a time is scored, matched greedily and its left-overs placed by breaking a
 pair, and the chunks' left-overs are matched once more. Checked against the numpy code it
 replaced."""
@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core
+from matchedfilter import _screeners
 
 
 def _best_swap(scores, u, vs, w_arr, z_arr, floor):

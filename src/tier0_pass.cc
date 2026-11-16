@@ -1,4 +1,4 @@
-/* One pass of the shared-screener merging (gatechain.cluster_tier0_candidates): every
+/* One pass of the shared-screener merging (_screeners.cluster_tier0_candidates): every
  * candidate merge of two clusters turned into a group of templates with one screener, or
  * turned down.
  *

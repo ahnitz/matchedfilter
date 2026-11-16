@@ -7,6 +7,7 @@ from typing import NamedTuple, Optional
 import numpy as np
 
 from . import _calibration
+from . import _screeners
 
 from . import _config
 from . import _core
@@ -487,7 +488,7 @@ class HierarchicalFilter(MatchedFilter):
     def _tier0_candidates_for_band(self, band, templates=None, pass2=None):
         """Lazily build candidate Tier-0 clusters up to `_TIER0_MAX_ARITY` for `band`. `pass2`,
         when given, decides after each pass whether the next higher-arity pass is built
-        (gatechain.cluster_tier0_candidates); a later call without it builds what was skipped."""
+        (_screeners.cluster_tier0_candidates); a later call without it builds what was skipped."""
         max_k = int(_TIER0_MAX_ARITY)
         empty = (None,) * (2 if max_k <= 4 else int(math.ceil(math.log2(max_k))))
         if not self._tier0_cluster_eligible():
@@ -532,7 +533,7 @@ class HierarchicalFilter(MatchedFilter):
                     skipped[0] = True
                 return ok
 
-        cands = _gatechain.cluster_tier0_candidates(
+        cands = _screeners.cluster_tier0_candidates(
             tmpl, self._pending_ref, self.n, b, k0=k0, max_arity=max_k, pass2=call_pass2
         )
         self._tier0_cand_cache[b] = (cands, not skipped[0])
@@ -666,7 +667,7 @@ class HierarchicalFilter(MatchedFilter):
         tmpl = self._templates_for_clustering()
         if tmpl is None:
             return None
-        cl1 = _gatechain.cluster_tier1_from_tier0(
+        cl1 = _screeners.cluster_tier1_from_tier0(
             tmpl, self._pending_ref, self.n, cl0, key[1],
             k0=self._desired_offsets(ch)[1])
         self._tier1_clusters[key] = (cl0, cl1)

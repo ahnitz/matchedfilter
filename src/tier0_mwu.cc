@@ -2,7 +2,7 @@
  * vector lane and each as the plain loop would: a group's shared screener for many groups
  * (below), and a vector's sums against the coarse shifts (CoarseSums).
  *
- * A group's shared screener (gatechain.cluster_tier0_candidates), for many groups at once.
+ * A group's shared screener (_screeners.cluster_tier0_candidates), for many groups at once.
  *
  * One group: the unit-norm vector over a band of K bins that its m members, each phase-aligned
  * to it, overlap best in the worst case.

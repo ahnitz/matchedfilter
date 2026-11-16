@@ -9,6 +9,7 @@ import pytest
 from spectral_profiles import binomtest
 
 import matchedfilter as mf
+from matchedfilter import _screeners
 from matchedfilter import _calibration, _core, gatechain
 from matchedfilter.time_domain import TimeDomainFilterBank
 
@@ -251,7 +252,7 @@ def test_multi_arity_k16_screeners_partition_variance_and_fdr(monkeypatch):
     win = (256, 1792)
     power, psd, templates = _make_family_bank(n, nt, b0, group_size=16, drift_amp=0.14, seed=9191)
 
-    cands = gatechain.cluster_tier0_candidates(templates, power, n, b0, max_arity=16)
+    cands = _screeners.cluster_tier0_candidates(templates, power, n, b0, max_arity=16)
     assert len(cands) == 4
     cl_k2, cl_k4, cl_k8, cl_k16 = cands
     assert cl_k2 is not None and cl_k4 is not None and cl_k8 is not None and cl_k16 is not None
@@ -360,7 +361,7 @@ def test_pareto_frontier_retains_all_undominated_arities_and_forced_chain_fallba
     from matchedfilter import _hierarchical
 
     def mk(ratio, alpha, lag_pad=1):
-        return gatechain.Tier0Cluster(
+        return _screeners.Tier0Cluster(
             specs=np.zeros((4, 64), np.complex64),
             offsets=np.array([0, 2, 4, 6, 8], np.int32),
             members=np.arange(8, dtype=np.int32),

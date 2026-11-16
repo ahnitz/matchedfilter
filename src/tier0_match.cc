@@ -1,4 +1,4 @@
-/* The matching of a level's vectors into pairs (gatechain.cluster_tier0_candidates).
+/* The matching of a level's vectors into pairs (_screeners.cluster_tier0_candidates).
  *
  * The vectors U (nodes, K) complex64 are taken a chunk at a time in the given order (alike
  * ones are neighbours in it), and in a chunk:

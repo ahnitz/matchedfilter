@@ -7,6 +7,7 @@ import matchedfilter as mf
 from matchedfilter import _core, _hierarchical
 from matchedfilter import gatechain as gc
 from spectral_profiles import binomtest, make_spectral_profile
+from matchedfilter import _screeners
 
 
 def _make_profile(profile_name, n):
@@ -112,7 +113,7 @@ def test_uncorrelated_bank_leaves_tier0_unclustered(monkeypatch):
     phases = rng.uniform(0.0, 2.0 * np.pi, size=(nt, n))
     templates = (amp[None, :] * np.exp(1j * phases)).astype(np.complex64)
 
-    assert gc.cluster_tier0_templates(templates, power, n, 128) is None
+    assert _screeners.cluster_tier0_templates(templates, power, n, 128) is None
 
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
     hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5, fd=0.01)
@@ -142,7 +143,7 @@ def test_correlated_bank_halves_tier0_work_and_preserves_peaks(profile_name, use
     k0 = gc.band_offset(power, n, chain[0])
     if profile_name == "deadzone_bandpass":
         assert k0 > 0
-    cl = gc.cluster_tier0_templates(templates, power, n, chain[0], k0=k0)
+    cl = _screeners.cluster_tier0_templates(templates, power, n, chain[0], k0=k0)
     assert cl is not None
     assert cl.specs.shape == (nt // 2, chain[0])
     assert cl.lag_pad >= 1
@@ -212,7 +213,7 @@ def test_screener_coarse_noise_unit_variance(profile_name):
         n, nt, b0, profile_name=profile_name, seed=505
     )
     k0 = gc.band_offset(power, n, b0)
-    cl = gc.cluster_tier0_templates(templates, power, n, b0, k0=k0)
+    cl = _screeners.cluster_tier0_templates(templates, power, n, b0, k0=k0)
     assert cl is not None
 
     # Simulate colored noise spectra (unit per-quadrature variance after template match)
@@ -478,7 +479,7 @@ def test_adaptive_arity_k4_partition_variance_and_minimax():
         norm = math.sqrt(float(np.sum(psd * (spec.real ** 2 + spec.imag ** 2))))
         quad_Part[m_idx] = (spec / norm).astype(np.complex64)
 
-    cl_k2, cl_k4 = gc.cluster_tier0_candidates(quad_Part, power, n, b0, max_arity=4)
+    cl_k2, cl_k4 = _screeners.cluster_tier0_candidates(quad_Part, power, n, b0, max_arity=4)
     assert cl_k2 is not None
     assert cl_k4 is not None
     assert cl_k4.specs.shape[0] < cl_k2.specs.shape[0]
@@ -572,7 +573,7 @@ def test_a_merge_needs_its_members_variances_within_a_fifth(smallest, merged):
     power, _, bank = _make_quad_correlated_bank(n, 8, b0, chain_drift=0.15, seed=5150)
     for member, variance in enumerate((1.0, 0.86, 0.92, smallest)):
         bank[member] *= math.sqrt(variance)
-    _, cl_k4 = gc.cluster_tier0_candidates(bank, power, n, b0, max_arity=4)
+    _, cl_k4 = _screeners.cluster_tier0_candidates(bank, power, n, b0, max_arity=4)
     groups = sorted(sorted(int(t) for t in cl_k4.members[a:b])
                     for a, b in zip(cl_k4.offsets[:-1], cl_k4.offsets[1:]))
     assert [4, 5, 6, 7] in groups
@@ -725,10 +726,10 @@ def test_pass2_runs_only_when_asked_and_a_skipped_one_is_built_later(monkeypatch
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     n, nt, b0 = 2048, 16, 128
     power, _, bank = _make_quad_correlated_bank(n, nt, b0, chain_drift=0.12, seed=6061)
-    full = gc.cluster_tier0_candidates(bank, power, n, b0, max_arity=4)
+    full = _screeners.cluster_tier0_candidates(bank, power, n, b0, max_arity=4)
     assert full[0] is not None and full[1] is not None
     seen = []
-    k2, k4 = gc.cluster_tier0_candidates(bank, power, n, b0, max_arity=4,
+    k2, k4 = _screeners.cluster_tier0_candidates(bank, power, n, b0, max_arity=4,
                                          pass2=lambda cl: seen.append(cl) or False)
     assert k4 is None and len(seen) == 1 and seen[0] is k2
     np.testing.assert_array_equal(k2.members, full[0].members)
@@ -1067,7 +1068,7 @@ def test_finer_alpha_quantization_preserves_high_retention_thresholds():
     Tier-1 survivor reach."""
     n, nt, b0 = 2048, 16, 128
     power, _, templates = _make_quad_correlated_bank(n, nt, b0, chain_drift=0.14, seed=8282)
-    cl_k2, cl_k4 = gc.cluster_tier0_candidates(templates, power, n, b0, max_arity=4)
+    cl_k2, cl_k4 = _screeners.cluster_tier0_candidates(templates, power, n, b0, max_arity=4)
     assert cl_k2 is not None and cl_k4 is not None
     assert cl_k2.alpha > 0.98
     assert cl_k4.alpha >= 0.99
@@ -1090,7 +1091,7 @@ def _tier1_bank(n=2048, nt=16, b0=128, b1=512, chain_drift=0.06, seed=9201, powe
         templates = templates.copy()
         templates[1::2] *= np.float32(math.sqrt(power_ratio))
     k0_0 = int(gc.band_offset(power, n, b0))
-    cl0 = gc.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=4)
+    cl0 = _screeners.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=4)
     return power, psd, templates, cl0
 
 
@@ -1110,7 +1111,7 @@ def test_tier1_sub_screeners_nest_hold_the_floor_and_match_an_independent_retent
     power, _, templates, cl0 = _tier1_bank(n=n, b1=b1)
     assert cl0 is not None and cl0.specs.shape[0] < templates.shape[0]
     k0 = int(gc.band_offset(power, n, b1))
-    cl1 = gc.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0)
+    cl1 = _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0)
     assert cl1 is not None
     nt = templates.shape[0]
     assert sorted(cl1.members.tolist()) == list(range(nt))
@@ -1143,11 +1144,11 @@ def test_tier1_sub_screeners_nest_hold_the_floor_and_match_an_independent_retent
             ov = max(abs(np.sum(W * cvec.conj() * H[t] * np.exp(-2j * np.pi * tau * k / n)))
                      for tau in range(-reach, reach + 1))
             a_t = min(1.0, ov / v_t)
-            assert a_t >= gc.TIER1_ALPHA_MIN - 1e-4
+            assert a_t >= _screeners.TIER1_ALPHA_MIN - 1e-4
             assert a_t >= float(cl1.member_alphas[t]) - 2e-4
             assert v_c == pytest.approx(0.5 * (v_t + float(np.sum(W * np.abs(H[[m for m in cl1.members[cl1.offsets[c]:cl1.offsets[c + 1]] if m != t][0]]) ** 2))), rel=1e-3)
     assert cl1.alpha <= float(np.min(cl1.member_alphas)) + 1e-9
-    assert cl1.alpha >= gc.TIER1_ALPHA_MIN - 1e-3
+    assert cl1.alpha >= _screeners.TIER1_ALPHA_MIN - 1e-3
 
 
 def test_tier1_floor_splits_pairs_whose_members_lose_too_much():
@@ -1158,12 +1159,12 @@ def test_tier1_floor_splits_pairs_whose_members_lose_too_much():
     power, _, templates, cl0 = _tier1_bank(n=n, b1=b1, power_ratio=0.88)
     assert cl0 is not None
     k0 = int(gc.band_offset(power, n, b1))
-    assert gc.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0) is None
-    loose = gc.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0, alpha_min=0.9)
+    assert _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0) is None
+    loose = _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0, alpha_min=0.9)
     assert loose is not None
     merged = loose.members[np.repeat(np.diff(loose.offsets), np.diff(loose.offsets)) == 2]
     assert merged.size > 0
-    assert float(np.min(loose.member_alphas[merged])) < gc.TIER1_ALPHA_MIN
+    assert float(np.min(loose.member_alphas[merged])) < _screeners.TIER1_ALPHA_MIN
     assert loose.alpha == pytest.approx(float(np.min(loose.member_alphas)), abs=1e-3)
 
 
@@ -1181,9 +1182,9 @@ def test_tier1_screener_coarse_noise_unit_variance(profile_name):
     k0_0, k0_1 = int(gc.band_offset(power, n, b0)), int(gc.band_offset(power, n, b1))
     if profile_name == "deadzone_bandpass":
         k0_1 = max(k0_1, 136)                       # exercise the wrapped packing
-    cl0 = gc.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=2)
+    cl0 = _screeners.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=2)
     assert cl0 is not None
-    cl1 = gc.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0_1)
+    cl1 = _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0_1)
     assert cl1 is not None and np.any(np.diff(cl1.offsets) == 2)
     k_lo, k_hi = gc._band_slice(n, b1, k0_1)
     length = k_hi - k_lo

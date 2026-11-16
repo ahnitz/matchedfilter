@@ -550,7 +550,7 @@ for k in (1, 2, 3):
 # Which first band gets shared screeners, 2026-11-14
 
 A plan's first tier may run on shared screeners: one screener for a few templates alike in
-the first band (`gatechain.cluster_tier0_candidates`). Which band that is, and with which
+the first band (`_screeners.cluster_tier0_candidates`). Which band that is, and with which
 screeners, is settled when the plan chooses its chain
 (`HierarchicalFilter._cluster_candidate_bands`):
 

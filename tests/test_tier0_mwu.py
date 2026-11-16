@@ -1,4 +1,4 @@
-"""_core.tier0_mwu builds each group's shared screener (gatechain.cluster_tier0_candidates):
+"""_core.tier0_mwu builds each group's shared screener (_screeners.cluster_tier0_candidates):
 the mean of the members phased to a common frame, or the minimax vector multiplicative
 weights find, whichever the worst-matched member overlaps better. Checked against the numpy
 code it replaced."""
@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core
+from matchedfilter import _screeners
 
 
 def _reference(U_raw, ref, W, steps):
