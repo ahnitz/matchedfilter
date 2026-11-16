@@ -6,6 +6,7 @@ import os
 import tempfile
 import warnings
 from contextlib import contextmanager
+from . import _config
 
 
 def _cost_file():
@@ -18,7 +19,6 @@ def _cost_file():
     missing one is measured once and added; with the file populated and
     MF_AUTOTUNE=0 (no timed trials), the chain choice is deterministic.
     """
-    from . import _config
     return _config.get("MF_COST_FILE")
 
 

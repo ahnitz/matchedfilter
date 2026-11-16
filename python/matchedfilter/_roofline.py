@@ -94,8 +94,10 @@ import time
 
 import numpy as np
 
-from .time_domain import _stored_bins
+from .time_domain import _stored_bins, _normalize_windows
 from ._peaks import _MEASURED, _read
+from ._filter import _compute_module
+from . import _config
 
 #: Bytes per complex value at each precision.
 CBYTES = {"fp32": 8, "fp16": 4, "int16": 4}
@@ -195,7 +197,6 @@ def _backend_c16(device):
     d = parse(device)
     if d.kind != "gpu":
         return None
-    from ._filter import _compute_module
     return _compute_module(d).Context._x_has_c16
 
 
@@ -295,7 +296,6 @@ def followup_work(work, jobs, series_len=None):
     """The follow-up jobs [(bank, series, kwargs)] as run: one template each, laid out by the
     bank's own block layout. series_len: the series length, when the jobs' series are not
     kept (None)."""
-    from .time_domain import _normalize_windows
     s = work.stage("followups", "fp32", unit="blocks")
     for bank, ser, kw in jobs:
         g, _ = bank._template_map[int(kw["template_index"])]
@@ -407,7 +407,6 @@ def _x86_core(info):
     else:
         datapath = isa
         name = "Intel"
-    from . import _config
     datapath = _config.get("MF_ROOFLINE_DATAPATH", datapath)
     imul = _x86_int16_mul_ports(vendor, fam, int(info.get("model", "0")))
     return min(isa, datapath), ports, name, imul

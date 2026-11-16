@@ -1,6 +1,9 @@
 """Backend-neutral geometry of the packed (fp16) coarse kernel, shared by the Vulkan and
 Metal hosts (docs/cross-platform-review.md: one launch rule, so hosts and harnesses that
 dispatch a coarse build directly cannot disagree)."""
+from . import _config, _costfile
+import re
+from ._choice import _log_autotune
 
 
 def coarse_launch(nd, nt, ppg, tile, cspan):
@@ -45,7 +48,6 @@ def forced_layout(band):
     """The layout MF_COARSE_LAYOUT names for this band (comma-separated layout_label names;
     each names its own band), or None. The choice then takes it without timing, on every
     backend, so tests and measurements can run each layout through the production path."""
-    from . import _config
     for name in (_config.get("MF_COARSE_LAYOUT") or "").split(","):
         name = name.strip()
         if next((t for t in name.split("_") if t.isdigit()), None) == str(band):
@@ -82,7 +84,6 @@ def candidates(band, build, twt_options, max_invocations, max_shared, subgroup_s
 def parse_label(label):
     """(band, ppg, tile, twt, subgroup) of a coarse layout's name (layout_label's inverse),
     or None for a name that is not a packed fp16 build."""
-    import re
     m = re.fullmatch(r"tierb_(\d+)_c16(?:p(\d+))?(?:t(\d+))?(w?)(?:@(\d+))?", label)
     if m is None:
         return None
@@ -146,7 +147,6 @@ def shortlist(memo, kind, device, band, cands, label, kernel_id, measure, tiebre
     forced_layout's) is taken as it is, unscreened and unstored; a label that is not a
     candidate here raises ValueError naming the candidates. A device that cannot be timed
     runs the first candidate, unstored."""
-    from . import _costfile
     labels = [label(c) for c in cands]
     if forced is not None:
         if forced not in labels:
@@ -172,7 +172,6 @@ def shortlist(memo, kind, device, band, cands, label, kernel_id, measure, tiebre
     order = sorted(times, key=lambda c: (times[c], tuple(tiebreak(c)) if tiebreak else (), rank.get(c, 0)))
     hit = memo[key] = (order[0], order[1] if len(order) > 1 else None)
     _costfile.store_choice(key, label(hit[0]), **({"alt": label(hit[1])} if hit[1] is not None else {}))
-    from ._choice import _log_autotune
     _log_autotune("%s %s band %d -> %s (then %s)  %s", kind, device, band, label(hit[0]),
                   None if hit[1] is None else label(hit[1]),
                   {label(c): "%.3g" % t for c, t in sorted(times.items(), key=lambda kv: kv[1])[:4]})

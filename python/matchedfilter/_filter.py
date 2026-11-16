@@ -12,6 +12,7 @@ import numpy as np
 from . import _config
 from . import _core
 from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks
+from ._settings import fingerprint
 
 
 #: Transform lengths the GPU kernel covers. One workgroup carries a whole
@@ -1446,7 +1447,6 @@ class MatchedFilter:
                 self.__dict__.get("_ct"), self.__dict__.get("_ckey"),
                 None if ws is None else ws[2], None if ws is None else ws[3],
                 self.__dict__.get("_taps"))
-        from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
                 _config.get("MF_GPU_QUEUE_AHEAD"),
                 bool(self._want_sparse), fingerprint())
@@ -1472,7 +1472,6 @@ class MatchedFilter:
         if not plans or not raw or self._tdirty or not self._defer_series:
             return None
         d = self.__dict__
-        from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
                 _config.get("MF_GPU_QUEUE_AHEAD"), bool(self._want_sparse),
                 fingerprint())

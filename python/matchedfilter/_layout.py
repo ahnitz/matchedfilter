@@ -7,6 +7,8 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from ._prices import price_once
+from ._filter import _automatic_series_layout
 
 
 def _partition_templates(
@@ -123,7 +125,6 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     n = int(n)
     from .device import parse as _parse_device
     dkey = "cpu" if _parse_device(device).kind == "cpu" else str(device)
-    from ._prices import price_once
     # corr4: the fixed cost has a floor (_corr_measure); files with corr3 entries hold zeros
     key = "corr4,%d" % n if dkey == "cpu" else "corr4,%d,%s" % (n, dkey)
     if (n, dkey) in _CORR_COSTS:
@@ -153,7 +154,6 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     (_choice.fastest_of_rounds). The fixed cost is at least half the per-template cost."""
     from . import CorrelationFilter
     from ._choice import fastest_of_rounds as _fastest_of_rounds
-    from ._filter import _automatic_series_layout
     runs, blocks, valid = [], [], []
     short = n - (n - taps) // 2
     for nt, tp in ((2, taps), (16, taps), (16, short)):

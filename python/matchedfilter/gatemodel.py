@@ -47,8 +47,11 @@ gate_for and dismissal, the quantities the validation above is stated in.
 """
 import functools
 import math
+import weakref
+import hashlib
 
 import numpy as np
+from . import gatechain
 
 #: Per-component variance is 1, so a complex draw normalised to E|z|^2 = 1
 #: is scaled by this. See the noise-convention note above.
@@ -75,7 +78,6 @@ _FROZEN = {}
 
 def _freeze(profile):
     """Make `profile` read-only and start keeping facts for it; returns it."""
-    import weakref
     profile.setflags(write=False)
     key = id(profile)
     _FROZEN[key] = (weakref.ref(profile, lambda _r, k=key: _FROZEN.pop(k, None)), {})
@@ -102,7 +104,6 @@ def _profile_sig(power):
             facts["sig"] = _profile_sig_uncached(power)
         return facts["sig"]
     if isinstance(power, np.ndarray) and power.size >= _SIG_MEMO_MIN and power.flags.c_contiguous:
-        import weakref
         owner = power
         while isinstance(owner.base, np.ndarray):
             owner = owner.base
@@ -126,7 +127,6 @@ def _profile_sig_uncached(power):
     tot = float(np.sum(p))
     if tot <= 0:
         return b""
-    import hashlib
     quant = np.round(p / tot * 2.0 ** 32).astype(np.int64)
     return hashlib.sha1(quant.tobytes()).digest() + len(p).to_bytes(4, "little")
 
@@ -253,7 +253,6 @@ def _kept(power, n, band, snr, fd):
     """Sorted coarse maxima at `band` of the model's detections (draws the fine stage keeps)
     at budget fd, or None: each the maximum over the whole block, as the engine searches it
     (gatechain.signal_draws)."""
-    from . import gatechain
     bands = gatechain.usable_bands(power, n)
     ndet = _nsamp_for(fd)
     if band not in bands or ndet is None:
@@ -286,7 +285,6 @@ def gate_for(power, n, band, snr, fd):
     p = _check_power(power, n)
     if _nsamp_for(fd) is None:
         return None
-    from . import gatechain
     if band not in gatechain.usable_bands(p, n):
         return None
     plan = gatechain.chain_thresholds(p, n, snr, fd, (band,))

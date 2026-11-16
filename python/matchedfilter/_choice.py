@@ -48,7 +48,7 @@ from typing import Any, Callable, Dict, Hashable, Optional, Sequence, Tuple
 
 import numpy as np
 
-from . import _config
+from . import _config, _costfile
 
 #: Rounds before a first decision, and the most an unclear contest takes: every choice's
 #: schedule (MF_TRIAL_ROUNDS sets the first, the cap following at twice it; rounds()).
@@ -489,7 +489,6 @@ class Choice:
     def _record(self):
         if self.store_key is None:
             return None
-        from . import _costfile
         path = _costfile._cost_file()
         if path is None:
             return None
@@ -500,7 +499,6 @@ class Choice:
         on file afterwards (rec itself when it was written)."""
         if self.store_key is None:
             return rec
-        from . import _costfile
         path = _costfile._cost_file()
         if path is None:
             return rec
@@ -515,7 +513,6 @@ class Choice:
 
 def stored_lock(store_key: str, parse: Callable[[str], Any]):
     """The candidate (parse(label)) a lock on file names under store_key, or None."""
-    from . import _costfile
     path = _costfile._cost_file()
     if path is None:
         return None

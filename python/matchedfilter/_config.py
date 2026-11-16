@@ -21,6 +21,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
+import textwrap
 
 SECTIONS = (
     ("config", "Configuration"),
@@ -209,7 +210,6 @@ BY_NAME = {v.name: v for v in VARS}
 
 def markdown() -> str:
     """docs/environment.md, rendered from this table."""
-    import textwrap
     wrap = lambda text: textwrap.fill(text, 88, break_on_hyphens=False)   # noqa: E731
     out = ["# Environment variables", "",
            wrap("Every environment variable matchedfilter reads, by kind. None is needed for "

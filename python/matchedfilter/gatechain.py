@@ -47,15 +47,17 @@ from itertools import combinations
 from typing import NamedTuple, Optional
 
 import hashlib
+import copy
 import numpy as np
 
 from . import gatemodel as _gm
-from . import _costfile
+from . import _costfile, _config
 # The decision rules live in _choice; gatechain's callers keep them by these names.
 from ._choice import TIE
 # The cost file lives in _costfile. The calibration, the bank's layout and the Vulkan back end
 # reach these through gatechain (and tests patch _cost_file here), so they stay bound here.
 from ._costfile import _cost_warn, _load_cost_file
+from ._windows import coarse_lags
 _cost_file, _store_first = _costfile._cost_file, _costfile._store_first
 store_choice, stored_choice = _costfile.store_choice, _costfile.stored_choice
 
@@ -886,7 +888,6 @@ _SEED = 13
 
 def _coarse_lags_padded(n, b, w0, w1, lag_pad=0):
     """Coarse-lag range `(c0, c1)` for band `b` widened by `lag_pad` coarse samples (`hmf.c`)."""
-    from ._windows import coarse_lags
     lp = int(lag_pad)
     if lp <= 0:
         return coarse_lags(n, b, w0, w1)
@@ -904,7 +905,6 @@ def _coarse_lags_padded(n, b, w0, w1, lag_pad=0):
 def _engine_lags(n, bands, window):
     """(w0, w1, c0, c1): the fine lags [w0, w1) and each band's coarse lags [c0, c1) the engine
     searches for `window` (hmf.c: one coarse sample past each end inside the block)."""
-    from ._windows import coarse_lags
     w0, w1 = (0, n) if window is None else (int(window[0]), int(window[1]))
     lags = [coarse_lags(n, b, w0, w1) for b in bands]
     return w0, w1, tuple(c[0] for c in lags), tuple(c[1] for c in lags)
@@ -1018,7 +1018,6 @@ def _law_profile(p, n, bands, snr, k0s):
 def _signal_law_enabled():
     """Whether the planner's signal table is drawn from the samples' joint law (_signal_law)
     where that holds (_law_applies), and not simulated: on unless MF_SIGNAL_LAW=0."""
-    from . import _config
     return bool(_config.get("MF_SIGNAL_LAW"))
 
 
@@ -1787,7 +1786,6 @@ def band_forward_wanted(n, band, f, forced=None):
     (thresholds set by hand, no reference), the bands. MF_BAND_FORWARD=0/1 forces it off or on,
     as does `forced` (a context's feed_forced: the GPU calibration times both feeds); the cost
     model prices a chain's feed by this same rule (CostModel.feed_delta)."""
-    from . import _config
     if forced is None:
         forced = _config.get("MF_BAND_FORWARD")
     if forced is False or n > 65536 or band >= n:
@@ -1962,7 +1960,6 @@ class CostModel:
                  for b, r in (ratios or {}).items() if 0.0 < float(r) < 1.0}
         if not clean and not self.tier0_ratios:
             return self
-        import copy
         cm = copy.copy(self)
         cm.tier0_ratios = clean
         cm.tier0_single = bool(single_tier)
@@ -1993,7 +1990,6 @@ class CostModel:
         the measured whole-block refine and base + (2 h n / b + 1) * lag_price, b its last band
         (refine_for; the window scales with n / b, so it favours chains ending in a wider band),
         weighted by the fraction of blocks eligible for direct refine."""
-        import copy
         cm = copy.copy(self)
         cm.direct_lag = float(lag_price)
         # single_tier False: a one-tier chain's tier runs on the CPU's FP16 gate, which reports
@@ -2008,7 +2004,6 @@ class CostModel:
     def unscreened(self):
         """A copy that prices no Q15 screen: the costs of a plan whose first tier runs without
         one (a pinned chain's, HierarchicalFilter._arm_q15)."""
-        import copy
         cm = copy.copy(self)
         cm.screen = {}
         cm._sig = None

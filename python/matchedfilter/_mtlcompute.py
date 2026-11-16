@@ -18,6 +18,7 @@ import sys
 import weakref
 from contextlib import contextmanager
 from functools import wraps
+import re as _re
 
 import numpy as np
 from ._shared import empty_shared
@@ -546,7 +547,6 @@ class Context(Executor, InputUploads):
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): the core count plus a stated formula."""
-        import re as _re
         from . import _peaks as _pk
         chip = next((k for k in _pk._APPLE_GPU if k in (out["name"] or "")), "M2")
         ghz, cores, bus, mts = _pk._APPLE_GPU[chip]

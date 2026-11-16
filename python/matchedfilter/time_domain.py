@@ -7,16 +7,23 @@ import collections.abc as _abc
 from typing import Any, Optional, Sequence, Union, Tuple, List, Dict
 import threading
 import weakref
+import sys
+import time
+import ctypes
+import math
 import numpy as np
 from . import _calibration, _config
 from . import _settings, _trial
-from ._choice import _AUTOTUNE_LOCK, TIE as _TIE
+from ._choice import _AUTOTUNE_LOCK, TIE as _TIE, _autotune_enabled, playing, _log_autotune
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
 from ._windows import _normalize_windows, _window_layout
 from ._windows import _merge_window_bins, _window_bin_phases
 # The bank's layout planning lives in _layout.
 from ._layout import _corr_partition, _partition_templates
-from . import _core
+from . import _core, _choice
+from ._hierarchical import _record_cpu_trial
+from ._results import _SparsePeaks, _Deferred
+from ._filter import _from_any, _automatic_series_layout
 
 
 def reference_profile(template, psd, f_low, f_high, delta_f) -> np.ndarray:
@@ -39,7 +46,6 @@ def reference_profile(template, psd, f_low, f_high, delta_f) -> np.ndarray:
 def _settle_device_writes():
     """Wait for GPU writes left in flight (correlate_series(wait=False)) before a host
     read. Device consumers are ordered on the GPU, so only host readers wait."""
-    import sys
     for name in ('._mtlcompute', '._vkcompute', '._cudacompute'):
         mod = sys.modules.get(__package__ + name)
         if mod is not None and hasattr(mod, 'settle_all'):
@@ -61,7 +67,6 @@ class _RaggedSplit:
             self.rank[m] = np.arange(int(m.sum()))
 
     def parts(self, r):
-        from ._results import _SparsePeaks
         if not isinstance(r, _SparsePeaks):
             return [(r[0][m][:, :, :u], r[1][m][:, :, :u]) for m, u in zip(self.masks, self.us)]
         nt, nb = r.shape[1], r.shape[2]
@@ -78,7 +83,6 @@ class _RaggedSplit:
 
     def deferred(self, d):
         """One _Deferred per part of the deferred result d, sharing one split."""
-        from ._results import _Deferred
         cell = []
 
         def part(i):
@@ -237,7 +241,6 @@ def _settle(replay, built, clock=None):
     10-25% slower than its second use (dev3, Renoir RADV), and the arm played first in a
     round read 14-21% slower than the same configuration played later
     (docs/trial-statistics-gpu.md); settled to time, the order made no difference."""
-    import time
     clock = clock or time.perf_counter
     prev = None
     for n in range(1, _SETTLE_REPLAYS + 1):
@@ -274,8 +277,6 @@ def _joint_round(jobs):
     if not groups:
         return None
     gpu = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
-    import time
-    from ._hierarchical import _record_cpu_trial
 
     def settle_for(sub):
         banks = [b for b, _, _ in sub]
@@ -427,7 +428,6 @@ def _gpu_batch(jobs, run):
     differently runs it, waited, back to back), its lock then in force for every batch
     (_settings). One trial plays a batch; the others take their locks or defaults. Returns
     run()'s results."""
-    from ._choice import _autotune_enabled, playing
     from .device import parse as _parse_device
     parsed = [_parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None]
     gpus = [d for d in parsed if d.kind == "gpu"]
@@ -439,7 +439,6 @@ def _gpu_batch(jobs, run):
     if playing() or not _autotune_enabled():
         with _settings.running(dict(locked)):
             return run()
-    from . import _choice
     # the slots this batch's composition consulted when a waited run of it last ran
     comp = (devs, tuple(sorted({id(b) for b, _, _ in jobs})),
             any((kw or {}).get("template_index") is not None for _, _, kw in jobs))
@@ -504,7 +503,6 @@ def _gpu_devs(gpus):
 def _single_choice(device, n, nblocks):
     """Where single-template calls of this shape (device, block size, block count's power of
     two) run (_settings "side"): paired, played on the calls (TimeDomainFilterBank._single_play)."""
-    from . import _choice
     key = (str(device), int(n), 1 << max(0, int(nblocks) - 1).bit_length())
     return _choice.choice("single-device", key, (_settings.DEFAULT, _settings.arm("side", "cpu")),
                           confirm=True, parse=_settings.valid,
@@ -1286,7 +1284,6 @@ class TimeDomainFilterBank:
     def _choose_layout(self, fine: np.ndarray, delta_f: float, single_n: Optional[int] = None):
         """Partition with each length batch at its cheapest modelled block size -- or, with
         single_n, every batch at that one size (a joint trial's "n=" arm, _trial), unpriced."""
-        from ._choice import _log_autotune
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
         n_sorted = np.empty(len(order), dtype=np.int64)
@@ -1417,7 +1414,6 @@ class TimeDomainFilterBank:
                 # screen together on real calls, its arms the same labels for every bank of the
                 # key (_trial_key). Its lock -- this process's or MF_COST_FILE's -- builds the
                 # winner's layout alone, with no block-size pricing for an "n=" lock.
-                from ._choice import _autotune_enabled
                 on = _autotune_enabled()
                 singles = self._single_sizes()[:_BLOCK_TRIAL_RANKS - 1] if on else []
                 self._trial_cands = tuple(singles) + ("model",)
@@ -1898,7 +1894,6 @@ class TimeDomainFilterBank:
         else:
             work_items = [(g, None) for g in self._groups]
 
-        from ._results import _Deferred, _SparsePeaks
         # In a batch (filter_series_many): its token, and this job's compute queue offset.
         defer, queue_offset = getattr(self, '_defer', False), getattr(self, '_queue_offset', 0)
         pending = []
@@ -2121,7 +2116,6 @@ class TimeDomainFilterBank:
         trial instead (_settings "single", _items_batch): batched, the GPU call is another
         dispatch. MF_AUTOTUNE=0 or MF_SINGLE_DEVICE=bank keeps the bank's device."""
         from .device import parse as _parse_device
-        from ._choice import _autotune_enabled, playing
         if (self.engine != 'hier' or _parse_device(self.device).kind != 'gpu'
                 or not _autotune_enabled() or _config.get("MF_SINGLE_DEVICE") == "bank"
                 or "_single_force" in self.__dict__ or playing()):
@@ -2170,11 +2164,9 @@ class TimeDomainFilterBank:
         its clock up). The jobs' input series must not be overwritten until then. A later
         batch on the same banks first finishes whatever of this one it would overwrite.
         """
-        from ._results import _Deferred
         paired = _joint_round(jobs)
         if paired is not None:
             return paired if wait else [_Deferred(lambda r=r: r) for r in paired]
-        from ._choice import playing
         res = _gpu_batch(jobs, lambda: TimeDomainFilterBank._run_batch(jobs, wait or playing()))
         if not wait:
             # a played batch ran waited (its arms are timed to their last result)
@@ -2184,7 +2176,6 @@ class TimeDomainFilterBank:
     @staticmethod
     def _run_batch(jobs, wait):
         """filter_series_many's batch, once, with the GPU settings in force (_settings)."""
-        from ._results import _Deferred
         global _BATCH_TOKEN
         _BATCH_TOKEN += 1
         # The deferred submissions may also be fused where a GPU driver batches them (Vulkan:
@@ -2278,7 +2269,6 @@ class TimeDomainFilterBank:
                 if collect is not None:
                     # Submitted, not waited on: each job's result is read when asked for, so a
                     # caller collecting later (filter_series_many(wait=False)) never waits here.
-                    from ._results import _Deferred
                     for i, j in enumerate(fast):
                         out[j] = _Deferred(lambda c=collect, i=i: c()[i])
                         done.add(j)
@@ -2314,7 +2304,6 @@ class TimeDomainFilterBank:
             if fast_ok:
                 collect = submit_followups([jobs[j] for j in fast_ok])
                 if collect is not None:
-                    from ._results import _Deferred
                     for i, j in enumerate(fast_ok):
                         out[j] = _Deferred(lambda c=collect, i=i: c()[i])
                         done.add(j)
@@ -2653,8 +2642,6 @@ class TimeDomainFilterBank:
         set of int
             Indices of jobs whose ``FilterResults`` were written into ``out``.
         """
-        import time
-        from ._results import _SparsePeaks
 
         done = set()
         prepared = []
@@ -2855,7 +2842,6 @@ class TimeDomainFilterBank:
         hooks = TimeDomainFilterBank._STREAM_HOOKS
         if hooks is not None:
             return hooks
-        import ctypes
         try:
             clib = ctypes.CDLL(_core.__file__)
             set_mirror = clib.ap_mf_set_corr_mirror
@@ -2931,11 +2917,6 @@ class TimeDomainFilterBank:
             ``correlate_series`` on each ``corr_jobs`` entry followed by
             ``filter_series_many(leaf_jobs, wait=wait)``.
         """
-        import math
-        import time
-        from ._choice import _autotune_enabled, playing
-        from ._filter import _from_any
-        from ._results import _SparsePeaks
         from .device import parse as _parse_device
 
         eff_tile_bytes = (TimeDomainFilterBank._TILE_BYTES
@@ -4106,7 +4087,6 @@ class TimeDomainFilterBank:
         if hit_ is not None:
             cache.move_to_end(key)
             return hit_
-        from ._filter import _automatic_series_layout
         st = np.empty(0, dtype=np.uintp)
         bounds = None
         keep = written = np.empty((0, 2), np.int64)
@@ -4265,7 +4245,6 @@ class TimeDomainFilterBank:
             If `template_index` is None: 2D complex64 array of shape `(n_templates, len(series))`.
             If `template_index` is specified: 1D complex64 array of shape `(len(series),)`.
         """
-        from ._filter import _from_any
         from .device import parse as _parse_device
 
         a = _from_any(series)
@@ -4497,7 +4476,6 @@ class TimeDomainFilterBank:
 
     def _correlate_selected(self, ser, W, templates, scales, out, support=None, wait=True):
         """correlate_series(templates=...): row j of the result is template templates[j]."""
-        from ._filter import _from_any
         S = ser.size
         sel = np.asarray(templates, dtype=np.int64).ravel()
         if sel.size and (sel.min() < 0 or sel.max() >= self.n_templates):

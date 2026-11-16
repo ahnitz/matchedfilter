@@ -5,6 +5,7 @@ records the device time of each submission as (label, device_ms) in ``timing_log
 ``timings()`` settles outstanding measurements and returns that log. Off, nothing registers.
 """
 import weakref
+from . import _config
 
 _CONTEXTS = weakref.WeakSet()
 #: (start_s, end_s) device intervals on one host-comparable clock, from backends that report
@@ -32,7 +33,6 @@ def busy(clear=True):
 
 
 def enabled():
-    from . import _config
     return _config.get("MF_GPU_TIMING")
 
 

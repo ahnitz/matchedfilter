@@ -18,7 +18,10 @@ It is reachable, but only by naming it.
 """
 from . import _cuda
 from . import _metal
-from . import _vulkan
+from . import _vulkan, _config
+import re
+import platform
+import sys
 
 _VENDORS = {0x1002: "AMD", 0x10DE: "NVIDIA", 0x8086: "Intel",
             0x13B5: "ARM", 0x5143: "Qualcomm", 0x106B: "Apple"}
@@ -41,7 +44,6 @@ def arch_keys(vendor, name):
     report it: Mesa writes it there as "RADV GFX1151", and the vendor id
     distinguishes AMD from anyone else naming a device similarly.
     """
-    import re
     keys = []
     vendors = {0x1002: "amd", 0x10DE: "nvidia", 0x8086: "intel", 0x106B: "apple"}
     v = vendors.get(vendor)
@@ -109,7 +111,6 @@ def _cpu_device():
 
 
 def _read_cpu_device(backend_name):
-    import platform
     fields = {}
     try:
         with open("/proc/cpuinfo") as fh:
@@ -185,7 +186,6 @@ def parse(spec):
     if isinstance(spec, Device):
         return spec
     if spec is None:
-        from . import _config
         spec = _config.get("MF_DEVICE")
     if not isinstance(spec, str):
         raise TypeError("device must be a string or Device, got %r" % (spec,))
@@ -243,7 +243,6 @@ def _no_gpu_reason():
     driver and never will, so "no libvulkan" says nothing about whether the
     machine has a GPU this library can drive.
     """
-    import sys
     if sys.platform == "darwin":
         ok, why = _metal.available()
         return why or ("a Metal device is present but was not usable"

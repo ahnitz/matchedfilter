@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from . import _config, _gputime, _kernels, _vulkan
+from . import _config, _gputime, _kernels, _vulkan, gatechain
 from ._shared import empty_shared
 from ._gpuhost import MAX_BINS
 
@@ -40,7 +40,6 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
 def _module_bindings(blob):
     """1 + the highest descriptor binding a SPIR-V module declares (0 if none)."""
-    import struct
     words = struct.unpack("<%dI" % (len(blob) // 4), blob)
     top, i = -1, 5
     while i < len(words):
@@ -56,7 +55,6 @@ def _module_bindings(blob):
 def _module_invocations(blob):
     """Invocations per workgroup a SPIR-V module declares (OpExecutionMode LocalSize; 0 if
     it declares none that way)."""
-    import struct
     words = struct.unpack("<%dI" % (len(blob) // 4), blob)
     i = 5
     while i < len(words):
@@ -698,6 +696,9 @@ _DEVICES = {}
 
 #: Live contexts by id(), for validating cached fused recordings (keys hold ids).
 import weakref as _weakref
+import struct
+import os as _os
+import re as _re
 _CONTEXTS_BY_ID = _weakref.WeakValueDictionary()
 
 
@@ -1206,7 +1207,6 @@ class Context(Executor, InputUploads):
         """Whether this device needs accurate trig: a forward transform with its native
         sin/cos, against NumPy's, once per device and process (MF_COST_FILE keeps it). The
         pipelines built for the probe are dropped when the answer is yes."""
-        from . import gatechain
         key = "trig|%s|k%s" % (self.device_name, gatechain.gpu_kernel_id("vulkan"))
         held = gatechain.stored_choice(key)
         if held is not None:
@@ -2065,7 +2065,6 @@ class Context(Executor, InputUploads):
     def _shader_core(self):
         """VkPhysicalDeviceShaderCorePropertiesAMD: (engines, arrays/engine, CUs/array, SIMDs/CU,
         wave size), or None."""
-        import ctypes
         vk = self.vk
         if not hasattr(vk, "vkGetPhysicalDeviceProperties2"):
             return None
@@ -2093,8 +2092,6 @@ class Context(Executor, InputUploads):
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): API-queryable counts plus a stated formula."""
-        import os as _os
-        import re as _re
         from . import _peaks as _pk
         m = _re.search(r"gfx\d+", out["name"] or "", _re.I)
         arch = m.group(0).lower() if m else ""

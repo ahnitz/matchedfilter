@@ -27,7 +27,7 @@ import numpy as np
 from . import _config
 _config.check_environment()   # before _core reads any of it
 from . import _core
-from . import _chains, _choice, _prices
+from . import _chains, _choice, _prices, _trial, _settings, time_domain
 from ._choice import _AUTOTUNE_LOCK
 from ._results import PEAK_DTYPE
 
@@ -129,6 +129,8 @@ def devices():
 
 
 from ._errors import UnsupportedSize      # noqa: E402
+import os
+from .gatemodel import gate_for
 
 
 def include_dir():
@@ -143,20 +145,17 @@ def include_dir():
     plans (ap_mf_*), the hierarchical plans (ap_hmf_*) and their helpers -- and documents
     each function.
     """
-    import os
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def choose_threshold(power, n, snr, fd, band):
     """The single-tier gate at `band` for this reference and budget (gatemodel.gate_for)."""
-    from .gatemodel import gate_for
     return gate_for(power, n, int(band), snr, fd)
 
 
 def get_autotune_state():
     """Snapshot of the process's chain choices and joint trials (_trial): per trial key, its
     winner and its rounds by arm."""
-    from . import _trial
     with _AUTOTUNE_LOCK:
         choices = dict(_chains._CHAIN_CHOICE)
         trials = list(_trial._TRIALS.items())
@@ -180,7 +179,6 @@ def clear_autotune_cache():
     Q15 tier-0 and direct-refine prices.
     The next use starts afresh from MF_COST_FILE. Machine state is kept: cost models
     (gatechain._COSTS), correlation prices and the kernel choices a GPU device holds."""
-    from . import _trial
     with _AUTOTUNE_LOCK:
         _chains._CHAIN_CHOICE.clear()
         _chains._Q15_MODEL.clear()
@@ -189,7 +187,6 @@ def clear_autotune_cache():
         _prices._DIRECT_PAIR.clear()
     _trial.clear()
     _choice.reset(scope="workload")
-    from . import _settings, time_domain
     _settings.clear()
     time_domain._GPU_RAN.clear()
     time_domain._SEEN_BY_BATCH.clear()

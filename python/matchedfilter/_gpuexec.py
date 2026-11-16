@@ -128,6 +128,7 @@ from ._errors import UnsupportedSize
 from ._gpuhier import HierOps
 from ._gpuhost import MAX_BINS, bin_shift, plan_items, split_items
 from ._shared import shared_view
+from ._results import _SparsePeaks
 
 
 #: Drivers whose devices batch submissions across contexts (register_fusion).
@@ -992,7 +993,6 @@ class Executor(HierOps):
         return oi, ov
 
     def _flat_sparse(self, rec, shape, rows, offsets, natural):
-        from ._results import _SparsePeaks
         nd, nt, nb = shape
         head = np.empty(1, np.uint32)
         self._x_read(rec.buffers["count"], head)

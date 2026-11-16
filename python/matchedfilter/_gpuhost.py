@@ -11,6 +11,8 @@ from collections import OrderedDict
 import numpy as np
 
 from ._errors import UnsupportedSize
+from ._windows import coarse_lags, _merge_window_bins
+from ._results import FilterResults, _EMPTY_FILTER_RESULTS
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).
 MAX_BINS = 2048
@@ -28,7 +30,6 @@ def coarse_span(n, band, lo, hi, lag_pad=0):
     hmf.c), so a signal near either end has coarse samples on both sides.
     The tier reduces it to ONE bin, so the reported peak is the window's maximum -- all a
     gate needs. shift is bin_shift(span) (-1 when span is not a power of two)."""
-    from ._windows import coarse_lags
     lp = int(lag_pad)
     if lp > 0:
         r = n // band
@@ -210,7 +211,6 @@ def band_windows(rowwin, n, band, lag_pad=0):
     hit = _BAND_WINDOWS.get(key)
     if hit is not None and hit[0] is rowwin:
         return hit[1]
-    from ._windows import coarse_lags
     w = np.asarray(rowwin, np.uint32).reshape(-1, 3)[:, :2].astype(np.int64)
     if lp > 0:
         r = n // band
@@ -270,7 +270,6 @@ def window_results(hit, counts, starts, idx, val, template, n, by_count=True):
     hit: (blocks, nbins) bool; counts: bins per block; starts: block start samples; idx/val:
     (blocks, nbins) peak lag and value; template: the global template index; n: block length.
     The one ordering rule every device follow-up path assembles with."""
-    from ._results import FilterResults, _EMPTY_FILTER_RESULTS
     bi, bn = np.nonzero(hit)
     if not bi.size:
         return _EMPTY_FILTER_RESULTS
@@ -514,8 +513,6 @@ def assemble_followups(layout, read):
     """Each job's FilterResults from a device run of followup_layout's groups, ordered as
     TimeDomainFilterBank._items_batch orders them. read(group) gives the group's (idx, val),
     each (entries, nbins), read once per group."""
-    from ._results import FilterResults
-    from ._windows import _merge_window_bins
     reads = {}
     empty = None
     out = []

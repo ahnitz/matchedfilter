@@ -13,6 +13,7 @@ fail with ``VK_ERROR_INCOMPATIBLE_DRIVER``.  The loader's own discovery works.
 See ``_shadowing_hint`` for what the failures actually were.
 """
 import ctypes
+import sys
 
 _VK_SUCCESS = 0
 
@@ -78,7 +79,6 @@ def _platform_note():
     library has no way to reach it, which is a different statement and the
     only one that tells them what to do about it.
     """
-    import sys
     if sys.platform == "darwin":
         return (" -- macOS ships no Vulkan driver. An Apple GPU is reached "
                 "through the Metal backend instead, which device='gpu' "

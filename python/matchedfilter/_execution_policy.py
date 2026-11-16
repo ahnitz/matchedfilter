@@ -7,6 +7,7 @@ Hardware/memory limits always bound the selected group size at execution.
 from functools import lru_cache
 import json
 from pathlib import Path
+from . import _config
 
 
 @lru_cache(maxsize=16)
@@ -68,7 +69,6 @@ def select(device, operation, n, band, templates):
     file is cached per path; use a new process after editing an existing file.
     Equally specific overlapping rows are errors, not order-dependent choices.
     """
-    from . import _config
     path = _config.get('MF_EXECUTION_POLICY') or str(Path(__file__).with_name('execution-policy.json'))
     res = _select_cached(path, device.kind, device.backend, device.name, device.arch,
                          operation, int(n), int(band), int(templates))

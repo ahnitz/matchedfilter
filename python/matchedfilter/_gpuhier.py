@@ -37,6 +37,8 @@ from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_windows, bin_shift,
                        coarse_span, hier_tiers, hier_window, split_bins)
 from .gatechain import band_forward_wanted
 from ._shared import pack_half2, shared_view
+from . import gatechain
+from ._results import _SparsePeaks
 
 #: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
 #: component in [2^C16_TEMPLATE_EXP, 2^(C16_TEMPLATE_EXP+1)), leaving fp16's lower 18 octaves
@@ -164,7 +166,6 @@ class HierOps:
         two on synthetic dispatches (_coarse.shortlist, kept in MF_COST_FILE). The device
         trial plays them on real batches (kernel slots, _settings.slot). MF_COARSE_LAYOUT
         forces a layout, unplayed. Made once per band and setting: every call asks."""
-        from . import gatechain
         from ._coarse import forced_layout, shortlist
         holder = getattr(self, "_device_state", None) or self
         forced = forced_layout(band) if what == "coarse" else None
@@ -989,7 +990,6 @@ class HierOps:
         """The call's peaks from its readback buffers. Counts, survivors and the rows a
         sparse result gathers are read in place where the host sees the buffers (_x_view):
         only a dense result copies its outputs whole."""
-        from ._results import _SparsePeaks
         nd, nt, nbins = shape
         pairs, out = nd * nt, nd * nt * nbins
         B = rec.buffers

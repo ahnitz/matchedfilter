@@ -2,7 +2,7 @@
 the file prices alike. One helper (price_once) holds the rule: this process's memo, else the
 record on file, else measure and store first-writer-wins (a valid record another process
 stored first is the one used)."""
-from . import _core, _costfile
+from . import _core, _costfile, gatechain
 
 
 def price_once(memo, mkey, file_key, measure, read):
@@ -35,7 +35,6 @@ def _direct_lagtap(real_series=False, complex_taps=False):
     """Ticks per lag x tap of the direct refine on this machine: timed once and kept in
     MF_COST_FILE, so every process sharing the file prices chains alike (the chain choice
     depends on it)."""
-    from . import gatechain
     rs, ct = bool(real_series), bool(complex_taps)
     mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
     key = "direct-lagtap|%s|%s%s" % (_core.backend(),
@@ -60,7 +59,6 @@ def _direct_pair_prices(n, plan, real_series=False, complex_taps=False):
     timing its own made the choice depend on that plan's timing noise: two plans of one bank
     layout, a merged call and its separate calls, refined the pairs near the boundary
     differently and so reported them to different fp32 rounding."""
-    from . import gatechain
     rs, ct = bool(real_series), bool(complex_taps)
     mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
     key = "direct-pair|%d|%s|%s%s" % (int(n), _core.backend(),
@@ -88,7 +86,6 @@ _GPU_DIRECT_RATIO = {}
 def _gpu_direct_ratio(n, ctx, real_series=False, complex_taps=False):
     """Device time of one GPU direct-refine (lag x tap) divided by one length-n FFT refine
     pair on `ctx`, timed once per (n, device, kernel family, mode) and kept in MF_COST_FILE."""
-    from . import gatechain
     rs, ct = bool(real_series), bool(complex_taps)
     mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
     dev_fn = getattr(ctx, "_dev_name", None)
