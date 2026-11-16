@@ -18,7 +18,7 @@ Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL)
   fdr          `tools/fdr_audit.py`: every profile and chain at n = 2048 and 4096, over the
                whole block and a window, FP32 and Q15 tiers, dismisses its budget against
                the flat filter, two-sided (`--fdr-inj` injections a case); and banks of 16
-               near-duplicate templates (`--bank 16`), tier-0 pair centroids on and off
+               near-duplicate templates (`--bank 16`), tier-0 pair screeners on and off
   repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
                cost file make the same choices
   followups    test_call_plan + test_followup_batch, `--loops` times (a past race)

@@ -29,19 +29,19 @@ with --strict-q15. Dismissing more than the plan always fails.
   python tools/fdr_audit.py --n 4096 --fd 1e-3 --inj 200000 --profiles aligo_o4_inspiral
   python tools/fdr_audit.py --chains auto --window 192,1856  # what chain selection picks
   python tools/fdr_audit.py --chains 256,512,1024 --q15 --json out.json
-  python tools/fdr_audit.py --bank 16 --q15                  # tier-0 pair centroids too
-  python tools/fdr_audit.py --bank 64 --group 8 --q15        # centroids of eight, as in production
+  python tools/fdr_audit.py --bank 16 --q15                  # tier-0 pair screeners too
+  python tools/fdr_audit.py --bank 64 --group 8 --q15        # screeners of eight, as in production
 
 With --bank NT each case is a bank of NT templates of the profile's output power, in groups
 of four (--group: another size) whose members differ by up to a coarse lag, a phase and a small chirp, at the
-reference's power: what tier-0 pair centroids
+reference's power: what tier-0 pair screeners
 (gatechain.cluster_tier0_candidates) merge. The library's own HierarchicalFilter runs it at
 the case's chain (MF_CHAIN_FORCE, which leaves clustering to the model, as in production),
-with the centroids ("t0c") and without ("flat0"), each at its own plan's thresholds, and each
+with the screeners ("t0c") and without ("flat0"), each at its own plan's thresholds, and each
 injection is of one template, searched by that template's row. A clustered plan's thresholds
 are solved for the cluster's conservative retention alpha; its modelled dismissal draws each
 member at its own retention (member_alphas), so a member alpha the engine does not attain,
-or a model that misprices them, is off the plan. Multi-tier chains only: a centroid is a
+or a model that misprices them, is off the plan. Multi-tier chains only: a screener is a
 tier-0 gate.
 
 Profiles: power laws "f^E" (power k^E in bins 1 .. n/2 - 1), "inspiral" (k^-7/3 with a
@@ -124,7 +124,7 @@ def modelled(power, n, chain, thresholds, snr, window, count, seed=9770, alpha0=
     """(dismissed, detections): of `count` detections of a model simulation independent of
     the plans' (seeds seed, seed + 1, ...: 2M detections each), those some tier of chain at
     these thresholds dismisses. alpha0 / alpha1: the signal's retention at the first / second
-    tier (a tier-0 centroid's / tier-1 sub-centroid's member's)."""
+    tier (a tier-0 screener's / tier-1 sub-screener's member's)."""
     from matchedfilter import gatechain as gc
     bands = gc.usable_bands(power, n)
     b1 = chain[1] if len(chain) >= 2 else None
@@ -264,10 +264,10 @@ def bank_spectra(power, n, nt, band, seed, chirp=3.0, group=4):
     profile's signal delayed by a group's own multiple of group * n / nt samples, each member
     delayed further by up to a coarse lag of `band` either way, turned by a random phase, and
     given a quadratic phase of up to `chirp` radians at n / 2 either way. A delay alone a
-    centroid's lag alignment undoes, a chirp it cannot, so a centroid of up to `group` members
+    screener's lag alignment undoes, a chirp it cannot, so a screener of up to `group` members
     (gatechain.cluster_tier0_candidates) retains each differently. Every template keeps the
     reference's power: the gate model assumes the bank's band fractions are the reference's
-    (a spectral tilt of k^0.15 put plans with and without centroids 3-20x off on power-law
+    (a spectral tilt of k^0.15 put plans with and without screeners 3-20x off on power-law
     profiles), and a large chirp spreads the template in time, losing flat-filter SNR (28
     radians lost 4.5% of the detections at n=2048)."""
     rng = np.random.default_rng(seed)
@@ -284,7 +284,7 @@ def bank_spectra(power, n, nt, band, seed, chirp=3.0, group=4):
 
 def run_bank_case(job):
     """One --bank case: (profile, n, chain, args) -> its row, with an entry per filter and
-    tier-0 setting (t0c: the model's centroids, flat0: none) and per statistic."""
+    tier-0 setting (t0c: the model's screeners, flat0: none) and per statistic."""
     name, n, chain, a = job
     import matchedfilter as mf
     from matchedfilter import _hierarchical
@@ -305,7 +305,7 @@ def run_bank_case(job):
     filters, plans = {}, {}
     devices = [("cpu", None)] + ([("device", a["device"])] if (a.get("device") and len(chain) >= 2) else [])
     for t0, on in (("t0c", True), ("flat0", False)):
-        _hierarchical._TIER0_PAIR_CENTROID = on
+        _hierarchical._TIER0_SHARED_SCREENERS = on
         try:
             for dname, dev in devices:
                 for stat in (("fp32", "q15") if dname == "cpu" and a["q15"] else ("fp32",)):
@@ -337,7 +337,7 @@ def run_bank_case(job):
                                       member_alphas1=None if cl1 is None
                                       else [float(x) for x in cl1.member_alphas])
         finally:
-            _hierarchical._TIER0_PAIR_CENTROID = True
+            _hierarchical._TIER0_SHARED_SCREENERS = True
     # each plan's modelled dismissal: templates injected uniformly, member t at its retention
     count = a["check"] or max(1000000, 10 * a["inj"])
     for key, pl in plans.items():
@@ -402,7 +402,7 @@ def main(argv=None):
     ap.add_argument("--window", default=None, help="START,END: search lags [START, END) only")
     ap.add_argument("--q15", action="store_true", help="also run the Q15-screened chains")
     ap.add_argument("--strict-q15", action="store_true",
-                    help="a Q15 or centroid chain dismissing less than its plan fails too")
+                    help="a Q15 or screener chain dismissing less than its plan fails too")
     ap.add_argument("--check", type=int, default=0,
                     help="model detections a plan's dismissal is counted on (default max(1M, 10 x --inj))")
     ap.add_argument("--seed", type=int, default=11)
@@ -410,7 +410,7 @@ def main(argv=None):
                     help="also run the device's hierarchical filter (gpu:0: the fp16 coarse gate)")
     ap.add_argument("--bank", type=int, default=0,
                     help="NT: audit banks of NT templates in groups of --group near-duplicates through "
-                         "HierarchicalFilter, tier-0 pair centroids on and off (see above)")
+                         "HierarchicalFilter, tier-0 pair screeners on and off (see above)")
     ap.add_argument("--group", type=int, default=4,
                     help="near-duplicates per group of a --bank (default 4). Production plans "
                          "cluster 6 to 8 templates: --bank 64 --group 8 audits that size (the model "
@@ -445,14 +445,14 @@ def main(argv=None):
             continue
         for key, e in r["engines"].items():
             off = e["p"] < level
-            # dismissing less than the plan: Q15 rounding, or a centroid's model (its draws
+            # dismissing less than the plan: Q15 rounding, or a screener's model (its draws
             # leave out the lag_pad lags the engine also searches); both cost work, not signals
             low = (off and e["to_model"] < 1 and (key.endswith("q15") or key.startswith("t0c"))
                    and not a.strict_q15)
             fail = (off and not low) or e["mismatches"]
             bad += bool(fail)
             under += bool(low)
-            clus = ("  %d centroids, alpha %.2f (members %.2f-%.2f)" % (
+            clus = ("  %d screeners, alpha %.2f (members %.2f-%.2f)" % (
                 e["clusters"], e["alpha"], min(e["member_alphas"] or [e["alpha"]]),
                 max(e["member_alphas"] or [e["alpha"]])) if e.get("clusters") else "")
             print("%s %-4s thr [%s] det %6d miss %5d  %.2fx budget  %.2fx plan (plan %.2fx)  p %.3g%s%s%s" % (
@@ -469,7 +469,7 @@ def main(argv=None):
             print("pooled %s: %d misses of %d detections over %d cases: %.3fx the budget "
                   "(+- %.3f binomial; plans scatter about fd / sqrt(47) each)"
                   % (key, m, d, len(ok), m / d / a.fd, math.sqrt(max(m, 1)) / d / a.fd))
-    print("%d of %d off the plan or mismatched, %d Q15 or centroid chains under it (%.0f s)"
+    print("%d of %d off the plan or mismatched, %d Q15 or screener chains under it (%.0f s)"
           % (bad, tests, under, time.time() - t0))
     if a.json:
         with open(a.json, "w") as f:

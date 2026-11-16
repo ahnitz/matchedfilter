@@ -136,6 +136,20 @@ def _restore_sys_path():
 
 
 @pytest.fixture(autouse=True)
+def _restore_simd_target():
+    """A test that narrows the SIMD target (mf.set_target) narrows it for itself only.
+    set_target(name) leaves targets() listing that one target, so a test that "restored"
+    the target by setting the back end it found pinned every later test to it, and a test
+    of another target then skipped: which one depended on the modules' order (found when
+    renaming test modules changed it, 2026-11-16)."""
+    import matchedfilter as mf
+    before = mf.targets()
+    yield
+    if mf.targets() != before:
+        mf.set_target(os.environ.get("MF_ISA") or None)
+
+
+@pytest.fixture(autouse=True)
 def _clean_autotune_cache():
     """Every test starts without the workload choices an earlier test made."""
     import matchedfilter as mf

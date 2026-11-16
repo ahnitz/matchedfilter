@@ -112,7 +112,7 @@ def _direct_refine_enabled():
     return _config.get("MF_DIRECT_REFINE")
 
 
-_TIER0_PAIR_CENTROID = True
+_TIER0_SHARED_SCREENERS = True
 _TIER0_MAX_ARITY = 16
 #: Skip building a wider first band's shared screeners when it loses even at the best ratio a
 #: narrower band found (HierarchicalFilter._choose_chain). False builds them for every band
@@ -145,8 +145,8 @@ def _narrower_bands_floor(ratios, whole, band):
     return max(held) if held else min(narrower.values())
 
 
-def _tier0_centroid_enabled():
-    return bool(_TIER0_PAIR_CENTROID)
+def _tier0_screeners_enabled():
+    return bool(_TIER0_SHARED_SCREENERS)
 
 
 def _tier0_min_clusters(band, is_cpu=True):
@@ -161,7 +161,7 @@ def _tier0_min_clusters(band, is_cpu=True):
 
 
 def _pareto_tier0_candidates(raw_cands):
-    """Distinct Pareto-undominated Tier-0 centroid candidates ordered from largest to smallest ratio."""
+    """Distinct Pareto-undominated Tier-0 screener candidates ordered from largest to smallest ratio."""
     distinct = []
     for cl in raw_cands:
         if cl is not None and (not distinct or cl.ratio <= distinct[-1].ratio - 0.05 + 1e-9):
@@ -458,7 +458,7 @@ class HierarchicalFilter(MatchedFilter):
                                                "" if self._direct_key() is None else "|direct", ctag)
 
     def _tier0_cluster_eligible(self):
-        """Return True when Tier-0 coarse centroid clustering applies to this plan."""
+        """Return True when Tier-0 coarse screener clustering applies to this plan."""
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         dev_ok = (
             (self.device.kind == "cpu" and self._gpu is None)
@@ -472,7 +472,7 @@ class HierarchicalFilter(MatchedFilter):
         return (self._clusters_allowed and tiers >= min_tiers and self.ntemplates >= 4
                 and self._pinned is None and self._cal_thr is None
                 and self._pending_ref is not None and len(self._pending_ref) == self.n
-                and dev_ok and not self._hermitian and _tier0_centroid_enabled())
+                and dev_ok and not self._hermitian and _tier0_screeners_enabled())
 
     def _templates_for_clustering(self):
         """Return current template spectra array without regenerating if already in memory."""
@@ -622,7 +622,7 @@ class HierarchicalFilter(MatchedFilter):
 
     def _clusters_sig(self):
         """Hashable summary of materialized candidate Tier-0 clusters for chain choice caching."""
-        if not self._tier0_clusters or not _tier0_centroid_enabled():
+        if not self._tier0_clusters or not _tier0_screeners_enabled():
             return ()
         return tuple(
             (b, round(cl.ratio, 2), math.floor(cl.alpha * 200.0 + 1e-9) / 200.0, cl.lag_pad)
@@ -639,9 +639,9 @@ class HierarchicalFilter(MatchedFilter):
         return self._tier0_cluster_for_band(int(ch[0]))
 
     def _tier1_usable(self, chain):
-        """Whether Tier-1 sub-centroids may run on `chain`: a CPU plan of at least two tiers,
+        """Whether Tier-1 sub-screeners may run on `chain`: a CPU plan of at least two tiers,
         except where Tier 1 is the last tier and a direct refine may apply (the direct refine
-        elects each survivor's own last-tier lag, which a shared centroid cannot give; the C
+        elects each survivor's own last-tier lag, which a shared screener cannot give; the C
         plan runs that tier unclustered then, ap_hmf_run)."""
         if self.device.kind != "cpu" or self._gpu is not None or chain is None or len(chain) < 2:
             return False
@@ -651,7 +651,7 @@ class HierarchicalFilter(MatchedFilter):
         return True
 
     def _active_tier1_cluster(self, chain=None):
-        """Active Tier-1 sub-centroid `Tier0Cluster` for `chain[1]` (nested inside the active
+        """Active Tier-1 sub-screener `Tier0Cluster` for `chain[1]` (nested inside the active
         Tier-0 clusters), or `None` when Tier-1 clustering does not apply."""
         ch = self._chain if chain is None else chain
         if not self._tier1_usable(ch):
@@ -673,7 +673,7 @@ class HierarchicalFilter(MatchedFilter):
         return cl1
 
     def _sync_tier0_clusters(self, plan):
-        """Upload or clear Tier-0 and Tier-1 pair centroids on CPU `_core.HMF` `plan`."""
+        """Upload or clear Tier-0 and Tier-1 pair screeners on CPU `_core.HMF` `plan`."""
         if plan is None or not hasattr(plan, "set_tier0_clusters"):
             return
         cl = self._active_tier0_cluster()
@@ -688,7 +688,7 @@ class HierarchicalFilter(MatchedFilter):
             else:
                 plan.set_tier0_clusters(cl.specs, cl.offsets, cl.members, int(cl.lag_pad))
             self._synced_t0 = tag
-        # Tier-1 sub-centroids nest inside the Tier-0 clusters: the C plan drops them whenever
+        # Tier-1 sub-screeners nest inside the Tier-0 clusters: the C plan drops them whenever
         # the Tier-0 clusters change, and they are uploaded after them.
         cl1 = self._active_tier1_cluster() if cl is not None else None
         tag1 = (id(plan), None if cl1 is None else id(cl1))
@@ -1172,7 +1172,7 @@ class HierarchicalFilter(MatchedFilter):
             if lb_by_b0[b0] >= limit or not math.isfinite(lb_by_b0[b0]):
                 continue
             def bound(ratio, b0=b0):
-                # the cheapest chain from b0 with tier 0 at this centroid ratio
+                # the cheapest chain from b0 with tier 0 at this screener ratio
                 # and no loss of signal (alpha 1, no lag padding): a lower bound
                 _, plans_r = _gatechain.choose_chain(
                     self._pending_ref, self.n, snr, self.fd,

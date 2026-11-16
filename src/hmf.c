@@ -131,9 +131,9 @@ struct ap_hmf_plan {
   ap_plan *fwd_cplx_batch;        /* lane-batched n-point forward (n <= 2048), or NULL */
   ap_plan *fwd_real_batch;        /* lane-batched n/2-point real forward (n <= 4096), or NULL */
   float *rtw;                     /* [2(n/2+1)] cos, sin of 2 pi k/n */
-  /* Tier-0 pair-centroid clustering (ap_hmf_set_tier0_clusters): evaluates tier0_nt <= nt
-     lag- and phase-aligned coarse centroids at tier 0 on full-bank multi-tier sweeps and
-     expands firing centroids to their member template indices for tier 1. */
+  /* Tier-0 pair-screener clustering (ap_hmf_set_tier0_clusters): evaluates tier0_nt <= nt
+     lag- and phase-aligned coarse screeners at tier 0 on full-bank multi-tier sweeps and
+     expands firing screeners to their member template indices for tier 1. */
   int tier0_clustered;
   int tier0_nt;
   int tier0_lag_pad;
@@ -142,8 +142,8 @@ struct ap_hmf_plan {
   int *tier0_off;                 /* [tier0_nt + 1] CSR offsets into tier0_members */
   int *tier0_members;             /* [nt] disjoint member template indices in [0, nt) */
   unsigned char *tier0_uncl_pend; /* [nd] deferred ingest into unclustered tier[0] */
-  /* Tier-1 sub-centroid clustering (ap_hmf_set_tier1_clusters): evaluates tier1_nt <= nt
-     sub-centroids at tier 1 on survivors of tier 0 and expands firing Tier-1 centroids
+  /* Tier-1 sub-screener clustering (ap_hmf_set_tier1_clusters): evaluates tier1_nt <= nt
+     sub-screeners at tier 1 on survivors of tier 0 and expands firing Tier-1 screeners
      to their member template indices for tier 2 / refine. */
   int tier1_clustered;
   int tier1_nt;
@@ -1056,9 +1056,9 @@ static int hmf_sync_unclustered_tier1(ap_hmf_plan *p,int d0,int nd){
 
 void ap_hmf_clear_tier0_clusters(ap_hmf_plan *p){
   if(!p || !p->tier0_clustered) return;
-  /* Tier-1 sub-centroids are only valid nested inside an active Tier-0 partition: a firing
-     Tier-1 centroid passes all its members on, which equals the unclustered tier only when
-     each of them came out of the same firing Tier-0 centroid. */
+  /* Tier-1 sub-screeners are only valid nested inside an active Tier-0 partition: a firing
+     Tier-1 screener passes all its members on, which equals the unclustered tier only when
+     each of them came out of the same firing Tier-0 screener. */
   ap_hmf_clear_tier1_clusters(p);
   (void)hmf_sync_unclustered_tier0(p,0,p->nd);
   hmf_free_tier0_clusters(p);
@@ -1097,9 +1097,9 @@ static int hmf_valid_partition(int nt,int nc,const int *offsets,const int *membe
   return ok;
 }
 
-/* The coarse plans of a centroid bank at band m: a pair-batched FP32 plan where nc fills a
+/* The coarse plans of a screener bank at band m: a pair-batched FP32 plan where nc fills a
    vector and m is within the pair-batch limit (as hmf_create_tier sizes a tier's), else a
-   plain one, and the FP16 gate where this build has it. Every centroid spectrum is loaded. */
+   plain one, and the FP16 gate where this build has it. Every screener spectrum is loaded. */
 static int hmf_cluster_plans(ap_hmf_plan *p,size_t m,int nc,const float *specs,
                              ap_mf_plan **out_mf,void **out_g16){
   const long pbmax=ap_env_int("MF_PBMAX",-1);
@@ -1126,7 +1126,7 @@ static int hmf_cluster_plans(ap_hmf_plan *p,size_t m,int nc,const float *specs,
   return 0;
 }
 
-/* Ingest the data rows this plan holds its own copy of into a newly built centroid bank of
+/* Ingest the data rows this plan holds its own copy of into a newly built screener bank of
    tier tr (rows the caller keeps arrive again with its next call). */
 static int hmf_cluster_replay_data(ap_hmf_plan *p,hmf_tier *tr,ap_mf_plan *cmf,void *cg16){
   if(!p->dcopy) return 0;
@@ -2835,7 +2835,7 @@ static int hmf_run_tier1_clustered(ap_hmf_plan *p,int d0,int fast_sparse,size_t 
   tr->lagged=0;
   tr->last_q15=0;
 
-  /* Map incoming (d, t) pairs to unique (d, c1) Tier-1 centroid pairs per block. */
+  /* Map incoming (d, t) pairs to unique (d, c1) Tier-1 screener pairs per block. */
   if(!p->qd || !p->qt || !p->qpass){
     const size_t np=(size_t)p->nd*p->nt;
     if(!p->qpass) p->qpass=malloc(np);
@@ -2919,8 +2919,8 @@ static int hmf_run_tier1_clustered(ap_hmf_plan *p,int d0,int fast_sparse,size_t 
   }
   tr->ticks+=ap_ticks()-t_0;
 
-  /* Expand firing Tier-1 centroids into sorted member template indices per block. Every member
-     of a firing centroid came in as a Tier-0 survivor: Tier-1 clusters nest inside Tier-0
+  /* Expand firing Tier-1 screeners into sorted member template indices per block. Every member
+     of a firing screener came in as a Tier-0 survivor: Tier-1 clusters nest inside Tier-0
      clusters (ap_hmf_set_tier1_clusters), and this path runs only after hmf_run_tier0_clustered
      passed whole Tier-0 clusters on in the same call (ap_hmf_run's conditions match). */
   int nnext=0;

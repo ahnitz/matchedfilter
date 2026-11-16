@@ -1,4 +1,4 @@
-"""Unit and statistical false-dismissal tests for Tier-0 coarse template pair centroids."""
+"""Unit and statistical false-dismissal tests for Tier-0 coarse template pair screeners."""
 import math
 import numpy as np
 import pytest
@@ -205,8 +205,8 @@ def test_correlated_bank_halves_tier0_work_and_preserves_peaks(profile_name, use
 
 
 @pytest.mark.parametrize("profile_name", ["inspiral_canonical", "deadzone_bandpass"])
-def test_centroid_coarse_noise_unit_variance(profile_name):
-    """Precomputed pair centroids preserve unit per-quadrature coarse noise variance on colored PSDs."""
+def test_screener_coarse_noise_unit_variance(profile_name):
+    """Precomputed pair screeners preserve unit per-quadrature coarse noise variance on colored PSDs."""
     n, nt, b0 = 2048, 12, 128
     power, psd, templates = _make_colored_correlated_bank(
         n, nt, b0, profile_name=profile_name, seed=505
@@ -335,7 +335,7 @@ def test_kill_switch_and_fallback_transitions(monkeypatch):
     data = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
 
     # 1. Kill switch off disables Tier-0 clustering completely
-    monkeypatch.setattr(_hierarchical, "_TIER0_PAIR_CENTROID", False)
+    monkeypatch.setattr(_hierarchical, "_TIER0_SHARED_SCREENERS", False)
     hf_off = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5, fd=0.01)
     hf_off.set_reference(power)
     hf_off.set_templates(templates)
@@ -345,7 +345,7 @@ def test_kill_switch_and_fallback_transitions(monkeypatch):
     assert hf_off.work_counts()["checked"][0] == nd * nt
 
     # 2. Pinned chains and explicit coarse thresholds run unclustered per-template Tier 0
-    monkeypatch.setattr(_hierarchical, "_TIER0_PAIR_CENTROID", True)
+    monkeypatch.setattr(_hierarchical, "_TIER0_SHARED_SCREENERS", True)
     hf_pin = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, chain=(128, 512), snr=5.5, fd=0.01)
     hf_pin.set_reference(power)
     hf_pin.set_templates(templates)
@@ -495,7 +495,7 @@ def test_adaptive_arity_k4_partition_variance_and_minimax():
     assert 3 in set(int(s) for s in sizes)
     assert 1 in set(int(s) for s in sizes)
 
-    # Colored-PSD coarse noise variance == 1.0 across all k in {1, 2, 3, 4} centroids
+    # Colored-PSD coarse noise variance == 1.0 across all k in {1, 2, 3, 4} screeners
     noise_scale = np.sqrt(psd)
     nblocks = 1200
     d_band = (
@@ -541,7 +541,7 @@ def test_adaptive_arity_k4_partition_variance_and_minimax():
         for j in range(4)
     )
 
-    # Normalize actual minimax centroid for quad 0 to unit PSD in-band norm and check worst-case overlap
+    # Normalize actual minimax screener for quad 0 to unit PSD in-band norm and check worst-case overlap
     ci_quad0 = next(
         ci for ci in range(cl_k4.specs.shape[0])
         if set(int(x) for x in members[offsets[ci]:offsets[ci + 1]]) == {0, 1, 2, 3}
@@ -608,7 +608,7 @@ def test_cost_driven_selection_chooses_k4_vs_k2_vs_unclustered(monkeypatch):
     hf_k2._execution_plan()
     assert hf_k2._mf.tier0_cluster_count() == nt // 2
 
-    # 2. Quad-correlated bank -> k=4 wins (nt // 4 == 4 centroids)
+    # 2. Quad-correlated bank -> k=4 wins (nt // 4 == 4 screeners)
     power_q, _, quad_bank = _make_quad_correlated_bank(n, nt, b0, chain_drift=0.12, seed=6061)
     hf_k4 = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5, fd=0.01)
     hf_k4.set_reference(power_q)
@@ -618,7 +618,7 @@ def test_cost_driven_selection_chooses_k4_vs_k2_vs_unclustered(monkeypatch):
 
 
 def test_k4_quad_bank_empirical_fdr_respects_budget(monkeypatch):
-    """4-template minimax centroids keep empirical false dismissals within the target budget."""
+    """4-template minimax screeners keep empirical false dismissals within the target budget."""
     monkeypatch.setenv("MF_GATE16", "0")
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
@@ -792,7 +792,7 @@ def test_tier0_refine_lags_matches_numpy_reference(target_isa, half_span):
 
 @pytest.mark.parametrize("use_q15", [False, True])
 @pytest.mark.parametrize("use_direct", [False, True])
-def test_single_tier_chain_centroids_fft_and_direct_refine(use_q15, use_direct, monkeypatch):
+def test_single_tier_chain_screeners_fft_and_direct_refine(use_q15, use_direct, monkeypatch):
     """Single-tier CPU chains (e.g. (256,) at n=1024) cluster Tier 0 and recover exact flat-filter
     peaks under both whole-block FFT refine and direct time-domain refine."""
     monkeypatch.setenv("MF_GATE16", "0")
@@ -883,7 +883,7 @@ def test_single_tier_chain_centroids_fft_and_direct_refine(use_q15, use_direct, 
 
 
 @pytest.mark.parametrize("use_q15", [False, True])
-def test_single_tier_centroid_fdr_and_lower_bound(use_q15, monkeypatch):
+def test_single_tier_screener_fdr_and_lower_bound(use_q15, monkeypatch):
     """Single-tier clustered chains respect the false-dismissal budget across interior and
     window-edge lags and satisfy pair_cost_lower_bound <= chosen cost."""
     monkeypatch.setenv("MF_GATE16", "0")
@@ -979,7 +979,7 @@ def test_clustered_tier0_preserves_sparse_c_order_across_interleaved_clusters(
     """When multiple Tier-0 clusters with interleaved member indices (e.g. [0, 15], [1, 14], ...)
     fire on the same block, run_series_batch_sparse and FilterResults emit peaks in strict
     (block, template, bin) C-order matching an unclustered reference bank. On a three-tier
-    chain the Tier-1 sub-centroids (interleaved too) take the sparse path as well."""
+    chain the Tier-1 sub-screeners (interleaved too) take the sparse path as well."""
     from matchedfilter.benchmark import _inspiral_power
     from matchedfilter.time_domain import template_spectra
 
@@ -1026,7 +1026,7 @@ def test_clustered_tier0_preserves_sparse_c_order_across_interleaved_clusters(
     if grp.plan._mf.tier0_cluster_count() == 0:
         # Force clustering on interleaved rows via set_tier0_clusters so C-order is exercised on all ISAs
         k0 = int(gc.band_offset(ref, n, 256))
-        cl = gc.tier0_pair_centroids(templates, ref, 256, k0=k0)
+        cl = gc.tier0_pair_screeners(templates, ref, 256, k0=k0)
         assert cl is not None
         assert any(
             int(cl.offsets[c + 1] - cl.offsets[c]) >= 2
@@ -1042,7 +1042,7 @@ def test_clustered_tier0_preserves_sparse_c_order_across_interleaved_clusters(
     else:
         grp.plan._mf.set_q15(False)
 
-    monkeypatch.setenv("MF_TIER0_CENTROIDS", "0")
+    monkeypatch.setenv("MF_TIER0_SCREENERS", "0")
     b_ref = mf.TimeDomainFilterBank(
         taps, counts, tap_sample_rate=2048.0, data_sample_rate=2048.0,
         threshold=6.0, false_dismissal=1e-2, binsize=512, fft_lengths=(n,)
@@ -1101,9 +1101,9 @@ def _cluster_of(cl):
     return out
 
 
-def test_tier1_sub_centroids_nest_hold_the_floor_and_match_an_independent_retention():
+def test_tier1_sub_screeners_nest_hold_the_floor_and_match_an_independent_retention():
     """cluster_tier1_from_tier0: a partition nested inside the Tier-0 clusters, merging some
-    pairs; every merged member's retention -- recomputed here over every fine lag the centroid's
+    pairs; every merged member's retention -- recomputed here over every fine lag the screener's
     padded window reaches, from the band vectors -- is at least alpha_min and at least what the
     builder reports; alpha is the smallest member retention."""
     n, b1 = 2048, 512
@@ -1122,7 +1122,7 @@ def test_tier1_sub_centroids_nest_hold_the_floor_and_match_an_independent_retent
     for c in range(cl1.offsets.size - 1):
         assert len(set(c0[cl1.members[cl1.offsets[c]:cl1.offsets[c + 1]]])) == 1
 
-    # Independent retention at every fine lag within the centroid's reach
+    # Independent retention at every fine lag within the screener's reach
     p = gc._norm_profile(power.astype(np.float32), n)
     k_lo, k_hi = gc._band_slice(n, b1, k0)
     H = templates[:, k_lo:k_hi].astype(np.complex128) / math.sqrt(p[k_lo:k_hi].sum())
@@ -1151,7 +1151,7 @@ def test_tier1_sub_centroids_nest_hold_the_floor_and_match_an_independent_retent
 
 
 def test_tier1_floor_splits_pairs_whose_members_lose_too_much():
-    """Members with unequal power lose sqrt(v_avg / v_t) at a shared centroid: with a 0.88
+    """Members with unequal power lose sqrt(v_avg / v_t) at a shared screener: with a 0.88
     weighted variance ratio no pair keeps the 0.995 floor and none merges, while a lower floor
     merges them and reports the loss."""
     n, b1 = 2048, 512
@@ -1168,8 +1168,8 @@ def test_tier1_floor_splits_pairs_whose_members_lose_too_much():
 
 
 @pytest.mark.parametrize("profile_name", ["inspiral_canonical", "deadzone_bandpass"])
-def test_tier1_centroid_coarse_noise_unit_variance(profile_name):
-    """Tier-1 sub-centroid spectra, as packed for the C plan (wrapped slots when k0 > 0), keep
+def test_tier1_screener_coarse_noise_unit_variance(profile_name):
+    """Tier-1 sub-screener spectra, as packed for the C plan (wrapped slots when k0 > 0), keep
     unit per-quadrature coarse noise variance on a coloured PSD, as single templates do."""
     n, b0 = 2048, 128
     rng = np.random.default_rng(3131)
@@ -1277,8 +1277,8 @@ def test_hmf_tier1_cluster_api_validates_and_nests():
 
 @pytest.mark.parametrize("chain", [(128, 512), (128, 512, 1024)])
 @pytest.mark.parametrize("use_q15", [False, True])
-def test_tier1_sub_centroids_cut_tier1_work_and_preserve_triggers(chain, use_q15, monkeypatch):
-    """HierarchicalFilter attaches Tier-1 sub-centroids inside its Tier-0 clusters (Tier 1 last
+def test_tier1_sub_screeners_cut_tier1_work_and_preserve_triggers(chain, use_q15, monkeypatch):
+    """HierarchicalFilter attaches Tier-1 sub-screeners inside its Tier-0 clusters (Tier 1 last
     or not), plans Tier 1 at their retention, evaluates fewer Tier-1 pairs than without them,
     and reports exactly the flat filter's triggers -- for the whole bank and for a template
     sub-slice (which runs Tier 1 unclustered)."""
@@ -1334,9 +1334,9 @@ def test_tier1_sub_centroids_cut_tier1_work_and_preserve_triggers(chain, use_q15
     assert with_t1 < plan.tier_inputs()[1]
 
 
-def test_no_tier1_sub_centroids_where_a_direct_refine_elects_tier1_lags(monkeypatch):
+def test_no_tier1_sub_screeners_where_a_direct_refine_elects_tier1_lags(monkeypatch):
     """With taps on a two-tier chain the direct refine elects each survivor's own Tier-1 lag:
-    no Tier-1 sub-centroids are attached or planned there."""
+    no Tier-1 sub-screeners are attached or planned there."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
     monkeypatch.setenv("MF_DIRECT_REFINE", "1")

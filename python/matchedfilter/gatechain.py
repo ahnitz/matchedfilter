@@ -96,10 +96,10 @@ _CACHE_MAX = 64
 
 
 class Tier0Cluster(NamedTuple):
-    """Precomputed Tier-0 coarse centroid bank and calibration parameters. The thresholds
+    """Precomputed Tier-0 coarse screener bank and calibration parameters. The thresholds
     are solved for one retention, alpha (from the members' mean less half their spread);
     member_alphas holds each template's own, which tools/fdr_audit.py --bank models a plan's
-    dismissal with. A Tier-1 sub-centroid bank (cluster_tier1_from_tier0) has the same form,
+    dismissal with. A Tier-1 sub-screener bank (cluster_tier1_from_tier0) has the same form,
     with alpha its members' smallest retention."""
     specs: np.ndarray
     offsets: np.ndarray
@@ -120,7 +120,7 @@ def _band_slice(n, b, k0):
 
 def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=4,
                              pass2=None):
-    """Build hierarchical Tier-0 centroid banks up to ``max_arity`` (``k <= 2, 4, 8, 16``).
+    """Build hierarchical Tier-0 screener banks up to ``max_arity`` (``k <= 2, 4, 8, 16``).
 
     Parameters
     ----------
@@ -243,7 +243,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
 
     def _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad):
         # (k <= 4 members at 0.96 at their build lag met the engine at ~0.99)
-        return _centroid_retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad,
+        return _screener_retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad,
                                    W32, WC64, exp_all64, R, v)
 
     def _pack_cluster(bvecs_c64, offs_i32, mems_i32, alphas_arr, max_dl):
@@ -366,7 +366,7 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
 
 
 def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_arity=2):
-    """Build a lag-and-phase-aligned Tier-0 coarse centroid bank up to ``max_arity``.
+    """Build a lag-and-phase-aligned Tier-0 coarse screener bank up to ``max_arity``.
 
     Parameters
     ----------
@@ -383,12 +383,12 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_ari
     rho_min : float, optional
         Minimum PSD-weighted in-band coherence required to merge a Pass-1 pair (default ``0.90``).
     max_arity : int, optional
-        Maximum templates merged into a single centroid in ``{2, 3, 4}`` (default ``2``).
+        Maximum templates merged into a single screener in ``{2, 3, 4}`` (default ``2``).
 
     Returns
     -------
     Tier0Cluster or None
-        Precomputed centroid spectra ``(nt0, b0)``, CSR ``offsets`` ``(nt0 + 1,)``,
+        Precomputed screener spectra ``(nt0, b0)``, CSR ``offsets`` ``(nt0 + 1,)``,
         ``members`` ``(nt,)``, coarse window ``lag_pad``, quantized count ``ratio``,
         and conservative signal-retention factor ``alpha``, or ``None`` when ``nt < 2``
         or fewer than 15% of templates merge.
@@ -405,26 +405,26 @@ def cluster_tier0_templates(spectra, power, n, band, k0=0, rho_min=0.90, max_ari
     return best
 
 
-def _centroid_retention(bvecs, offsets, members, alphas, lag_pad, W32, WC64, exp_all64, R, v):
+def _screener_retention(bvecs, offsets, members, alphas, lag_pad, W32, WC64, exp_all64, R, v):
     """Each clustered member's retention as the engine meets it.
 
-    The retention is the peak, over the lags the centroid's padded window reaches
-    (``|lag| <= lag_pad * R`` fine samples), of the centroid's overlap with the member, in the
+    The retention is the peak, over the lags the screener's padded window reaches
+    (``|lag| <= lag_pad * R`` fine samples), of the screener's overlap with the member, in the
     member's variance units: ``alpha = sqrt(v_c / v_t) |<c, u_t>|`` for unit ``c`` and ``u_t``.
-    The overlap at the one lag a member was aligned at when the centroid was built is only a
-    lower bound: the centroid blends members, and its cross-correlation with a member can peak
+    The overlap at the one lag a member was aligned at when the screener was built is only a
+    lower bound: the screener blends members, and its cross-correlation with a member can peak
     elsewhere.
 
     Parameters
     ----------
     bvecs : numpy.ndarray
-        ``(nc, length)`` complex64 in-band centroid vectors.
+        ``(nc, length)`` complex64 in-band screener vectors.
     offsets, members : numpy.ndarray
-        CSR partition of the templates into the ``nc`` centroids.
+        CSR partition of the templates into the ``nc`` screeners.
     alphas : array_like
         ``(nt,)`` starting retentions; singletons keep theirs.
     lag_pad : int
-        Coarse lags of padding the engine searches around each centroid's window.
+        Coarse lags of padding the engine searches around each screener's window.
     W32 : numpy.ndarray
         ``(length,)`` float32 inverse-PSD weights.
     WC64 : numpy.ndarray
@@ -458,19 +458,19 @@ def _centroid_retention(bvecs, offsets, members, alphas, lag_pad, W32, WC64, exp
     return out
 
 
-#: Smallest member retention a Tier-1 sub-centroid may have (cluster_tier1_from_tier0).
+#: Smallest member retention a Tier-1 sub-screener may have (cluster_tier1_from_tier0).
 TIER1_ALPHA_MIN = 0.995
 
 
 def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_min=0.985,
                              alpha_min=TIER1_ALPHA_MIN):
-    """Build a Tier-1 sub-centroid bank by pairing members inside each Tier-0 cluster.
+    """Build a Tier-1 sub-screener bank by pairing members inside each Tier-0 cluster.
 
     Pairs are scored at band ``band1`` with the same C kernels Tier-0 clustering uses
     (``_core.tier0_pair_scores`` over coarse shifts, ``_core.tier0_refine_lags`` for the exact
     fine lag), matched greedily by coherence within each multi-member Tier-0 cluster, and
-    merged into unit-variance centroids. Each merged member's retention is then measured as the
-    engine meets it (:func:`_centroid_retention`), and any pair with a member below
+    merged into unit-variance screeners. Each merged member's retention is then measured as the
+    engine meets it (:func:`_screener_retention`), and any pair with a member below
     ``alpha_min`` is split again, so the threshold model's Tier-1 loss stays small and is
     passed to :func:`chain_thresholds` (``tier1_cluster``) exactly.
 
@@ -483,7 +483,7 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
     n : int
         Full fine FFT block length.
     tier0_cluster : Tier0Cluster
-        Active Tier-0 centroid bank; only its multi-member clusters are split further.
+        Active Tier-0 screener bank; only its multi-member clusters are split further.
     band1 : int
         Tier-1 coarse FFT band length ``b1`` (must divide ``n`` and be ``< n // 2``).
     k0 : int, optional
@@ -497,7 +497,7 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
     Returns
     -------
     Tier0Cluster or None
-        Tier-1 sub-centroid bank (``specs`` ``(nc1, b1)``, CSR ``offsets``/``members`` nested
+        Tier-1 sub-screener bank (``specs`` ``(nc1, b1)``, CSR ``offsets``/``members`` nested
         inside ``tier0_cluster``'s clusters, ``lag_pad``, ``alpha`` = smallest member
         retention, ``member_alphas``), or ``None`` when no pair merges.
     """
@@ -600,7 +600,7 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
     pa, pb, pdl, g, rho = pa[keep], pb[keep], pdl[keep], g[keep], rho[keep]
     Ca_u, Cb_u = Ca_u[keep], Cb_u[keep]
 
-    # Unit-variance pair centroids (cluster_tier0_candidates' Pass-1 synthesis)
+    # Unit-variance pair screeners (cluster_tier0_candidates' Pass-1 synthesis)
     target_v = 0.5 * (v[pa] + v[pb])
     pair_vecs = ((np.sqrt(target_v / (2.0 * (1.0 + rho))))[:, None]
                  * (Ca_u + (g.conj() / rho)[:, None] * (Cb_u * exp_all[pdl + R1]))
@@ -634,7 +634,7 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
         bvecs = np.asarray(vecs, dtype=np.complex64)
         offs_i32 = np.asarray(offs, dtype=np.int32)
         mems_i32 = np.asarray(mems, dtype=np.int32)
-        alphas = _centroid_retention(bvecs, offs_i32, mems_i32, np.ones(nt), lpad,
+        alphas = _screener_retention(bvecs, offs_i32, mems_i32, np.ones(nt), lpad,
                                      W32, WC64, exp_all64, R1, v)
         return bvecs, offs_i32, mems_i32, lpad, alphas
 
@@ -1925,7 +1925,7 @@ class CostModel:
         return (cq, True) if cq <= c * (1.0 + TIE) else (c, False)
 
     def first_tier_for(self, chain, reach1):
-        """(cost per pair, q15) of `chain`'s first tier, scaling dense Tier-0 work by centroid ratio
+        """(cost per pair, q15) of `chain`'s first tier, scaling dense Tier-0 work by screener ratio
         when `chain[0]` has an active Tier-0 cluster ratio."""
         b = int(chain[0])
         t0r = self.tier0_ratios
@@ -1941,14 +1941,14 @@ class CostModel:
         return (cq, True) if cq <= c * (1.0 + TIE) else (c, False)
 
     def with_tier0_cluster(self, ratios, single_tier=True):
-        """Return a shallow copy pricing chains' first tier with centroid ratios.
+        """Return a shallow copy pricing chains' first tier with screener ratios.
 
         Parameters
         ----------
         ratios : dict of {int: float} or None
             Mapping from candidate Tier-0 band `b` to `n_clusters / n_templates` (`< 1.0`).
         single_tier : bool, optional
-            Whether single-tier chains `(b,)` may use Tier-0 centroids (`True` on CPU,
+            Whether single-tier chains `(b,)` may use Tier-0 screeners (`True` on CPU,
             `False` on GPU).
 
         Returns
@@ -3161,7 +3161,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
 
     tier0_cluster / tier1_cluster: a Tier0Cluster (or an (alpha, lag_pad) pair) whose
     retention and lag padding the signal draws and noise maxima of tier 0 / tier 1 are
-    modelled with. A Tier-1 sub-centroid bank applies only with a Tier-0 one and a chain of
+    modelled with. A Tier-1 sub-screener bank applies only with a Tier-0 one and a chain of
     at least two tiers.
 
     Called whenever a plan's reference changes, inside the caller's filtering,

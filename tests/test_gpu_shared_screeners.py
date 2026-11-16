@@ -1,4 +1,4 @@
-"""GPU Tier-0 coarse centroid clustering (`compactPairsClustered`) unit and FDR tests."""
+"""GPU Tier-0 coarse screener clustering (`compactPairsClustered`) unit and FDR tests."""
 import ctypes
 import math
 
@@ -11,7 +11,7 @@ import matchedfilter as mf
 from matchedfilter import _cudacompute, _gpuhier, _hierarchical
 from matchedfilter import gatechain as gc
 from matchedfilter._gpuexec import fused
-from test_coarse_pair_centroids import (
+from test_shared_screeners import (
     _make_colored_correlated_bank,
     _make_quad_correlated_bank,
 )
@@ -89,7 +89,7 @@ def test_cuda_ptx_compactc_abi_and_buffer_sizing(monkeypatch):
 @pytest.mark.skipif(not usable_gpu(), reason=usable_gpu_reason() or "no usable GPU")
 @pytest.mark.parametrize("profile_name", ["inspiral_canonical", "deadzone_bandpass"])
 def test_gpu_clustered_tier0_arities_windows_and_feeds(profile_name, monkeypatch):
-    """GPU Tier-0 centroids (k in {1, 2, 3, 4}, k0=0 and k0>0, interior & wrap windows) match flat."""
+    """GPU Tier-0 screeners (k in {1, 2, 3, 4}, k0=0 and k0>0, interior & wrap windows) match flat."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
     n, nd, nt = 2048, 8, 20
@@ -222,7 +222,7 @@ def test_gpu_clustered_tier0_arities_windows_and_feeds(profile_name, monkeypatch
 
 @pytest.mark.skipif(not usable_gpu(), reason=usable_gpu_reason() or "no usable GPU")
 def test_gpu_compactc_nan_inf_fails_open():
-    """NaN or Inf in a Tier-0 centroid coarse value fails open and expands all member templates."""
+    """NaN or Inf in a Tier-0 screener coarse value fails open and expands all member templates."""
     n, nd, nt = 1024, 2, 8
     power, _, templates = _make_quad_correlated_bank(n, nt, 128, seed=818)
     hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5, fd=0.01, device="gpu")
@@ -247,7 +247,7 @@ def test_gpu_compactc_nan_inf_fails_open():
 
 @pytest.mark.skipif(not usable_gpu(), reason=usable_gpu_reason() or "no usable GPU")
 def test_gpu_clustered_tier0_empirical_fdr_respects_budget(monkeypatch):
-    """GPU Tier-0 centroids (k <= 4) respect the false-dismissal budget on interior and edge lags."""
+    """GPU Tier-0 screeners (k <= 4) respect the false-dismissal budget on interior and edge lags."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
     n, nt = 2048, 16

@@ -1,7 +1,7 @@
 """Shared screeners are not built for a wider first band that cannot win.
 
 HierarchicalFilter._choose_chain builds a candidate first band's shared screeners (tier-0
-centroids) to price the chains that start there. A wider band shares no better than a
+screeners) to price the chains that start there. A wider band shares no better than a
 narrower one, so a band that loses even at the best ratio a narrower band found is skipped.
 The plan must be the one the full evaluation chooses."""
 import numpy as np

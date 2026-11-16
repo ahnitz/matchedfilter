@@ -11,7 +11,7 @@ Covers:
 4. Live GPU execution on all enumerable Vulkan devices (including RADV `sg=64` and
    `llvmpipe` `sg=8`) across all four feeds, odd/zero/single survivor counts, FP16 overflow
    fail-open, `hier_peaks_grouped` per-row windows, shifted active bands (`band_offsets`),
-   Tier-0 coarse centroid clustering (`tier0_cluster`), and direct time-domain refinement
+   Tier-0 coarse screener clustering (`tier0_cluster`), and direct time-domain refinement
    (`use_direct = True`).
 """
 import ctypes
@@ -598,7 +598,7 @@ def test_gpu_tier1_fp16_shifted_bands_and_clustered_tier0(gpu_dev, monkeypatch):
     # 2. Clustered Tier-0 (`compactPairsClustered` writing `t1args` via `packShift`) on (128, 512).
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
-    from test_coarse_pair_centroids import _make_quad_correlated_bank
+    from test_shared_screeners import _make_quad_correlated_bank
     power, psd, c_tmpls = _make_quad_correlated_bank(n, 16, 128, chain_drift=0.14, seed=515)
     c_data = ((rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n)))
               * np.sqrt(psd)[None, :]).astype(np.complex64)

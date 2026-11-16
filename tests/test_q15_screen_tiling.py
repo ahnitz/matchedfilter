@@ -1,6 +1,6 @@
 """Tests for L1D-tiled multi-block Q15 screening, same-block Tier-1 gather register reuse,
 CPU-cache-queried L2 sizing and n = 1024 hierarchical block eligibility, and multi-arity
-(k <= 16) Tier-0 coarse centroids."""
+(k <= 16) Tier-0 coarse screeners."""
 import ctypes
 import math
 
@@ -150,7 +150,7 @@ def test_q15_screen_blocks_bit_exact_against_stat_path(target, band):
 
 
 @pytest.mark.parametrize("band", [64, 128, 256, 512, 1024])
-def test_q15_pairs_batch_same_block_centroid_runs_exact(target, band):
+def test_q15_pairs_batch_same_block_screener_runs_exact(target, band):
     """Verify 4-way and 2-way same-block register reuse in q15_prod_gather_n and
     q15_screen_gather_row_fused_n matches single-pair evaluation bit-for-bit across runs of
     1..9 survivors per data block at every Q15 band."""
@@ -240,8 +240,8 @@ def test_q15_pairs_batch_same_block_centroid_runs_exact(target, band):
         lib.ap_mf_destroy(plan)
 
 
-def test_multi_arity_k16_centroids_partition_variance_and_fdr(monkeypatch):
-    """Verify k <= 16 multi-pass centroids produce valid CSR partitions, unit colored-PSD
+def test_multi_arity_k16_screeners_partition_variance_and_fdr(monkeypatch):
+    """Verify k <= 16 multi-pass screeners produce valid CSR partitions, unit colored-PSD
     variance, lazy pass pruning, and empirical FDR within budget."""
     monkeypatch.setenv("MF_GATE16", "0")
     monkeypatch.setenv("MF_AUTOTUNE", "0")
@@ -261,7 +261,7 @@ def test_multi_arity_k16_centroids_partition_variance_and_fdr(monkeypatch):
     assert sorted(int(m) for m in cl_k16.members) == list(range(nt))
     assert int(sizes.max()) > 4 and int(sizes.max()) <= 16
 
-    # Colored-PSD coarse noise variance == 1.0 across all k <= 16 centroids
+    # Colored-PSD coarse noise variance == 1.0 across all k <= 16 screeners
     rng = np.random.default_rng(9192)
     d_band = (
         (rng.standard_normal((800, b0)) + 1j * rng.standard_normal((800, b0)))
@@ -273,7 +273,7 @@ def test_multi_arity_k16_centroids_partition_variance_and_fdr(monkeypatch):
         vars_all.extend([float(np.var(corr.real)), float(np.var(corr.imag))])
     assert float(np.mean(vars_all)) == pytest.approx(1.0, abs=0.04)
 
-    # HierarchicalFilter selects high-arity (>4) centroids and respects empirical FDR budget
+    # HierarchicalFilter selects high-arity (>4) screeners and respects empirical FDR budget
     hf = mf.HierarchicalFilter(n, ndata=1, ntemplates=nt, snr=snr, fd=fd, search_window=win)
     hf.set_reference(power)
     hf.set_templates(templates)
@@ -356,7 +356,7 @@ def test_batch_target_large_l2_does_not_inflate_long_transforms(monkeypatch):
 
 def test_pareto_frontier_retains_all_undominated_arities_and_forced_chain_fallback(monkeypatch):
     """Verify _pareto_tier0_candidates keeps every undominated arity and _tier0_cluster_for_band
-    falls back cleanly to unclustered None when forced_chain cannot gate with centroids."""
+    falls back cleanly to unclustered None when forced_chain cannot gate with screeners."""
     from matchedfilter import _hierarchical
 
     def mk(ratio, alpha, lag_pad=1):

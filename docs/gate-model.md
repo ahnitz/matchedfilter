@@ -737,7 +737,7 @@ Through `choose_chain` on the six synthetic shapes and a flat profile (252 cases
 six shapes): fd 1e-2 default chains at n 2048 and 4096, 80 cases, 0.879 budgets pooled;
 the model's own chains on the production window at n 1024 and 2048, 1.003 (fd 1e-2) and
 0.912 (fd 1e-3, 4.5 M detections); fd 1e-3 default chains at n 2048, 0.828; a 16-template
-bank with the Q15 screen and tier-0 centroids, 0.792 and 0.604. No case off its plan.
+bank with the Q15 screen and tier-0 screeners, 0.792 and 0.604. No case off its plan.
 
 # One simulation for signal and noise, 2026-10-26
 

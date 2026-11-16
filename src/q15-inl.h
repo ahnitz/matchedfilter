@@ -988,7 +988,7 @@ static HWY_INLINE void q15_prod_gather_n(const int16_t *const *drp, const int16_
     for(int l = 0; l < AP_QW;){
       /* Load a data block's tile once and keep it in registers across the whole run of
          consecutive survivor pairs from that block (such as the members expanded from a
-         firing centroid), which the caller's (block, template) order makes contiguous. */
+         firing screener), which the caller's (block, template) order makes contiguous. */
       const int16_t *dr0 = drp[l];
       int run_end = l + 1;
       while(run_end < AP_QW && drp[run_end] == dr0) run_end++;
@@ -1108,7 +1108,7 @@ static HWY_NOINLINE int q15_screen_gather_row_fused_n(
   for(int l = 0; l < cnt;){
     const int16_t *dr0 = drp[l], *di0 = dip[l];
     /* Share dR/dI in registers across consecutive survivor pairs from the same data block
-       (such as members expanded from a firing Tier-0 centroid). */
+       (such as members expanded from a firing Tier-0 screener). */
     if(l + 3 < cnt && drp[l + 1] == dr0 && drp[l + 2] == dr0 && drp[l + 3] == dr0){
       if(l + 5 < cnt){
         __builtin_prefetch(trp[l + 4], 0, 1);

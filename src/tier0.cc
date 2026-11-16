@@ -1,4 +1,4 @@
-/* Tier-0 pair centroid scoring (gatechain.cluster_tier0_candidates), under Highway's dispatch.
+/* Tier-0 pair screener scoring (gatechain.cluster_tier0_candidates), under Highway's dispatch.
  *
  * For a chunk of mc unit-variance coarse template vectors U (mc x len, split real and
  * imaginary) and nsh candidate lag shifts S (nsh x len, unit-modulus phases), the coherence
