@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 
 DATA = pathlib.Path(__file__).parent / "data"
 N, SNR = 2048, 6.0
@@ -23,17 +24,17 @@ def _profile():
 def empty_model(monkeypatch):
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE", "_PLAN_CACHE",
               "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_KEPT", "_LOCAL_WINDOWS"):
-        monkeypatch.setattr(gc, c, OrderedDict())
-    monkeypatch.setattr(gc, "_SIMILAR", {})
-    monkeypatch.setattr(gc, "_SIMILAR_COUNT", {})
+        monkeypatch.setattr(gd if hasattr(gd, c) else gc, c, OrderedDict())
+    monkeypatch.setattr(gd, "_SIMILAR", {})
+    monkeypatch.setattr(gd, "_SIMILAR_COUNT", {})
 
 
 def _draws(p, bands, fd=1e-2, alphas=None, held=True):
     """The draws as the planner holds them (held), or written out as plain arrays."""
     kw = {} if alphas is None else {"alphas": alphas}
-    read = gc._signal_table if held else gc.signal_draws
-    return read(p, N, bands, SNR, gc.model_draws(fd)[0],
-                window=gc.local_window(p, N, bands, WINDOWS[0]), lags_too=True, **kw)
+    read = gd._signal_table if held else gd.signal_draws
+    return read(p, N, bands, SNR, gd.model_draws(fd)[0],
+                window=gd.local_window(p, N, bands, WINDOWS[0]), lags_too=True, **kw)
 
 
 def _held_bytes(cache):
@@ -62,7 +63,7 @@ def test_a_chains_columns_are_its_kept_draws_halves(empty_model, chain):
     """_kept_halves gives, as views, exactly what halving a copy of the chain's kept draws
     gives, for adjacent and for scattered columns."""
     p = _profile()
-    bands = gc.usable_bands(p, N)
+    bands = gd.usable_bands(p, N)
     sig, _ = _draws(p, bands)
     cols = [bands.index(b) for b in chain]
     A, B = gc._kept_halves(sig, bands, cols, chain, SNR)
@@ -85,12 +86,12 @@ def test_a_retention_holds_its_own_band_beside_the_plain_draws(empty_model):
     maxima and for their lags; written out (signal_draws) they are the whole table, and what
     the planner reads of them is that table's."""
     p = _profile()
-    bands = gc.usable_bands(p, N)
+    bands = gd.usable_bands(p, N)
     (Cp, Fp), (fatp, catp) = _draws(p, bands)
     alphas = tuple(0.97 if b == 128 else 1.0 for b in bands)
     (C, F), (fat, cat) = _draws(p, bands, alphas=alphas)
     altered = bands.index(128)
-    assert isinstance(C, gc._Beside) and isinstance(cat, gc._Beside)
+    assert isinstance(C, gd._Beside) and isinstance(cat, gd._Beside)
     assert C.plain is Cp and cat.plain is catp and F is Fp and fat is fatp
     assert set(C.own) == {altered} == set(cat.own)
     assert C.own[altered].nbytes + cat.own[altered].nbytes < 0.3 * (Cp.nbytes + catp.nbytes)
@@ -116,13 +117,13 @@ def _altered_bands_per_simulation(monkeypatch):
     """A list that receives, for every simulation run from here on, the number of bands it
     alters by a retention."""
     simulated = []
-    simulate = gc._simulate
+    simulate = gd._simulate
 
     def spy(p_, n, bands_, *a, **k):
         simulated.append(sum(x < 1.0 for x in (k.get("alphas") or ())))
         return simulate(p_, n, bands_, *a, **k)
 
-    monkeypatch.setattr(gc, "_simulate", spy)
+    monkeypatch.setattr(gd, "_simulate", spy)
     return simulated
 
 
@@ -134,16 +135,16 @@ def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_mo
     p, bands = _profile(), [128, 256, 512]
     both, one, other = (0.97, 0.995, 1.0), (0.97, 1.0, 1.0), (1.0, 0.995, 1.0)
     # its own simulation: the single retentions are not used
-    monkeypatch.setattr(gc, "_beside_singles", lambda parts: None)
+    monkeypatch.setattr(gd, "_beside_singles", lambda parts: None)
     (C, F), (fat, cat) = _draws(p, bands, alphas=both, held=False)
     monkeypatch.undo()
     monkeypatch.setenv("MF_SIGNAL_LAW", "0")          # (undone with the rest: `simulated`)
-    for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS, gc._SIMILAR, gc._SIMILAR_COUNT):
+    for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS, gd._NOISE_RECORDS, gd._SIMILAR, gd._SIMILAR_COUNT):
         c.clear()
 
     simulated = _altered_bands_per_simulation(monkeypatch)
     (Cs, Fs), (fats, cats) = _draws(p, bands, alphas=both)
-    assert isinstance(Cs, gc._Beside) and sorted(Cs.own) == [0, 1]
+    assert isinstance(Cs, gd._Beside) and sorted(Cs.own) == [0, 1]
     assert max(simulated) == 1                        # one band at a time
     np.testing.assert_array_equal(Cs.full(), C)
     np.testing.assert_array_equal(cats.full(), cat)
@@ -159,13 +160,13 @@ def test_a_retention_of_two_bands_is_its_single_retentions_side_by_side(empty_mo
 def test_noise_under_two_retentions_is_each_bands_own(empty_model, monkeypatch):
     """The noise records of two altered bands are those of the two simulated together, read
     from each band's own (which the band's signal retention already made)."""
-    p, bands, al, nsim = gc._norm_profile(_profile(), N), [128, 256, 512], (0.97, 0.995, 1.0), 3000
-    k0s = tuple(gc.band_offset(p, N, b) for b in bands)
-    together = gc._noise_records(p, N, bands[:2], nsim, 5, k0s=k0s[:2], alphas=al[:2])
-    plain = gc._noise_records(p, N, bands, nsim, 5, k0s=k0s)
-    gc._NOISE_RECORDS.clear()
+    p, bands, al, nsim = gd._norm_profile(_profile(), N), [128, 256, 512], (0.97, 0.995, 1.0), 3000
+    k0s = tuple(gd.band_offset(p, N, b) for b in bands)
+    together = gd._noise_records(p, N, bands[:2], nsim, 5, k0s=k0s[:2], alphas=al[:2])
+    plain = gd._noise_records(p, N, bands, nsim, 5, k0s=k0s)
+    gd._NOISE_RECORDS.clear()
     simulated = _altered_bands_per_simulation(monkeypatch)
-    got = gc._noise_records(p, N, bands, nsim, 5, k0s=k0s, alphas=al)
+    got = gd._noise_records(p, N, bands, nsim, 5, k0s=k0s, alphas=al)
     assert max(simulated) == 1
     for i in (0, 1):
         for x, y in zip(got[i], together[i]):
@@ -190,12 +191,12 @@ def test_a_retentions_plans_are_those_of_its_own_table(empty_model, monkeypatch)
         return out
 
     shared = plans()
-    assert any(isinstance(v[0][0], gc._Beside) for v in gc._SIGNAL_CACHE.values())
+    assert any(isinstance(v[0][0], gd._Beside) for v in gd._SIGNAL_CACHE.values())
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_PLAN_CACHE", "_SIGNAL_RECORDS",
               "_NOISE_RECORDS", "_KEPT"):
-        getattr(gc, c).clear()
-    gc._SIMILAR.clear()
-    monkeypatch.setattr(gc, "_beside_plain", lambda hit, plain: hit)
+        getattr(gd if hasattr(gd, c) else gc, c).clear()
+    gd._SIMILAR.clear()
+    monkeypatch.setattr(gd, "_beside_plain", lambda hit, plain: hit)
     assert plans() == shared
 
 
@@ -205,9 +206,9 @@ def test_distance_halves_are_the_distances_halved(empty_model, far):
     without the searched window's far noise; and what they count and select beyond a
     half-width is what the array gives."""
     p = _profile()
-    bands = gc.usable_bands(p, N)
+    bands = gd.usable_bands(p, N)
     sig, lags = _draws(p, bands, fd=1e-3)
-    noise = gc.noise_block_maxima(p, N, bands, nsim=gc.model_draws(1e-3)[1], window=WINDOWS[0]) if far else None
+    noise = gd.noise_block_maxima(p, N, bands, nsim=gd.model_draws(1e-3)[1], window=WINDOWS[0]) if far else None
     for b in (256, 512):
         A, B = gc._distance_halves(sig, lags, bands, (b,), SNR, N, noise)
         whole = gc._distances(sig, lags, bands, (b,), SNR, N, noise)
@@ -234,7 +235,7 @@ def test_windows_and_chains_add_almost_nothing_to_what_is_held(empty_model):
     few indices, a retention's its band's column."""
     import json
     p = _profile()
-    bands = gc.usable_bands(p, N)
+    bands = gd.usable_bands(p, N)
     rec = json.loads((DATA / "cost_model_2048_zen5.json").read_text())
     cost = gc.CostModel.from_dict(rec["model"]).unscreened().with_direct(0.09 * 256 + 4.0)
     fd = 1e-3
@@ -242,8 +243,8 @@ def test_windows_and_chains_add_almost_nothing_to_what_is_held(empty_model):
     (C, F), (fat, cat) = _draws(p, bands, fd=fd)
     table = C.nbytes + fat.nbytes + cat.nbytes
     held_tables = lambda: sum(  # noqa: E731  (what the draws' own cache holds)
-        x.nbytes for (c, _), (_, at) in gc._SIGNAL_CACHE.values()
-        for t in (c, at) for x in (t.own.values() if isinstance(t, gc._Beside) else [t]))
+        x.nbytes for (c, _), (_, at) in gd._SIGNAL_CACHE.values()
+        for t in (c, at) for x in (t.own.values() if isinstance(t, gd._Beside) else [t]))
     tables_before = held_tables()
     one = _held_bytes(gc._KEPT)
     assert one < 2.5 * table

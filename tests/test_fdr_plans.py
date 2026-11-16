@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc, gatemodel as gm
+from matchedfilter import _gatedraws as gd
 from fdr_support import SNR, profile
 
 
@@ -13,17 +14,17 @@ def _plan_seeds(name, n, fd, seeds, cost=None):
     rule), each judged on 1M detections of one independent check simulation: rows of
     (seed, kind, tiers, realised dismissal / fd, half-width)."""
     power = profile(name, n)
-    bands = gc.usable_bands(power, n)
-    C, F = gc.signal_draws(power, n, bands, SNR, 1000000, seed=977, window=None)
+    bands = gd.usable_bands(power, n)
+    C, F = gd.signal_draws(power, n, bands, SNR, 1000000, seed=977, window=None)
     det = F[:, 0] >= SNR
     check = C[det]
     rows = []
     for s in range(seeds):
-        sig, lags = gc.signal_draws(power, n, bands, SNR, gc.model_draws(fd)[0], seed=1000 + s,
+        sig, lags = gd.signal_draws(power, n, bands, SNR, gd.model_draws(fd)[0], seed=1000 + s,
                                     lags_too=True)
-        noise = gc.noise_block_maxima(power, n, bands, seed=1000 + s)
+        noise = gd.noise_block_maxima(power, n, bands, seed=1000 + s)
         plans = {}
-        for chain in gc.enumerate_chains(n, 3, bands=bands):
+        for chain in gd.enumerate_chains(n, 3, bands=bands):
             pl = gc.plan_chain(sig, noise, bands, list(chain), fd, cost, n, SNR, lags=lags)
             if pl is not None:
                 plans[tuple(chain)] = pl
@@ -34,10 +35,10 @@ def _plan_seeds(name, n, fd, seeds, cost=None):
             for b, t in zip(pl["chain"], pl["thresholds"]):
                 lost |= check[:, bands.index(b)] < t
             rows.append((s, kind, len(pl["chain"]), lost.mean() / fd))
-        for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS, gc._NOISE_CACHE,
+        for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS, gd._NOISE_RECORDS, gd._NOISE_CACHE,
                   gc._KEPT, gc._CAND_CACHE):
             c.clear()
-        gc._SIMILAR.clear()
+        gd._SIMILAR.clear()
     return rows
 
 

@@ -31,6 +31,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
+from matchedfilter import _gatedraws as gd
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tools"))
 
@@ -320,15 +321,15 @@ def test_the_library_model_matches_this_one():
 @pytest.mark.parametrize("fd", [.01, .001, .0001])
 def test_quantile_placement_uses_the_conditional_distribution(fd):
     """The gate is an order statistic of the detections' coarse maxima (draws the fine stage
-    keeps, in the window local to the signal: gatechain.local_window), on the fit half the
+    keeps, in the window local to the signal: _gatedraws.local_window), on the fit half the
     plan was not searched on: the j-th smallest of M with M + 1 = round(j / fd), whose
     dismissal on fresh draws averages j / (M + 1) = fd."""
     from matchedfilter import gatechain as gc, gatemodel as gm
     p = profile()
     gate = gm.gate_for(p, N, BAND, SNR, fd)
-    bands = gc.usable_bands(p, N)
-    sig = gc.signal_draws(p, N, bands, SNR, gc.model_draws(fd)[0],
-                          window=gc.local_window(p, N, bands))
+    bands = gd.usable_bands(p, N)
+    sig = gd.signal_draws(p, N, bands, SNR, gd.model_draws(fd)[0],
+                          window=gd.local_window(p, N, bands))
     fit = np.sort(gc._halves(gc.kept_draws(sig, bands, (BAND,), SNR))[1][:, 0])
     j = gm.fit_order(fd)
     assert fit.size + 1 == round(j / fd)
@@ -361,7 +362,7 @@ def test_coarse_never_exceeds_its_local_fine_maximum():
     the fine grid, so the coarse maximum cannot exceed its local fine maximum."""
     from matchedfilter import gatechain as gc
     p = np.zeros(1024); p[:512] = 1.
-    C, F = gc.signal_draws(p, 1024, [128, 512], 5., 8000, 71)
+    C, F = gd.signal_draws(p, 1024, [128, 512], 5., 8000, 71)
     assert np.all(C[:, 1] <= F[:, 1] + 2e-6)
     # ...but the decimated grid still loses SNR (scalloping) even at full in-band power.
     assert np.mean(C[:, 1] < .9 * F[:, 1]) > .1
@@ -385,27 +386,27 @@ def test_unresolvable_budget_refuses_without_sampling(monkeypatch):
     from matchedfilter import gatemodel as gm, gatechain as gc
     def forbidden(*args, **kwargs):
         raise AssertionError("unresolvable request allocated samples")
-    monkeypatch.setattr(gc, 'signal_draws', forbidden)
+    monkeypatch.setattr(gd, 'signal_draws', forbidden)
     assert gm.gate_for(np.ones(128), 128, 64, 5., 1e-8) is None
 
 
 def test_sampling_cache_includes_seed_and_exact_snr(monkeypatch):
     from matchedfilter import gatechain as gc
     from collections import OrderedDict
-    monkeypatch.setattr(gc, '_SIGNAL_CACHE', OrderedDict())
-    monkeypatch.setattr(gc, '_SIMILAR', {})
+    monkeypatch.setattr(gd, '_SIGNAL_CACHE', OrderedDict())
+    monkeypatch.setattr(gd, '_SIMILAR', {})
     p = np.ones(128)
-    a = gc.signal_draws(p, 128, [64], 5., 1024, 1)
-    assert gc.signal_draws(8*p, 128, [64], 5., 1024, 1) is a       # only the profile's shape matters
-    assert gc.signal_draws(p, 128, [64], 5., 1024, 2) is not a
-    assert gc.signal_draws(p, 128, [64], 5.00001, 1024, 1) is not a
+    a = gd.signal_draws(p, 128, [64], 5., 1024, 1)
+    assert gd.signal_draws(8*p, 128, [64], 5., 1024, 1) is a       # only the profile's shape matters
+    assert gd.signal_draws(p, 128, [64], 5., 1024, 2) is not a
+    assert gd.signal_draws(p, 128, [64], 5.00001, 1024, 1) is not a
 
 
 def test_sampling_cache_is_bounded(monkeypatch):
     from matchedfilter import gatechain as gc
     from collections import OrderedDict
-    monkeypatch.setattr(gc, '_SIGNAL_CACHE', OrderedDict())
-    monkeypatch.setattr(gc, '_CACHE_MAX', 3)
+    monkeypatch.setattr(gd, '_SIGNAL_CACHE', OrderedDict())
+    monkeypatch.setattr(gd, '_CACHE_MAX', 3)
     for seed in range(5):
-        gc.signal_draws(np.ones(128), 128, [64], 5., 1024, seed)
-    assert len(gc._SIGNAL_CACHE) <= 3
+        gd.signal_draws(np.ones(128), 128, [64], 5., 1024, seed)
+    assert len(gd._SIGNAL_CACHE) <= 3

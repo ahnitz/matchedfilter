@@ -127,14 +127,15 @@ def modelled(power, n, chain, thresholds, snr, window, count, seed=9770, alpha0=
     these thresholds dismisses. alpha0 / alpha1: the signal's retention at the first / second
     tier (a tier-0 screener's / tier-1 sub-screener's member's)."""
     from matchedfilter import gatechain as gc
-    bands = gc.usable_bands(power, n)
+    from matchedfilter import _gatedraws as gd
+    bands = gd.usable_bands(power, n)
     b1 = chain[1] if len(chain) >= 2 else None
     alphas = (None if alpha0 >= 1.0 and alpha1 >= 1.0 else
               tuple(alpha0 if b == chain[0] else (alpha1 if b == b1 else 1.0) for b in bands))
     lost = total = 0
     step = 2000000
     for c in range(-(-int(count) // step)):
-        C, F = gc.signal_draws(power, n, bands, snr, min(step, int(count) - c * step), seed=seed + c,
+        C, F = gd.signal_draws(power, n, bands, snr, min(step, int(count) - c * step), seed=seed + c,
                                window=window, alphas=alphas)
         det = F[:, 0] >= snr
         bad = np.zeros(int(det.sum()), bool)

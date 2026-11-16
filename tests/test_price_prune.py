@@ -10,6 +10,7 @@ import pytest
 
 from matchedfilter import _calibration as cal
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 
 DATA = pathlib.Path(__file__).parent / "data"
 
@@ -21,7 +22,7 @@ def _zen5_model_2048():
 
 def _scaled_model(cm_2048, n):
     scale = float(n) / 2048.0
-    bands = gc.candidate_bands(n)
+    bands = gd.candidate_bands(n)
     dense = {}
     sparse = {}
     screen = {}
@@ -82,8 +83,8 @@ def isolated_caches(monkeypatch):
         "_PLAN_CACHE", "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_PRICE_CACHE",
         "_OFFSET_CACHE", "_BOUND_PRICE_CACHE",
     ):
-        monkeypatch.setattr(gc, name, OrderedDict())
-    monkeypatch.setattr(gc, "_SIMILAR", {})
+        monkeypatch.setattr(gd if hasattr(gd, name) else gc, name, OrderedDict())
+    monkeypatch.setattr(gd, "_SIMILAR", {})
 
 
 def test_pair_cost_lower_bound_is_sound_across_profiles_and_models(isolated_caches):
@@ -93,7 +94,7 @@ def test_pair_cost_lower_bound_is_sound_across_profiles_and_models(isolated_cach
         cm_unscr = cm_n.unscreened()
         cm_dir = cm_n.with_direct(0.5, single_tier=False, fraction=0.4, base=2.0, multi_frac=0.3)
         cm_gpu = copy.copy(cm_n)
-        cm_gpu.feed = {"full": 900.0, "band": {b: 120.0 + 0.4 * b for b in gc.candidate_bands(n)}}
+        cm_gpu.feed = {"full": 900.0, "band": {b: 120.0 + 0.4 * b for b in gd.candidate_bands(n)}}
         cm_gpu._sig = None
         models = [
             (cm_n, 64),
@@ -105,7 +106,7 @@ def test_pair_cost_lower_bound_is_sound_across_profiles_and_models(isolated_cach
 
         for pname, prof in _diverse_profiles(n):
             if pname == "hf_offset":
-                assert any(gc.band_offset(prof, n, b) > 0 for b in gc.candidate_bands(n))
+                assert any(gd.band_offset(prof, n, b) > 0 for b in gd.candidate_bands(n))
             for snr, fd in ((4.8, 0.02), (8.0, 0.005)):
                 for win in windows:
                     for cm_use, nt_use in models:
@@ -126,9 +127,9 @@ def test_pair_cost_lower_bound_is_sound_across_profiles_and_models(isolated_cach
 
                             # Verify lazy max_cost branch-and-bound preserves soundness and decision
                             gc._BOUND_PRICE_CACHE.clear()
-                            gc._SIMILAR.pop(("pair-lb",), None)
-                            for k_sim in [k for k in gc._SIMILAR if k and k[0] == "pair-lb"]:
-                                del gc._SIMILAR[k_sim]
+                            gd._SIMILAR.pop(("pair-lb",), None)
+                            for k_sim in [k for k in gd._SIMILAR if k and k[0] == "pair-lb"]:
+                                del gd._SIMILAR[k_sim]
                             lb_tight = gc.pair_cost_lower_bound(
                                 prof, n, snr, fd, cm_use, max_tiers=mt,
                                 window=win, ntemplates=nt_use, max_cost=0.5 * lb - 1.0,
@@ -137,8 +138,8 @@ def test_pair_cost_lower_bound_is_sound_across_profiles_and_models(isolated_cach
                             assert lb_tight <= act + 1e-9
 
                             gc._BOUND_PRICE_CACHE.clear()
-                            for k_sim in [k for k in gc._SIMILAR if k and k[0] == "pair-lb"]:
-                                del gc._SIMILAR[k_sim]
+                            for k_sim in [k for k in gd._SIMILAR if k and k[0] == "pair-lb"]:
+                                del gd._SIMILAR[k_sim]
                             lb_loose = gc.pair_cost_lower_bound(
                                 prof, n, snr, fd, cm_use, max_tiers=mt,
                                 window=win, ntemplates=nt_use, max_cost=act + 1.0,
@@ -152,13 +153,13 @@ def test_price_block_sizes_prunes_simulations_and_preserves_winner(isolated_cach
     monkeypatch.setattr(cal, "device_costs", lambda n, device=None, ntemplates=64, group=None: models_by_n[int(n)])
 
     sim_ns = []
-    orig_sim = gc._simulate
+    orig_sim = gd._simulate
 
     def tracking_sim(p, n, *args, **kwargs):
         sim_ns.append(int(n))
         return orig_sim(p, n, *args, **kwargs)
 
-    monkeypatch.setattr(gc, "_simulate", tracking_sim)
+    monkeypatch.setattr(gd, "_simulate", tracking_sim)
 
     # Wrap choose_chain with functools.wraps to verify __wrapped__ unwrapping stays active
     orig_choose = gc.choose_chain
@@ -204,8 +205,8 @@ def test_price_block_sizes_prunes_simulations_and_preserves_winner(isolated_cach
 
     for cache_name in ("_PRICE_CACHE", "_CHOICE_CACHE", "_SIGNAL_CACHE", "_NOISE_CACHE",
                        "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_BOUND_PRICE_CACHE"):
-        getattr(gc, cache_name).clear()
-    gc._SIMILAR.clear()
+        getattr(gd if hasattr(gd, cache_name) else gc, cache_name).clear()
+    gd._SIMILAR.clear()
     sim_ns.clear()
 
     out_pruned = cal.price_block_sizes(
@@ -238,8 +239,8 @@ def test_price_block_sizes_prunes_simulations_and_preserves_winner(isolated_cach
     # 3. Verify ahead=1 prices the first dearer candidate (2048) and prunes subsequent ones (4096, 8192)
     for cache_name in ("_PRICE_CACHE", "_CHOICE_CACHE", "_SIGNAL_CACHE", "_NOISE_CACHE",
                        "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_BOUND_PRICE_CACHE"):
-        getattr(gc, cache_name).clear()
-    gc._SIMILAR.clear()
+        getattr(gd if hasattr(gd, cache_name) else gc, cache_name).clear()
+    gd._SIMILAR.clear()
     sim_ns.clear()
 
     out_ahead = cal.price_block_sizes(

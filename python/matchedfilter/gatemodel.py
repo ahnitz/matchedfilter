@@ -68,9 +68,9 @@ _SIG_MEMO = {}
 _SIG_MEMO_MIN = 1 << 16
 
 
-#: What is known of a normalised profile that cannot change. gatechain._norm_profile returns
+#: What is known of a normalised profile that cannot change. _gatedraws._norm_profile returns
 #: read-only arrays; a planning call hands the one it made to every table and window it asks
-#: for, and a profile that stands in for others like it (gatechain._similar_get) is the same
+#: for, and a profile that stands in for others like it (_gatedraws._similar_get) is the same
 #: array for every bank. Its signature and band offsets are kept by the array's identity
 #: while it lives: id -> (weakref, {fact: value}).
 _FROZEN = {}
@@ -95,7 +95,7 @@ def _profile_sig(power):
     profiles equal to float rounding share it. (A 24-bin, 1%-quantised signature let profiles
     whose gates differ share a plan: an A+ reference took an O4 one's thresholds and dismissed
     4x its budget.) Near-identical profiles share plans through gatechain's reuse instead,
-    which compares what the gates depend on (gatechain._similar_get)."""
+    which compares what the gates depend on (_gatedraws._similar_get)."""
     if power is None:
         return b""
     facts = _frozen_facts(power)
@@ -252,12 +252,13 @@ def _check_power(power, n):
 def _kept(power, n, band, snr, fd):
     """Sorted coarse maxima at `band` of the model's detections (draws the fine stage keeps)
     at budget fd, or None: each the maximum over the whole block, as the engine searches it
-    (gatechain.signal_draws)."""
-    bands = gatechain.usable_bands(power, n)
+    (_gatedraws.signal_draws)."""
+    from . import _gatedraws    # it imports this module
+    bands = _gatedraws.usable_bands(power, n)
     ndet = _nsamp_for(fd)
     if band not in bands or ndet is None:
         return None
-    sig = gatechain.signal_draws(power, n, bands, snr, ndet)
+    sig = _gatedraws.signal_draws(power, n, bands, snr, ndet)
     if sig is None:
         return None
     return np.sort(gatechain.kept_draws(sig, bands, (band,), snr)[:, 0])
@@ -285,7 +286,8 @@ def gate_for(power, n, band, snr, fd):
     p = _check_power(power, n)
     if _nsamp_for(fd) is None:
         return None
-    if band not in gatechain.usable_bands(p, n):
+    from . import _gatedraws    # it imports this module
+    if band not in _gatedraws.usable_bands(p, n):
         return None
     plan = gatechain.chain_thresholds(p, n, snr, fd, (band,))
     return None if plan is None else float(plan["thresholds"][0])

@@ -12,6 +12,7 @@ from . import _screeners
 from . import _config
 from . import _core
 from . import gatechain as _gatechain
+from . import _gatedraws
 from . import _chains, _choice, _prices, _settings, _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune
 from ._filter import MatchedFilter, _from_any
@@ -44,7 +45,7 @@ def _band_features(power, m, k0=0):
     tot = p.sum()
     if tot <= 0:
         return 0.0, 1.0
-    k0, khi = _gatechain._band_slice(len(p), m, k0)
+    k0, khi = _gatedraws._band_slice(len(p), m, k0)
     inb = p[k0:khi]
     s = inb.sum()
     if s <= 0:
@@ -64,9 +65,9 @@ def _uncovered_reference(power, n):
     of nearly constant magnitude -- there is no peak to find coarsely and
     refine, so the hierarchical method does not apply. See `_BEFF_MIN`.
     """
-    bands = _gatechain.candidate_bands(n)
+    bands = _gatedraws.candidate_bands(n)
     return bool(bands) and all(
-        _band_features(power, b, _gatechain.band_offset(power, n, b))[1] < _BEFF_MIN
+        _band_features(power, b, _gatedraws.band_offset(power, n, b))[1] < _BEFF_MIN
         for b in bands
     )
 
@@ -497,7 +498,7 @@ class HierarchicalFilter(MatchedFilter):
         got = self._tier0_cand_cache.get(b)
         if got is not None and (got[1] or pass2 is not None):
             return got[0]
-        usable = _gatechain.usable_bands(self._pending_ref, self.n)
+        usable = _gatedraws.usable_bands(self._pending_ref, self.n)
         cand_ok = (b in usable) if self.device.kind == "cpu" else (len(usable) >= 2 and b in usable[:-1])
         if not cand_ok:
             self._tier0_cand_cache[b] = (empty, True)
@@ -505,7 +506,7 @@ class HierarchicalFilter(MatchedFilter):
         tmpl = self._templates_for_clustering() if templates is None else templates
         if tmpl is None:
             return empty
-        k0 = _gatechain.band_offset(self._pending_ref, self.n, b)
+        k0 = _gatedraws.band_offset(self._pending_ref, self.n, b)
         min_cl = _tier0_min_clusters(b, is_cpu=self.device.kind == "cpu")
         step_ref = [0]
         skipped = [False]
@@ -760,7 +761,7 @@ class HierarchicalFilter(MatchedFilter):
         """Per-tier starting fine bins k0: model-selected offsets when calibrating from a
         reference profile, or zeros when explicit thresholds bypass the model."""
         if self._pending_ref is not None and self._cal_thr is None:
-            return tuple(int(_gatechain.band_offset(self._pending_ref, self.n, b)) for b in chain)
+            return tuple(int(_gatedraws.band_offset(self._pending_ref, self.n, b)) for b in chain)
         return (0,) * len(chain)
 
     def _restore_into(self, plan, templates=None):
@@ -857,7 +858,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._pending_ref is not None:
             ref = np.asarray(self._pending_ref, dtype=np.float64)
             tot = ref.sum()
-            f = tuple(float(ref[slice(*_gatechain._band_slice(self.n, b, k0))].sum() / tot)
+            f = tuple(float(ref[slice(*_gatedraws._band_slice(self.n, b, k0))].sum() / tot)
                       if tot > 0 else 0.0 for b, k0 in zip(chain, offsets))
         if (getattr(self, "_taps", None) is not None
                 and _direct_refine_enabled() and self._cal_thr is None
@@ -1258,7 +1259,7 @@ class HierarchicalFilter(MatchedFilter):
                 "coarse pass to localise -- use MatchedFilter. A reference like this is "
                 "usually |h|^2 without the 1/S(f), or a spectrum with no low-frequency cutoff."
                 % (self.n, _BEFF_MIN))
-        if not _gatechain.candidate_bands(self.n):
+        if not _gatedraws.candidate_bands(self.n):
             # No band fits below n/2 (n = 64): no chain to price, and pricing one (the cost
             # model's calibration) has no tier to time.
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
@@ -1281,7 +1282,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._tier0_cluster_eligible():
             is_cpu = self.device.kind == "cpu"
             min_len = 1 if is_cpu else 2
-            usable = _gatechain.usable_bands(self._pending_ref, self.n)
+            usable = _gatedraws.usable_bands(self._pending_ref, self.n)
             cand_bands = usable if (is_cpu and usable) else (usable[:-1] if len(usable) >= 2 else [])
             tmpl = self._templates_for_clustering() if cand_bands else None
             if tmpl is not None:
@@ -1536,7 +1537,7 @@ class HierarchicalFilter(MatchedFilter):
         out = []
         power = total = None
         for i, (b, k0) in enumerate(zip(bands, offsets)):
-            k0, khi = _gatechain._band_slice(self.n, b, k0)
+            k0, khi = _gatedraws._band_slice(self.n, b, k0)
             if f is None:
                 if power is None:
                     power = H.real * H.real + H.imag * H.imag

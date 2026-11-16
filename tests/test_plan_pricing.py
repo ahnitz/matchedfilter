@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 
 DATA = pathlib.Path(__file__).parent / "data"
 N, SNR = 2048, 6.0
@@ -37,9 +38,9 @@ def _model(screen, ratios, direct):
 def empty_model(monkeypatch):
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE", "_PLAN_CACHE",
               "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_KEPT", "_LOCAL_WINDOWS"):
-        monkeypatch.setattr(gc, c, OrderedDict())
-    monkeypatch.setattr(gc, "_SIMILAR", {})
-    monkeypatch.setattr(gc, "_SIMILAR_COUNT", {})
+        monkeypatch.setattr(gd if hasattr(gd, c) else gc, c, OrderedDict())
+    monkeypatch.setattr(gd, "_SIMILAR", {})
+    monkeypatch.setattr(gd, "_SIMILAR_COUNT", {})
 
 
 @pytest.mark.parametrize("screen, ratios, direct", [(False, False, False), (True, False, False),
@@ -51,7 +52,7 @@ def test_the_plans_are_the_python_loops(screen, ratios, direct, empty_model, mon
     plans = {}
     for in_c in (True, False):
         monkeypatch.setattr(gc, "_C_PRICING", in_c)
-        for c in (gc._CHOICE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE, gc._SIMILAR):
+        for c in (gc._CHOICE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE, gd._SIMILAR):
             c.clear()
         best, every = gc.choose_chain(p, N, SNR, 1e-3, cost=cost, max_tiers=3, ntemplates=96)
         plans[in_c] = [(tuple(d["chain"]), d["cost"], tuple(d["search"]["thresholds"]),

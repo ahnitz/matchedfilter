@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 
 DATA = pathlib.Path(__file__).parent / "data"
 N, SNR, COUNT = 2048, 6.0, 300000
@@ -22,19 +23,19 @@ def _profile():
 def empty_model(monkeypatch):
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE", "_PLAN_CACHE",
               "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_KEPT", "_LOCAL_WINDOWS"):
-        monkeypatch.setattr(gc, c, OrderedDict())
-    monkeypatch.setattr(gc, "_SIMILAR", {})
-    monkeypatch.setattr(gc, "_SIMILAR_COUNT", {})
+        monkeypatch.setattr(gd if hasattr(gd, c) else gc, c, OrderedDict())
+    monkeypatch.setattr(gd, "_SIMILAR", {})
+    monkeypatch.setattr(gd, "_SIMILAR_COUNT", {})
 
 
 def _table(monkeypatch, law, p, bands, window, alphas=None, seed=4242, count=COUNT):
     """The detections of one table: (C, F, fine lags, coarse lags), from the law or simulated."""
     monkeypatch.setenv("MF_SIGNAL_LAW", "1" if law else "0")
-    for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._SIMILAR):
+    for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS, gd._SIMILAR):
         c.clear()
-    (C, F), (fat, cat) = gc._signal_table(p, N, bands, SNR, count, seed=seed, window=window,
+    (C, F), (fat, cat) = gd._signal_table(p, N, bands, SNR, count, seed=seed, window=window,
                                           lags_too=True, alphas=alphas)
-    if isinstance(C, gc._Beside):
+    if isinstance(C, gd._Beside):
         C, cat = C.full(), cat.full()
     det = np.asarray(F[:, 0]) >= SNR
     return (np.asarray(C)[det], np.asarray(F[:, 0])[det], np.asarray(fat)[det].astype(np.int64),
@@ -44,8 +45,8 @@ def _table(monkeypatch, law, p, bands, window, alphas=None, seed=4242, count=COU
 @pytest.fixture
 def setting(empty_model):
     p = _profile()
-    bands = gc.usable_bands(p, N)
-    return p, bands, gc.local_window(p, N, bands, None)
+    bands = gd.usable_bands(p, N)
+    return p, bands, gd.local_window(p, N, bands, None)
 
 
 def test_each_bands_dismissal_curve_is_the_simulations(setting, monkeypatch):
@@ -90,10 +91,10 @@ def test_a_retention_is_the_simulations(setting, monkeypatch):
     assert float(np.median(law[:, 1])) < float(np.median(plain[:, 1]))      # it lowers the band
     # held beside the plain draws: row for row the same draws, one column of its own
     monkeypatch.setenv("MF_SIGNAL_LAW", "1")
-    (C, F), _ = gc._signal_table(p, N, bands, SNR, COUNT, seed=4242, window=window, lags_too=True,
+    (C, F), _ = gd._signal_table(p, N, bands, SNR, COUNT, seed=4242, window=window, lags_too=True,
                                  alphas=alphas)
-    (Cp, Fp), _ = gc._signal_table(p, N, bands, SNR, COUNT, seed=4242, window=window, lags_too=True)
-    assert isinstance(C, gc._Beside) and C.plain is Cp and sorted(C.own) == [1]
+    (Cp, Fp), _ = gd._signal_table(p, N, bands, SNR, COUNT, seed=4242, window=window, lags_too=True)
+    assert isinstance(C, gd._Beside) and C.plain is Cp and sorted(C.own) == [1]
 
 
 def test_the_maxima_lie_where_the_simulations_do(setting, monkeypatch):
@@ -113,7 +114,7 @@ def test_the_maxima_lie_where_the_simulations_do(setting, monkeypatch):
 def test_the_tables_contract(setting, monkeypatch):
     p, bands, window = setting
     monkeypatch.setenv("MF_SIGNAL_LAW", "1")
-    (C, F), (fat, cat) = gc._signal_table(p, N, bands, SNR, 5000, seed=7, window=window, lags_too=True)
+    (C, F), (fat, cat) = gd._signal_table(p, N, bands, SNR, 5000, seed=7, window=window, lags_too=True)
     assert C.shape == (5000, len(bands)) and C.dtype == np.float32 and F.shape == C.shape
     assert fat.shape == (5000,) and cat.shape == C.shape and fat.dtype == cat.dtype == np.int32
     assert np.all(F[:, 0] >= SNR)                       # every row is a detection
@@ -121,10 +122,10 @@ def test_the_tables_contract(setting, monkeypatch):
     assert window[0] <= fat.min() and fat.max() < window[1]
     for i, b in enumerate(bands):
         assert np.all(cat[:, i] % (N // b) == 0)        # a coarse lag times the band's step
-    again = gc._signal_table(p, N, bands, SNR, 5000, seed=7, window=window)
-    gc._SIGNAL_CACHE.clear()
-    fresh = gc._signal_table(p, N, bands, SNR, 5000, seed=7, window=window)
-    other = gc._signal_table(p, N, bands, SNR, 5000, seed=8, window=window)
+    again = gd._signal_table(p, N, bands, SNR, 5000, seed=7, window=window)
+    gd._SIGNAL_CACHE.clear()
+    fresh = gd._signal_table(p, N, bands, SNR, 5000, seed=7, window=window)
+    other = gd._signal_table(p, N, bands, SNR, 5000, seed=8, window=window)
     assert np.array_equal(again[0], C) and np.array_equal(fresh[0], C)       # the seed's draws
     assert not np.array_equal(other[0], C)
 
@@ -140,8 +141,8 @@ def test_the_plan_is_the_simulations(setting, monkeypatch):
     plans = {}
     for law in (False, True):
         monkeypatch.setenv("MF_SIGNAL_LAW", "1" if law else "0")
-        for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._SIMILAR, gc._CHOICE_CACHE, gc._PLAN_CACHE,
-                  gc._CAND_CACHE, gc._KEPT, gc._NOISE_CACHE):
+        for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS, gd._SIMILAR, gc._CHOICE_CACHE, gc._PLAN_CACHE,
+                  gc._CAND_CACHE, gc._KEPT, gd._NOISE_CACHE):
             c.clear()
         plans[law] = gc.choose_chain(p, N, SNR, 1e-3, cost=cost, max_tiers=3, ntemplates=96)[0]
     assert tuple(plans[True]["chain"]) == tuple(plans[False]["chain"])
@@ -157,25 +158,25 @@ def test_a_window_too_wide_for_the_law_is_simulated(setting, monkeypatch):
     from matchedfilter import _signal_law
     p, bands, window = setting
     drawn, simulated = [], []
-    law, simulate = _signal_law.signal_table, gc._simulate
+    law, simulate = _signal_law.signal_table, gd._simulate
     monkeypatch.setattr(_signal_law, "signal_table",
                         lambda *a, **k: drawn.append(a[7][:2]) or law(*a, **k))
-    monkeypatch.setattr(gc, "_simulate", lambda *a, **k: simulated.append(a[1]) or simulate(*a, **k))
+    monkeypatch.setattr(gd, "_simulate", lambda *a, **k: simulated.append(a[1]) or simulate(*a, **k))
     monkeypatch.setenv("MF_SIGNAL_LAW", "1")
-    assert gc._law_applies(N, window) and not gc._law_applies(N, (0, N))
-    assert not gc._law_applies(N, (N // 4 - 1, 3 * N // 4))            # just over half
-    gc._signal_table(p, N, bands, SNR, 2000, seed=3, window=window)
+    assert gd._law_applies(N, window) and not gd._law_applies(N, (0, N))
+    assert not gd._law_applies(N, (N // 4 - 1, 3 * N // 4))            # just over half
+    gd._signal_table(p, N, bands, SNR, 2000, seed=3, window=window)
     assert drawn == [window] and not simulated
-    gc._signal_table(p, N, bands, SNR, 2000, seed=3, window=(0, N))
+    gd._signal_table(p, N, bands, SNR, 2000, seed=3, window=(0, N))
     assert drawn == [window] and simulated
     # a steep red profile's own window is the whole block
     red = 1.0 / np.arange(1, N + 1) ** 2.0
     red[N // 2:] = 0.0
     red /= red.sum()
-    wide = gc.local_window(red, N, gc.usable_bands(red, N), None)
-    assert not gc._law_applies(N, wide)
+    wide = gd.local_window(red, N, gd.usable_bands(red, N), None)
+    assert not gd._law_applies(N, wide)
     monkeypatch.setenv("MF_SIGNAL_LAW", "0")
-    assert not gc._law_applies(N, window)
+    assert not gd._law_applies(N, window)
 
 
 def test_three_profiles_planned_in_turn_are_drawn_once_each(setting, monkeypatch):
@@ -194,9 +195,9 @@ def test_three_profiles_planned_in_turn_are_drawn_once_each(setting, monkeypatch
     tables = []
     for _ in range(2):
         for q in profiles:
-            for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS):
+            for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS):
                 c.clear()                               # the table is read from the held draws
-            tables.append(np.array(gc._signal_table(q, N, bands, SNR, 3000, seed=5, window=window)[0]))
+            tables.append(np.array(gd._signal_table(q, N, bands, SNR, 3000, seed=5, window=window)[0]))
     assert len(drawn) == 3
     for first, again in zip(tables[:3], tables[3:]):
         assert np.array_equal(first, again)

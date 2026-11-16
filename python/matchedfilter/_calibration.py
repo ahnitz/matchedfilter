@@ -7,6 +7,7 @@ import numpy as np
 
 from . import _choice
 from . import gatechain as _gc
+from . import _gatedraws as _gd
 
 _ORIG_CHOOSE_CHAIN = _gc.choose_chain
 
@@ -95,7 +96,7 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
             return cm
     rng = np.random.default_rng(seed)
     run_blocks = max(int(blocks), group) if int(blocks) == _CAL_BLOCKS else int(blocks)
-    bands = _gc.candidate_bands(n)
+    bands = _gd.candidate_bands(n)
     taps = n // 4
     h = np.zeros((nt, n), np.complex64)
     h[:, :taps] = rng.standard_normal((nt, taps)) / np.sqrt(taps)
@@ -468,7 +469,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
         if cm is not None:
             _gc._COSTS[key] = cm
             return cm
-    bands = _gc.candidate_bands(n)
+    bands = _gd.candidate_bands(n)
     spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
     big = float(np.finfo(np.float32).max)
     plans = {}
@@ -700,7 +701,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
                                            ntemplates=ntemplates)
                 if best is not None:
                     hit = (cm.block, best["cost"], best["chain"])
-            _gc._cache_put(_gc._PRICE_CACHE, key, hit)
+            _gd._cache_put(_gc._PRICE_CACHE, key, hit)
         else:
             _gc._PRICE_CACHE.move_to_end(key)
         block, pair_cost, chain = hit

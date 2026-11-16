@@ -4,6 +4,7 @@ docstring for the claims and their budgets)."""
 import pytest
 
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 from spectral_profiles import binomtest
 from fdr_support import ALPHA, engine_misses, profile
 
@@ -16,7 +17,7 @@ def test_the_engine_dismisses_its_budget(name, chain):
     chain's plan dismisses, two-sided, multi-tier chains included."""
     n, fd = 2048, 0.05
     power = profile(name, n)
-    if not set(chain) <= set(gc.usable_bands(power, n)):
+    if not set(chain) <= set(gd.usable_bands(power, n)):
         pytest.skip("a band of %s holds none of %s's power" % (chain, name))
     thr, det, miss, want = engine_misses(power, n, chain, fd, 2500)
     p = binomtest(miss, det, p=want, alternative="two-sided").pvalue

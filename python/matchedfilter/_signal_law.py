@@ -1,6 +1,6 @@
 """The planner's signal table drawn from the joint law of the few numbers it holds.
 
-The gate model's simulation (gatechain._simulate) makes a block of noise bins, adds a signal
+The gate model's simulation (_gatedraws._simulate) makes a block of noise bins, adds a signal
 and transforms it for the fine statistic and for each band; the planner then keeps, per
 draw, the largest fine statistic and each band's largest coarse statistic in a window around
 the signal, and where they lie. Those are functions of a few samples next to the signal, and
@@ -42,7 +42,7 @@ _DOMAIN_LAW = 7
 #: profile's draws, not drawn again. About 29 MB a profile at 96,000 draws and a block of
 #: 1024. Three: a job's banks alternate between the top templates they hang under, and two
 #: top templates' banks under two detectors plan on three profiles that are not alike
-#: (gatechain._law_profile); holding two, every other bank drew its profile again.
+#: (_gatedraws._law_profile); holding two, every other bank drew its profile again.
 _DRAWS = OrderedDict()
 _DRAWS_MAX = 3
 
@@ -79,7 +79,7 @@ def signal_table(p, n, bands, slices, snr, ndet, seed, lags, alphas=None, nf=16)
         The draws' seed.
     lags : tuple
         ``(w0, w1, c0, c1)``: the fine window and each band's coarse lags
-        (gatechain._engine_lags).
+        (_gatedraws._engine_lags).
     alphas : sequence of float, optional
         Each band's retention; a band with one below 1 keeps that share of the signal and
         of the noise it has in common with the other statistics.

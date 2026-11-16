@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 import matchedfilter as mf
 from matchedfilter import _calibration
+from matchedfilter import _gatedraws as gd
 import matchedfilter._core as _core
 
 
@@ -681,10 +682,10 @@ def test_plan_chain_matches_the_plain_split_search():
     prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
     n = 2048
     cm = _calibration.calibrate_costs(n, 32)
-    bands = gc.usable_bands(prof, n)
-    sig = gc.signal_draws(prof, n, bands, 6.0, gc.model_draws(1e-3)[0], window=(192, n - 192))
-    noise = gc.noise_block_maxima(prof, n, bands, window=(192, n - 192))
-    for chain in gc.enumerate_chains(n, 3, bands=bands):
+    bands = gd.usable_bands(prof, n)
+    sig = gd.signal_draws(prof, n, bands, 6.0, gd.model_draws(1e-3)[0], window=(192, n - 192))
+    noise = gd.noise_block_maxima(prof, n, bands, window=(192, n - 192))
+    for chain in gd.enumerate_chains(n, 3, bands=bands):
         fast = gc.plan_chain(sig, noise, bands, list(chain), 1e-3, cm, n, 6.0)
         ref = _plan_chain_bruteforce(sig, noise, bands, list(chain), 1e-3, cm, n, 6.0)
         assert (fast is None) == (ref is None), chain
@@ -828,7 +829,7 @@ def test_calibrations_sharing_band_costs_in_any_order(monkeypatch, order):
     monkeypatch.delenv("MF_COST_FILE", raising=False)
     for n in order:
         cm = _calibration.calibrate_costs(n, 64)
-        for b in gc.candidate_bands(n):
+        for b in gd.candidate_bands(n):
             if gc._q15_band(b) and gc.cpu_gate_kind() != "f16":
                 assert b in cm.screen and cm.screen[b]["recheck"] >= 0, (n, b)
 

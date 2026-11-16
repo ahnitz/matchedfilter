@@ -17,6 +17,7 @@ import pytest
 
 from matchedfilter import _core
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 
 SEED = (2 << 32) | 29
 
@@ -186,15 +187,15 @@ def test_the_records_are_those_of_a_scan_one_value_at_a_time():
 def _profile(n):
     p = np.exp(-np.arange(n) / (n / 7.0)) + 1e-4
     p[: n // 100] = 0
-    return gc._norm_profile(p, n)
+    return gd._norm_profile(p, n)
 
 
 @pytest.fixture
 def fresh(monkeypatch):
     from collections import OrderedDict
     for c in ("_NOISE_CACHE", "_NOISE_RECORDS", "_SIGNAL_CACHE", "_SIGNAL_RECORDS"):
-        monkeypatch.setattr(gc, c, OrderedDict())
-    monkeypatch.setattr(gc, "_SIMILAR", {})
+        monkeypatch.setattr(gd if hasattr(gd, c) else gc, c, OrderedDict())
+    monkeypatch.setattr(gd, "_SIMILAR", {})
 
 
 @pytest.mark.parametrize("order", [(20000,), (5000, 20000), (20000, 5000), (5000, 7000, 20000)])
@@ -202,12 +203,12 @@ def test_fewer_noise_blocks_are_a_prefix_of_more(fresh, order):
     """A noise simulation extended from a smaller one, or read as the prefix of a larger one,
     gives exactly the blocks a single full simulation gives."""
     n = 2048
-    p, bands, win = _profile(n), gc.candidate_bands(n), (128, 1920)
-    got = {ns: gc.noise_block_maxima(p, n, bands, nsim=ns, window=win).copy() for ns in order}
-    for c in (gc._NOISE_CACHE, gc._NOISE_RECORDS):
+    p, bands, win = _profile(n), gd.candidate_bands(n), (128, 1920)
+    got = {ns: gd.noise_block_maxima(p, n, bands, nsim=ns, window=win).copy() for ns in order}
+    for c in (gd._NOISE_CACHE, gd._NOISE_RECORDS):
         c.clear()
-    gc._SIMILAR.clear()
-    full = gc.noise_block_maxima(p, n, bands, nsim=20000, window=win)
+    gd._SIMILAR.clear()
+    full = gd.noise_block_maxima(p, n, bands, nsim=20000, window=win)
     for ns, v in got.items():
         np.testing.assert_array_equal(v, full[:ns], err_msg=str(ns))
 
@@ -216,29 +217,29 @@ def test_noise_maxima_do_not_depend_on_which_simulation_ran_first(fresh):
     """noise_block_maxima reads the blocks of the one simulation signal_draws also runs: the
     same numbers whether a signal simulation ran first (and recorded its noise) or not."""
     n = 2048
-    p, bands, win = _profile(n), gc.candidate_bands(n), (128, 1920)
-    alone = gc.noise_block_maxima(p, n, bands, nsim=6000, window=win).copy()
-    for c in (gc._NOISE_CACHE, gc._NOISE_RECORDS, gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS):
+    p, bands, win = _profile(n), gd.candidate_bands(n), (128, 1920)
+    alone = gd.noise_block_maxima(p, n, bands, nsim=6000, window=win).copy()
+    for c in (gd._NOISE_CACHE, gd._NOISE_RECORDS, gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS):
         c.clear()
-    gc._SIMILAR.clear()
-    gc.signal_draws(p, n, bands, 6.0, 4000, window=win)
-    assert gc._NOISE_RECORDS, "the signal simulation recorded no noise"
-    np.testing.assert_array_equal(alone, gc.noise_block_maxima(p, n, bands, nsim=6000, window=win))
+    gd._SIMILAR.clear()
+    gd.signal_draws(p, n, bands, 6.0, 4000, window=win)
+    assert gd._NOISE_RECORDS, "the signal simulation recorded no noise"
+    np.testing.assert_array_equal(alone, gd.noise_block_maxima(p, n, bands, nsim=6000, window=win))
 
 
 def test_every_window_reads_one_noise_simulation(fresh):
     """Windows of one profile share its simulation's running-maximum records: one simulation,
     each window's maxima what a simulation of that window alone gives."""
     n = 2048
-    p, bands = _profile(n), gc.candidate_bands(n)
+    p, bands = _profile(n), gd.candidate_bands(n)
     wins = [(128, 1920), (192, 1856), (64, 1984), None]
-    shared = [gc.noise_block_maxima(p, n, bands, window=w).copy() for w in wins]
-    assert len(gc._NOISE_RECORDS) == 1
+    shared = [gd.noise_block_maxima(p, n, bands, window=w).copy() for w in wins]
+    assert len(gd._NOISE_RECORDS) == 1
     for w, v in zip(wins, shared):
-        for c in (gc._NOISE_CACHE, gc._NOISE_RECORDS):
+        for c in (gd._NOISE_CACHE, gd._NOISE_RECORDS):
             c.clear()
-        gc._SIMILAR.clear()
-        np.testing.assert_array_equal(v, gc.noise_block_maxima(p, n, bands, window=w), err_msg=str(w))
+        gd._SIMILAR.clear()
+        np.testing.assert_array_equal(v, gd.noise_block_maxima(p, n, bands, window=w), err_msg=str(w))
 
 
 @pytest.mark.parametrize("cut", [None, 801])
@@ -253,17 +254,17 @@ def test_the_noise_statistics_are_the_transforms_of_the_stream(fresh, cut):
     if cut is not None:
         p = p.copy()
         p[cut:] = 0
-        p = gc._norm_profile(p, n)
-    bands = gc.usable_bands(p, n)
-    recs = gc._noise_records(p, n, bands, rows, 13)
+        p = gd._norm_profile(p, n)
+    bands = gd.usable_bands(p, n)
+    recs = gd._noise_records(p, n, bands, rows, 13)
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kfill = min(int(np.flatnonzero(p)[-1]) + 1, bands[-1])
     for r in range(rows):
-        d = _fill(2 * kfill, 2 * r * n, seed=(gc._DOMAIN_SIGNAL << 32) | 13) * np.repeat(scale[:kfill], 2)
+        d = _fill(2 * kfill, 2 * r * n, seed=(gd._DOMAIN_SIGNAL << 32) | 13) * np.repeat(scale[:kfill], 2)
         x = d[0::2].astype(np.float64) + 1j * d[1::2]
         for b, (pos, val, off) in zip(bands, recs):
             # bins past kfill empty: x zero-padded to the band's b
-            a = np.abs(np.fft.ifft(x[:b], b) * b * (gc._SIG / np.sqrt(p[:b].sum()))) ** 2
+            a = np.abs(np.fft.ifft(x[:b], b) * b * (gd._SIG / np.sqrt(p[:b].sum()))) ** 2
             want = np.flatnonzero(a > np.maximum.accumulate(np.concatenate(([-1.0], a[:-1]))))
             got = slice(off[r], off[r + 1])
             np.testing.assert_array_equal(pos[got], want, err_msg="row %d band %d" % (r, b))
@@ -290,22 +291,22 @@ def test_a_simulation_out_of_room_continues_where_it_stopped(fresh, monkeypatch)
     records are exactly those of a simulation with room."""
     n = 2048
     p = _profile(n)
-    bands = gc.usable_bands(p, n)
+    bands = gd.usable_bands(p, n)
     Fb = [p[:b].sum() for b in bands]
     calls = _counting_calls(monkeypatch)
-    sim = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    sim = gd._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
     t, u, sig = sim["t"], sim["u"], sim["recs"]
-    noise = gc._NOISE_RECORDS[gc._key(p, n, bands, 13)][1]
+    noise = gd._NOISE_RECORDS[gd._key(p, n, bands, 13)][1]
     roomy, calls[:] = list(calls), []
-    for c in (gc._NOISE_RECORDS, gc._SIGNAL_RECORDS):
+    for c in (gd._NOISE_RECORDS, gd._SIGNAL_RECORDS):
         c.clear()
-    gc._SIMILAR.clear()
-    monkeypatch.setattr(gc, "_ROOM", 0.02)
-    monkeypatch.setattr(gc, "_PILOT", 500)
-    monkeypatch.setattr(gc, "_ROOM_Z", 0.0)
-    sim2 = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    gd._SIMILAR.clear()
+    monkeypatch.setattr(gd, "_ROOM", 0.02)
+    monkeypatch.setattr(gd, "_PILOT", 500)
+    monkeypatch.setattr(gd, "_ROOM_Z", 0.0)
+    sim2 = gd._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
     t2, u2, sig2 = sim2["t"], sim2["u"], sim2["recs"]
-    noise2 = gc._NOISE_RECORDS[gc._key(p, n, bands, 13)][1]
+    noise2 = gd._NOISE_RECORDS[gd._key(p, n, bands, 13)][1]
     assert all(got == todo for todo, got in roomy), roomy
     assert sum(got < todo for todo, got in calls) >= 2, calls     # it did run out, and continued
     np.testing.assert_array_equal(t, t2)
@@ -324,10 +325,10 @@ def test_a_simulation_has_room_for_the_records_its_rows_have(fresh, monkeypatch)
     k = np.arange(1, n // 2, dtype=np.float64)
     p = np.zeros(n)
     p[1:n // 2] = k ** (-7 / 3) / ((0.015 * n / k) ** 4 + 1)
-    p = gc._norm_profile(p, n)
-    bands = gc.usable_bands(p, n)
+    p = gd._norm_profile(p, n)
+    bands = gd.usable_bands(p, n)
     calls = _counting_calls(monkeypatch)
-    recs = gc._noise_records(p, n, bands, 20000, 13)
+    recs = gd._noise_records(p, n, bands, 20000, 13)
     assert len(calls) >= 2 and all(got == todo for todo, got in calls), calls
     for b, (pos, val, off) in zip(bands, recs):
         assert off[-1] == pos.size == val.size and off.size == 20001, b
@@ -344,17 +345,17 @@ def test_signal_draws_depend_only_on_their_seed(fresh):
     of the coarsest band is the same search."""
     n = 2048
     p = _profile(n)
-    bands = gc.usable_bands(p, n)
-    C, F = gc.signal_draws(p, n, bands, 6.0, 4000, window=(128, 1920))
-    gc._SIGNAL_CACHE.clear(); gc._SIMILAR.clear()
-    C2, F2 = gc.signal_draws(p, n, bands, 6.0, 4000, window=(128, 1920))
+    bands = gd.usable_bands(p, n)
+    C, F = gd.signal_draws(p, n, bands, 6.0, 4000, window=(128, 1920))
+    gd._SIGNAL_CACHE.clear(); gd._SIMILAR.clear()
+    C2, F2 = gd.signal_draws(p, n, bands, 6.0, 4000, window=(128, 1920))
     np.testing.assert_array_equal(C, C2)
     np.testing.assert_array_equal(F, F2)
     step = n // bands[0]
-    gc._SIGNAL_CACHE.clear(); gc._SIMILAR.clear()
-    C3, _ = gc.signal_draws(p, n, bands, 6.0, 4000, window=(128 + step, 1920 + step))
+    gd._SIGNAL_CACHE.clear(); gd._SIMILAR.clear()
+    C3, _ = gd.signal_draws(p, n, bands, 6.0, 4000, window=(128 + step, 1920 + step))
     np.testing.assert_array_equal(C, C3)
-    C4, _ = gc.signal_draws(p, n, bands, 6.0, 4000, seed=14, window=(128, 1920))
+    C4, _ = gd.signal_draws(p, n, bands, 6.0, 4000, seed=14, window=(128, 1920))
     assert not np.array_equal(C, C4)
 
 
@@ -363,12 +364,12 @@ def test_the_c_plan_search_matches_the_python_one(fresh, monkeypatch):
     and without draws the direct refine's window misses (at several half-widths)."""
     n, fd = 2048, 0.01
     p = _profile(n)
-    bands = gc.usable_bands(p, n)
+    bands = gd.usable_bands(p, n)
     tried = 0
     for win in ((128, 1920), None):
-        sig, lags = gc.signal_draws(p, n, bands, 6.0, gc.model_draws(fd)[0], window=win, lags_too=True)
-        noise = gc.noise_block_maxima(p, n, bands, window=win)
-        for chain in gc.enumerate_chains(n, 3, bands=bands):
+        sig, lags = gd.signal_draws(p, n, bands, 6.0, gd.model_draws(fd)[0], window=win, lags_too=True)
+        noise = gd.noise_block_maxima(p, n, bands, window=win)
+        for chain in gd.enumerate_chains(n, 3, bands=bands):
             cols = [bands.index(b) for b in chain]
             S, _ = gc._halves(gc.kept_draws(sig, bands, chain, 6.0))
             dist, _ = gc._halves(gc._distances(sig, lags, bands, chain, 6.0, n))
@@ -392,18 +393,18 @@ def test_signal_draws_hold_exactly_the_detections_asked_for(fresh):
     at once draws: a smaller request is the larger one's prefix, in any order of requests."""
     n, win = 2048, (192, 1856)
     p = _profile(n)
-    bands = gc.usable_bands(p, n)
-    small = gc.signal_draws(p, n, bands, 6.0, 3001, window=win, lags_too=True)
-    big = gc.signal_draws(p, n, bands, 6.0, 20000, window=win, lags_too=True)
+    bands = gd.usable_bands(p, n)
+    small = gd.signal_draws(p, n, bands, 6.0, 3001, window=win, lags_too=True)
+    big = gd.signal_draws(p, n, bands, 6.0, 20000, window=win, lags_too=True)
     for (C, F), at in (small, big):
         det = F[:, 0] >= 6.0
         assert det[-1] and C.shape[0] == F.shape[0] == at[0].shape[0] == at[1].shape[0]
     assert int((small[0][1][:, 0] >= 6.0).sum()) == 3001
     assert int((big[0][1][:, 0] >= 6.0).sum()) == 20000
-    for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS):
+    for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS, gd._NOISE_RECORDS):
         c.clear()
-    gc._SIMILAR.clear()
-    once = gc.signal_draws(p, n, bands, 6.0, 20000, window=win, lags_too=True)
+    gd._SIMILAR.clear()
+    once = gd.signal_draws(p, n, bands, 6.0, 20000, window=win, lags_too=True)
     m = small[0][0].shape[0]
     for a, b in zip(big[0] + big[1], once[0] + once[1]):
         np.testing.assert_array_equal(a, b)
@@ -417,9 +418,9 @@ def test_signal_draws_place_their_maxima_as_the_engine_does(fresh):
     sample past each end); over the whole block both wrap into [0, n)."""
     n = 2048
     p = _profile(n)
-    bands = gc.usable_bands(p, n)
+    bands = gd.usable_bands(p, n)
     for win in ((192, 1856), None):
-        (C, F), (fat, cat) = gc.signal_draws(p, n, bands, 6.0, 4000, window=win, lags_too=True)
+        (C, F), (fat, cat) = gd.signal_draws(p, n, bands, 6.0, 4000, window=win, lags_too=True)
         w0, w1 = win or (0, n)
         assert fat.min() >= w0 and fat.max() < w1, (win, fat.min(), fat.max())
         for i, b in enumerate(bands):
@@ -437,11 +438,11 @@ def test_block_size_ranking_models_with_every_draw(fresh, monkeypatch):
     monkeypatch.setattr(gc, "_PRICE_CACHE", type(gc._PRICE_CACHE)())
     monkeypatch.setattr(gc, "_CHOICE_CACHE", type(gc._CHOICE_CACHE)())
     seen = []
-    orig = gc._noise_records
-    monkeypatch.setattr(gc, "_noise_records", lambda p, n, b, nsim, seed: seen.append(nsim) or orig(p, n, b, nsim, seed))
+    orig = gd._noise_records
+    monkeypatch.setattr(gd, "_noise_records", lambda p, n, b, nsim, seed: seen.append(nsim) or orig(p, n, b, nsim, seed))
     fine = np.exp(-np.arange(4097) / 600.0); fine[:30] = 0
     cal.price_block_sizes(fine, 0.25, 2048.0, 300, 150, 64, 6.0, 0.01, [2048, 4096])
-    assert seen and set(seen) == {gc.model_draws(0.01)[1]}, seen
+    assert seen and set(seen) == {gd.model_draws(0.01)[1]}, seen
 
 
 @pytest.mark.parametrize("nrows", [1, 7, 8, 15, 16, 17, 33])
@@ -452,33 +453,33 @@ def test_simulate_batch_boundaries_and_spectrum_modes(fresh, nrows, n, cut):
     (kmax > n / 2), covering pairbatch (64, 128) and balanced (256..4096) sizes."""
     p = _profile(n).copy()
     p[cut:] = 0.0
-    p = gc._norm_profile(p, n)
-    bands = gc.candidate_bands(n)
+    p = gd._norm_profile(p, n)
+    bands = gd.candidate_bands(n)
     Fb = [float(p[:b].sum()) for b in bands]
     sim = dict(p=p, Fb=Fb, rows=0, t=np.empty(0, np.int64), u=np.empty(0), recs=None, tab=None)
-    gc._extend_signal(sim, n, bands, 6.0, 1, 19)
+    gd._extend_signal(sim, n, bands, 6.0, 1, 19)
     tab = sim["tab"]
-    t, _ = gc._arrivals(19, n // bands[0], 0, nrows)
-    fi = (np.arange(nrows) % gc._NF).astype(np.int32)
-    srec, nrec = gc._simulate(p, n, bands, nrows, 0, 19, (tab, t, fi), True, keep_at=5.5)
+    t, _ = gd._arrivals(19, n // bands[0], 0, nrows)
+    fi = (np.arange(nrows) % gd._NF).astype(np.int32)
+    srec, nrec = gd._simulate(p, n, bands, nrows, 0, 19, (tab, t, fi), True, keep_at=5.5)
 
     # Verify against NumPy float64 backward transforms row by row.
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kmax = int(np.flatnonzero(p)[-1]) + 1
-    stream = (gc._DOMAIN_SIGNAL << 32) | 19
+    stream = (gd._DOMAIN_SIGNAL << 32) | 19
     for r in range(nrows):
         d = _fill(2 * kmax, 2 * r * n, seed=stream) * np.repeat(scale[:kmax], 2)
         x = d[0::2].astype(np.float64) + 1j * d[1::2]
         # Noise records per band
         for bi, (b, (pos, val, off)) in enumerate(zip(bands, nrec)):
-            yb = np.fft.ifft(x[:b], b) * b * (gc._SIG / math.sqrt(Fb[bi]))
+            yb = np.fft.ifft(x[:b], b) * b * (gd._SIG / math.sqrt(Fb[bi]))
             ab = np.abs(yb) ** 2
             wp, wv = _records_one_at_a_time(ab.astype(np.float32), 0, 1, b, 0)
             sl = slice(off[r], off[r + 1])
             np.testing.assert_array_equal(pos[sl], wp)
             np.testing.assert_allclose(val[sl], wv, rtol=1e-5, atol=1e-5)
         # Signal records for fine (s = 0) and coarse bands (s = 1..nb)
-        yf = np.fft.ifft(x, n) * n * gc._SIG
+        yf = np.fft.ifft(x, n) * n * gd._SIG
         tr = int(t[r])
         df = tab[int(fi[r]), 0].astype(np.complex128)
         af = np.empty(n, np.float64)
@@ -502,15 +503,15 @@ def test_simulate_numerical_equivalence_across_isas():
     AVX, SSE4) across both pairbatch (64, 128) and balanced (256..4096) transforms."""
     code = (
         "import sys, numpy as np\n"
-        "from matchedfilter import gatechain as gc\n"
+        "from matchedfilter import _gatedraws as gd\n"
         "out = {}\n"
         "for n in (2048, 4096):\n"
         "    p = np.exp(-np.arange(n) / (n / 7.0)) + 1e-4\n"
         "    p[:n // 100] = 0; p[int(0.46 * n):] = 0\n"
-        "    p = gc._norm_profile(p, n)\n"
-        "    bands = gc.usable_bands(p, n)\n"
-        "    C, F = gc.signal_draws(p, n, bands, 6.0, 250, seed=31, window=(128, n - 128))\n"
-        "    N = gc.noise_block_maxima(p, n, bands, nsim=250, seed=31, window=(128, n - 128))\n"
+        "    p = gd._norm_profile(p, n)\n"
+        "    bands = gd.usable_bands(p, n)\n"
+        "    C, F = gd.signal_draws(p, n, bands, 6.0, 250, seed=31, window=(128, n - 128))\n"
+        "    N = gd.noise_block_maxima(p, n, bands, nsim=250, seed=31, window=(128, n - 128))\n"
         "    out['C_%d' % n] = C; out['F_%d' % n] = F; out['N_%d' % n] = N\n"
         "np.savez(sys.argv[1], **out)\n"
     )

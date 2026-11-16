@@ -13,6 +13,7 @@ import pytest
 
 import matchedfilter as mf
 from matchedfilter import _calibration
+from matchedfilter import _gatedraws as gd
 from matchedfilter import TimeDomainFilterBank
 
 
@@ -231,7 +232,7 @@ def test_chain_pool_excludes_nothing():
         best, plans = gc.choose_chain(ref, nfft, 5.5, 1e-2, cost=_calibration.calibrate_costs(nfft, 64), max_tiers=3)
         assert best is not None
         priced = {q["chain"] for q in plans}
-        pool = set(gc.enumerate_chains(nfft, 3, bands=gc.usable_bands(ref, nfft)))
+        pool = set(gd.enumerate_chains(nfft, 3, bands=gd.usable_bands(ref, nfft)))
         assert priced <= pool
         # multi-tier chains are candidates at every n, including small blocks
         assert any(len(c) > 1 for c in priced), (nfft, sorted(priced))

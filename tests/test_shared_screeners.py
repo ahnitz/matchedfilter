@@ -6,6 +6,7 @@ import pytest
 import matchedfilter as mf
 from matchedfilter import _core, _hierarchical
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 from spectral_profiles import binomtest, make_spectral_profile
 from matchedfilter import _screeners
 
@@ -140,7 +141,7 @@ def test_correlated_bank_halves_tier0_work_and_preserves_peaks(profile_name, use
     )
 
     # Verify cluster synthesis merges all 8 correlated pairs and pads by 1 coarse lag
-    k0 = gc.band_offset(power, n, chain[0])
+    k0 = gd.band_offset(power, n, chain[0])
     if profile_name == "deadzone_bandpass":
         assert k0 > 0
     cl = _screeners.cluster_tier0_templates(templates, power, n, chain[0], k0=k0)
@@ -212,7 +213,7 @@ def test_screener_coarse_noise_unit_variance(profile_name):
     power, psd, templates = _make_colored_correlated_bank(
         n, nt, b0, profile_name=profile_name, seed=505
     )
-    k0 = gc.band_offset(power, n, b0)
+    k0 = gd.band_offset(power, n, b0)
     cl = _screeners.cluster_tier0_templates(templates, power, n, b0, k0=k0)
     assert cl is not None
 
@@ -222,7 +223,7 @@ def test_screener_coarse_noise_unit_variance(profile_name):
     noise_scale = np.sqrt(psd)
     d_full = (rng.standard_normal((nblocks, n)) + 1j * rng.standard_normal((nblocks, n))) * noise_scale[None, :]
     d_band = np.zeros((nblocks, b0), dtype=np.complex128)
-    k_lo, k_hi = gc._band_slice(n, b0, k0)
+    k_lo, k_hi = gd._band_slice(n, b0, k0)
     length = k_hi - k_lo
     if k0 == 0:
         d_band[:, :length] = d_full[:, :length]
@@ -379,26 +380,26 @@ def test_single_column_alpha_simulation_splice_equivalence():
     lag_pads = (0, 1, 0, 0)
     win = (128, 1920)
 
-    gc._SIGNAL_RECORDS.clear()
-    gc._NOISE_RECORDS.clear()
-    gc._SIGNAL_CACHE.clear()
-    gc._NOISE_CACHE.clear()
+    gd._SIGNAL_RECORDS.clear()
+    gd._NOISE_RECORDS.clear()
+    gd._SIGNAL_CACHE.clear()
+    gd._NOISE_CACHE.clear()
 
     # Spliced multi-band simulation reusing base draws
-    (c_multi, f_multi), _ = gc.signal_draws(
+    (c_multi, f_multi), _ = gd.signal_draws(
         power, n, bands, snr=6.0, ndet=512, seed=77, window=win, lags_too=True,
         alphas=alphas, _exact=True
     )
-    n_multi = gc.noise_block_maxima(
+    n_multi = gd.noise_block_maxima(
         power, n, bands, nsim=2048, seed=77, window=win,
         alphas=alphas, lag_pads=lag_pads, _exact=True
     )
 
     # Direct unclustered columns must be bit-for-bit identical
-    (c_base, f_base), _ = gc.signal_draws(
+    (c_base, f_base), _ = gd.signal_draws(
         power, n, bands, snr=6.0, ndet=512, seed=77, window=win, lags_too=True, _exact=True
     )
-    n_base = gc.noise_block_maxima(
+    n_base = gd.noise_block_maxima(
         power, n, bands, nsim=2048, seed=77, window=win, _exact=True
     )
     np.testing.assert_array_equal(f_multi, f_base)
@@ -407,9 +408,9 @@ def test_single_column_alpha_simulation_splice_equivalence():
         np.testing.assert_array_equal(n_multi[:, col], n_base[:, col])
 
     # Direct 1-band noise simulation on b=256 with alpha=0.96, lag_pad=1 must match column 1
-    gc._NOISE_RECORDS.clear()
-    gc._NOISE_CACHE.clear()
-    n_single = gc.noise_block_maxima(
+    gd._NOISE_RECORDS.clear()
+    gd._NOISE_CACHE.clear()
+    n_single = gd.noise_block_maxima(
         power, n, [256], nsim=2048, seed=77, window=win,
         alphas=(0.96,), lag_pads=(1,), _exact=True
     )
@@ -1026,7 +1027,7 @@ def test_clustered_tier0_preserves_sparse_c_order_across_interleaved_clusters(
     grp.plan._execution_plan()
     if grp.plan._mf.tier0_cluster_count() == 0:
         # Force clustering on interleaved rows via set_tier0_clusters so C-order is exercised on all ISAs
-        k0 = int(gc.band_offset(ref, n, 256))
+        k0 = int(gd.band_offset(ref, n, 256))
         cl = gc.tier0_pair_screeners(templates, ref, 256, k0=k0)
         assert cl is not None
         assert any(
@@ -1090,7 +1091,7 @@ def _tier1_bank(n=2048, nt=16, b0=128, b1=512, chain_drift=0.06, seed=9201, powe
     if power_ratio != 1.0:
         templates = templates.copy()
         templates[1::2] *= np.float32(math.sqrt(power_ratio))
-    k0_0 = int(gc.band_offset(power, n, b0))
+    k0_0 = int(gd.band_offset(power, n, b0))
     cl0 = _screeners.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=4)
     return power, psd, templates, cl0
 
@@ -1110,7 +1111,7 @@ def test_tier1_sub_screeners_nest_hold_the_floor_and_match_an_independent_retent
     n, b1 = 2048, 512
     power, _, templates, cl0 = _tier1_bank(n=n, b1=b1)
     assert cl0 is not None and cl0.specs.shape[0] < templates.shape[0]
-    k0 = int(gc.band_offset(power, n, b1))
+    k0 = int(gd.band_offset(power, n, b1))
     cl1 = _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0)
     assert cl1 is not None
     nt = templates.shape[0]
@@ -1124,8 +1125,8 @@ def test_tier1_sub_screeners_nest_hold_the_floor_and_match_an_independent_retent
         assert len(set(c0[cl1.members[cl1.offsets[c]:cl1.offsets[c + 1]]])) == 1
 
     # Independent retention at every fine lag within the screener's reach
-    p = gc._norm_profile(power.astype(np.float32), n)
-    k_lo, k_hi = gc._band_slice(n, b1, k0)
+    p = gd._norm_profile(power.astype(np.float32), n)
+    k_lo, k_hi = gd._band_slice(n, b1, k0)
     H = templates[:, k_lo:k_hi].astype(np.complex128) / math.sqrt(p[k_lo:k_hi].sum())
     m_bin = np.mean(np.abs(templates[:, k_lo:k_hi].astype(np.complex128)) ** 2, axis=0)
     W = p[k_lo:k_hi] / np.maximum(m_bin, 1e-6 * m_bin.max())
@@ -1158,7 +1159,7 @@ def test_tier1_floor_splits_pairs_whose_members_lose_too_much():
     n, b1 = 2048, 512
     power, _, templates, cl0 = _tier1_bank(n=n, b1=b1, power_ratio=0.88)
     assert cl0 is not None
-    k0 = int(gc.band_offset(power, n, b1))
+    k0 = int(gd.band_offset(power, n, b1))
     assert _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0) is None
     loose = _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0, alpha_min=0.9)
     assert loose is not None
@@ -1179,14 +1180,14 @@ def test_tier1_screener_coarse_noise_unit_variance(profile_name):
     templates = templates.copy()
     templates[1::2] = templates[0::2] * np.exp(1j * rng.uniform(-np.pi, np.pi, (8, 1))).astype(np.complex64)
     b1 = 256
-    k0_0, k0_1 = int(gc.band_offset(power, n, b0)), int(gc.band_offset(power, n, b1))
+    k0_0, k0_1 = int(gd.band_offset(power, n, b0)), int(gd.band_offset(power, n, b1))
     if profile_name == "deadzone_bandpass":
         k0_1 = max(k0_1, 136)                       # exercise the wrapped packing
     cl0 = _screeners.cluster_tier0_templates(templates, power, n, b0, k0=k0_0, max_arity=2)
     assert cl0 is not None
     cl1 = _screeners.cluster_tier1_from_tier0(templates, power, n, cl0, b1, k0=k0_1)
     assert cl1 is not None and np.any(np.diff(cl1.offsets) == 2)
-    k_lo, k_hi = gc._band_slice(n, b1, k0_1)
+    k_lo, k_hi = gd._band_slice(n, b1, k0_1)
     length = k_hi - k_lo
     d_full = (rng.standard_normal((1500, n)) + 1j * rng.standard_normal((1500, n))) * np.sqrt(psd)[None, :]
     d_band = np.zeros((1500, b1), dtype=np.complex128)

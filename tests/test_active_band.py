@@ -16,6 +16,7 @@ import pytest
 
 import matchedfilter as mf
 from matchedfilter import TimeDomainFilterBank, _core, gatechain
+from matchedfilter import _gatedraws
 from matchedfilter._gpuhier import CLAIMS
 from matchedfilter.time_domain import template_spectra
 from conftest import usable_gpu, usable_gpu_reason
@@ -168,7 +169,7 @@ def test_cyclic_slot_wrapping_identity():
 
 
 def test_a_normalised_profile_is_frozen_and_keeps_what_follows_from_it():
-    """gatechain._norm_profile returns a read-only array, and returns it as it is when handed
+    """_gatedraws._norm_profile returns a read-only array, and returns it as it is when handed
     it again: a planning call normalises once whatever it asks for. The array's signature and
     band offsets are kept with it, the same values as for a plain copy, and go when it does."""
     import gc
@@ -177,21 +178,21 @@ def test_a_normalised_profile_is_frozen_and_keeps_what_follows_from_it():
     wall = np.zeros(n)
     wall[300:n // 2] = np.arange(300, n // 2, dtype=np.float64) ** -2.3     # nothing below a wall
     held = len(gatemodel._FROZEN)
-    p = gatechain._norm_profile(3.0 * wall, n)
+    p = _gatedraws._norm_profile(3.0 * wall, n)
     assert not p.flags.writeable and abs(p.sum() - 1.0) < 1e-12
-    assert gatechain._norm_profile(p, n) is p
+    assert _gatedraws._norm_profile(p, n) is p
     plain = p.copy()                                    # not frozen: computed each time
-    assert gatechain._norm_profile(plain, n) is not plain
-    offsets = [gatechain.band_offset(p, n, b) for b in (64, 128, 256, 512)]
-    assert offsets == [gatechain.band_offset(plain, n, b) for b in (64, 128, 256, 512)]
+    assert _gatedraws._norm_profile(plain, n) is not plain
+    offsets = [_gatedraws.band_offset(p, n, b) for b in (64, 128, 256, 512)]
+    assert offsets == [_gatedraws.band_offset(plain, n, b) for b in (64, 128, 256, 512)]
     assert max(offsets) > 0                             # the wall moves a band
-    assert offsets == [gatechain.band_offset(p, n, b) for b in (64, 128, 256, 512)]
+    assert offsets == [_gatedraws.band_offset(p, n, b) for b in (64, 128, 256, 512)]
     assert gatemodel._profile_sig(p) == gatemodel._profile_sig(plain)
     facts = gatemodel._frozen_facts(p)
     assert facts["sig"] == gatemodel._profile_sig(plain) and facts["k0", n, 128] == offsets[1]
     assert gatemodel._frozen_facts(plain) is None and gatemodel._frozen_facts(p[:8]) is None
     with pytest.raises(ValueError):
-        gatechain._norm_profile(p, n // 2)              # a frozen profile of another length
+        _gatedraws._norm_profile(p, n // 2)              # a frozen profile of another length
     del p, facts
     gc.collect()
     assert len(gatemodel._FROZEN) == held
@@ -208,21 +209,21 @@ def test_band_offset_preserves_dc_profiles_and_unlocks_seismic_wall_tiers():
         plaw[1:n // 2] = (bins ** exp).astype(np.float32)
         plaw /= plaw.sum()
         for band in (64, 128, 256, 512, 1024):
-            assert gatechain.band_offset(plaw, n, band) == 0
+            assert _gatedraws.band_offset(plaw, n, band) == 0
 
     # Smooth inspiral_power(4096) keeps k0 == 0 for every band above its ~61-bin low-frequency knee.
     canonical = inspiral_power(n)
     for band in (128, 256, 512, 1024):
-        assert gatechain.band_offset(canonical, n, band) == 0
+        assert _gatedraws.band_offset(canonical, n, band) == 0
 
     # Seismic-wall profiles at f_low = 20, 25, 35 Hz select 8-bin-aligned k0 > 0 with major gain.
     for f_low, n_fft in ((25.0, 4096), (35.0, 4096), (20.0, 8192)):
         prof = _seismic_wall_power(n_fft, f_low_hz=f_low, sample_rate_hz=2048.0)
-        k0_64 = gatechain.band_offset(prof, n_fft, 64)
+        k0_64 = _gatedraws.band_offset(prof, n_fft, 64)
         assert k0_64 > 0 and k0_64 % 8 == 0
         assert float(prof[k0_64:k0_64 + 64].sum()) > float(prof[:64].sum()) + 0.25
 
-        tiers = gatechain.usable_bands(prof, n_fft)
+        tiers = _gatedraws.usable_bands(prof, n_fft)
         assert 64 in tiers and 128 in tiers
 
 

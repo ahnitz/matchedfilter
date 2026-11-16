@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 from matchedfilter import gatemodel as gm
 
 from test_local_window import (CHECK_SEED, DATA, PROFILES, _production, empty_model)  # noqa: F401 (empty_model is a fixture)
@@ -26,13 +27,13 @@ def test_far_noise_drawing_the_refine_away_is_charged_as_often_as_it_happens(emp
     searched window itself, the coarse maximum lies outside the local window -- and not
     several times it."""
     p, n = PROFILES[name]()
-    bands = gc.usable_bands(p, n)
+    bands = gd.usable_bands(p, n)
     window = _production(n)
-    local = gc.local_window(p, n, bands, window)
-    ndet = 4 * gc.model_draws(1e-3)[0]
-    noise = gc.noise_block_maxima(p, n, bands, nsim=gc.model_draws(1e-3)[1], window=window)
-    sig, lags = gc.signal_draws(p, n, bands, snr, ndet, window=local, lags_too=True)
-    (C, F), (fat, cat) = gc.signal_draws(p, n, bands, snr, ndet, seed=CHECK_SEED, window=window, lags_too=True)
+    local = gd.local_window(p, n, bands, window)
+    ndet = 4 * gd.model_draws(1e-3)[0]
+    noise = gd.noise_block_maxima(p, n, bands, nsim=gd.model_draws(1e-3)[1], window=window)
+    sig, lags = gd.signal_draws(p, n, bands, snr, ndet, window=local, lags_too=True)
+    (C, F), (fat, cat) = gd.signal_draws(p, n, bands, snr, ndet, seed=CHECK_SEED, window=window, lags_too=True)
     det = F[:, 0] >= snr
     counted = 0
     for b in (128, 256, 512):
@@ -61,12 +62,12 @@ def test_a_plan_with_a_direct_refine_keeps_the_budget_on_the_real_window(empty_m
     import json
     p, n = PROFILES[name]()
     fd = 1e-3
-    bands = gc.usable_bands(p, n)
+    bands = gd.usable_bands(p, n)
     window = _production(n)
     rec = json.loads((DATA / "cost_model_2048_zen5.json").read_text())
     direct = gc.CostModel.from_dict(rec["model"]).unscreened().with_direct(0.09 * 256 + 4.0)
-    ndet = 4 * gc.model_draws(fd)[0]
-    (C, F), (fat, cat) = gc.signal_draws(p, n, bands, snr, ndet, seed=CHECK_SEED, window=window, lags_too=True)
+    ndet = 4 * gd.model_draws(fd)[0]
+    (C, F), (fat, cat) = gd.signal_draws(p, n, bands, snr, ndet, seed=CHECK_SEED, window=window, lags_too=True)
     det = F[:, 0] >= snr
     windows = 0
     for chain in ((256,), (128, 256), (256, 512)):

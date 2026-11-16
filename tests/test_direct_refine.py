@@ -6,6 +6,7 @@ import pytest
 
 import matchedfilter as mf
 from matchedfilter import _prices, gatechain
+from matchedfilter import _gatedraws
 from matchedfilter.time_domain import template_spectra
 
 #: Tests that time the real prices themselves (the rest run on pinned ones).
@@ -123,18 +124,18 @@ def test_halfwidth_shares_the_budget(fd):
     from matchedfilter.benchmark import _inspiral_power
     n = 2048
     ref, win = _inspiral_power(n), (192, 1856)
-    p = gatechain._norm_profile(ref, n)
-    bands = gatechain.usable_bands(p, n)
+    p = _gatedraws._norm_profile(ref, n)
+    bands = _gatedraws.usable_bands(p, n)
     rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
     cm = gatechain.CostModel.from_dict(rec["model"]).unscreened()
     direct = cm.with_direct(0.09 * 256 + 4.0)      # ticks per lag of a 256-tap window on Zen 5
     # the model's draws: the signals in the window local to them, the noise in the window
     # searched, whose maxima also say where far noise would draw the refine away
-    # (gatechain.local_window, _distances)
-    sig, lags = gatechain.signal_draws(p, n, bands, 6.0, gatechain.model_draws(fd)[0],
-                                       window=gatechain.local_window(p, n, bands, win), lags_too=True)
+    # (_gatedraws.local_window, _distances)
+    sig, lags = _gatedraws.signal_draws(p, n, bands, 6.0, _gatedraws.model_draws(fd)[0],
+                                       window=_gatedraws.local_window(p, n, bands, win), lags_too=True)
     C, F = sig
-    noise = gatechain.noise_block_maxima(p, n, bands, nsim=gatechain.model_draws(fd)[1], window=win)
+    noise = _gatedraws.noise_block_maxima(p, n, bands, nsim=_gatedraws.model_draws(fd)[1], window=win)
     det = F[:, 0] >= 6.0
     fit = np.zeros(det.sum(), bool)
     fit[1::2] = True                                  # the fit half: every other detection
@@ -179,7 +180,7 @@ def test_a_plans_window_misses_no_more_than_the_allowance():
     p = np.zeros(n)
     p[1:n // 2] = 1.0 / np.arange(1, n // 2)
     pl = gatechain.chain_thresholds(p, n, 6.0, fd, (1024,), cost=cm, window=win)
-    m = gatechain.model_draws(fd)[0] // 2
+    m = _gatedraws.model_draws(fd)[0] // 2
     allow = gatechain._gm.window_allowance(fd, m, m)
     assert allow == 15
     assert pl["search"]["halfwidth"] is not None and pl["search"]["missed"] <= allow, pl["search"]

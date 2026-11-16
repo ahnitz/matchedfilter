@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 from matchedfilter import gatemodel as gm
 
 DATA = pathlib.Path(__file__).parent / "data"
@@ -25,8 +26,8 @@ def _psd(name):
 def empty_model(monkeypatch):
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE", "_PLAN_CACHE",
               "_SIGNAL_RECORDS", "_NOISE_RECORDS"):
-        monkeypatch.setattr(gc, c, OrderedDict())
-    monkeypatch.setattr(gc, "_SIMILAR", {})
+        monkeypatch.setattr(gd if hasattr(gd, c) else gc, c, OrderedDict())
+    monkeypatch.setattr(gd, "_SIMILAR", {})
 
 
 def test_the_signature_tells_different_profiles_apart():
@@ -40,13 +41,13 @@ def test_a_different_profile_is_planned_on_its_own(empty_model):
     a = _psd("aLIGOAdVO4T1800545|flow=30|fcut=1024")
     b = _psd("aLIGOAPlusDesignSensitivityT1800042|flow=30|fcut=1024")
     cos = float(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
-    assert cos > gc._REUSE_COS          # the old criterion alone would have shared these
+    assert cos > gd._REUSE_COS          # the old criterion alone would have shared these
     chain = (128, 256, 512)
     first = gc.chain_thresholds(a, N, 6.0, 1e-2, chain, window=WIN)
     after = gc.chain_thresholds(b, N, 6.0, 1e-2, chain, window=WIN)
-    for c in (gc._SIGNAL_CACHE, gc._NOISE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE):
+    for c in (gd._SIGNAL_CACHE, gd._NOISE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE):
         c.clear()
-    gc._SIMILAR.clear()
+    gd._SIMILAR.clear()
     alone = gc.chain_thresholds(b, N, 6.0, 1e-2, chain, window=WIN)
     assert after is not first
     assert tuple(after["thresholds"]) == tuple(alone["thresholds"])
@@ -67,10 +68,10 @@ def test_no_reuse_past_the_response_tolerance(empty_model):
     a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
     k = np.arange(N)
     b = a * (1.0 + 0.2 * (k < 128))           # 20% more power in the lowest bins
-    fa, fb = gc._gate_features(a, N), gc._gate_features(b, N)
-    assert np.max(np.abs(fa - fb) / np.maximum(fa, 1e-12)) > gc._REUSE_RESPONSE
-    sa = gc.signal_draws(a, N, [256, 512, 1024], 6.0, 20000)
-    assert gc.signal_draws(b, N, [256, 512, 1024], 6.0, 20000) is not sa
+    fa, fb = gd._gate_features(a, N), gd._gate_features(b, N)
+    assert np.max(np.abs(fa - fb) / np.maximum(fa, 1e-12)) > gd._REUSE_RESPONSE
+    sa = gd.signal_draws(a, N, [256, 512, 1024], 6.0, 20000)
+    assert gd.signal_draws(b, N, [256, 512, 1024], 6.0, 20000) is not sa
 
 
 def test_a_reused_result_is_found_again_by_its_own_signature(empty_model):
@@ -81,7 +82,7 @@ def test_a_reused_result_is_found_again_by_its_own_signature(empty_model):
     chain = (256, 512, 1024)
     first = gc.chain_thresholds(a, N, 6.0, 1e-3, chain, window=WIN)
     assert gc.chain_thresholds(b, N, 6.0, 1e-3, chain, window=WIN) is first
-    gc._SIMILAR.clear()                 # only b's own signature can find it now
+    gd._SIMILAR.clear()                 # only b's own signature can find it now
     assert gc.chain_thresholds(b, N, 6.0, 1e-3, chain, window=WIN) is first
 
 
@@ -127,8 +128,8 @@ def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypat
     assert plan is not None
     assert len(gc._KEPT) > 0 and len(gc._CAND_CACHE) > 0
 
-    gc._SIGNAL_CACHE.clear()
-    gc._NOISE_CACHE.clear()
+    gd._SIGNAL_CACHE.clear()
+    gd._NOISE_CACHE.clear()
     del plan
     pygc.collect()
     assert len(gc._KEPT) == 0
@@ -138,16 +139,16 @@ def test_what_is_derived_from_draws_is_released_with_them(empty_model, monkeypat
 def test_similar_results_are_bounded_over_all_keys(empty_model, monkeypatch):
     """The results held for reuse by similar profiles are bounded per kind across keys, the
     oldest dropped first and an emptied key removed: a long job meets new keys throughout."""
-    monkeypatch.setattr(gc, "_SIMILAR_COUNT", {})
-    monkeypatch.setitem(gc._SIMILAR_MAX, "choice", 8)
+    monkeypatch.setattr(gd, "_SIMILAR_COUNT", {})
+    monkeypatch.setitem(gd._SIMILAR_MAX, "choice", 8)
     unit = (np.ones(4, np.float32), np.ones(2))
     for i in range(40):
-        gc._similar_put("choice", unit, (i,), "result %d" % i)
-        held = sorted(k[1] for k in gc._SIMILAR)
+        gd._similar_put("choice", unit, (i,), "result %d" % i)
+        held = sorted(k[1] for k in gd._SIMILAR)
         assert len(held) <= 8
         assert held == list(range(i - len(held) + 1, i + 1))      # the newest, no gaps
-    assert len(gc._SIMILAR) >= 7
+    assert len(gd._SIMILAR) >= 7
     # a key's own list still keeps only its newest entries
     for i in range(4):
-        gc._similar_put("plan", unit, ("one key",), i, keep=2)
-    assert [e[1] for e in gc._SIMILAR[("plan", "one key")]] == [2, 3]
+        gd._similar_put("plan", unit, ("one key",), i, keep=2)
+    assert [e[1] for e in gd._SIMILAR[("plan", "one key")]] == [2, 3]

@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import gatechain as gc, gatemodel as gm
+from matchedfilter import _gatedraws as gd
 from spectral_profiles import binomtest
 from fdr_support import ALPHA, PROFILES, SNR, modelled, profile
 
@@ -40,7 +41,7 @@ def _true_coarse(power, n, band, draws, seed):
     rng = np.random.default_rng(seed)
     h = np.sqrt(power)
     k = np.arange(n)
-    k0, khi = gc._band_slice(n, band, gc.band_offset(power, n, band))
+    k0, khi = gd._band_slice(n, band, gd.band_offset(power, n, band))
     R, fb = n // band, power[k0:khi].sum()
     out = []
     for start in range(0, draws, 2000):
@@ -68,7 +69,7 @@ def test_the_single_tier_gate_dismisses_its_budget_of_true_detections(name, band
     n, fd = 1024, 0.05
     power = profile(name, n)
     band = n // band_frac
-    if band not in gc.usable_bands(power, n):
+    if band not in gd.usable_bands(power, n):
         pytest.skip("band %d holds none of %s's power" % (band, name))
     gate = gm.gate_for(power, n, band, SNR, fd)
     assert gate is not None
@@ -110,9 +111,9 @@ def test_signal_draws_noise_is_the_noise_simulation(name, window):
     point, against lags from 0) the same distribution."""
     n = 2048
     power = profile(name, n)
-    bands = gc.usable_bands(power, n)
-    C, F = gc.signal_draws(power, n, bands, 0.0, 20000, window=window)
-    whole = gc.noise_block_maxima(power, n, bands, window=window)
+    bands = gd.usable_bands(power, n)
+    C, F = gd.signal_draws(power, n, bands, 0.0, 20000, window=window)
+    whole = gd.noise_block_maxima(power, n, bands, window=window)
     if window is None:      # the same draws (the signal's path adds its zero response: rounding)
         np.testing.assert_allclose(C, whole, rtol=1e-6)
     _all_alike({b: _ks_p(C[:, i], whole[:, i]) for i, b in enumerate(bands)}, (name, window))
@@ -135,8 +136,8 @@ def test_signal_draws_match_a_direct_simulation(name, window):
     w0, w1 = window or (0, n)
     power = profile(name, n)
     p = power / power.sum()
-    bands = gc.usable_bands(power, n)
-    C, F = gc.signal_draws(power, n, bands, SNR, M, window=window)
+    bands = gd.usable_bands(power, n)
+    C, F = gd.signal_draws(power, n, bands, SNR, M, window=window)
     rng = np.random.default_rng(zlib.crc32(("%s|%s" % (name, window)).encode()))
     k = np.arange(n)
     w = (rng.standard_normal((M, n)) + 1j * rng.standard_normal((M, n))) * np.sqrt(p)
@@ -148,7 +149,7 @@ def test_signal_draws_match_a_direct_simulation(name, window):
     ps = {"fine": _ks_p(F[:, 0], fine[some])}
     for i, b in enumerate(bands):
         R = n // b
-        k0, khi = gc._band_slice(n, b, gc.band_offset(p, n, b))
+        k0, khi = gd._band_slice(n, b, gd.band_offset(p, n, b))
         c0, c1 = (w0 // R - 1 if w0 else 0), min(-(-w1 // R) + 1, b)
         if k0 == 0:
             cb = np.abs(np.fft.ifft(x[:, :b], axis=1) * b)

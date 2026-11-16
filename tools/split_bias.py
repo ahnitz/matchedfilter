@@ -62,15 +62,16 @@ _CHUNK = 2000000 * 2048
 
 def _clear(gc):
     """Drop the gate model's caches: a worker makes many simulations, each held otherwise."""
-    for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS, gc._NOISE_CACHE,
-              gc._KEPT, gc._CAND_CACHE, gc._PLAN_CACHE, gc._SIMILAR):
+    from matchedfilter import _gatedraws as gd
+    for c in (gd._SIGNAL_CACHE, gd._SIGNAL_RECORDS, gd._NOISE_RECORDS, gd._NOISE_CACHE,
+              gc._KEPT, gc._CAND_CACHE, gc._PLAN_CACHE, gd._SIMILAR):
         c.clear()
 
 
 def _seeds(fd, n, pi, j=None, chunk=None):
     """A model replicate's seed (j) or a check chunk's (chunk). Within one n and fd every
     profile index pi < 20, replicate and chunk has its own, and none is the gate model's own
-    seed (gatechain._SEED)."""
+    seed (_gatedraws._SEED)."""
     base = 10000 * int(round(-math.log10(fd))) + 1000 * (n // 1024) + pi
     return 100000 + base + 20 * j if j is not None else 700000 + base + 100 * chunk
 
@@ -100,16 +101,17 @@ def run_case(job):
     name, pi, n, fd, a = job
     from fdr_audit import profile
     from matchedfilter import gatechain as gc
+    from matchedfilter import _gatedraws as gd
     snr = a["snr"]
     win = tuple(a["window"]) if a["window"] else (3 * n // 32, n - 3 * n // 32)
-    p = gc._norm_profile(profile(name, n), n)
-    bands = gc.usable_bands(p, n)
-    chains = gc.enumerate_chains(n, a["max_tiers"], bands=bands)
+    p = gd._norm_profile(profile(name, n), n)
+    bands = gd.usable_bands(p, n)
+    chains = gd.enumerate_chains(n, a["max_tiers"], bands=bands)
     cost = _cost_model(a, n)
     step = _CHUNK // n
     cols, dcols = [], []
     for c in range(max(1, -(-a["check"] // step))):
-        (C, F), (fat, cat) = gc.signal_draws(p, n, bands, snr, min(step, a["check"] - c * step),
+        (C, F), (fat, cat) = gd.signal_draws(p, n, bands, snr, min(step, a["check"] - c * step),
                                              seed=_seeds(fd, n, pi, chunk=c), window=win,
                                              lags_too=True)
         keep = F[:, 0] >= snr
@@ -144,9 +146,9 @@ def run_case(job):
     rows = []
     for j in range(a["seeds"]):
         s = _seeds(fd, n, pi, j=j)
-        sig, lags = gc.signal_draws(p, n, bands, snr, gc.model_draws(fd)[0], seed=s, window=win,
+        sig, lags = gd.signal_draws(p, n, bands, snr, gd.model_draws(fd)[0], seed=s, window=win,
                                     lags_too=True)
-        noise = gc.noise_block_maxima(p, n, bands, nsim=gc.model_draws(fd)[1], seed=s, window=win)
+        noise = gd.noise_block_maxima(p, n, bands, nsim=gd.model_draws(fd)[1], seed=s, window=win)
         picks, given = [], {}
         for chain in chains:
             for prune in (False, True):

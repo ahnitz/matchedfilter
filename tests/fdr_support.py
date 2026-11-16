@@ -7,6 +7,7 @@ import numpy as np
 import matchedfilter as mf
 import matchedfilter._core as _core
 from matchedfilter import gatechain as gc
+from matchedfilter import _gatedraws as gd
 from spectral_profiles import SHAPE_NAMES, make_spectral_profile
 
 SNR = 5.5
@@ -41,8 +42,8 @@ MODELLED = 200000
 def modelled(power, n, chain, thresholds, window=None):
     """The share of MODELLED detections of an independent model simulation (seed 977, not
     the plans' 13) that some tier of chain with these thresholds dismisses."""
-    bands = gc.usable_bands(power, n)
-    C, F = gc.signal_draws(power, n, bands, SNR, MODELLED, seed=977, window=window)
+    bands = gd.usable_bands(power, n)
+    C, F = gd.signal_draws(power, n, bands, SNR, MODELLED, seed=977, window=window)
     det = F[:, 0] >= SNR
     lost = np.zeros(int(det.sum()), bool)
     for b, t in zip(chain, thresholds):
