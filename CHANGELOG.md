@@ -4,725 +4,139 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+Changes since 0.1.0a9, by what a user of the library sees. The development record behind
+each entry (measurements, commits, studies) is in the repository history at the tag
+`pre-release-history`.
+
 ### Added
 
-- One set of templates searched in several noise profiles. A `HierarchicalFilter` holds a
-  calibration per profile (`use_profile(name)`: the reference, and the chain, thresholds,
-  shared screeners and compiled tiers that follow from it) over one copy of the templates:
-  every profile's compiled plan reads the first one's full-resolution templates and taps
-  (`_core.HMF(..., share=)`, `ap_hmf_create_chain_shared`). A `TimeDomainFilterBank` takes a
-  reference under a name (`set_reference(..., profile=name)`; the first settles the block
-  sizes) and a filtering call names the profile it runs (`profile=name`, also per job of
-  `filter_series_many` and `correlate_and_filter_many`). `HierarchicalSearch` builds one
-  bank a leaf, with a profile per channel where the root's profile is a mapping; it built a
-  whole bank per channel, each with its own templates. `tests/test_profiles.py`. MEASURED
-  on the 171,828-template showcase search, 16 workers, a profile per detector, peak resident
-  memory per worker 1.59-1.69 -> 1.52-1.55 GiB (one profile: 1.12-1.27, unchanged); steady
-  throughput and leaf setup level with the bank per channel (four operating points, two
-  paired runs each, order alternated: leaf stage within 1.2%).
-- `search.Root(profile={channel: (w, delta_f)})`: one reference profile a channel, for
-  channels whose noise spectra differ (two detectors). Each channel then has its own leaf
-  banks, calibrated on its own profile; `HierarchicalSearch.leaf_bank(root, leaf, channel)`
-  returns a channel's bank. A single `(w, delta_f)` is one bank for every channel, as before.
-  Found on the 171,828-template BNS search: gates calibrated on the first detector's profile
-  passed 20-42% of pairs at a 64-bin first tier on the other detector's data, where the model
-  expected 4% (signal power below 64 Hz: 16% of the total with one detector's spectrum, 45%
-  with the other's).
-- Tier-0 pair centroids (fe86f0ed, 5d02d1e3, 3f5fd63b, 88781d6e): on a multi-tier plan of four
-  or more templates, the model may gate tier 0 on lag- and phase-aligned centroids of up to
-  four templates, its thresholds solved for the centroid's retention, its survivors fanned
-  out to the members. CPU (FP32, FP16, Q15) and GPU (`compactPairsClustered`). Measured at
-  production length in docs/review-rounds-1-6.md: a CPU win, a GPU loss.
-- `TimeDomainFilterBank.correlate_and_filter_many` (e35458cb, f2c462f2): the CPU middle
-  correlation and leaf filtering in L3-sized cohorts, used by HierarchicalSearch and the
-  ladder when the cohort footprint fits.
-- A GPU direct time-domain refine (`refine_td.slang`, 1a04c4c0) and a multi-bin CPU one (up to
-  four output bins, cb68ae50), each priced against the transform refine.
-- The GPU FP16 listed tier-1 gate (a8667c9f) and an arbitrary-pair sparse Q15 screen
-  (`q15_screen_gather`, aa2e481d).
-- `tools/fdr_audit.py --bank NT`: the centroids against the flat filter, on banks of
-  near-duplicate templates through HierarchicalFilter, centroids on and off. The audit's
-  one-template banks and pinned chains never ran them.
-- `tools/bench_refilter.py`: replays captured single-template refilter calls of a search
-  (time per call, first and repeated, and the peaks against the capture), and
-  `tests/test_refilter_dense.py`: such calls, alone and batched, against the correlation
-  computed directly (real and strided-lane series, complex taps, windows over several
-  blocks, bin sizes that do not divide the window, a threshold that keeps some bins).
-- `tools/fdr_audit.py --group G`: the near-duplicates per group of a `--bank` (default 4).
-  The model forms clusters above four only when at least eight remain, so `--bank 16` audited
-  centroids of four while production plans mostly cluster six to eight. `--bank 64 --group 8`
-  forms centroids of eight: 108 cases at n=2048 and 4096 pooled 0.77x the false-dismissal
-  budget (FP32) and 0.73x (Q15), none off its plan's model, the worst case 1.40x, Tier-1
-  sub-centroids active in 72. A 64-template case holds about 11 GB at n=2048 and more at
-  some profiles: run one profile per process.
-- An AVX3 CI job: with HWY_AVX3_DL enabled, AVX-512 runners select AVX3_DL, so plain AVX3 had
-  no coverage. It is skipped, with a notice, on a runner without AVX-512.
-- An AVX back end for CPUs with AVX but not AVX2 (Sandy and Ivy Bridge), which ran the
-  4-lane SSE4 kernels because Highway has no AVX1 target. The float kernels (transforms,
-  products, peak scans) run at 8 lanes on 256-bit AVX without FMA (src/simd-avx1.h,
-  src/kernel_avx1.cc). The Q15 screen and the integer helpers stay SSE4's. It is
-  selected automatically, `targets()` lists it as `AVX`, and `MF_ISA=SSE4` keeps the
-  4-lane kernels. Results match the other ISAs to fp32 rounding (peaks identical, |snr|
-  within 5e-7). Fine-stage call on an Ivy Bridge E5-2660 v2: x1.59 at n=1024, x1.32 at
-  2048, x1.40 at 4096, x1.25 at 16384.
-- CPython 3.15: release wheels (Linux x86-64 manylinux and musllinux, macOS arm64) and CI
-  test jobs. Wheels build with cibuildwheel 4.3.4.
-- tests/test_lint.py: the library is pyflakes-clean, and stays so. pyflakes reported 143
-  warnings in python/matchedfilter (imports left behind when code moved between modules,
-  re-exports of private names, locals computed and dropped; none was a live bug), now 0,
-  and the test fails on any new one. It skips where pyflakes is not installed; CI installs
-  it with the test extra. tools/, tests/ and examples/ lost their dead imports and locals
-  too.
+- Several noise profiles over one set of templates. A `HierarchicalFilter` holds one
+  calibration per profile (`use_profile(name)`) over a single copy of the templates, and a
+  `TimeDomainFilterBank` takes a reference under a name (`set_reference(..., profile=name)`)
+  and filters under one (`profile=name`, also per job of `filter_series_many` and
+  `correlate_and_filter_many`).
+- `search.Root(profile={channel: (w, delta_f)})`: one reference profile per channel, for
+  channels whose noise spectra differ (two detectors). A single `(w, delta_f)` still gives
+  one calibration for every channel. `HierarchicalSearch.leaf_bank(root, leaf, channel)`
+  returns a channel's bank.
+- Shared screeners: on a plan of four or more templates, the first tiers may screen on the
+  aligned mean of up to 16 similar templates and pass survivors to the members. The gate
+  model solves the thresholds for the screener's retention, so the false-dismissal budget
+  still holds. CPU (FP32, FP16, Q15) and GPU.
+- `TimeDomainFilterBank.correlate_and_filter_many`: the middle correlation and the leaf
+  filtering of a hierarchical search in cache-sized cohorts.
+- A direct time-domain refine on the GPU, and a multi-bin one on the CPU (up to four output
+  bins), each used where it is priced below the transform refine.
+- An AVX back end for CPUs with AVX but not AVX2 (Sandy and Ivy Bridge): the float kernels
+  run at 8 lanes where they ran the 4-lane SSE4 kernels. `targets()` lists it as `AVX`.
+- CPython 3.15 wheels (Linux x86-64 manylinux and musllinux, macOS arm64).
+- Tools: `fdr_audit.py --bank NT --group G` (shared screeners against the flat filter),
+  `bench_refilter.py` (replay of a search's single-template follow-up calls), and the
+  `setup_*.py` tools (capture and replay of a job's setup).
 
 ### Changed
 
-- Chain choice: chains the model prices within `TIE` (5%) of the cheapest are a tie, and the
-  tie now goes to the chain with the fewest tiers (then the flop proxy, which alone decided
-  before and favours an extra tier). On the 171,828-template BNS search (pycbc PR 5521) the
-  model priced (128, 256) and (128, 256, 512) within 1% on every machine and chose three
-  tiers. Fine-stage CPU of the two-tier chain against it, paired runs: Haswell -18% and -9%
-  at SNR 6.0, -26% at 6.5, +3% at 5.5; Ivy Bridge -17% and -4% at 6.0, -7% at 5.5; Zen 5
-  -5% at 6.0, -8% at 6.5, 0 at 5.5 (false dismissal 0.001), -3% at 6.0 with 0.01. Triggers
-  at or above threshold differ by 0.1-0.3% in each direction, each chain's own dismissal.
-  A plan's chain, thresholds and results change wherever such a tie existed.
+Results that change are stated; everything else returns what it returned before.
 
-- A lone single-template job in a `filter_series_many` batch of other kinds of job takes the
-  follow-up batch's path, as two or more already did, and as a single call now does: a job
-  returns the same peaks however it is submitted. Its values differ in rounding from the
-  one-template plan's, which such a job got before.
-
-- The CPU FP16 first gate on ARM gates on its own statistic, each pair's FP16 maximum, as the
-  GPU's fp16 tier and the x86 Q15 screen do, in place of an upper bound on the FP32 maximum
-  (|y16|max (1 + 3u) + kappa u rms, kappa 16). Against the flat filter by injection on Apple
-  silicon (CI macOS arm64; `tools/fdr_audit.py --n 2048 4096`, 80 cases), no case was off its
-  plan and the pooled dismissal was 1.041x the budget, as the FP32 path's 1.036x; with the
-  bound, single-tier chains at bands 1024 and 2048 dismissed 0.15-0.22x their plans. Gone
-  with it: `GATE16_KAPPA` and `ap_gate16_kappa_u`. `_core.gate16_bound` is
-  `_core.gate16_max`, and `tools/gate_margin.py --gate cpu-g16` judges the gate on its own
-  statistic.
-- A GPU joint trial's round settles each configuration until a replay builds nothing and
-  runs within half the tie (2.5%) of the replay before, at most five replays. It used to
-  stop as soon as nothing more was built. Vulkan fused batches now count as built recordings.
-  A batch that has built everything can still run 10-25% slower for a replay or two, so the
-  arm played first in a round read 14-21% slower than the same configuration played later
-  (docs/trial-statistics-gpu.md). Short test27 ladders, 24 per GPU, equal arm's sd per
-  round before and after: dev2 (8060S) 0.31 to 0.15, dev3 (Renoir) 0.24 to 0.10, dev4 (Iris
-  Xe) 0.024 to 0.022; the order effect is gone on dev3. The current rule's power for a 10%
-  gain went from 0.013 to 0.98 on dev2 and from 0.41 to 0.73 on dev3, its false-switch rate
-  fell on every device, and job times did not move.
-- The GPU fp16 coarse tier gates on its own statistic, each pair's fp16 maximum, as the CPU's
-  Q15 screen does, in place of an error bound (|c16| (1 + 3u) + kappa u rms, kappa from a
-  measured error table per backend). Against the flat filter by injection on the 8060S
-  (`tools/fdr_audit.py --device gpu:0`), its chains dismissed 1.02x their budget, every case
-  on its plan; with the bound 0.85x, and single-tier chains at band 1024 0.20-0.28x (the bound
-  passed pairs no plan priced, which the refine then did). Gone with it: `C16_KAPPA` and the
-  sigma tables (`tools/coarse_layout.py`), `tools/c16_sigma.py`, the raw-gate pass of the GPU
-  cost calibration (a child process per transform size), the cost model's `excess`, and the
-  bound's energy reduction in most coarse kernels. Every fp16 coarse kernel is rebuilt; the
-  GPU kernel identities and stored GPU cost models are new. `tools/gate_margin.py` judges a
-  gate on its own statistic by its accuracy (every pair within 0.14% of the exact maximum)
-  and uploads its operands at every threshold (a skipped upload left the fp16 tier's verdicts
-  stale), and the merge gate's fdr stage runs the device's filter too. Throughput is
-  unchanged (the test27 ladder on the 8060S chose the same chains; steady time 1.00-1.04x
-  over three paired runs under load).
-- One coarse-candidate enumerator for every GPU backend (`_coarse.candidates`): each shipped
-  coarse build whose recorded group and workgroup memory fit the device, at each twiddle
-  source and subgroup size the backend gives it. Metal now offers its tiles at every packing
-  and no longer offers builds past its 32 KB threadgroup memory; CUDA holds its builds to the
-  device's queried block limits. One timing rule for every offline measurement (the coarse
-  and gate-way screens, the GPU cost calibration, the continuous correlation's block-size
-  prices: `_choice.fastest_of_rounds`), and one threshold search for every calibration.
-- CPU: the survivor gathers' lane transposes run under the back end's own dispatch (`MF_ISA`
-  reaches them), one copy for every target; SSE4 takes a vector transpose where it took a
-  scalar loop. The AVX back end (Sandy and Ivy Bridge) takes the pair-batched alternate at
-  n = 256 and 512, 0.73x and 0.81x the time it took (one bin, 8 x 64 pairs).
-- One generator for every GPU kernel, `tools/kernel_variants.py`: the table of every Vulkan,
-  Metal and CUDA artifact, the facts each is built with and the one way each is compiled
-  (`build_spirv.py` and `build_ptx.py` run it; `build_forward.py` is gone). A rebuild
-  reproduces all 275 SPIR-V, 290 Metal and 309 PTX artifacts byte for byte. Each backend's
-  manifest has one schema (Metal has its own instead of columns in the SPIR-V one), and the
-  hosts read every kernel fact from it through `matchedfilter._kernels`: the 32 KB builds,
-  Vulkan's bindings and push-constant bytes, Metal's and CUDA's group sizes and the coarse
-  candidates' memory. That last was a formula overstating the fp16 builds' memory about
-  twice, so a 64 KB device now also tries the coarse packings that fit (band 1024 at 16
-  pairs). Metal ships one survivor compaction each, as Vulkan and CUDA do, in place of 30
-  per-length builds that differed only in their `#line` names. Vulkan's and CUDA's kernel
-  identities are unchanged; Metal's moves once. CI checks the kernels and manifests against
-  the generator.
-- A GPU chain's forward is priced from the feeds the calibration times -- the band forward
-  at each widest band and the full forward, per block -- taking the feed the backend's own
-  rule takes for the chain, in place of a one-point fit of the band forward
-  (`forward * (1/2 + B/2n)`) plus a recompute at a running mean of earlier calls'
-  refine-block fractions, which the refine term already held. test27 ladder on the 8060S:
-  0.96x the steady time (fine stage 0.94x, three runs each). A stored GPU cost model is
-  measured afresh once.
-- A GPU batch is always fused, in lockstep, and the `gpu-batch` device trial that chose
-  fusion and the fused interleave depth is gone. Pinned at production length (test27 ladder,
-  2-3 runs an arm), unfused batches were 3-17% slower on the 8060S, RENOIR and Iris Xe and
-  the depth-3 interleave no faster; the trial had locked unfused on replays of short runs
-  on an idle device, where it timed 6-15% faster.
-- Block size and the Q15 screen are decided by one joint trial on real calls, on the CPU
-  and GPU alike, in place of three separate trials, and the gate chain is no longer timed:
-  each plan runs its model chain (`MF_CHAIN_FORCE` pins one for measurement). The trial's
-  arms are complete configurations: the default (the smallest block size, each plan's model
-  chain and the model's screen setting) and one-step deviations from it (another block size,
-  the model's priced layout, the screen off or on). They are timed in paired rounds on the
-  same jobs of two of a batch's banks and pooled as ratios to the default. Arms that can no
-  longer win leave the rounds, and a winner other than the default must win again alone
-  against it before it locks. The old chain trial locked one chain for plans of every
-  profile, which ran 2-14% slower per call (dev1, dev2, Haswell, Ivy Bridge). On the test67
-  leaves at their mean of 12 calls per bank, total CPU is 4.6% lower on dev2 and 6.0% lower
-  on dev1. `MF_TRIAL_ROUNDS` replaces `MF_BLOCK_TRIALS` and `MF_CHAIN_TRIALS`, and
-  `MF_CHAIN_MARGIN` is gone (all three now warn); `tools/migrate_cost_file.py` removes the
-  superseded trial records from a cost file. `HierarchicalFilter.autotune_info` reports
-  status `model` when no trial ran.
-- Block sizes are chosen on real calls in every run, not only with MF_COST_FILE: the first
-  reference's banks run each candidate size in paired rounds and the search locks the fastest,
-  pooled over its banks. Candidates are the smallest single sizes, smallest first (a tie keeps
-  the smallest), then the model's layout. The model alone misjudged sizes under production load:
-  fresh processes on a loaded Haswell node put up to 231 of test67's 323 banks on 4096, which
-  ran 1.6-1.95x slower than 2048. Banks built after the lock skip block-size pricing. CPU leaves
-  of a search run as one filter_series_many batch (the results are the same).
-- Hierarchical CPU choices hold under changing machine load. The cost calibration times every
-  quantity round-robin (each timed call after an untimed one on the same plan) and keeps each
-  one's minimum: under a dynamic load the calibrated costs spread up to 4.7x between
-  processes, now under 1.2%, so block size, chain and tier thresholds stop moving with the
-  load. Two pricing errors that sent single-tier band-256 chains to the transform refine at
-  ~2x the best chain's cost are fixed: the direct refine's window is priced with the draws
-  the chain runs with (a tenth of them gave 2 coarse samples against 62), and a one-tier
-  chain behind the Q15 screen, which reports no lag, is priced with the transform refine.
-  A close call between the screen and the float first tier takes the screen (within TIE).
-  test27 full job, both variants together on one node: Haswell steady 0.84 -> 1.21 M
-  templates in real time (fine stage 1.01 -> 1.59 M, job 3331 -> 2565 s), Ivy Bridge
-  0.23 -> 0.31 M (job 11365 -> 9163 s); dev2 unchanged (its choices were already right).
-  Triggers move only near threshold (the tier thresholds follow the chosen chain, within
-  the false-dismissal budget): Haswell 5 of 27,501 H1 and 28-36 of 30,414 L1, max snr 6.13.
-- The gate model's simulations draw from a counter-based generator (src/gauss.cc:
-  Threefry-2x32 and Box-Muller, identical for any vector width; AVX2 and AVX-512 agree bit
-  for bit, SSE4 to the last ulp of its log and sincos), so their draws, and the thresholds
-  they place, differ from before within the simulation's own error (thresholds +-1.4%).
-- One false-dismissal budget per plan, met by construction (docs/gate-model.md,
-  2026-10-29). A plan's structure is searched on half of the gate model's detections:
-  the split of fd between its tiers and, on the CPU, the direct refine's window. Its
-  thresholds are fitted on the other half, every tier moved by one shift that leaves
-  j - 1 of that half dismissed (`gatechain.plan_chain`). The fit half is independent of
-  everything the search chose, so every plan dismisses fd on average, with no correction
-  for the search, the chain `choose_chain` picks included.
-  - `_SPLIT_TOLERANCE_Z` is gone. It was the 0.75 cut, and with costs from a real machine
-    the bias it cut was larger: the CPU's plans dismissed 1.02-1.08 of fd, tiers and
-    window together.
-  - On independent draws (`tools/split_bias.py`: 10 profiles x 30 model seeds, fd 1e-2
-    and 1e-3, n = 2048 and 4096, priced by operation count and by Zen 5 costs with a
-    direct refine) every chain's plans average 0.997-1.005 of fd and the picks
-    0.998-1.013.
-  - Each plan rests on half the draws, so its sd is 0.14 fd (0.09 before), and 5% of
-    plans dismiss more than 1.25 fd, the tolerance decision D1 sets
-    (`gatemodel.fit_order`).
-  - Thresholds change everywhere.
-  - Meeting fd where the plans exceeded it costs CPU throughput: on test27's bank
-    (`tools/ladder.py`), 0.98 on dev1 at the production model seed (paired), and a median
-    of 0.976 over 8 model seeds.
-- The CPU direct refine's window is inside the budget. The detections it misses count as
-  dismissals, and the split search tries every half-width that misses a different set,
-  priced per lag, beside the whole-block refine.
-  - `CostModel.with_direct` takes ticks per lag.
-  - A window may miss at most `gatemodel.window_allowance` of the search half's
-    detections (15-21 of the about 47 dismissals the budget allows). Within that, the
-    chance that the fit half leaves the window no room, and the plan refines by
-    transform, is at most what D1's tail leaves.
-  - `_LOCALISE_SHARE` (up to 5% of fd on top of the budget) and the window's extra
-    coarse sample are gone.
-  - A pinned chain's thresholds are priced without the Q15 screen it runs without.
-  - Explicit thresholds refine by transform.
-- The gate model's draw count is a function of fd and D1's tolerance only: 2 (round(j / fd) - 1)
-  detections, j = 47 at fd 1e-2 and 48 at 1e-3, simulated until reached at any snr.
-  - At fd 1e-3 that is a median of 167,000 draws (200,000 before), at 1e-2 16,500
-    (20,000).
-  - 200/fd with its 20,000 floor, the 3,000,000 cap, `_GROW` and the K < 8 refusals are
-    gone.
-  - A budget below fd 5.5e-5 now refuses. Before, such budgets ran on 8-96 dismissed
-    draws.
-  - `choose_chain` and `chain_thresholds` take `nsamp` as detections.
-  - `tools/fdr_audit.py` tests each case against its plan's modelled dismissal
-    (two-sided, against independent model draws) and reports the pooled misses over the
-    budget.
-  - `tools/split_bias.py` has no z and counts the direct refine's misses (`--cost`,
-    `--taps`).
+- One false-dismissal budget per plan, met by construction. A plan's structure (the split
+  of `fd` between tiers and, on the CPU, the direct refine's window) is searched on half of
+  the gate model's detections and its thresholds are fitted on the other half. Every plan
+  dismisses `fd` on average and 5% of plans dismiss more than 1.25 `fd`. Thresholds change
+  everywhere. A budget below `fd` 5.5e-5 is refused.
+- Block size and the Q15 screen are decided by one joint trial on real calls, on the CPU and
+  the GPU, in every run (not only with `MF_COST_FILE`). The gate chain is the cost model's
+  choice and is no longer timed. `MF_TRIAL_ROUNDS` replaces `MF_BLOCK_TRIALS` and
+  `MF_CHAIN_TRIALS`; `MF_CHAIN_MARGIN` is gone. `tools/migrate_cost_file.py` removes the
+  superseded records from a cost file.
+- Chains the model prices within 5% of the cheapest are a tie, and the tie goes to the chain
+  with the fewest tiers. A plan's chain, thresholds and results change wherever such a tie
+  existed.
+- The reduced-precision first tiers (GPU fp16, ARM FP16) gate on their own statistic, as the
+  x86 Q15 screen does, in place of an upper bound on the FP32 maximum. Against the flat
+  filter by injection their chains dismiss 1.02-1.04x the budget; with the bound they
+  dismissed as little as 0.15x of it and passed pairs no plan priced.
+- The gate model's simulations draw from a counter-based generator that gives the same
+  stream at any vector width, and the planner's signal table is drawn from the joint law of
+  the samples it reads rather than simulated (`MF_SIGNAL_LAW=0` simulates as before).
+  Thresholds differ from before within the simulation's own error.
+- Cost calibration holds under changing machine load: quantities are timed round-robin and
+  each keeps its minimum. On a loaded node calibrated costs spread up to 4.7x between
+  processes before and under 1.2% now.
+- A single-template call (`filter_series(template_index=k)`) and a lone single-template job
+  of a batch take the batched follow-up path. A job returns the same peaks however it is
+  submitted; values differ from the old one-template plan's in rounding.
+- A GPU batch is always fused; the device trial that chose fusion is gone.
+- `gatechain.calibrate_costs` is the calibration itself, with its defaults. A model measured
+  with other calls is stored under its own key.
+- One generator builds every GPU kernel (`tools/kernel_variants.py`), each backend's
+  manifest has one schema, and CI checks the shipped kernels against the generator.
 
 ### Removed
 
-- The platform FFT (2039868e): macOS no longer transforms through Accelerate's vDSP, and
-  `MatchedFilter.set_platform_fft` / `HierarchicalMatchedFilter.set_platform_fft` are gone
-  with it (src/fft_accel.c and its pricing). Every platform runs the library's own
-  transforms, one code path to tune. The M2's fine stage is 3% faster, since the forward
-  priced through vDSP lost to the batched forward. The middle correlation is 47% slower
-  (48.5 to 71.2 s on test27; steady time 6.4% longer), since vDSP's transforms are 1.44x
-  ours at n = 2048 and about 2.2x at 32k-64k. The kernel work since then is closing that gap.
-- `MF_COARSE_RAW` (the GPU fp16 tier always reports its own statistic).
-- `MF_GPU_FUSE_INTERLEAVE` (the fused interleave depth is gone).
+- The platform FFT: macOS no longer transforms through Accelerate, and
+  `MatchedFilter.set_platform_fft` and `HierarchicalMatchedFilter.set_platform_fft` are
+  gone. Every platform runs the library's own transforms.
+- Environment variables `MF_COARSE_RAW`, `MF_GPU_FUSE_INTERLEAVE`, `MF_ILAY`,
+  `MF_METAL_IEEE`, `MF_TC_KAPPA` and `MF_CAPTURE`. Setting a removed variable warns.
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
-  (`chain_thresholds(...)["halfwidth"]`), chosen with its thresholds against one budget.
-- 52 shipped GPU kernels that nothing could run or nothing chose, 14.7 MB of 115 MB: CUDA's
-  tensor-core coarse gate (`src/gpu/coarse_tc.cu`, four PTX builds; the measured coarse
-  choice never picked it on the L40S, where it ran 25-40% slower than the Slang layouts),
-  the fp32 tiled coarse kernel (`coarse_tile.slang`, nine builds no host loaded), three
-  SPIR-V modules no build makes (over 1024 invocations), and 36 PTX modules over the 48 KB
-  of static shared memory CUDA allows a block, which no NVIDIA GPU can launch (their
-  lengths run the 32 KB staging builds, as they did). Results are unchanged. One choice
-  changes on CUDA: the band-8192 coarse candidates no longer include `tierb_8192_c16p2`
-  and `tierb_8192_c16p2w`. Those 64 KB modules could not load and had no 32 KB build, so
-  timing the band-8192 coarse layouts raised `UnsupportedSize`; it now times the two
-  layouts that load. Devices with tensor cores also lose the two `tc` coarse candidates
-  at bands 256 and 512 (the deleted gate).
-- `MF_ILAY` and the strided ([n1][k2]) intermediate layout of the CPU transform that
-  `MF_ILAY=0` selected. Paired rounds on Zen 5 (2026-10-27) covered the AVX3, AVX2, AVX
-  and SSE4 kernels, n = 256 to 2^20, and the peak (one bin, many bins, unthresholded),
-  full-output and continuous correlation calls. The strided layout was 5-7% slower than
-  the contiguous one at the median on every ISA and up to 1.36x slower (2^20). It was never
-  faster by the 5% a measured choice needs: its best case was 4.8% (n = 4096, SSE4), which a
-  16-round re-measure put at 1.00. Outputs were bit-identical. On the CPU ladder (test27
-  bank, AVX3) it was 0.5-6.4% slower per round. Zen 3 had it slower at every length
-  (2026-10-22). An Apple M2 measured it 4-9% faster at n >= 2^18 (2026-10-22), which was not
-  re-measured. Without it, results are bit-identical on every ISA.
-  Removing the branch changed GCC's inlining: stage A's untabled 32-point path, which no
-  plan with its twiddle table takes, was inlined into the tabled one (12.2 -> 15.2 KB on
-  AVX2, 13.5 -> 16.9 KB on AVX) and the AVX n = 1024 one-bin call ran 1.14x slower. That
-  path is now its own out-of-line function, and the hot one is 7.8 and 8.5 KB. Paired on
-  Zen 5, the AVX and AVX2 calls at n = 1024 are 1.03-1.04x the old build's and level
-  elsewhere (n = 512, 4096), and AVX3 is unchanged; on Zen 3 (AVX2) 1.00x, 0.97x and 1.04x
-  at n = 512, 1024 and 4096. The remainder is code placement, as the fine stage's frontend
-  bound makes it (the old ladder ratios were measured before this fix).
-- `MF_METAL_IEEE` (no tool, test or CI job set it, and `=none` let the survivor compaction
-  drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
-  of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting
-  any of them, or `MF_GATE_CACHE_FILE`, now warns that it was removed and why.
-- The package root's re-exports of private names (33, from `_filter`, `_hierarchical`,
-  `_choice` and `_results`, and the `_gatechain` alias) and `time_domain`'s re-exports from
-  `_layout` and `_windows`. Private names are reached in their own modules and may move
-  (docs/robustness-plan.md, decision 5); the public names are unchanged
-  (tests/test_public_api.py).
+  (`chain_thresholds(...)["halfwidth"]`).
+- 52 shipped GPU kernels that nothing could run or nothing chose (14.7 MB), CUDA's
+  tensor-core coarse gate among them.
+- The package root's re-exports of private names, and `time_domain`'s re-exports from
+  `_layout` and `_windows`. The public names are unchanged (`tests/test_public_api.py`).
+- From the repository: the dated studies, audits, plans and measurement logs under `docs/`,
+  and the tools that only reproduced them.
 
 ### Performance
 
-- The gate planner's signal table is drawn from the joint law of the samples it reads, not
-  simulated (`matchedfilter._signal_law`; `MF_SIGNAL_LAW=0` simulates as before). A band's
-  statistic is the fine statistic's own bins restricted to the band, so the fine samples
-  around a signal's arrival and each band's nearest coarse samples are one Gaussian vector
-  whose covariances are sums over the profile's bins; coarse samples further away are the
-  largest of as many independent noise samples. Chains, a shared screener's retention and
-  the lags of the maxima are read from the one vector; a profile's draws are held while it
-  is planned, so a retention draws nothing again. It stands in only for a window of at most
-  half the block: a profile whose correlations span the block is planned on the whole block
-  and simulated, and the simulation remains the reference the law is tested against
-  (`tests/test_signal_law.py`). MEASURED, 171,828-template search, 16 workers, a profile per
-  detector, quiet machine, law against simulation on the same code: setup 83.4 and 85.0 s ->
-  73.0 and 73.7 s at SNR 6.0 / FDR 0.001 and 110.7 -> 81.6 s at 5.5, steady throughput and
-  peak memory level. Dismissal of the reference's kept triggers within 0.5 of threshold at
-  5.5 (budget 0.100%): H1 0.117% +- 0.010, L1 0.091% +- 0.008 with the law, 0.099% and 0.124%
-  simulated. One `pycbc_inspiral_fir` job of the FIR search example without a cost file:
-  440.4 -> 398.0 billion instructions.
-- The law's draws are held for three profiles, not two, each in less memory. A job's banks
-  alternate between the top templates they hang under, and two top templates' banks under
-  two detectors plan on three profiles that are not alike: holding two, every other bank
-  drew its profile again (185 draws over the 16 workers' two passes, 0.19 s each, where a
-  worker's banks and block-size trial plan on 8 profiles). A sample's
-  block lag is no longer stored per draw and sample but read from the draw's first lag and
-  the sample's place in its arrival class (42 -> 29 MB a profile at a block of 1024).
-  MEASURED, same search and machine, three alternating pairs: setup 72.6, 72.9 and 72.2 s
-  -> 66.5, 66.7 and 67.0 s; resident memory of the 16 workers 21.8 against 21.7 GiB; every
-  plan unchanged. The steady rate read 12.9 against 12.6 M template-s/s a core with every
-  stage 2-5% slower, the detector-side stages that this does not touch included: with
-  less of the run in setup the workers filter at once more of the time.
-- The planner normalises a profile once. `gatechain._norm_profile` returns a read-only
-  array and returns such an array as it is, and the array's signature and band offsets are
-  kept with it (`gatemodel._freeze`): a chain choice normalised its profile five times,
-  hashed it three times and solved each band's offset twice, and a profile standing in for
-  the banks like it is one array for all of them. MEASURED, same search and machine, three
-  alternating pairs: setup 65.8, 67.0 and 67.3 s -> 65.1, 65.0 and 64.7 s, steady rate
-  level; every plan of the replayed setup unchanged.
-- A pass of the shared-screener merging in C++ (`src/tier0_pass.cc`, `_core.tier0_pass`):
-  every candidate merge's members, the frame they are aligned in, their lags, the screener
-  and the retentions that accept or turn the group down were some forty numpy operations a
-  pass. The routine does the numpy code's arithmetic operation for operation (its pairwise
-  sums, a complex number over a real one by the reciprocal, the modulus numpy's AVX-512 loop
-  computes), so on the replayed setup of the showcase search every screener set is bit for
-  bit what it was at SNR 5.5, 6.0 and 7.0; numpy's own modulus differs between machines in
-  the last place, and the routine's does not. `tests/test_tier0_pass.py` keeps the numpy
-  code as the reference. MEASURED, same search and machine, three alternating pairs: setup
-  65.3, 64.9 and 63.9 s -> 61.9, 61.8 and 61.7 s, steady rate level.
-- The matching of a level's vectors into pairs in C++ (`src/tier0_match.cc`,
-  `_core.tier0_match`): the chunks' pair scores, the greedy selection, the swaps that place
-  left-overs and the second round over what the chunks left were a trip through numpy per
-  chunk, about 29,000 a pass of the showcase search. One difference from the numpy code:
-  where a row held equal candidate scores its order was that of numpy's partial sort and is
-  now the column's (no such case in the replayed setup, whose screener sets are bit for bit
-  what they were at SNR 5.5, 6.0 and 7.0). The coarse shift search of `tier0_pass` runs a
-  shift a vector lane. `tests/test_tier0_match.py` keeps the numpy code, with the swap
-  search `gatechain._best_swap` that only it used, as the reference. MEASURED, same search
-  and machine, three alternating pairs: setup 63.3, 62.3 and 62.6 s -> 57.8, 57.8 and
-  57.5 s, steady rate level.
-- The first level and the levels' rebuilding in C++ (`src/tier0_pass.cc`):
-  `_core.tier0_pair_level` makes the templates' coherent pairs clusters of two (lags refined,
-  pair screeners, retentions) and `_core.tier0_pass` now writes the next level itself; both
-  were numpy blocks ending in a Python loop over the templates or the clusters. Screener
-  sets of the replayed setup bit for bit what they were at SNR 5.5, 6.0 and 7.0. MEASURED,
-  same search and machine, three alternating pairs: setup 57.0, 58.6 and 58.1 s -> 55.2,
-  55.6 and 54.6 s, steady rate level.
-- A chain's candidate plans priced in C (`_core.plan_best`): `gatechain.plan_chain` priced
-  each of about 69 candidates of a chain in a Python loop over the cost model's first tier,
-  later tiers and refine, 2.8 million iterations a pass of the showcase search. The routine
-  does the loop's arithmetic operation for operation on the model's tables
-  (`gatechain._pricing_tables`); the loop stays for a model with a feed (GPU) and as the
-  reference (`gatechain._C_PRICING`, `tests/test_plan_pricing.py`: the same plans at the
-  same costs with a Q15 screen, shared screeners' ratios and a direct refine). Every plan
-  of the replayed setup unchanged at SNR 5.5, 6.0 and 7.0. MEASURED, same search and
-  machine, three alternating pairs: setup 55.5, 55.3 and 55.3 s -> 52.1, 52.7 and 52.2 s,
-  steady rate level.
-- A leaf plan's setup with a profile per detector. MEASURED on a replay of one worker's
-  setup calls from the 171,828-template search (`perf stat` user instructions, every plan's
-  chain and thresholds unchanged at each step): 64.9 -> 55.8 G; in the 16-worker run on a
-  quiet machine (three alternating pairs, 673dd2fd), setup 116.5, 116.2 and 116.1 s -> 84.5,
-  85.2 and 85.2 s (0.73), steady throughput level (12.59 against 12.53 M template-s/s a
-  core), peak resident memory a worker 1.51 against 1.47 GiB. Under another load of about 24 the same comparison
-  read 175 -> 138 s (four alternating pairs, 0.75-0.84 pair by pair) at 7.8-8.0 M: the
-  ratio holds, the absolute figures do not.
-  One `pycbc_inspiral_fir` job of pycbc's FIR search example (11,988 templates, H1 and L1,
-  2,048 s, one core) at SNR 6.0 / FDR 0.001: 447.5 -> 337.3 G instructions, peak resident
-  memory 1.72 -> 1.43 GB, the same triggers; the search after the data conditioning
-  20.4 -> 11.5 s. That is the standard point's gain, where the wider-band clustering this
-  removes was concentrated: the same job gained 7% at (5.5, 0.001), 3.9% at (6.5, 0.001)
-  and 1.7% at (6.0, 0.01). (The replay's figures include about 2 G of the replay's own
-  hashing of its inputs, the same before and after.) In that job the
-  block-size trial's preparation (both profiles calibrated on every candidate size) is 43.5 G
-  against 55.6 G of leaf setup and 28 G of filtering; with a cost file reused from an earlier
-  job (`MF_COST_FILE`) it is not run: 288.1 G, 1.23 GB.
-  - The first band a plan builds shared screeners for is the one that won in the last plan
-    for its reference (`_chains._TIER0_FIRST`), the others by lower bound as before. The rule
-    that skips a wider band once a narrower one has won needs the narrower one first; the
-    wider band often had the lower bound and never won (547 of 1606 first-profile plans).
-  - A narrower band whose sharing was not cut short, nor stopped by the least number of
-    screeners a band keeps, bounds a wider band's ratio by its own (`_narrower_bands_floor`),
-    not only by the smallest ratio found. A plan keeps the winning band's screeners only, so
-    it is the same in whatever order its bands were considered.
-  - A retention of several bands (shared screeners at the first tier, sub-screeners at the
-    second) is read from each band's single retention, signal and noise: a band's draws do
-    not depend on the other bands' retentions, so the columns are bit for bit those of the
-    joint simulation, which is no longer run, and nothing more is held for the combination.
-  - A retention's simulation draws noise only for the rows the plain simulation kept
-    (`ap_gauss_fill_rows`' `keep`: a row mask in the fill, which still generates rows in pairs).
-- A screener retention's draws hold only the bands the retention alters, beside the plain
-  draws (`gatechain._Beside`): one or two columns of coarse maxima and of their lags where a
-  whole table and its lags were held, 23 times over for an L1 profile. MEASURED on the
-  171,828-template showcase search, 16 workers, a profile per detector, peak resident memory
-  per worker 1.53-1.70 -> 1.42-1.48 GiB; throughput and setup level.
-- The gate planner holds a profile's draws once, column by column. A chain's detections
-  are views of the table's two halves (each chain held its own copies of both: ten to twenty
-  chains a table); a screener retention's draws share the plain draws' fine maxima, lags and
-  every band the retention leaves alone; and a window adds a few indices to one array of
-  fine-to-coarse distances a table and last band (it had an array and its two halves of its
-  own). Plans are unchanged (`tests/test_draw_columns.py`). MEASURED on the 171,828-template
-  showcase search, 16 workers, default configuration, peak resident memory per worker:
-  1.40-1.43 -> 1.16-1.25 GiB with one profile, 2.35-2.42 -> 1.61-1.80 GiB with a profile per
-  detector; leaf setup at SNR 6.0 / FDR 0.001 56 -> 52 s and 137 -> 125 s; steady throughput
-  unchanged.
-- Template groups of nearly one length share their chain searches: the direct refine's two
-  bin fractions, a group's own numbers and the only thing its cost model differed by from
-  its siblings', are priced to a twentieth (`HierarchicalFilter._cost_model`). MEASURED on
-  the 171,828-template showcase search, 16 workers, leaf setup summed at SNR 6.0 / FDR
-  0.001: 63 -> 54 s with one profile, 158 -> 137 s with a profile per detector (6.5 / 0.001:
-  109 -> 90 s; 6.5 / 0.01: 44 -> 38 s). Chain choices, tier work counts and steady
-  throughput unchanged (four paired runs, order alternated).
-- The gate model plans on signal draws read in a window local to the signal
-  (`gatechain.local_window`: four times the longer of the profile's autocorrelation extent
-  and the coarsest band's step), with the noise maxima of the window searched, so every
-  window of a profile shares one set of signal draws; and a screener retention's simulation
-  is released once its draws are read. A plan made this way sets no gate above the searched
-  window's, and charges to its budget the detections whose direct refine noise far from the
-  signal would draw away (`tests/test_local_window.py`; `docs/gate-model.md` has the
-  379,680-plan audit and the engine's).
-  MEASURED on the 171,828-template showcase search, 16 workers, default configuration, at
-  SNR 6.0 / FDR 0.001, 6.5 / 0.01, 6.5 / 0.001 and 7.0 / 0.01 (two to five runs each). Peak
-  resident memory per worker: 1.75-2.00 -> 1.40-1.45 GiB with one profile, 3.10-3.21 ->
-  2.31-2.56 GiB with a profile per detector. Leaf setup, summed, at 6.0 / 0.001: 67 -> 63 s
-  and 176 -> 156 s. Steady template throughput per core, M: one profile 12.2, 32.4, 17.9,
-  28.9 -> 12.0, 32.8, 17.6, 34.4 (the first and third within the runs' scatter of 3%); a
-  profile per detector 12.7, 38.8, 19.9, 41.0 -> 13.0, 39.4, 20.0, 41.7.
-- A time-domain bank solves each hierarchical plan's thresholds when its reference is set,
-  with the rest of the calibration. They were solved on the first filtering call, and a chain
-  the choice had not already planned in that form (one with second-tier shared screeners)
-  spent about 100 ms a plan there. MEASURED on the 171,828-template showcase search, 16
-  workers on a Ryzen AI Max+ 395 (Zen 5), steady template throughput per core: 11.6 -> 12.1 M at SNR 6.0
-  / FDR 0.001 with one profile, and 9.6 -> 12.6 M with a profile per detector.
-- Shared-screener synthesis in C (`_core.tier0_mwu`): each merged group's screener (the mean
-  of its members or the minimax vector, whichever its worst-matched member overlaps better)
-  was about ninety small numpy iterations per leaf bank. Leaf-bank setup of 202 captured
-  banks of the 171,828-template BNS search, back to back on Zen 5: 39.3 to 34.1 ms per bank;
-  in the job (8 segments, loaded machine) 41.9 to 34.8 s. Every bank's chain, screeners,
-  retention and thresholds are unchanged, and with one cost file and trials off the job's
-  triggers are bit-identical. `tests/test_tier0_mwu.py` keeps the numpy code as the
-  reference.
-- That synthesis several groups to a vector (`src/tier0_mwu.cc`): a group in each lane, each
-  lane doing the one-group routine's operations in its order (the file is built with
-  floating-point contraction off; `hypot` and `exp` stay libm's, per lane), so every screener
-  is bit for bit the one-group routine's, which stays as `tier0_mwu(..., plain=1)` for the
-  test that says so. Replayed setup of the showcase search's captured leaf banks on Zen 5:
-  3.5% (SNR 6.0) to 4.7% (5.5) fewer instructions, every screener set and plan unchanged.
-
-- Leaf-bank setup no longer builds a wider first band's shared screeners (tier-0 centroids)
-  when that band loses even at the best screener-to-template ratio a narrower band found
-  (`HierarchicalFilter._choose_chain`; `_hierarchical._TIER0_PRUNE_WIDER = False` builds
-  them all). On the 171,828-template BNS search (pycbc PR 5521) every leaf bank built the
-  256 band's screeners and none used them. Leaf-bank setup of an 8-segment job on Zen 5:
-  32.7 to 20.7 s, the job's triggers identical; 202 captured leaf banks: 39.5 to 25.9 ms
-  each, every chain, screener set, retention and threshold unchanged.
-- `HierarchicalSearch` keeps one root transform plan per series length for the process. A
-  caller with a search per root (pycbc: one per top template) built the 2^20-point plan
-  again for each, 0.4 s of a 64-top job.
-
-- A single-template call on the CPU (`filter_series(template_index=k)`, which
-  `PeaksContext.refilter` makes once per follow-up trigger) takes the batched follow-up path
-  as a batch of one, instead of a one-template plan with its layout, grouping and bin merge
-  in Python. On the 171,828-template BNS search (pycbc PR 5521, 8 segments, Zen 5) a refilter
-  call went from 1.01 to 0.21 ms and the steady loop from 39.3 to 34.3 s (-12.7%); refilter
-  is 1.9% of the search loop (was 8.5%). Replay of 240 captured calls
-  (`tools/bench_refilter.py`): first call of a template 1.17 to 0.23 ms on Zen 5, about
-  -40% on a loaded Haswell and a loaded Ivy Bridge node (wall time). The peaks are the same
-  samples and the values equal to rounding (5e-7 relative); in the job 3 of 543,450 L1
-  follow-up triggers moved between samples of equal magnitude. Direct time-domain
-  correlation over the whole 51,000-sample window was measured and is slower (0.39 against
-  0.22 ms), so the batch keeps it for small lag counts only.
-- What the batched path declines (a resampled bank, a wrapped plan) still runs a
-  one-template plan: every CPU group of a block length now shares one, which filters up to
-  32 blocks per kernel call (first call 1.17 to 0.58 ms on the same replay). Each group kept
-  up to eight one-block plans before.
-
-- Tier-0 centroids of up to 16 templates, 1-tier centroids, Tier-1 sub-centroids and n=1024
-  layouts on the CPU (b692ec97 .. c67d610a). Production ladder (test27 bank, 27 tops, 6
-  segments, Zen 5, concurrent paired runs against 16f053c3): steady fine stage 10.42 to
-  9.29 s a segment (-10.8%), middle unchanged, segment total 14.76 to 13.65 s (-7.5%).
-  One-off setup grows 8.6 s (65.2 to 73.8 s), most of it `cluster_tier0_candidates` (5.7 to
-  12.5 s), so the change pays back after about 34 segments. Limiting clusters to eight
-  measured the same steady time and about 5 s less setup in two loaded runs (not changed
-  here); limiting them to four cost about 4% of the fine stage.
-
-- The 64-point twiddled codelet is split-radix from 8 lanes up (it was only at 16), and the
-  8-lane forward's hand-written n = 2048 half-output path is gone: the generic path with
-  split-radix matched it on Zen 3 and Ivy Bridge and ran the fine stage ~3% faster on
-  Haswell (test27 ladder, concurrent pinned pairs, 2026-11-03). 4 lanes (NEON, SSE4) keep the radix-8 codelet:
-  the M2's fine stage ran 1-2% slower with split-radix.
-- The tier-0 centroids' setup on the test27 job: 21 -> 8 s on the CPU, 26 -> 13 s on the
-  GPU (dev2). The pair scorer runs under Highway's dispatch (5.5x at AVX-512), and a bound
-  after the first matching pass skips the second, and the pricing, of bands that cannot win.
-  Their steady rate is unchanged (1.29x their absence on the CPU); they now pay for their
-  setup after about 8 segments instead of 21. docs/review-rounds-1-6.md.
-- Optimisation rounds 1-6 (f8fe1443..a52ced2e, 40 commits: Q15 screens, forward and middle
-  correlation kernels, sparse batches, L3 tiling, GPU register use and subgroup exchanges,
-  the centroids). On the test27 production job on dev2's GPU the steady segments took 14%
-  less time; the first segment took 20 s more, mostly the centroids' setup. On its CPU (one core) the steady segments took 37% less time and the
-whole job 18% less (222 to 182 s). See
-  docs/review-rounds-1-6.md, which also lists where each new constant comes from.
-- Setup of a hierarchical search: test27's 614 leaf banks over 27 references in one process,
-  matchedfilter's share (beyond the banks' steady calls): dev2 22.9-29.9 -> 7.5 s,
-  Haswell 209 -> 63-94 s, Ivy Bridge 239-426 -> 157-170 s. The reference's signature is
-  memoised by memory (a full-resolution reference was hashed per bank); the calibration's
-  threshold searches count passes on 32 blocks and its calls are 128 blocks; the simulations
-  draw 7-39x faster (above), run in single precision, reduce each transformed block in one
-  pass (_core.row_peaks), and the plan search, gate features and kept draws are memoised or
-  linear where they were quadratic.
-- Setup of a hierarchical search, again: a test67 BBH full-data job (323 banks over 19
-  references; setup is per job, the same for 3x the data), matchedfilter's setup CPU against
-  the release candidate above, interleaved on one node: Haswell 276 -> 185 s, Ivy Bridge
-  401 -> 307 s, dev2 45.5 -> 16.7 s. The noise simulation keeps each block's running-maximum
-  records, so every template group's search window reads its block maxima from one
-  simulation per reference and block size, where each window simulated anew; it runs in one
-  C pass (_core.noise_records: draws, the library's transforms, records; within 2.6e-7 of
-  NumPy's). The plan search leaves out noise blocks below the lowest first-tier threshold it
-  tries (2.8x, candidates identical); the signal simulation evaluates each band on its own
-  lags (identical). The cost calibration shares band costs between sizes on one series group,
-  reuses its plans and runs 32-block calls: a job's calibration (2048 and 4096) takes 0.8 s on
-  Haswell and 1.5-2.5 s on Ivy Bridge, from 6.6-6.9 and 11-12 s (main: 26 and 45-59 s).
-  Decisions under one cost file are identical to before on test27 and test67.
-- Setup of a hierarchical search, a third pass (test67 BBH job, matchedfilter's setup CPU,
-  interleaved with the previous main on one node, two sessions each): Ivy Bridge 309 -> 199 s
-  and 246 -> 115 s, Haswell 254 -> 167 s and 176 -> 103 s; dev2 13.4-16.1 -> 8.9-10.6 s.
-  Block-size ranking runs a provisional model with a quarter of the noise blocks (the signal
-  draws, on which the budget rests, keep their count), and a full model of the same profile
-  extends that simulation rather than redoing it. The simulations' generator draws from
-  xoshiro128++ within blocks seeded by Threefry (SSE4 4.5 -> 1.9 ns a draw; the stream
-  changes: test27 keeps every decision under one cost file, thresholds within 1.2%; test67
-  moves one reference's near-tie chain). The signal simulation reads the stream's cached
-  prefix for every reference, the plan search runs in C (identical candidates), and the cost
-  model's interpolation tables are kept as arrays.
-- The gate model's simulation, which places every chain's thresholds, runs about 2.5x
-  faster with bit-identical records and draws. On dev2 (one core, load ~60, medians of 5
-  interleaved runs), for the inspiral reference at n = 2048 and fd 1e-3: choose_chain 4.91 ->
-  1.98 s, the signal simulation (200k draws) 4.81 -> 1.90 s and 38.9 -> 14.6 G
-  instructions. That follows a first 14.5% (signal simulation at n = 2048 and 4096, 6.67 ->
-  5.70 s, idle core): the keep check's and the records skip's maxima, of non-negative
-  squares, are taken as integer maxima of their bit patterns, which order alike and
-  vectorise. The noise records were sized for white noise's count of running-maximum
-  records, and the inspiral profile's smooth statistics have two to three times as many,
-  so the simulation overflowed and ran again with twice the room: two full simulations at
-  n = 2048, three at 4096. It now keeps the rows that fit and continues from the first that
-  did not. The records scan runs in Highway, a block of 16 values with one comparison
-  (src/records.cc). On AVX-512 the Gaussian fill draws two blocks in one 16-lane vector
-  (0.68 -> 0.36 ns a draw), rows are filled together with their scale, and the transforms
-  read the draws in place. The first step is exact by construction (and matched on 25M
-  records); the later ones match its build bit for bit under AVX-512, AVX2, AVX and SSE4
-  (499 arrays each).
-
-- The AVX back end (Sandy and Ivy Bridge) has its own block and spectrum loads (scale_load,
-  split_store, now in src/loads-inl.h). It had inherited SSE4's, and split_store's vector path
-  needs the plan's lane width, 8 for AVX, so it ran its scalar loop there. Identical results.
-- At 16 lanes (AVX-512), the fused peak scan at n=1024 runs one instance for blocks with one
-  bin and with two, instead of one of each. Each carries the 32-point transform with its
-  inlined scan (27 KB), and alternating the two block by block thrashed the instruction cache
-  of a stage that is frontend-bound: on Zen 5 26% of dispatch slots got no instructions.
-  Cascade Lake and Zen 5 -1..-3% at n=1024 (two sessions each; code layout alone moves this
-  stage by up to 8% on Zen 5). 8-lane paths are unchanged; results identical.
-- Flat CPU banks above 1024 Hz may take 1024-sample blocks when a 2048 block's working set
-  (data and template spectra and the intermediate, 48 KB) fills the L1D. The valid-fraction
-  rule then picks 1024 wherever it keeps half of each block valid. Since 2026-10-05 the
-  candidates had started at 2048, a leftover of a removed decimation scheme. pycbc's test27
-  fine banks (257-297 taps): Haswell -10%, Zen 3 -11%, Ivy Bridge -15%, Zen 5 -9%. An M2
-  (128 KB L1D) keeps 2048, where 1024 was 2.6% slower. GPU banks and the hierarchical
-  engine (which prices its own block sizes) are unchanged.
-- Stage A loads its twiddles from a full table when the table (8N bytes) fits the L1D,
-  instead of forming each from two smaller tables (four multiplies and two broadcasts an
-  element). Results are bit-identical. Fine-stage call at n = 2048 and 4096: -1 to -5% on Zen 5,
-  -3 to -5% on Haswell, -2 to -9% on Ivy Bridge. Past the L1D the table lost (Ivy Bridge
-  +18% at 16384, +55% at 65536), so larger transforms keep the factored form.
-- Stage B transforms a column of the intermediate where stage A left it, when the column
-  is one codelet, instead of copying it to a staging buffer first. The flat engine's
-  block loads (series, real series, the DIF loads) take the backend's full-width
-  scale_load too. Results are bit-identical.
-- The copy of each block's spectrum into the plan's layout (set_data, set_template) and the
-  hierarchical engine's scale-and-load of each block's samples run at the machine's vector
-  width (backend kernels split_store and scale_load). They were loops in matchfilt.c and
-  hmf.c, which are compiled for the SSE4.2 baseline: the copy was scalar, the load 4 lanes.
-  Results are bit-identical. pycbc test27 hierarchical: the copy's cycles fall 70% and the
-  library's 4.7%.
-- AVX-512 transforms transpose their 16x16 corner turn in registers (in-lane unpacks, then
-  two rounds of 128-bit block shuffles) instead of the generic four-stage network, which the
-  compiler kept as rolled loops through memory: 35 cycles for the pair of 16x16
-  transposes against 195 on Zen 5. Results are bit-identical. pycbc's test27 flat fine stage
-  takes 22% less time (7.7 to 6.0 s on dev2) and the whole job about 5% less.
-- The gate model finds a result it reused for a similar profile again by that profile's own
-  signature. Before, every lookup of a segment's reference took the similarity search
-  (~1 ms, against ~0.03 ms), and a hierarchical filter looks its plan and chain choice up
-  several times per reference. On the O2 production replica (one core, dev2) the run takes
-  5% less wall time (73.9 s to 70.2 s); its thresholds and triggers are unchanged.
-- The gate model's decision setup in a fresh process at fd 1e-3 takes 0.69-0.73x the
-  time. On dev2 at load 6-8, `choose_chain` takes 1.15 -> 0.79 s at n = 2048 and
-  2.14 -> 1.49 s at 4096, and a CPU FIR plan's whole decision 1.17 -> 0.83 s and
-  2.18 -> 1.59 s. dev1 is 0.69-0.71x. The work removed:
-  - fewer draws;
-  - the noise alone recorded only for the model's 20,000 noise blocks;
-  - one split grid (`_SPLIT`, 9 shares; 19 gave the same plans' costs to 0.05%);
-  - no per-band single-tier plans to price the direct refine.
+- Setup of a hierarchical search. The gate planner's simulations, threshold searches,
+  shared-screener clustering and plan pricing run in C and C++, reuse results between
+  similar template groups and hold a profile's draws once. On the 171,828-template BNS
+  search with a profile per detector (16 workers, Zen 5), leaf setup took 114 s and now
+  takes 52 s, with about 1.3 GiB less memory across the workers.
+- Follow-up calls. A single-template refilter call went from 1.01 to 0.21 ms on that search
+  (Zen 5), and its steady loop took 12.7% less time.
+- Shared screeners, the Q15 screen, the forward and middle correlation kernels and cache
+  tiling: on a 27-top production job on one Zen 5 core the steady segments took 37% less
+  time than before those changes.
+- Two-tier chains where the model had tied them with three: fine-stage CPU 17-18% lower on
+  Haswell and Ivy Bridge at SNR 6.0, 5% on Zen 5.
+- AVX back end: a fine-stage call on an Ivy Bridge E5-2660 v2 runs 1.25-1.59x faster than
+  on the SSE4 kernels, by length.
+- Smaller kernel changes: a split-radix 64-point codelet from 8 lanes up, in-register
+  16x16 transposes on AVX-512, twiddle tables that fit the L1 cache, and one copy of each
+  block's spectrum into the plan's layout.
 
 ### Fixed
 
 - A bank refuses a reference that holds no power or is not finite when it is set, naming
-  the profile (`TimeDomainFilterBank.set_reference`). A detector with no data in a stretch
-  gives a noise spectrum that is nowhere positive and so an all-zero reference; the job then
-  failed later with "the reference has no localised correlation peak". Found on pycbc's FIR
-  search example run over a stretch without L1 data.
-- The gate model's memory follows the signal draws it still holds. What a chain's planning
-  derives from a set of draws (kept draws, halves, distances, candidates) was memoised with
-  references to the draws, so draws evicted from their own cache stayed alive, with
-  everything derived from them, until 4096 further entries had passed; the entries now hold
-  weak references and go with the draws. A chain's kept draws are no longer held beside
-  their two halves. The results kept for reuse by similar profiles are bounded over all
-  their keys (they were bounded per key only, and a job meets new keys for as long as it
-  runs). MEASURED on the 171,828-template showcase search, 16 workers, a profile per
-  detector, peak resident memory summed over the workers: 56-58 GB -> 47 GB; steady
-  throughput and setup time unchanged.
-- The continuous correlation's block-size costs gave a fixed cost per block of zero when
-  sixteen templates cost more each than two (a loaded node; spectra leaving a 256 KB
-  second-level cache), and the layout then put filters in groups of their own, each with its
-  own forward pass: on a loaded Haswell node five middle filters in five groups ran at half
-  the speed of one group. The fixed cost is now at least half the per-template cost (stored
-  as `corr4`). Middle-stage CPU over four rounds of five tops on that node: -15%; the layout
-  on Zen 5 is unchanged.
-
-- The direct refine rounded an odd lag window up to a full SIMD vector only for a series read
-  in place, so a strided lane of a complex series (or a zero-extended block) took the kernel's
-  tail path for its last lags. On arm64 the two paths round 1 ulp apart: the Nightly's
-  `test_a_lane_of_a_complex_series_is_read_in_place` failed there from 02d5f410. The padding
-  now depends on the block alone.
-
-- The gate model's simulation read and rewrote past the end of its records arrays on ARM:
-  the records scan stored each vector's records with `CompressBlendedStore`, which on NEON
-  loads, blends and stores a whole vector at the destination (AddressSanitizer, Linux
-  arm64, in every nightly since 2026-10-28). It now compresses into local lanes and copies
-  the records. Results are unchanged.
-- The musllinux wheel builds again (it failed from 2026-10-27): the simulation's power
-  pass used GCC's `target_clones`, which needs IFUNC, and musl has none. It now runs under
-  Highway's dispatch as the other kernels do (`ap_sim_power`, src/records.cc), with
-  identical output on dev2 (noise maxima and a chain choice compared bit for bit).
-- The nightly's sanitizer shards fit their time: `--shard` places test modules heaviest
-  first into the lightest shard, by each module's seconds in tests/durations.json
-  (tools/test_durations.py), where it dealt them in turn by name, and the false-dismissal
-  calibration tests, a quarter of the suite in one module, are three
-  (test_fdr_calibration, test_fdr_engine, test_fdr_plans). The predicted heaviest of 12
-  shards is 1.2x the mean, against 2.9x. A timing test that held a run to 1 ms checks it
-  against the call's own time instead.
-
-- `gatechain.calibrate_costs` was a wrapper that measured 256-block calls, where plans, tools
-  and tests (through `_calibration.calibrate_costs`) measured 32, and cost models were cached
-  and stored under n, template count and series group alone: whichever calibration ran first
-  in a process, or first into an MF_COST_FILE, set the model every later one returned. The
-  public name is now the calibration itself, with its defaults, and a model measured with
-  other calls (blocks, rounds, seed, and on a GPU templates) is kept under its own key. Models
-  of the default calls keep the key they are stored under.
-- The GPU cost calibration priced the same work 0.25-4x differently from one process to the
-  next on a Radeon 8060S, enough to rank the n=2048 gate chains (256, 1024) and (256, 512)
-  either way round (0.67-1.45x where the first runs 1.06-1.08x the second): 5 production
-  ladder processes of 22 picked (256, 1024) or the one-tier (256,). It copied its series
-  from the host before every timed call, which left the GPU idle long enough to slow the
-  call by a varying amount; took the median of five calls in a row, which slow spells and,
-  under CPU load, a power-limited GPU moved; and scaled each call by a reference timed just
-  before it, whose clock under load was not the call's. Now, as the CPU calibration already
-  does, each configuration's time is its fastest, of 15 rounds of 3 calls taken in turn; the
-  series is resident in device memory, as the fine stage's is; and the reference scales the
-  calibration as a whole. In 31 of 32 ladder processes since, the model ranked (256, 1024)
-  at 1.04-1.10x (256, 512). Calibration at n=2048 takes about 5-8 s (15-26 s under CPU
-  load); models stored by the old method are measured again.
-- The GPU cost calibration scales every price of a process to a reference call's time on a
-  warmed device (the anchor), but under CPU load it timed the anchor on a device still at
-  its idle clock. The 0.25 s warm-up was timed from before the reference's first call, which
-  records its commands: 0.06 s on an idle Radeon 8060S, 0.4-0.5 s with eight other processes
-  on its four cores. In each of 178 processes with 6-12 others on their cores the warm-up had
-  run out before it began, and in 17 the anchor read 0.105-0.134 ms against 0.028-0.031,
-  which scaled every price of their models 2.8-4.3x, so models at different n no longer
-  compared. The warm-up now starts after the first call (the calibration's own warm-up
-  too), and the anchor is the warmed device's fastest call: 137-308 warm calls before it in
-  42 loaded processes, none cold. Calibration time is unchanged when idle (8.0 s at
-  n=2048) and up to 0.6 s longer under that load (21-27 s). Models stored by the old method
-  are measured again.
-- MF_GPU_PROFILE=1 could lose the Vulkan device (VK_ERROR_DEVICE_LOST) on the first call of a
-  profiled run: phase marks were read from queries no submitted run would write.
-- The CPU cost calibration failed (KeyError 'recheck') for a size calibrated after a smaller
-  one on the same series group, e.g. a bank pricing 1024-sample blocks before 2048: the
-  sizes share band costs, and the screen's per-pass cost was timed only when the first
-  screen band was still to measure. It is now timed at the first screen band measured.
-- A survivor's direct-or-transform refine compared prices each plan timed for itself, so two
-  plans of one layout (a padded call and its unpadded call) refined pairs near the boundary
-  differently and reported them to different fp32 rounding. The prices are now timed once per
-  size and kernel and kept in MF_COST_FILE.
-- The macOS arm64 build: gauss.cc dispatched with a qualified name, which a single-target
-  build (NEON only) cannot resolve.
+  the profile. A detector with no data gave an all-zero reference and the job failed later
+  with an unrelated message.
+- The gate model's memory follows the signal draws it still holds. Derived results kept
+  evicted draws alive; on the 16-worker search above, peak resident memory fell from
+  56-58 GB to 47 GB.
+- The continuous correlation's block-size costs could give a zero fixed cost per block on a
+  loaded node, which put each filter in a group of its own with its own forward pass.
+- The direct refine's last lags of a strided lane took a different kernel path, which
+  rounds 1 ulp apart on arm64.
+- The gate model's simulation read and rewrote past the end of its records arrays on ARM.
+  Results were unchanged.
+- The musllinux wheel builds again, and the macOS arm64 single-target build compiles.
+- GPU cost calibration priced the same work 0.25-4x differently between processes on a
+  Radeon 8060S, and under CPU load scaled a process's prices by an anchor timed on an idle
+  device. Models stored by the old method are measured again.
+- `MF_GPU_PROFILE=1` could lose the Vulkan device on the first call of a profiled run.
+- CPU cost calibration failed (`KeyError 'recheck'`) for a size calibrated after a smaller
+  one on the same series group.
+- Two plans of one layout could refine a pair near the direct-or-transform boundary
+  differently, each from its own timed prices. The prices are timed once per size and
+  kernel.
 
 ### Documentation
 
-- docs/architecture.md, a reference for the library as it is: the public API, the module
-  layers, the C engine and the `_core` boundary, the GPU host layer and backends, a
-  hierarchical call end to end, the gate model, the cost models, measured choices and what
-  MF_COST_FILE holds. docs/README.md classifies every document as reference or dated log.
-  Reference pages that still described retired mechanisms (calibration files deciding the
-  gates, chain trials, trial samples kept between processes) are corrected; dated logs are
-  kept as written.
+- `docs/architecture.md` is the reference for the library as it is: the public API, the
+  layers, the C engine, the GPU host layer, the gate model, the cost models and the
+  measured choices. `docs/README.md` lists every page.
 
 ## 0.1.0a9
 
