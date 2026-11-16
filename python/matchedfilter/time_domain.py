@@ -4,7 +4,7 @@ automatically select optimal FFT block sizes, and filter continuous series."""
 from collections import OrderedDict
 import itertools
 import collections.abc as _abc
-from typing import Any, Optional, Sequence, Union, Tuple, List, Dict
+from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import threading
 import weakref
 import sys
@@ -924,6 +924,149 @@ def template_valid(tap_counts, block_length, *, tap_sample_rate=2048.0,
         raise ValueError(f"block_length {n} is shorter than the longest filter "
                          f"({int(data_counts.max())} data samples)")
     return np.stack([start, stop], axis=1)
+
+
+class _TiledJob(NamedTuple):
+    """A middle-stage correlation job the tiled cascade can run (correlate_and_filter_many)."""
+    bank: Any                   # the middle bank
+    series: np.ndarray          # its input series, float32 or complex64, on the host
+    S: int                      # the series' samples
+    windows: np.ndarray         # the windows correlated, normalised
+    support: Optional[np.ndarray]   # the samples of `out` that are written, or None for all
+    out: np.ndarray             # (rows, S) complex64 output the leaf jobs read
+    selection: Optional[np.ndarray]     # the templates correlated, or None for every one
+    selection_key: Optional[bytes]      # the selection as bytes, to compare jobs by
+    scales: Optional[np.ndarray]        # per-template scales, or None
+    leaves: list                # indices of the leaf jobs that read `out`
+
+
+def _trials_decided(leaf_jobs):
+    """Adopt the block sizes the leaf banks' joint trials have decided; False while a bank's
+    trial is still playing (its calls must run one by one to be timed)."""
+    if not leaf_jobs or playing() or not _autotune_enabled():
+        return True
+    for l_bank, _, l_kw in leaf_jobs:
+        if (l_kw or {}).get("template_index") is not None or not getattr(l_bank, "_in_trial", False):
+            continue
+        t_key = _trial_key(l_bank)
+        win = _trial.winner(t_key)
+        if win is not None:
+            l_bank._lock_arm(win)
+            continue
+        tr = _trial.trial(t_key, l_bank._joint_arms)
+        if len(tr.live()) < 2:
+            with _AUTOTUNE_LOCK:
+                tr.choice.lock(_trial.DEFAULT)
+        if tr.winner is not None:
+            l_bank._lock_arm(tr.winner)
+            continue
+        return False
+    return True
+
+
+def _leaves_by_producer(corr_jobs, leaf_jobs):
+    """Which correlation job writes the series each leaf job filters: a leaf's series is a row
+    (or a real or imaginary lane) of a correlation job's preallocated ``out``, found by its
+    address. Returns (per correlation job the leaf jobs reading its output, the leaf jobs
+    reading none)."""
+    corr_ranges = []
+    leaf_by_corr = [[] for _ in range(len(corr_jobs))]
+    for ci, (_, _, c_kw) in enumerate(corr_jobs):
+        out_arr = (c_kw or {}).get("out")
+        if (isinstance(out_arr, np.ndarray) and out_arr.dtype == np.complex64
+                and out_arr.ndim == 2 and out_arr.flags.c_contiguous
+                and out_arr.flags.writeable and out_arr.nbytes > 0):
+            lo_addr = out_arr.ctypes.data
+            corr_ranges.append((ci, lo_addr, lo_addr + out_arr.nbytes))
+    independent_leaves = []
+    for j, (_, l_ser, _) in enumerate(leaf_jobs):
+        matched_ci = None
+        if isinstance(l_ser, np.ndarray) and l_ser.nbytes > 0:
+            ptr = l_ser.ctypes.data
+            for ci, lo_addr, hi_addr in corr_ranges:
+                if lo_addr <= ptr < hi_addr:
+                    matched_ci = ci
+                    break
+        if matched_ci is not None:
+            leaf_by_corr[matched_ci].append(j)
+        else:
+            independent_leaves.append(j)
+    return leaf_by_corr, independent_leaves
+
+
+def _tiled_job(corr_bank, corr_series, corr_kw, dep_indices):
+    """The correlation job as a _TiledJob, or None where the tiled cascade cannot run it: a
+    series that is not one-dimensional, an output that is not a writable (rows, samples)
+    complex64 array matching the templates asked for, a plan on a GPU, scales or a selection
+    of the wrong shape."""
+    a_in = _from_any(corr_series)
+    if (isinstance(a_in, np.ndarray) and not np.iscomplexobj(a_in)
+            and corr_bank._correlation_reads_real()):
+        ser_mid = np.ascontiguousarray(a_in, np.float32)
+    else:
+        ser_mid = _host_copy(a_in, np.complex64)
+    if ser_mid.ndim != 1 or ser_mid.size == 0:
+        return None
+    S = ser_mid.size
+    out_arr = corr_kw["out"]
+    if not (isinstance(out_arr, np.ndarray) and out_arr.dtype == np.complex64
+            and out_arr.ndim == 2 and out_arr.shape[1] == S
+            and out_arr.flags.c_contiguous and out_arr.flags.writeable):
+        return None
+    W_corr = _normalize_windows(corr_kw.get("windows"), S)
+    out_support_arg = corr_kw.get("out_support")
+    support = _normalize_windows(out_support_arg, S) if out_support_arg is not None else None
+    if any(getattr(g.get_correlation_plan(), "_gpu", None) is not None for g in corr_bank._groups):
+        return None
+    sc_full = None
+    scales_arg = corr_kw.get("scales")
+    if scales_arg is not None:
+        sc_full = np.ascontiguousarray(_from_any(scales_arg), dtype=np.float32)
+        if sc_full.ndim != 1 or sc_full.size != corr_bank.n_templates:
+            return None
+    sel_arr = None
+    templates_sel = corr_kw.get("templates")
+    if templates_sel is not None:
+        sel_arr = np.asarray(templates_sel, dtype=np.int64).ravel()
+        if (sel_arr.size and (sel_arr.min() < 0 or sel_arr.max() >= corr_bank.n_templates)
+                or np.unique(sel_arr).size != sel_arr.size
+                or out_arr.shape != (sel_arr.size, S)):
+            return None
+    elif out_arr.shape != (corr_bank.n_templates, S):
+        return None
+    return _TiledJob(corr_bank, ser_mid, S, W_corr, support, out_arr, sel_arr,
+                     None if sel_arr is None else sel_arr.tobytes(), sc_full, dep_indices)
+
+
+def _cohorts(cand_jobs):
+    """The jobs (index, _TiledJob) grouped into cohorts that run together: the same middle
+    bank, series length, windows and template selection (the detectors of one search), with
+    outputs that do not overlap. In the order of their first job."""
+    cohorts = []
+    used_cand = [False] * len(cand_jobs)
+    for idx_a, (ci_a, info_a) in enumerate(cand_jobs):
+        if used_cand[idx_a]:
+            continue
+        used_cand[idx_a] = True
+        key_a = (id(info_a.bank), info_a.S, info_a.windows.tobytes(), info_a.selection_key)
+        members = [(ci_a, info_a)]
+        out_a = info_a.out
+        addr_spans = [(out_a.ctypes.data, out_a.ctypes.data + out_a.nbytes)]
+        for idx_b in range(idx_a + 1, len(cand_jobs)):
+            if used_cand[idx_b]:
+                continue
+            ci_b, info_b = cand_jobs[idx_b]
+            if (id(info_b.bank), info_b.S, info_b.windows.tobytes(), info_b.selection_key) != key_a:
+                continue
+            out_b = info_b.out
+            lo_b, hi_b = out_b.ctypes.data, out_b.ctypes.data + out_b.nbytes
+            if any(lo_b < hi_x and lo_x < hi_b for lo_x, hi_x in addr_spans):
+                continue
+            used_cand[idx_b] = True
+            members.append((ci_b, info_b))
+            addr_spans.append((lo_b, hi_b))
+        cohorts.append(members)
+    return cohorts
 
 
 class TimeDomainFilterBank:
@@ -2946,24 +3089,9 @@ class TimeDomainFilterBank:
         if not corr_jobs:
             return _run_untiled()
 
-        # Adopt any decided joint-trial locks upfront; fall back to untiled while a trial plays.
-        if leaf_jobs and not playing() and _autotune_enabled():
-            for l_bank, _, l_kw in leaf_jobs:
-                if (l_kw or {}).get("template_index") is not None or not getattr(l_bank, "_in_trial", False):
-                    continue
-                t_key = _trial_key(l_bank)
-                win = _trial.winner(t_key)
-                if win is not None:
-                    l_bank._lock_arm(win)
-                    continue
-                tr = _trial.trial(t_key, l_bank._joint_arms)
-                if len(tr.live()) < 2:
-                    with _AUTOTUNE_LOCK:
-                        tr.choice.lock(_trial.DEFAULT)
-                if tr.winner is not None:
-                    l_bank._lock_arm(tr.winner)
-                    continue
-                return _run_untiled()
+        # A leaf bank whose block-size trial is still playing runs untiled
+        if not _trials_decided(leaf_jobs):
+            return _run_untiled()
 
         if not wait or eff_tile_bytes <= 0:
             return _run_untiled()
@@ -2974,30 +3102,7 @@ class TimeDomainFilterBank:
 
         set_mirror, stream_cp, stream_fn = TimeDomainFilterBank._corr_stream_hooks()
 
-        # Index preallocated correlation output buffers so each leaf job maps to its producer.
-        corr_ranges = []
-        leaf_by_corr = [[] for _ in range(len(corr_jobs))]
-        for ci, (_, _, c_kw) in enumerate(corr_jobs):
-            out_arr = (c_kw or {}).get("out")
-            if (isinstance(out_arr, np.ndarray) and out_arr.dtype == np.complex64
-                    and out_arr.ndim == 2 and out_arr.flags.c_contiguous
-                    and out_arr.flags.writeable and out_arr.nbytes > 0):
-                lo_addr = out_arr.ctypes.data
-                corr_ranges.append((ci, lo_addr, lo_addr + out_arr.nbytes))
-
-        independent_leaves = []
-        for j, (_, l_ser, _) in enumerate(leaf_jobs):
-            matched_ci = None
-            if isinstance(l_ser, np.ndarray) and l_ser.nbytes > 0:
-                ptr = l_ser.ctypes.data
-                for ci, lo_addr, hi_addr in corr_ranges:
-                    if lo_addr <= ptr < hi_addr:
-                        matched_ci = ci
-                        break
-            if matched_ci is not None:
-                leaf_by_corr[matched_ci].append(j)
-            else:
-                independent_leaves.append(j)
+        leaf_by_corr, independent_leaves = _leaves_by_producer(corr_jobs, leaf_jobs)
 
         _settle_device_writes()
 
@@ -3021,47 +3126,7 @@ class TimeDomainFilterBank:
                 and not (set(corr_kw) - allowed_corr_keys)
                 and corr_kw.get("out") is not None
             )
-            info = None
-            if can_tile:
-                a_in = _from_any(corr_series)
-                if (isinstance(a_in, np.ndarray) and not np.iscomplexobj(a_in)
-                        and corr_bank._correlation_reads_real()):
-                    ser_mid = np.ascontiguousarray(a_in, np.float32)
-                else:
-                    ser_mid = _host_copy(a_in, np.complex64)
-                if ser_mid.ndim == 1 and ser_mid.size > 0:
-                    S = ser_mid.size
-                    out_arr = corr_kw["out"]
-                    templates_sel = corr_kw.get("templates")
-                    scales_arg = corr_kw.get("scales")
-                    out_support_arg = corr_kw.get("out_support")
-                    if (isinstance(out_arr, np.ndarray) and out_arr.dtype == np.complex64
-                            and out_arr.ndim == 2 and out_arr.shape[1] == S
-                            and out_arr.flags.c_contiguous and out_arr.flags.writeable):
-                        W_corr = _normalize_windows(corr_kw.get("windows"), S)
-                        support = (_normalize_windows(out_support_arg, S)
-                                   if out_support_arg is not None else None)
-                        corr_bank._groups
-                        if not any(getattr(g.get_correlation_plan(), "_gpu", None) is not None
-                                   for g in corr_bank._groups):
-                            sc_full = None
-                            if scales_arg is not None:
-                                sc_full = np.ascontiguousarray(_from_any(scales_arg), dtype=np.float32)
-                                if sc_full.ndim != 1 or sc_full.size != corr_bank.n_templates:
-                                    can_tile = False
-                            sel_arr = None
-                            if can_tile and templates_sel is not None:
-                                sel_arr = np.asarray(templates_sel, dtype=np.int64).ravel()
-                                if (sel_arr.size and (sel_arr.min() < 0 or sel_arr.max() >= corr_bank.n_templates)
-                                        or np.unique(sel_arr).size != sel_arr.size
-                                        or out_arr.shape != (sel_arr.size, S)):
-                                    can_tile = False
-                            elif can_tile and out_arr.shape != (corr_bank.n_templates, S):
-                                can_tile = False
-                            if can_tile:
-                                sel_key = None if sel_arr is None else sel_arr.tobytes()
-                                info = (corr_bank, ser_mid, S, W_corr, support, out_arr,
-                                        sel_arr, sel_key, sc_full, dep_indices)
+            info = _tiled_job(corr_bank, corr_series, corr_kw, dep_indices) if can_tile else None
             if info is None:
                 all_ephemeral = False
                 t_c0 = time.perf_counter()
@@ -3071,30 +3136,7 @@ class TimeDomainFilterBank:
             else:
                 cand_jobs.append((ci, info))
 
-        cohorts = []
-        used_cand = [False] * len(cand_jobs)
-        for idx_a, (ci_a, info_a) in enumerate(cand_jobs):
-            if used_cand[idx_a]:
-                continue
-            used_cand[idx_a] = True
-            bank_a, _, S_a, W_a, _, out_a, _, sel_key_a, _, _ = info_a
-            key_a = (id(bank_a), S_a, W_a.tobytes(), sel_key_a)
-            members = [(ci_a, info_a)]
-            addr_spans = [(out_a.ctypes.data, out_a.ctypes.data + out_a.nbytes)]
-            for idx_b in range(idx_a + 1, len(cand_jobs)):
-                if used_cand[idx_b]:
-                    continue
-                ci_b, info_b = cand_jobs[idx_b]
-                bank_b, _, S_b, W_b, _, out_b, _, sel_key_b, _, _ = info_b
-                if (id(bank_b), S_b, W_b.tobytes(), sel_key_b) != key_a:
-                    continue
-                lo_b, hi_b = out_b.ctypes.data, out_b.ctypes.data + out_b.nbytes
-                if any(lo_b < hi_x and lo_x < hi_b for lo_x, hi_x in addr_spans):
-                    continue
-                used_cand[idx_b] = True
-                members.append((ci_b, info_b))
-                addr_spans.append((lo_b, hi_b))
-            cohorts.append(members)
+        cohorts = _cohorts(cand_jobs)
 
         # Execute each multi-detector cohort in L3-resident chunks when its active output
         # fits within the automatic L3 residency budget (or when tile_bytes is explicit).
@@ -3192,12 +3234,12 @@ class TimeDomainFilterBank:
 
             # Check per-cohort preparation cache when trials are locked and scales are absent.
             memo_ok = (not playing() and not getattr(corr_bank, "_in_trial", False)
-                       and all(info[8] is None for _, info in members))
+                       and all(info.scales is None for _, info in members))
             memo_key = None
             if memo_ok:
                 leaf_sigs = []
                 for d_idx, (_, info) in enumerate(members):
-                    for j in info[9]:
+                    for j in info.leaves:
                         lb, ls, lk = leaf_jobs[j]
                         if (getattr(lb, "_in_trial", False)
                                 or not isinstance(ls, np.ndarray)
@@ -3220,12 +3262,12 @@ class TimeDomainFilterBank:
                         break
                 if memo_ok:
                     mem_sigs = tuple(
-                        (info[5].ctypes.data, info[5].shape,
-                         None if info[4] is None else info[4].tobytes())
+                        (info.out.ctypes.data, info.out.shape,
+                         None if info.support is None else info.support.tobytes())
                         for _, info in members
                     )
                     memo_key = (
-                        D, S, max_kr, stride_det, W_corr.tobytes(), members[0][1][7],
+                        D, S, max_kr, stride_det, W_corr.tobytes(), members[0][1].selection_key,
                         eff_tile_bytes, id(raw_pool), mem_sigs, tuple(leaf_sigs),
                     )
 
@@ -3460,7 +3502,7 @@ class TimeDomainFilterBank:
                     unwritten_runs = np.concatenate(([0], written_runs.ravel(), [S])).reshape(-1, 2)
                     det_edge_runs = []
                     for _, info in members:
-                        _, _, _, edges_d = corr_bank._windows_layout(g_m, S, W_corr, info[4])
+                        _, _, _, edges_d = corr_bank._windows_layout(g_m, S, W_corr, info.support)
                         det_edge_runs.append(edges_d.reshape(-1, 2))
 
                     if W_corr.shape[0] > 1 and M > 0:
@@ -3714,7 +3756,7 @@ class TimeDomainFilterBank:
                     has_real_corr = hasattr(ep_m, "correlate_series_continuous_real")
                     det_run_fns = [
                         ep_m.correlate_series_continuous_real
-                        if info[1].dtype == np.float32 and has_real_corr
+                        if info.series.dtype == np.float32 and has_real_corr
                         else ep_m.correlate_series_continuous
                         for _, info in members
                     ]
@@ -3753,8 +3795,8 @@ class TimeDomainFilterBank:
                             out_row_first = b_rows[0]
                             for d_idx, (_, info) in enumerate(members):
                                 t_d0 = time.perf_counter()
-                                ser_d = info[1]
-                                out_d = info[5]
+                                ser_d = info.series
+                                out_d = info.out
                                 r_sc = det_scales[d_idx]
                                 t_det_batch = tbuf_det[d_idx][:kr]
                                 direct_mirror = (
@@ -3865,7 +3907,7 @@ class TimeDomainFilterBank:
                                     if w_spans.size > 0:
                                         for d_idx, (_, info) in enumerate(members):
                                             t_d0 = time.perf_counter()
-                                            out_d = info[5]
+                                            out_d = info.out
                                             t_row_1d = tbuf_det[d_idx][q]
                                             out_row_ptr = out_d[r_out].ctypes.data
                                             t_row_ptr = t_row_1d.ctypes.data
