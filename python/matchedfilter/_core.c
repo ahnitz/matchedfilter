@@ -2343,6 +2343,19 @@ static PyTypeObject RootType={
 
 /* plan_best: the cheapest of a chain's candidate plans (gatechain.plan_chain), priced as its
    Python loop prices them on a CostModel, operation for operation. */
+/* The Python loop rounds every product and sum; a compiler that fuses a product into the
+   sum that follows (aarch64 by default) gave costs one place off, and on a tie another
+   plan. These functions are compiled with contraction off, whatever the file's flags. */
+#if defined(__clang__)
+#define PB_EXACT
+#define PB_EXACT_BODY _Pragma("clang fp contract(off)")
+#elif defined(__GNUC__)
+#define PB_EXACT __attribute__((optimize("fp-contract=off")))
+#define PB_EXACT_BODY
+#else
+#define PB_EXACT
+#define PB_EXACT_BODY _Pragma("fp_contract(off)")
+#endif
 enum { PB_ROWS=64, PB_TIERS=8 };
 typedef struct { int n; double fs[PB_ROWS], vs[PB_ROWS]; } pb_table;
 
@@ -2362,7 +2375,8 @@ static int pb_read(PyObject *pair, pb_table *t){
 }
 
 /* gatechain._interp_clamped */
-static double pb_interp(double x, const pb_table *t){
+PB_EXACT static double pb_interp(double x, const pb_table *t){
+  PB_EXACT_BODY
   const double *fs=t->fs, *vs=t->vs;
   if(x<=fs[0]) return vs[0];
   if(x>=fs[t->n-1]) return vs[t->n-1];
@@ -2376,7 +2390,8 @@ static double pb_interp(double x, const pb_table *t){
   return (x-fs[j])*(dy/dx)+vs[j];
 }
 /* CostModel._interp: a table's value at density f */
-static double pb_cost(const pb_table *t, double f){
+PB_EXACT static double pb_cost(const pb_table *t, double f){
+  PB_EXACT_BODY
   return pb_interp(log(f>1e-12 ? f : 1e-12), t);
 }
 
@@ -2390,7 +2405,8 @@ static double pb_cost(const pb_table *t, double f){
    (share, the last tier's sparse table)). A table is (log densities, values), tuples of
    floats. Returns the cheapest plan's cost and where it is (the first of equal costs), or
    None when no candidate has a last tier. */
-static PyObject *M_plan_best(PyObject *self,PyObject *args){
+PB_EXACT static PyObject *M_plan_best(PyObject *self,PyObject *args){
+  PB_EXACT_BODY
   (void)self;
   PyObject *cands,*hws,*first,*later,*refine,*direct;
   if(!PyArg_ParseTuple(args,"O!O!O!O!OO",&PyList_Type,&cands,&PyTuple_Type,&hws,
