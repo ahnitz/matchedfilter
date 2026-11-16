@@ -1,49 +1,77 @@
-# Coverage follow-up: state transitions and transfer costs
+# Test coverage
 
-First written September 26, 2026.
+What checks a change, where each check runs, and how to run the opt-in ones.
 
-## Source distribution checks
+## The suite
 
-Normal CI and release CI both build the source archive, install it, and run
-its bundled tests from an extracted directory outside the checkout. This
-checks that test fixtures and native build inputs survive packaging.
+`python -m pytest tests` runs on the CPU and on every GPU backend the machine has; tests
+of a backend that is absent skip and say so. The suite needs NumPy and pytest only. Run
+it single-threaded (`OMP_NUM_THREADS=1`), since the library's choices are per thread.
 
-The 0.1.0a3 release built its Linux and macOS wheels successfully, but publishing
-was blocked because the source archive omitted `tests/data/reference_profile_pycbc.npy`.
-Version 0.1.0a4 includes this 16,512-byte reference spectrum. It remains a NumPy
-file to preserve the measured values used by the reference-profile, gate-model,
-and inert-taps tests; it is test data in the source archive, not wheel payload.
+By area, the tests check:
+
+- **Results against references.** Flat filtering against a NumPy correlation; the
+  hierarchical filter against the flat one; every SIMD target the build holds against the
+  others; each GPU backend against the CPU; compiled planner routines against the NumPy
+  code they replaced, bit for bit.
+- **The gate model.** A plan's false-dismissal rate against its budget by injection, per
+  profile and chain; the planner's decisions under a shared cost file; the reduced-precision
+  tiers against their own statistic.
+- **State and lifetime.** Data, template and reference changes between calls; cached device
+  inputs after each kind of change; empty and zero-padded series; ownership of arrays a
+  filter is given; one filter object per thread.
+- **Boundaries.** Malformed shapes, ranges and dtypes are refused before native code runs;
+  native routines are checked against output overruns.
+- **Transfer counts.** GPU uploads and submissions are counted with host doubles, so the
+  checks run without GPU hardware. They are deterministic; no wall-clock limit is embedded
+  in the default suite.
+- **Packaging and tools.** The public API's names, the shipped kernels against their
+  manifests, the documentation index, every tool's imports, and the benchmark and site
+  builders.
+
+## Continuous integration
+
+Each push runs the suite on Linux x86-64 (the widest target and forced narrower ones),
+Linux arm64 and macOS arm64, across the supported Python versions. One job builds the
+source archive, compares it with the tracked files, installs it and runs its bundled tests
+from a directory outside the checkout, so a missing fixture or build input fails there.
+The Nightly workflow adds AddressSanitizer and UndefinedBehaviorSanitizer runs, in shards
+balanced by `tests/durations.json`. Timing benchmarks on shared runners are recorded for
+comparison over time and never fail a job.
+
+## The merge gate
+
+`python tools/gate.py` runs every pre-merge check this machine can run and reports each as
+ok, FAIL or skip: the suite, the production ladder against the CPU reference (given a bank
+and profiles), the narrow gates' margins, the false-dismissal audit against the flat filter
+(`tools/fdr_audit.py`), reproducible choices under a shared cost file, and the state of CI.
+A skipped check is reported as skipped, never as passed.
 
 ## Performance regression checks
 
-Normal CI checks correctness and structural costs, including upload reuse,
-cache bounds, and one warm Vulkan submission for distinct flat windows. Timing
-benchmarks on shared runners remain advisory. GPU-specific checks run when
-that backend is available.
-
-Run the opt-in timing suite on an otherwise idle machine:
+The default suite checks correctness and structural costs (upload reuse, cache bounds,
+submission counts). Run the opt-in timing suite on an otherwise idle machine:
 
 ```bash
 python -m pytest tests/test_performance.py --run-performance -q
 ```
 
-It covers CPU and available GPU devices:
+It covers the CPU and available GPU devices:
 
-- Flat and hierarchical cached `run()` at 2,048, 4,096, and 8,192 points with
-  16 data rows × 128 templates, plus 128 × 512 at 4,096 points. The peak
-  threshold is 5.5; hierarchical runs use explicit band 256 and coarse
-  threshold 4.0.
-- Automatic peak `run_series()` at those three lengths, with 43 blocks and
-  128 templates. It may cost at most 1.5 times the explicit-block reference.
-- Continuous full output at 32,768 points, six templates and a 1,048,576-sample
-  series. It may cost at most 1.5 times explicit blocks plus assembly.
-- Vulkan irregular windows at 4,096 points, 128 blocks and 32 templates.
-  Grouped submission must take at most half the separate-submission time.
+- Flat and hierarchical cached `run()` at 2,048, 4,096 and 8,192 points with 16 data rows
+  × 128 templates, and 128 × 512 at 4,096 points. The peak threshold is 5.5; hierarchical
+  runs use an explicit band of 256 and a coarse threshold of 4.0.
+- Automatic peak `run_series()` at those three lengths, with 43 blocks and 128 templates.
+  It may cost at most 1.5 times the explicit-block reference.
+- Continuous full output at 32,768 points, six templates and a 1,048,576-sample series. It
+  may cost at most 1.5 times explicit blocks plus assembly.
+- Vulkan irregular windows at 4,096 points, 128 blocks and 32 templates. Grouped submission
+  must take at most half the separate-submission time.
 
-Warm calls exclude setup, check results before timing, and alternate compared
-paths. The relative limits allow noise while catching substantial overhead.
-They cannot catch a slowdown shared by both paths. For that, record a baseline
-on the known-good revision and compare the candidate in the same environment:
+Warm calls exclude setup, check results before timing, and alternate the compared paths.
+The relative limits allow noise and catch substantial overhead. They cannot catch a
+slowdown shared by both paths. For that, record a baseline on the known-good revision and
+compare the candidate in the same environment:
 
 ```bash
 python -m pytest tests/test_performance.py --run-performance \
@@ -52,202 +80,17 @@ python -m pytest tests/test_performance.py --run-performance \
   --performance-baseline=.local/performance-baseline.json -q
 ```
 
-The comparison fails if any measured workload is over 25% slower. Host, device,
-ISA, Python, and NumPy identities must match; missing workload baselines fail
-instead of being silently ignored. Recording writes only after a successful
-run, and refuses to overwrite the baseline used for comparison. Keep baselines in ignored local storage or CI artifacts, and refresh them
-only after reviewing a deliberate change. A baseline should come from the
-known-good revision, not be recreated automatically for each candidate.
-Unavailable GPU cases skip explicitly. These tests are opt-in because shared
-CI load and GPU clocks can overwhelm small improvements; a dedicated idle
-runner can use the saved-baseline command as a blocking check.
+The comparison fails if any measured workload is over 25% slower. Host, device, ISA,
+Python and NumPy identities must match, and a workload missing from the baseline fails.
+Recording writes only after a successful run and refuses to overwrite the baseline being
+compared against. Keep baselines in ignored local storage or CI artifacts, and refresh
+them only after reviewing a deliberate change. Unavailable GPU cases skip explicitly.
 
-## Gaps covered
+## What the tests do not show
 
-`tests/test_vk_upload_cache.py` now exercises the actual Vulkan and Metal
-host dispatch methods with allocation/submission doubles. It checks input
-contents and transfer counts, so it runs without GPU hardware. Numerical
-Vulkan cases also execute on the Radeon 8060S.
-
-- Revisiting cached dispatches after data or template changes, in both flat
-  and hierarchical modes. Metal had the same stale-resident-input bug as
-  Vulkan. Both now share residency bookkeeping.
-- More than 2048 output bins, including a shorter final split. Vulkan was
-  invalidating the inputs uploaded by earlier pieces of the same call;
-  subsequent unchanged calls transferred them again unnecessarily.
-- Updating data must leave full and coarse template buffers resident.
-- Half packing preserves the shader's real-low/imaginary-high bit format
-  for contiguous, strided, reversed and transposed inputs, including signed
-  zero, half subnormals, overflow, infinities and NaNs.
-
-`tests/test_series_lifecycle.py` covers both filter classes and both devices:
-
-- Repeated series calls with forced reuse of the temporary spectrum's
-  address. Hierarchical GPU filtering returned stale complex values because
-  the dirty flag was not set for the new series. The test checks a known
-  complex scaling, not only unchanged peak indices.
-- Empty series and fully zero-padded blocks. The GPU attempted to gather
-  from an empty array; it now supplies zero spectra, matching the CPU.
-- Empty block lists, malformed array dimensions, negative/overflowing
-  starts, invalid template ranges, and nonpositive binsizes. A 2-D series
-  originally reached an oversized GPU buffer write and crashed Python.
-  Validation is shared between the two classes and runs before native
-  dispatch. Tests guard that boundary so a future regression reports a
-  failure rather than killing the entire suite.
-- Contiguous and interleaved window groups retain block order and agree
-  with independent single-block calls, including complex values.
-- Changing a hierarchical GPU reference recalibrates both the metadata and
-  the executed gate. A deterministic signal crosses the gate under one
-  reference and is rejected under the other. Previously the old band
-  fraction and scaled templates survived the reference update.
-- A new series does not re-upload an unchanged template bank. Flat GPU
-  filtering previously forced this upload on every series call.
-
-## Performance checks
-
-Transfer counts are deterministic regression tests; wall-clock thresholds
-are deliberately not embedded in the suite. Residency bookkeeping uses
-array metadata, never spectrum hashes or content comparisons.
-
-Interleaved before/after measurements used the same process and the same
-inputs, nine rounds with alternating execution order, warm plans, and
-numerical checks outside the timed loop. The baseline snapshots are from
-the start of this follow-up (including the earlier Vulkan cache fix and the
-existing CPU tuning edits). The diagnostic is `/tmp/mf_coverage_benchmark.py`;
-its source snapshots are `/tmp/mf-api-before-coverage.py` and
-`/tmp/mf-vulkan-before-coverage.py`.
-
-The initial hierarchical-series comparison was about 6% slower. Profiling
-showed the old repeated-series path performing **zero data uploads** because
-of the stale-buffer bug. Correctness requires those uploads. To offset the
-cost, contiguous window groups now use a slice instead of copying their
-spectra; forward FFT scaling happens in place; already-complex64 FFT results
-are not copied again; and little-endian half packing converts interleaved
-components in one pass instead of constructing shifted integer temporaries.
-The general-endian packing fallback is retained.
-
-Final measured medians (milliseconds):
-
-| Workload | Before | After |
-| --- | ---: | ---: |
-| CPU flat `run` | 2.599 | 2.638 |
-| CPU flat `run_series` | 10.803 | 10.838 |
-| CPU hierarchical `run` | 0.700 | 0.706 |
-| CPU hierarchical `run_series` | 3.350 | 3.386 |
-| GPU flat `run` | 0.217 | 0.220 |
-| GPU flat `run_series` | 5.821 | 4.881 |
-| GPU hierarchical `run` | 0.090 | 0.090 |
-| GPU hierarchical `run_series` | 4.102 | 3.478 |
-| GPU split-bin `run` | 0.444 | 0.445 |
-
-Main workloads use n=4096, 16 data spectra × 64 templates for `run`, and
-64 blocks × 64 templates for `run_series`. Hierarchical band=512 and a
-fixed coarse threshold isolate execution from selection. Split-bin filtering
-uses four data spectra, sixteen templates and binsize=1. These are local
-measurements, not claims for every batch shape or device. The small CPU
-differences varied in sign across repeated runs; no CPU kernel was changed.
-
-## Validation limits
-
-The final full suite passed **513 tests, with 5 skipped**, in 43.00 seconds.
-That is 77 additional collected cases compared with the previous turn's
-438 passed / 3 skipped. The two additional skips are CPU instances of a
-GPU-only transfer contract. The focused host-only run, without device access,
-passed 48 tests and skipped 38 GPU cases.
-
-After the final optimizations, all twelve saved PyCBC captures were replayed
-again through flat CPU and GPU `run_series`: all **842 detected peaks** agreed
-in location and complex value at rtol=atol=1e-5.
-
-Real GPU execution was tested on the Radeon 8060S with the system C++ runtime
-preloaded so Mesa could load. Metal host logic was tested on Linux using
-submission doubles; execution of Metal kernels and Apple performance still
-require macOS CI. The full original PyCBC search and false-dismissal budget
-study remain separate work; this follow-up does not claim to close them.
-
-## Follow-up parity review
-
-The subsequent CPU/GPU audit adds initialization/subrange validation,
-shape-preserving output reuse, threshold reset/reference/first-stage state
-transitions, raw dtype checks, and refinement counters that count work rather
-than detections. Final shared-checkout validation: 595 passed,
-5 skipped on CPU plus Radeon 8060S.
-
-## CI launch-directory and dependency regression
-
-CI runs the installed package's tests from a scratch directory. The new tuner
-regression tests exposed `tools/hmf_tune.py` importing `tests` and `tools`
-relative to the current directory; from `/tmp`, four tests failed to import
-`hmf_design`. That import also eagerly required SciPy, absent from the declared
-NumPy/pytest runtime test environment. Resolve helper paths from `__file__` and
-load the SciPy-backed legacy design helper only when a design sweep uses it.
-CLI regressions now launch outside the repository, and an import test blocks
-SciPy and the legacy design module. Full scratch-directory validation on the
-local CPU/Radeon 8060S: 596 passed, 5 skipped in 46.72 seconds.
-
-## Benchmark CLI configuration reporting
-
-The hierarchical configuration is now `(band, taps)`. The benchmark CLI still
-formatted three fields and indexed `cfg[2]`, crashing both console reporting
-and JSON export after the flat timings completed. The CLI regression stubs only
-the expensive timing operations and exercises successful two-field reporting,
-JSON output, and an uncovered calibration row in the same run.
-
-## Audit cleanup coverage
-
-New tests cover native output overruns and malformed layouts, optional magnitude
-storage and scratch resizing, CPU/GPU refusal without calibration, explicit
-settings without table access, rescaling already-ingested templates after a
-reference change, dispatch eviction, and bounded series batches. Execution-only
-matrix/arity tests explicitly open the gate; statistical tests continue to use
-measured calibration. The benchmark's superset check now explicitly opens the
-gate instead of relying on below-grid SNR clamping.
-
-The exact cleanup snapshot, isolated from concurrent GPU-extension work and
-launched from `/tmp`, passed **660 tests, 5 skipped** on CPU/Radeon 8060S.
-The shared checkout also passed 676 tests, 5 skipped before the final below-grid
-budget and float32-range guards; those guards passed 134 focused tests, and their
-21 calibration-contract tests passed with warnings treated as errors. The cost
-export regression additionally verifies that newly measured bands without
-existing cost coverage are not exported into selection.
-
-## Benchmark presentation
-
-README banners use Markdown, the site resolves image assets and horizontal
-rules, and the overview renders the teaser once with responsive sizing. Timing
-references are FFTW/MKL only; NumPy remains the correctness oracle. Regression
-tests cover missing optional engines, representative CPU target selection,
-old-artifact deduplication, reference columns, and generated banner markup.
-A real CPU/GPU benchmark and a 15-page site build validate the end-to-end path.
-
-## Complete transform-size benchmark coverage
-
-The public CLI and benchmark CI now default to every power of two from 64
-to 1048576. Regression tests verify the complete emitted size list and input
-memory budgets at the largest lengths. The CPU/GPU sweep uses 128 × 512
-where memory permits, retains unsupported/calibration-gap rows, and validates
-near-tied cross-device maxima against an independent transform. The existing flat and hierarchical chart pages show all measured lengths;
-the hierarchical chart can use another runner when its preferred runner
-lacks a result for a length. No separate all-sizes page is published.
-
-The old short report stopped at 16384 to isolate a regression before the
-larger GPU kernels were committed; it was not a support limit. Separate stale
-README/usage paragraphs also retained the earlier range after size support
-expanded. The overview, API introduction and usage table now agree with the
-implemented CPU 64–1048576 and GPU 64–65536 ranges.
-
-Version 0.1.0a5 also makes Git provenance optional in CPU cost regeneration.
-Source archives have no `.git` metadata; measurements record `unknown` rather
-than failing or using an unrelated ancestor checkout. Regression tests cover
-archives, missing Git executables, and failing Git commands. Local release
-validation must extract into a temporary directory outside any Git checkout,
-matching CI; extracting under the repository can hide this dependency.
-
-The Haswell coarse-consumer tests also exercise positive thresholds on every
-available CPU SIMD target, including partial-vector windows and absent peaks.
-The 1024-point FDR transfer guard explicitly selects AVX2 when available, rather
-than accidentally testing only AVX-512 on a wider host. It compares thresholded
-peak-only magnitudes against the ordinary CPU path at empirical dismissal rates
-0.01 and 0.001; GPU coverage remains conditional on actual hardware. Bank-level
-kernel binding is also covered by the existing selector, multi-bin and crossing
-count tests.
+- Metal kernels execute only on macOS; on Linux the Metal host logic runs against
+  submission doubles. The CI's paravirtual Apple GPU is not physical hardware
+  ([testing Metal on physical Apple hardware](macos-test-machine.md)).
+- CUDA is tested where an NVIDIA GPU is present, which no CI runner has.
+- The ladder checks of the merge gate need a production-like bank and noise profiles,
+  which are not in the repository.
