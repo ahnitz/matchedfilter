@@ -135,10 +135,6 @@ def _u32(x):
     return ctypes.c_uint32(int(x) & 0xFFFFFFFF)
 
 
-def _i32(x):
-    return ctypes.c_int32(int(x))
-
-
 def _param_ptrs(params):
     """cuLaunchKernel's argument array: the address of each parameter (kept alive by the
     caller with params)."""

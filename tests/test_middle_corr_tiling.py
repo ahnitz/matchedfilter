@@ -1,4 +1,4 @@
-"""Regression and parity tests for middle-stage continuous correlation (Track 3).
+"""Regression and parity tests for middle-stage continuous correlation.
 
 Covers two-regime CPU block tiling across transform sizes, cached-forward subset
 block tiling, cost-based correlation bank partitioning on CPU and GPU, and GPU

@@ -38,7 +38,7 @@ def _direct_lagtap(real_series=False, complex_taps=False):
     from . import gatechain
     rs, ct = bool(real_series), bool(complex_taps)
     mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
-    key = "direct-lagtap|%s|%s%s" % (_core.backend() if hasattr(_core, "backend") else "",
+    key = "direct-lagtap|%s|%s%s" % (_core.backend(),
                                      gatechain.cpu_gate_kind(), mode)
 
     def measure():
@@ -63,7 +63,7 @@ def _direct_pair_prices(n, plan, real_series=False, complex_taps=False):
     from . import gatechain
     rs, ct = bool(real_series), bool(complex_taps)
     mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
-    key = "direct-pair|%d|%s|%s%s" % (int(n), _core.backend() if hasattr(_core, "backend") else "",
+    key = "direct-pair|%d|%s|%s%s" % (int(n), _core.backend(),
                                       gatechain.cpu_gate_kind(), mode)
 
     def measure():

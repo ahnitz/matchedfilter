@@ -203,7 +203,7 @@ def _batch_target(n: int, max_batch: Optional[int]) -> int:
     if max_batch is not None:
         return int(max_batch)
     from . import _core
-    l2 = int(_core.l2_bytes()) if hasattr(_core, "l2_bytes") else 0
+    l2 = int(_core.l2_bytes())
     cap = 1024 if l2 >= 1048576 else 512
     return min(cap, max(32, 1048576 // (max(64, int(n) // 8) * 8)))
 

@@ -126,14 +126,6 @@ def kernel_id(backend, stems):
     return _digest(backend, names)
 
 
-def family_id(backend, prefix):
-    """Identity of every shipped kernel of a backend whose stem starts with prefix (all the
-    coarse builds of one band, "tierb_256_c16", for instance)."""
-    suffixes = BACKENDS[backend][1]
-    return kernel_id(backend, [_stem_of(n, suffixes) for n in _ids(backend)
-                               if n.startswith(prefix)] or [prefix])
-
-
 def gpu_kernel_id(backend="vulkan"):
     """Identity of every shipped program of a backend (for a choice that times all of them,
     and for reports): the digest of each program's name and digest, in name order -- the same

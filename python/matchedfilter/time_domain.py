@@ -16,10 +16,7 @@ from ._windows import _normalize_windows, _window_layout
 from ._windows import _merge_window_bins, _window_bin_phases
 # The bank's layout planning lives in _layout.
 from ._layout import _corr_partition, _partition_templates
-try:
-    from . import _core
-except ImportError:
-    _core = None
+from . import _core
 
 
 def reference_profile(template, psd, f_low, f_high, delta_f) -> np.ndarray:
@@ -802,7 +799,7 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
     """
     T, m = taps.shape
     cplx = np.iscomplexobj(taps)
-    if rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'):
+    if rate_ratio == 1.0:
         try:
             if cplx:
                 _core.taps_to_spectra(np.ascontiguousarray(taps, np.complex64), counts, n, m, out, True)
@@ -2382,8 +2379,6 @@ class TimeDomainFilterBank:
         set of int
             Indices of jobs whose ``FilterResults`` were written into ``out``.
         """
-        if _core is None or not hasattr(_core, "td_followup_batch"):
-            return set()
         from .device import parse as _parse_device
         from ._filter import MatchedFilter
         if getattr(MatchedFilter.run_series, "__qualname__", "") != "MatchedFilter.run_series":
@@ -2658,8 +2653,6 @@ class TimeDomainFilterBank:
         set of int
             Indices of jobs whose ``FilterResults`` were written into ``out``.
         """
-        if _core is None or not hasattr(_core.HMF, "run_series_batch_sparse"):
-            return set()
         import time
         from ._results import _SparsePeaks
 
@@ -2862,24 +2855,21 @@ class TimeDomainFilterBank:
         hooks = TimeDomainFilterBank._STREAM_HOOKS
         if hooks is not None:
             return hooks
-        if _core is None or not getattr(_core, "__file__", None):
+        import ctypes
+        try:
+            clib = ctypes.CDLL(_core.__file__)
+            set_mirror = clib.ap_mf_set_corr_mirror
+            set_mirror.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            set_mirror.restype = None
+            stream_cp = clib.ap_mf_stream_copy
+            stream_cp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+            stream_cp.restype = None
+            stream_fn = clib.ap_mf_stream_fence
+            stream_fn.argtypes = []
+            stream_fn.restype = None
+            hooks = (set_mirror, stream_cp, stream_fn)
+        except AttributeError:
             hooks = (None, None, None)
-        else:
-            import ctypes
-            try:
-                clib = ctypes.CDLL(_core.__file__)
-                set_mirror = clib.ap_mf_set_corr_mirror
-                set_mirror.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-                set_mirror.restype = None
-                stream_cp = clib.ap_mf_stream_copy
-                stream_cp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
-                stream_cp.restype = None
-                stream_fn = clib.ap_mf_stream_fence
-                stream_fn.argtypes = []
-                stream_fn.restype = None
-                hooks = (set_mirror, stream_cp, stream_fn)
-            except AttributeError:
-                hooks = (None, None, None)
         TimeDomainFilterBank._STREAM_HOOKS = hooks
         return hooks
 
@@ -2994,8 +2984,7 @@ class TimeDomainFilterBank:
                     continue
                 return _run_untiled()
 
-        if (not wait or eff_tile_bytes <= 0
-                or _core is None or not hasattr(_core.HMF, "run_series_batch_sparse")):
+        if not wait or eff_tile_bytes <= 0:
             return _run_untiled()
         if any(_parse_device(b.device).kind != "cpu" for b, _, _ in corr_jobs):
             return _run_untiled()

@@ -93,12 +93,6 @@ _NOISE_CACHE = OrderedDict()
 _CACHE_MAX = 64
 
 
-class GateTier(NamedTuple):
-    """One coarse gate tier: transform length `band` and starting fine bin `k0`."""
-    band: int
-    k0: int = 0
-
-
 class Tier0Cluster(NamedTuple):
     """Precomputed Tier-0 coarse centroid bank and calibration parameters. The thresholds
     are solved for one retention, alpha (from the members' mean less half their spread);
@@ -1837,7 +1831,17 @@ class CostModel:
         self.dense = {int(b): float(v) for b, v in dense.items()}
         self._sparse = {int(b): sorted((float(f), float(v)) for f, v in rows) for b, rows in sparse.items()}
         self._refine = sorted((float(f), float(v)) for f, v in refine)
+        # shared screeners' ratios by first band (with_tier0_cluster), and whether a one-tier
+        # chain may use them
         self.tier0_ratios = {}
+        self.tier0_single = True
+        # the direct refine (with_direct): None prices none
+        self.direct_lag = None
+        self.direct_single = True
+        self.direct_frac = 1.0
+        self.direct_base = 0.0
+        self.direct_multi_frac = 0.0
+        self._sig = None
 
     @staticmethod
     def _interp(rows, f):
@@ -1864,23 +1868,23 @@ class CostModel:
     def signature(self):
         """A hashable summary of the model's content, for cache keys (an object's id can be
         reused once it is collected, which would hand a new model an old model's results)."""
-        sig = getattr(self, "_sig", None)
+        sig = self._sig
         if sig is None:
-            t0r = getattr(self, "tier0_ratios", None)
+            t0r = self.tier0_ratios
             sig = (self.n, self.block, tuple(sorted(self.dense.items())),
                    tuple((b, tuple(r)) for b, r in sorted(self._sparse.items())),
                    tuple(self._refine),
                    tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                          + ((tuple(v["sparse"]),) if "sparse" in v else ())
                          for b, v in sorted(self.screen.items())),
-                   getattr(self, "direct_lag", None), getattr(self, "direct_single", True),
-                   getattr(self, "direct_frac", 1.0),
-                   getattr(self, "direct_base", 0.0),
-                   getattr(self, "direct_multi_frac", 0.0),
+                   self.direct_lag, self.direct_single,
+                   self.direct_frac,
+                   self.direct_base,
+                   self.direct_multi_frac,
                    None if self.feed is None else (tuple(sorted(self.feed["band"].items())),
                                                    self.feed["full"]))
             if t0r:
-                sig = sig + (tuple(sorted(t0r.items())), bool(getattr(self, "tier0_single", True)))
+                sig = sig + (tuple(sorted(t0r.items())), bool(self.tier0_single))
             self._sig = sig
         return sig
 
@@ -1926,8 +1930,8 @@ class CostModel:
         """(cost per pair, q15) of `chain`'s first tier, scaling dense Tier-0 work by centroid ratio
         when `chain[0]` has an active Tier-0 cluster ratio."""
         b = int(chain[0])
-        t0r = getattr(self, "tier0_ratios", None)
-        if not t0r or b not in t0r or (len(chain) <= 1 and not getattr(self, "tier0_single", True)):
+        t0r = self.tier0_ratios
+        if not t0r or b not in t0r or (len(chain) <= 1 and not self.tier0_single):
             return self.first_tier(b, reach1)
         ratio = t0r[b]
         c = self.dense[b] * ratio
@@ -1956,7 +1960,7 @@ class CostModel:
         """
         clean = {int(b): round(float(r), 4)
                  for b, r in (ratios or {}).items() if 0.0 < float(r) < 1.0}
-        if not clean and not getattr(self, "tier0_ratios", None):
+        if not clean and not self.tier0_ratios:
             return self
         import copy
         cm = copy.copy(self)
@@ -2012,23 +2016,23 @@ class CostModel:
 
     def prices_direct(self, chain):
         """Whether this model prices a direct refine for chain (with_direct)."""
-        return (getattr(self, "direct_lag", None) is not None
-                and getattr(self, "direct_frac", 1.0) > 0.0
-                and (len(chain) > 1 or getattr(self, "direct_single", True)))
+        return (self.direct_lag is not None
+                and self.direct_frac > 0.0
+                and (len(chain) > 1 or self.direct_single))
 
     def refine_for(self, chain, f, hw=None):
         """Ticks per refined pair for this chain at refine density f, with the direct refine's
         window half-width hw (None: the whole-block refine)."""
         r = self.refine(f)
         if hw is not None and self.prices_direct(chain):
-            d = getattr(self, "direct_base", 0.0) + self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1)
-            mfrac = getattr(self, "direct_multi_frac", 0.0)
+            d = self.direct_base + self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1)
+            mfrac = self.direct_multi_frac
             if mfrac > 0.0:
                 b_last = int(chain[-1])
                 if b_last in self._sparse:
                     d += mfrac * self.sparse(b_last, f)
             d = min(r, d)
-            frac = getattr(self, "direct_frac", 1.0)
+            frac = self.direct_frac
             r = (1.0 - frac) * r + frac * d
         return r
 
@@ -2041,8 +2045,8 @@ class CostModel:
         f = reach[len(chain)]
         if len(chain) == 1:
             b0 = int(chain[0])
-            t0r = getattr(self, "tier0_ratios", None)
-            if t0r and b0 in t0r and getattr(self, "tier0_single", True):
+            t0r = self.tier0_ratios
+            if t0r and b0 in t0r and self.tier0_single:
                 if hw is not None and self.prices_direct(chain):
                     f_surv = (self.screen_reach(b0, f) or f) if screened else f
                     c_elect = self.sparse(b0, f_surv) if b0 in self._sparse else self.dense[b0]
@@ -2146,7 +2150,7 @@ def default_series_group(n):
     while grp > 1 and grp * 8 * n_i > 512 * 1024:
         grp >>= 1
     if grp > 32:
-        l2 = int(_core.l2_bytes()) if hasattr(_core, "l2_bytes") else 0
+        l2 = int(_core.l2_bytes())
         while grp > 32 and grp * 8 * n_i > (l2 >> 1):
             grp >>= 1
     return grp
@@ -2670,10 +2674,10 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     if isinstance(cost, CostModel) and k >= 2:
         later = chain[1:]
         prices_dir = cost.prices_direct(chain)
-        dlag = getattr(cost, "direct_lag", 0.0) if prices_dir else 0.0
-        dbase = getattr(cost, "direct_base", 0.0) if prices_dir else 0.0
-        dmfrac = getattr(cost, "direct_multi_frac", 0.0) if prices_dir else 0.0
-        dfrac = getattr(cost, "direct_frac", 1.0) if prices_dir else 1.0
+        dlag = cost.direct_lag if prices_dir else 0.0
+        dbase = cost.direct_base if prices_dir else 0.0
+        dmfrac = cost.direct_multi_frac if prices_dir else 0.0
+        dfrac = cost.direct_frac if prices_dir else 1.0
         b_last = int(chain[-1]) if prices_dir else 0
         has_last_sparse = bool(prices_dir and dmfrac > 0.0 and b_last in cost._sparse)
         R = n // b_last if prices_dir else 0
