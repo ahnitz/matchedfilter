@@ -1068,6 +1068,934 @@ def _cohorts(cand_jobs):
     return cohorts
 
 
+#: The keyword arguments a correlation job and a leaf job may carry and still run tiled.
+_TILED_CORR_KEYS = frozenset(("windows", "scales", "templates", "out", "out_support", "wait"))
+_TILED_LEAF_KEYS = frozenset(("windows", "binsize", "threshold", "template_index", "profile"))
+
+
+class _LeafSub:
+    """One leaf plan's share of a tiled leaf job: a template group of the leaf bank, the
+    blocks it filters and the compiled plan that filters them. Compiling the cohort advances
+    `cursor` through its slabs; a run adds the peaks found, their count and the seconds
+    spent."""
+    __slots__ = ("group", "starts", "slabs", "plan", "ep", "series", "ntemplates", "binsize",
+                 "threshold", "parts", "total", "seconds", "slab_info", "cursor")
+
+    def __init__(self, group, starts, slabs, plan, ep, series, ntemplates, binsize, threshold,
+                 slab_info):
+        self.group, self.starts, self.slabs, self.plan, self.ep = group, starts, slabs, plan, ep
+        self.series, self.ntemplates, self.binsize = series, ntemplates, binsize
+        self.threshold, self.slab_info = threshold, slab_info
+        self.parts, self.total, self.seconds, self.cursor = [], 0, 0.0, 0
+
+
+class _TiledGroup(NamedTuple):
+    """One template group of the middle bank, compiled for a cohort: its rows of the output,
+    the blocks it correlates and the samples they write, and its chunks. A chunk is
+    (has blocks, block starts, block bounds, first sample, end sample, written runs,
+    bridges to zero, batch jobs); a batch job is (first row, first template, templates,
+    output rows, rows contiguous, filter calls, their leaf subs, earliest sample a later
+    chunk's leaf still reads)."""
+    group: Any
+    n_rows: int
+    max_batch: int
+    n_batches: int
+    rows: Any
+    local: Any
+    contiguous: bool
+    out_rows: Any
+    blocks: int
+    out_samples: int
+    template_values: int
+    plan: Any
+    ep: Any
+    lo: int
+    hi: int
+    col0: Any
+    col1: Any
+    written: Any
+    unwritten: Any
+    edges: Any
+    first_col: int
+    chunks: list
+
+
+class _CohortPrep(NamedTuple):
+    """What a cohort settles before it runs, kept by the middle bank for the next call with
+    the same jobs: the leaf banks and plans it was made for (checked before reuse), every
+    leaf sub, the leaf jobs with no window, each other leaf job's assembly record
+    (job, windows, bin sizes to merge, subs), the compiled groups and the samples the
+    cohort's windows span."""
+    bank_refs: list
+    plan_checks: list
+    subs: list
+    empty_leaves: list
+    leaf_preps: list
+    groups: list
+    w_span: int
+
+
+def _template_batches(corr_bank, sel_arr, n_out_rows):
+    """The cohort's output rows by template group of the middle bank, each group's rows cut
+    into batches of consecutive templates (up to 8 at n <= 4096, 4 at 8192, else 1) that one
+    correlation call fills. Returns the groups as (group, [(local template, output row)],
+    batches), each output row's slot within its batch, and the largest batch."""
+    grp_rows_map = {}
+    if sel_arr is not None:
+        for out_row, tmpl_id in enumerate(sel_arr):
+            g_m, li = corr_bank._template_map[int(tmpl_id)]
+            grp_rows_map.setdefault(id(g_m), (g_m, []))[1].append((int(li), int(out_row)))
+        grp_work = []
+        for g_m in corr_bank._groups:
+            entry = grp_rows_map.get(id(g_m))
+            if entry is not None:
+                entry[1].sort(key=lambda pair: pair[0])
+                grp_work.append(entry)
+    else:
+        grp_work = []
+        for g_m in corr_bank._groups:
+            g_indices = g_m.template_indices
+            if len(g_indices) > 0:
+                grp_work.append((
+                    g_m,
+                    [(li, int(out_row)) for li, out_row in enumerate(g_indices)],
+                ))
+
+    row_slot = [0] * n_out_rows
+    pre_grp_batches = []
+    max_kr = 1
+    for g_m, row_pairs in grp_work:
+        nt_sel_g = len(row_pairs)
+        max_kr_g = 8 if g_m.n <= 4096 else (4 if g_m.n == 8192 else 1)
+        batches = []
+        k_cur = 0
+        while k_cur < nt_sel_g:
+            li0 = row_pairs[k_cur][0]
+            k_end = k_cur + 1
+            while (
+                k_end < nt_sel_g
+                and k_end - k_cur < max_kr_g
+                and row_pairs[k_end][0] == li0 + (k_end - k_cur)
+            ):
+                k_end += 1
+            kr = k_end - k_cur
+            if kr > max_kr:
+                max_kr = kr
+            b_rows = tuple(row_pairs[k][1] for k in range(k_cur, k_end))
+            b_contig_out = all(b_rows[q] == b_rows[0] + q for q in range(kr))
+            batches.append((k_cur, li0, kr, b_rows, b_contig_out))
+            for q, r_out in enumerate(b_rows):
+                row_slot[r_out] = q
+            k_cur = k_end
+        pre_grp_batches.append((g_m, row_pairs, batches))
+    return pre_grp_batches, row_slot, max_kr
+
+
+def _tile_scratch(corr_bank, D, S, max_kr):
+    """The middle bank's scratch for a cohort of D detectors: per detector, max_kr rows of S
+    samples that stay in cache, zero where nothing has been written. Returns the pool, the
+    detectors' stride in it, each detector's rows and the map of what each row holds."""
+    # Stagger detector buffers by 256 samples (2 KiB) so power-of-two/64-aligned spans
+    # do not alias onto identical L2/L3 cache sets across detectors.
+    det_span = max_kr * S
+    pad_s = 256 if (det_span & 63) == 0 else 0
+    stride_det = det_span + pad_s
+    need_total = D * stride_det
+    raw_pool = corr_bank.__dict__.get("_l3_tile_pool")
+    prev_layout = corr_bank.__dict__.get("_l3_tile_layout")
+    dirty_map = corr_bank.__dict__.setdefault("_l3_tile_dirty_map", {})
+    if raw_pool is None or raw_pool.size < need_total:
+        raw_pool = _aligned_zeros(need_total, dtype=np.complex64)
+        corr_bank.__dict__["_l3_tile_pool"] = raw_pool
+        corr_bank.__dict__["_l3_tile_layout"] = (S, stride_det)
+        dirty_map.clear()
+    elif prev_layout != (S, stride_det):
+        raw_pool[:need_total] = 0
+        corr_bank.__dict__["_l3_tile_layout"] = (S, stride_det)
+        dirty_map.clear()
+    tbuf_det = [
+        raw_pool[d * stride_det : d * stride_det + det_span].reshape(max_kr, S)
+        for d in range(D)
+    ]
+    return raw_pool, stride_det, tbuf_det, dirty_map
+
+
+def _cohort_memo_key(corr_bank, members, leaf_jobs, S, max_kr, stride_det, W_corr,
+                     eff_tile_bytes, raw_pool):
+    """The key a cohort's preparation is kept under, or None where it may not be reused: a
+    trial is playing, a job carries scales, or a leaf job is not a plain windowed call on an
+    array. The key names the jobs' arrays by address and layout, and the leaf banks."""
+    D = len(members)
+    memo_ok = (not playing() and not getattr(corr_bank, "_in_trial", False)
+               and all(info.scales is None for _, info in members))
+    memo_key = None
+    if memo_ok:
+        leaf_sigs = []
+        for d_idx, (_, info) in enumerate(members):
+            for j in info.leaves:
+                lb, ls, lk = leaf_jobs[j]
+                if (getattr(lb, "_in_trial", False)
+                        or not isinstance(ls, np.ndarray)
+                        or (lk and ((set(lk) - _TILED_LEAF_KEYS)
+                                    or lk.get("template_index") is not None))):
+                    memo_ok = False
+                    break
+                w_arg = lk.get("windows") if lk else None
+                if w_arg is not None and type(w_arg) is not slice:
+                    memo_ok = False
+                    break
+                w_sig = None if w_arg is None else (w_arg.start, w_arg.stop, w_arg.step)
+                leaf_sigs.append((
+                    j, d_idx, id(lb), getattr(lb, "_layout_rank", None),
+                    ls.ctypes.data, ls.dtype.char, ls.shape, ls.strides,
+                    w_sig, lk.get("binsize") if lk else None,
+                    lk.get("threshold") if lk else None,
+                ))
+            if not memo_ok:
+                break
+        if memo_ok:
+            mem_sigs = tuple(
+                (info.out.ctypes.data, info.out.shape,
+                 None if info.support is None else info.support.tobytes())
+                for _, info in members
+            )
+            memo_key = (
+                D, S, max_kr, stride_det, W_corr.tobytes(), members[0][1].selection_key,
+                eff_tile_bytes, id(raw_pool), mem_sigs, tuple(leaf_sigs),
+            )
+    return memo_key
+
+
+def _prep_still_valid(cached_prep, leaf_jobs):
+    """Whether a kept preparation still describes these leaf jobs: the same bank objects,
+    each plan still holding the execution plan and the real-series mode it was bound with."""
+    valid_cache = all(
+        wref() is leaf_jobs[j_ref][0] for wref, j_ref in cached_prep.bank_refs
+    )
+    if valid_cache:
+        for ap, ep, real_m, _ in cached_prep.plan_checks:
+            if getattr(ap, "_mf", None) is not ep:
+                valid_cache = False
+                break
+            if ap.__dict__.get("_applied_real", False) is not real_m and hasattr(ap, "_sync_direct_prices"):
+                valid_cache = False
+                break
+            if real_m and ap.__dict__.get("_ep_real") != (ep, True):
+                valid_cache = False
+                break
+    return valid_cache
+
+
+def _reset_prep(cached_prep):
+    """Clear what the last run left in a kept preparation: the plans' data state and each
+    leaf sub's peaks, count and seconds."""
+    for ap, _, _, _ in cached_prep.plan_checks:
+        ap._dataset = False
+        if ap._data_ready:
+            ap._data_ready.clear()
+    for srec in cached_prep.subs:
+        srec.parts.clear()
+        srec.total = 0
+        srec.seconds = 0.0
+
+
+def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
+    """Bind every leaf job of the cohort to the scratch row its series will be read from.
+
+    A leaf job's series is a row (or a real or imaginary lane) of a member's output; its
+    plans are prepared on the scratch row that holds that output row while its batch runs.
+    Returns None where a leaf job cannot run tiled (not a hierarchical bank on such a row, a
+    threshold below the bank's, a plan that would have to switch its series mode within the
+    cohort). Otherwise (subs by output row and detector, the assembly record of each leaf
+    job, the leaf jobs with no window, every sub, the plans to check before reuse, the
+    banks to check before reuse)."""
+    D = len(members)
+    ep_modes = {}
+    subs_by_row = [[[] for _ in range(D)] for _ in range(n_out_rows)]
+    cohort_leaf_preps = []
+    cohort_empty_leaves = []
+    all_sub_recs = []
+    plan_checks = []
+    bank_refs = []
+    row_stride_bytes = S * 8
+
+    for d_idx, (ci, info) in enumerate(members):
+        _, _, _, _, _, out_arr, _, _, _, dep_indices = info
+        out_lo = out_arr.ctypes.data
+        out_hi = out_lo + out_arr.nbytes
+        for j in dep_indices:
+            l_bank, l_ser_raw, l_kw = leaf_jobs[j]
+            l_kw = l_kw or {}
+            if (l_bank.engine != "hier" or l_kw.get("template_index") is not None
+                    or (set(l_kw) - _TILED_LEAF_KEYS)
+                    or not isinstance(l_ser_raw, np.ndarray)
+                    or l_ser_raw.ndim != 1 or l_ser_raw.size != S
+                    or l_ser_raw.strides != (8,)
+                    or l_ser_raw.dtype not in (np.complex64, np.float32)
+                    or l_ser_raw.ctypes.data + (S - 1) * 8 + l_ser_raw.itemsize > out_hi):
+                return None
+            off_b = l_ser_raw.ctypes.data - out_lo
+            out_row, rem_b = divmod(off_b, row_stride_bytes)
+            if out_row < 0 or out_row >= n_out_rows:
+                return None
+            q_slot = row_slot[out_row]
+            t_row_base = tbuf_det[d_idx][q_slot]
+            if l_ser_raw.dtype == np.complex64:
+                if rem_b != 0:
+                    return None
+                tbuf_view = t_row_base
+            else:
+                if rem_b == 0:
+                    tbuf_view = t_row_base.real
+                elif rem_b == 4:
+                    tbuf_view = t_row_base.imag
+                else:
+                    return None
+
+            thr_arg = l_kw.get("threshold")
+            eff_thr = l_bank.threshold if thr_arg is None else float(thr_arg)
+            if not np.isfinite(eff_thr) or eff_thr < l_bank.threshold or eff_thr <= 0.0:
+                return None
+            ser_t = l_bank._input_series(tbuf_view)
+            if ser_t.ctypes.data != tbuf_view.ctypes.data or ser_t.size != S:
+                return None
+
+            bank_refs.append((weakref.ref(l_bank), j))
+            windows = l_kw.get("windows")
+            wkey = ((S, windows.start, windows.stop, windows.step)
+                    if type(windows) is slice else None)
+            wmemo = l_bank.__dict__.setdefault("_window_memo", {})
+            hit = wmemo.get(wkey) if wkey is not None else None
+            if hit is not None:
+                W_leaf, cache_key = hit
+            else:
+                W_leaf = _normalize_windows(windows, S)
+                cache_key = (S, W_leaf.tobytes())
+                if wkey is not None:
+                    if len(wmemo) >= 64:
+                        wmemo.clear()
+                    W_leaf.flags.writeable = False
+                    wmemo[wkey] = (W_leaf, cache_key)
+            if W_leaf.shape[0] == 0:
+                cohort_empty_leaves.append(j)
+                continue
+
+            prep = TimeDomainFilterBank._prepare_cpu_sparse_job(
+                l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr,
+                l_kw.get("profile", _SAME_PROFILE))
+            if prep is None:
+                return None
+
+            W_p, merge_bs, entries = prep
+            job_subs = []
+            for g_f, sub_st, sl, _, _, active_plan, ser_in, bs, thr_f, plan_profile in entries:
+                active_plan.use_profile(plan_profile)
+                nt_f = active_plan.ntemplates
+                active_plan._require_templates(0, nt_f)
+                active_plan._dataset = False
+                active_plan._data_ready = set()
+                real = ser_in.dtype == np.float32
+                stride = 2 if real and ser_in.strides == (8,) else 1
+
+                ep_prev = getattr(active_plan, "_mf", None)
+                if (ep_prev is not None and id(ep_prev) in ep_modes
+                        and ep_modes[id(ep_prev)] != (real, stride)):
+                    return None
+                active_plan._want_real = real
+                ep = active_plan._execution_plan()
+                if id(ep) in ep_modes and ep_modes[id(ep)] != (real, stride):
+                    return None
+                held_mode = active_plan.__dict__.get("_ep_real")
+                if real or (held_mode is not None and held_mode[0] is ep and held_mode[1]):
+                    if not ep.set_real_series(real, stride) and real:
+                        return None
+                    active_plan._ep_real = (ep, real)
+                if (active_plan.__dict__.get("_applied_real") is not real
+                        and hasattr(active_plan, "_sync_direct_prices")):
+                    active_plan._sync_direct_prices(ep, real)
+                ep_modes[id(ep)] = (real, stride)
+                plan_checks.append((active_plan, ep, real, stride))
+
+                cser = (np.lib.stride_tricks.as_strided(
+                    ser_in, shape=(2 * ser_in.size - 1,), strides=(4,))
+                    if stride == 2 else ser_in)
+                dgroup = int(ep.series_group())
+                slab_info = _layout_slabs(sl, dgroup, g_f.n, S)
+                sub_rec = _LeafSub(g_f, sub_st, sl, active_plan, ep, cser, nt_f, bs,
+                                   float(thr_f), slab_info)
+                job_subs.append(sub_rec)
+                all_sub_recs.append(sub_rec)
+                subs_by_row[out_row][d_idx].append(sub_rec)
+            cohort_leaf_preps.append((j, W_p, merge_bs, job_subs))
+    return (subs_by_row, cohort_leaf_preps, cohort_empty_leaves, all_sub_recs, plan_checks,
+            bank_refs)
+
+
+def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
+    """One chunk's work per template batch: the filter calls for every leaf slab that ends
+    within the chunk's horizon (the first sample a later chunk writes), each with the sub it
+    belongs to, and the earliest sample a slab still waiting will read, which is what must
+    be carried to the next chunk. Advances each sub's slab cursor."""
+    chunk_batch_jobs = []
+    for k_r0, li0, kr, b_rows, b_contig_out in batches:
+        c_jobs = []
+        back_subs = []
+        for d_idx in range(D):
+            for q, out_row in enumerate(b_rows):
+                cid = d_idx * kr + q
+                for sub_rec in subs_by_row[out_row][d_idx]:
+                    slab_info = sub_rec.slab_info
+                    s_cur = sub_rec.cursor
+                    if slab_info[0]:
+                        _, _, slab_r1, slab_req_end, _ = slab_info
+                        if s_cur >= slab_req_end.size:
+                            continue
+                        s_next = (slab_req_end.size if horizon >= S
+                                  else int(np.searchsorted(slab_req_end, horizon, side="right")))
+                        if s_next <= s_cur:
+                            continue
+                        r0 = 0 if s_cur == 0 else int(slab_r1[s_cur - 1])
+                        r1 = int(slab_r1[s_next - 1])
+                        sub_rec.cursor = s_next
+                        sl = sub_rec.slabs
+                        ph_slice = None if sl.phase is None else sl.phase[r0:r1]
+                        c_jobs.append((
+                            sub_rec.ep, sub_rec.series,
+                            sl.starts[r0:r1], sl.low[r0:r1], sl.high[r0:r1],
+                            0, sub_rec.ntemplates, sub_rec.binsize, sub_rec.threshold, None, ph_slice, cid,
+                        ))
+                        back_subs.append((sub_rec, q, r0, r1))
+                    else:
+                        _, _, sorted_r0, sorted_r1, sorted_req_end, _ = slab_info
+                        if s_cur >= sorted_req_end.size:
+                            continue
+                        s_next = (sorted_req_end.size if horizon >= S
+                                  else int(np.searchsorted(sorted_req_end, horizon, side="right")))
+                        if s_next <= s_cur:
+                            continue
+                        sub_rec.cursor = s_next
+                        sl = sub_rec.slabs
+                        run_r0 = int(sorted_r0[s_cur])
+                        run_r1 = int(sorted_r1[s_cur])
+                        slices = []
+                        for k_s in range(s_cur + 1, s_next):
+                            nr0 = int(sorted_r0[k_s])
+                            nr1 = int(sorted_r1[k_s])
+                            if nr0 == run_r1:
+                                run_r1 = nr1
+                            else:
+                                slices.append((run_r0, run_r1))
+                                run_r0, run_r1 = nr0, nr1
+                        slices.append((run_r0, run_r1))
+                        for r0, r1 in slices:
+                            ph_slice = None if sl.phase is None else sl.phase[r0:r1]
+                            c_jobs.append((
+                                sub_rec.ep, sub_rec.series,
+                                sl.starts[r0:r1], sl.low[r0:r1], sl.high[r0:r1],
+                                0, sub_rec.ntemplates, sub_rec.binsize, sub_rec.threshold, None, ph_slice, cid,
+                            ))
+                            back_subs.append((sub_rec, q, r0, r1))
+
+        min_fut = S
+        if has_b and more_chunks and len(batches) > 1:
+            for d_idx in range(D):
+                for out_row in b_rows:
+                    for sub_rec in subs_by_row[out_row][d_idx]:
+                        s_cur = sub_rec.cursor
+                        suf_min = sub_rec.slab_info[-1]
+                        if s_cur < suf_min.size:
+                            v_min = int(suf_min[s_cur])
+                            if v_min < min_fut:
+                                min_fut = v_min
+        chunk_batch_jobs.append((
+            k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut,
+        ))
+    return chunk_batch_jobs
+
+
+def _compile_groups(corr_bank, members, pre_grp_batches, subs_by_row, S, W_corr, n_out_rows,
+                    eff_tile_bytes):
+    """Compile each template group of the middle bank for the cohort: where its blocks
+    write, which output margins and gaps must be zero, its time chunks (as many as keep a
+    batch's span within eff_tile_bytes) and each chunk's filter calls. Returns the
+    _TiledGroup list and the samples the windows span."""
+    D = len(members)
+    w_span = int((W_corr[:, 1] - W_corr[:, 0]).sum())
+    compiled_groups = []
+    for g_m, row_pairs, batches in pre_grp_batches:
+        nt_sel_g = len(row_pairs)
+        max_batch_kr = max((b[2] for b in batches), default=1)
+        row_indices_arr = np.array([r_out for _, r_out in row_pairs], dtype=np.int64)
+        li_arr = np.array([li for li, _ in row_pairs], dtype=np.int64)
+        is_contig_out = (
+            nt_sel_g == n_out_rows
+            and row_indices_arr[0] == 0
+            and np.array_equal(row_indices_arr, np.arange(n_out_rows, dtype=np.int64))
+        ) or (
+            row_indices_arr[-1] - row_indices_arr[0] + 1 == nt_sel_g
+            and np.array_equal(
+                row_indices_arr,
+                np.arange(row_indices_arr[0], row_indices_arr[0] + nt_sel_g, dtype=np.int64),
+            )
+        )
+        out_slice_obj = (slice(int(row_indices_arr[0]), int(row_indices_arr[0]) + nt_sel_g)
+                         if is_contig_out else row_indices_arr)
+
+        st, bounds, keep, _ = corr_bank._windows_layout(g_m, S, W_corr, None)
+        M = int(st.size)
+        if M > 0:
+            w_out_samples = int((keep[:, 1] - keep[:, 0]).sum()) * nt_sel_g
+            tmpl_vals = nt_sel_g * _stored_bins(g_m)
+            cplan = g_m.get_correlation_plan()
+            cplan._require_templates(0, len(g_m.template_indices))
+            ep_m = cplan._continuous_plan()
+            lo_v, hi_v = cplan.valid
+            s64 = st.astype(np.int64)
+            if bounds is not None:
+                b64 = bounds.astype(np.int64)
+                col0 = s64 + b64[:, 0]
+                col1 = s64 + b64[:, 1]
+            else:
+                col0 = s64 + lo_v
+                col1 = np.minimum(s64 + hi_v, S)
+            written_runs = _interval_runs(S, col0, col1)
+        else:
+            w_out_samples = tmpl_vals = 0
+            cplan = ep_m = None
+            lo_v = hi_v = 0
+            col0 = col1 = np.empty(0, dtype=np.int64)
+            written_runs = np.empty((0, 2), dtype=np.int64)
+
+        unwritten_runs = np.concatenate(([0], written_runs.ravel(), [S])).reshape(-1, 2)
+        det_edge_runs = []
+        for _, info in members:
+            _, _, _, edges_d = corr_bank._windows_layout(g_m, S, W_corr, info.support)
+            det_edge_runs.append(edges_d.reshape(-1, 2))
+
+        if W_corr.shape[0] > 1 and M > 0:
+            full_edges = np.concatenate(([0], keep.ravel(), [S])).reshape(-1, 2)
+            bridged_edges = _intersect_runs(full_edges, written_runs)
+        else:
+            bridged_edges = np.empty((0, 2), dtype=np.int64)
+
+        if M == 0:
+            raw_chunks = [(0, 0, S)]
+            grp_min_col = 0
+        else:
+            grp_min_col = int(col0.min())
+            batch_span_bytes = D * int(col1.max() - grp_min_col) * 8 * max_batch_kr
+            kt = min(M, max(1, int(math.ceil(batch_span_bytes / eff_tile_bytes))))
+            if kt <= 1:
+                raw_chunks = [(0, M, S)]
+            else:
+                raw_chunks = []
+                m_prev = 0
+                for ck_i in range(1, kt + 1):
+                    if ck_i == kt:
+                        m_next = M
+                    else:
+                        m_next = (M * ck_i) // kt
+                        if g_m.n <= 4096:
+                            m_next = min(M, ((m_next + 15) // 16) * 16)
+                    if m_next > m_prev:
+                        hz = S if m_next == M else int(col0[m_next:].min())
+                        raw_chunks.append((m_prev, m_next, hz))
+                        m_prev = m_next
+
+        comp_chunks = []
+        for ck_idx, (m0, m1, horizon) in enumerate(raw_chunks):
+            has_b = m1 > m0
+            if has_b:
+                st_c = st[m0:m1]
+                bnd_c = bounds[m0:m1] if bounds is not None else None
+                c_start = int(col0[m0:m1].min())
+                c_end = int(col1[m0:m1].max())
+                if m1 - m0 == 1 or W_corr.shape[0] <= 1:
+                    t_runs = ((c_start, c_end),)
+                else:
+                    brk = np.flatnonzero(col0[m0 + 1:m1] > col1[m0:m1 - 1]) + 1
+                    r_starts = col0[m0:m1][np.concatenate(([0], brk))]
+                    r_stops = col1[m0:m1][np.concatenate((brk - 1, [m1 - m0 - 1]))]
+                    t_runs = tuple(
+                        (int(ra), int(rb)) for ra, rb in zip(r_starts, r_stops) if rb > ra
+                    )
+                chunk_bridges = (
+                    _intersect_runs(bridged_edges, np.asarray(t_runs, dtype=np.int64))
+                    if bridged_edges.size > 0 and t_runs else np.empty((0, 2), dtype=np.int64)
+                )
+            else:
+                st_c = bnd_c = None
+                c_start = c_end = 0
+                t_runs = ()
+                chunk_bridges = np.empty((0, 2), dtype=np.int64)
+
+            chunk_batch_jobs = _chunk_batch_jobs(
+                batches, subs_by_row, D, S, horizon, has_b, ck_idx + 1 < len(raw_chunks))
+            comp_chunks.append((
+                has_b, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs,
+            ))
+
+        compiled_groups.append(_TiledGroup(
+            g_m, nt_sel_g, max_batch_kr, len(batches), row_indices_arr, li_arr,
+            is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
+            cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
+            det_edge_runs, grp_min_col, comp_chunks,
+        ))
+    return compiled_groups, w_span
+
+
+def _clear_stale_scratch(M, col0, col1, max_batch_kr, unwritten_runs, tbuf_det, dirty_map,
+                         dt_corr_d):
+    """Zero what an earlier group left in the scratch rows where this group's blocks will
+    not write, and record what this group will leave. The time is shared between the
+    detectors' correlation times."""
+    D = len(tbuf_det)
+    t_c0 = time.perf_counter()
+    new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
+    for d_idx in range(D):
+        t_det = tbuf_det[d_idx]
+        for q in range(max_batch_kr):
+            d_lo, d_hi = dirty_map.get((d_idx, q), (0, 0))
+            if d_hi > d_lo:
+                stale = _intersect_runs(
+                    unwritten_runs, np.array([[d_lo, d_hi]], dtype=np.int64))
+                for sa, sb in stale:
+                    if sb > sa:
+                        t_det[q, int(sa):int(sb)] = 0
+            dirty_map[(d_idx, q)] = new_dirty
+    dt_share = (time.perf_counter() - t_c0) / D
+    for d_idx in range(D):
+        dt_corr_d[d_idx] += dt_share
+
+
+def _output_margins_and_scales(members, g_m, row_indices_arr, li_arr, is_contig_out,
+                               out_slice_obj, det_edge_runs, unwritten_runs, retain_radius,
+                               dt_corr_d):
+    """Each detector's per-row scales for this group (None without scales). Where the output
+    is written (retain_radius is not 0), also zero its margins and apply the scales to the
+    samples no block writes, as correlate_series does."""
+    D = len(members)
+    det_scales = [None] * D
+    if retain_radius != 0:
+        for d_idx, (_, info) in enumerate(members):
+            t_d0 = time.perf_counter()
+            _, _, _, _, _, out_d, sel_d, _, sc_d, _ = info
+            for ea, eb in det_edge_runs[d_idx]:
+                if eb > ea:
+                    out_d[out_slice_obj, int(ea):int(eb)] = 0
+            if sc_d is not None:
+                row_sc = (sc_d[sel_d[row_indices_arr]] if sel_d is not None
+                          else sc_d[g_m.template_indices[li_arr]])
+                det_scales[d_idx] = row_sc
+                for ua, ub in unwritten_runs:
+                    if ub > ua:
+                        ua_i, ub_i = int(ua), int(ub)
+                        if is_contig_out:
+                            sub_v = out_d[out_slice_obj, ua_i:ub_i]
+                            np.multiply(sub_v, row_sc[:, None], out=sub_v)
+                        else:
+                            for k_r, r_out in enumerate(row_indices_arr):
+                                np.multiply(
+                                    out_d[r_out, ua_i:ub_i], row_sc[k_r],
+                                    out=out_d[r_out, ua_i:ub_i],
+                                )
+            dt_corr_d[d_idx] += time.perf_counter() - t_d0
+    else:
+        for d_idx, (_, info) in enumerate(members):
+            _, _, _, _, _, _, sel_d, _, sc_d, _ = info
+            if sc_d is not None:
+                det_scales[d_idx] = (
+                    sc_d[sel_d[row_indices_arr]] if sel_d is not None
+                    else sc_d[g_m.template_indices[li_arr]]
+                )
+    return det_scales
+
+
+def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools, S,
+                     retain_radius, eff_ret_thr, set_mirror, stream_cp, dt_corr_d):
+    """Run one compiled group: for each time chunk and template batch, correlate the batch
+    for every detector into the scratch rows, write the output as asked (all of it, nothing,
+    or collars around retained peaks), filter every leaf slab that is ready, and carry the
+    samples a later chunk's leaves still read. Adds each detector's correlation time to
+    dt_corr_d; returns the filtering seconds and whether a streaming store was used."""
+    (g_m, nt_sel_g, max_batch_kr, n_batches, row_indices_arr, li_arr,
+     is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
+     cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
+     det_edge_runs, grp_min_col, comp_chunks) = grp
+    D = len(members)
+    dt_fine_cohort = 0.0
+    used_nt_stream = False
+    if M > 0:
+        for _ in range(D):
+            corr_bank._add_corr_work(g_m.n, dict(
+                blocks=M, pairs=M * nt_sel_g,
+                out_samples=w_out_samples, tmpl_values=tmpl_vals,
+            ))
+        cplan._dataset = False
+        if cplan._data_ready:
+            cplan._data_ready.clear()
+
+    _clear_stale_scratch(M, col0, col1, max_batch_kr, unwritten_runs, tbuf_det, dirty_map,
+                         dt_corr_d)
+    det_scales = _output_margins_and_scales(
+        members, g_m, row_indices_arr, li_arr, is_contig_out, out_slice_obj, det_edge_runs,
+        unwritten_runs, retain_radius, dt_corr_d)
+
+    n_chunks = len(comp_chunks)
+    need_collars = n_chunks > 1 and n_batches > 1
+    pending_fwd_end = (
+        [0] * nt_sel_g
+        if (retain_radius is not None and retain_radius > 0 and n_chunks > 1)
+        else None
+    )
+    saved_collars = [None] * n_batches if need_collars else None
+    r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
+
+    # Resolve per-detector C correlation callables once per group.
+    if M > 0:
+        has_real_corr = hasattr(ep_m, "correlate_series_continuous_real")
+        det_run_fns = [
+            ep_m.correlate_series_continuous_real
+            if info.series.dtype == np.float32 and has_real_corr
+            else ep_m.correlate_series_continuous
+            for _, info in members
+        ]
+    else:
+        det_run_fns = None
+
+    for ck_idx, (has_blocks, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs) in enumerate(comp_chunks):
+        has_bridges = chunk_bridges.size > 0
+        write_pool_idx = ck_idx & 1
+        write_off = 0
+
+        for b_idx, (k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut) in enumerate(chunk_batch_jobs):
+            # Restore any cross-chunk boundary collar saved from the previous chunk.
+            if saved_collars is not None and saved_collars[b_idx] is not None:
+                t_c0 = time.perf_counter()
+                saved_lo, saved_hi, src_pool, src_off = saved_collars[b_idx]
+                c_len = saved_hi - saved_lo
+                step_elems = kr * c_len
+                for d_idx in range(D):
+                    base_off = src_off + d_idx * step_elems
+                    tbuf_det[d_idx][:kr, saved_lo:saved_hi] = (
+                        src_pool[base_off : base_off + step_elems].reshape(kr, c_len)
+                    )
+                saved_collars[b_idx] = None
+                valid_lo = saved_lo
+                dt_share = (time.perf_counter() - t_c0) / D
+                for d_idx in range(D):
+                    dt_corr_d[d_idx] += dt_share
+            elif n_batches == 1 and ck_idx > 0:
+                valid_lo = grp_min_col
+            else:
+                valid_lo = c_start
+
+            # Correlate batch [li0, li0 + kr) across all detectors in the cohort into L3 tbuf.
+            if has_blocks:
+                out_row_first = b_rows[0]
+                for d_idx, (_, info) in enumerate(members):
+                    t_d0 = time.perf_counter()
+                    ser_d = info.series
+                    out_d = info.out
+                    r_sc = det_scales[d_idx]
+                    t_det_batch = tbuf_det[d_idx][:kr]
+                    direct_mirror = (
+                        retain_radius is None
+                        and r_sc is None
+                        and not has_bridges
+                        and b_contig_out
+                        and set_mirror is not None
+                    )
+                    if direct_mirror:
+                        set_mirror(out_d[out_row_first].ctypes.data, S)
+                        used_nt_stream = True
+                    det_run_fns[d_idx](ser_d, st_c, lo_v, hi_v, li0, kr, t_det_batch, bnd_c)
+                    if has_bridges:
+                        for za, zb in chunk_bridges:
+                            t_det_batch[:, int(za):int(zb)] = 0
+                    if r_sc is not None:
+                        if kr == 1:
+                            sc_val = r_sc[k_r0]
+                            t_row_1d = t_det_batch[0]
+                            for ra, rb in t_runs:
+                                np.multiply(t_row_1d[ra:rb], sc_val, out=t_row_1d[ra:rb])
+                        else:
+                            sc_vec = r_sc[k_r0 : k_r0 + kr, None]
+                            for ra, rb in t_runs:
+                                np.multiply(t_det_batch[:, ra:rb], sc_vec, out=t_det_batch[:, ra:rb])
+                    if retain_radius is None and not direct_mirror:
+                        for q, r_out in enumerate(b_rows):
+                            t_row_1d = t_det_batch[q]
+                            out_row_ptr = out_d[r_out].ctypes.data
+                            t_row_ptr = t_row_1d.ctypes.data
+                            for ra, rb in t_runs:
+                                if stream_cp is not None:
+                                    stream_cp(
+                                        out_row_ptr + ra * 8,
+                                        t_row_ptr + ra * 8,
+                                        (rb - ra) * 8,
+                                    )
+                                    used_nt_stream = True
+                                else:
+                                    out_d[r_out, ra:rb] = t_row_1d[ra:rb]
+                    dt_corr_d[d_idx] += time.perf_counter() - t_d0
+
+            # Filter all ready slabs of this batch across all detectors in one C call.
+            t_f0 = time.perf_counter()
+            peaks_by_q = None
+            if c_jobs:
+                c_out = _core.HMF.run_series_batch_sparse(c_jobs)
+                dt_b = time.perf_counter() - t_f0
+                dt_each = dt_b / len(c_jobs)
+                dt_fine_cohort += dt_b
+                for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
+                    sub_rec.total += tot
+                    sub_rec.seconds += dt_each
+                    if tot > 0:
+                        sl = sub_rec.slabs
+                        nt_f = sub_rec.ntemplates
+                        fl_arr = np.frombuffer(fl, np.int64)
+                        ix_arr = np.frombuffer(ix, np.int64)
+                        vl_arr = np.frombuffer(vl, np.complex64)
+                        sp = _SparsePeaks((r1 - r0, nt_f, sl.nbins), fl_arr, ix_arr, vl_arr)
+                        sub_rec.parts.append((r0, sp))
+                        if retain_radius is not None and retain_radius > 0:
+                            keep_pk = (
+                                np.ones(vl_arr.size, dtype=bool)
+                                if eff_ret_thr <= 0.0
+                                else (np.abs(vl_arr) >= eff_ret_thr)
+                            )
+                            if np.any(keep_pk):
+                                bi = fl_arr[keep_pk] // (nt_f * sl.nbins)
+                                s_pos = sl.starts[r0 + bi].astype(np.int64) + ix_arr[keep_pk]
+                                if peaks_by_q is None:
+                                    peaks_by_q = [[] for _ in range(kr)]
+                                peaks_by_q[q].append(s_pos)
+            else:
+                dt_fine_cohort += time.perf_counter() - t_f0
+
+            # Materialize collar spans around triggers when retain_radius > 0.
+            if has_blocks and retain_radius is not None and retain_radius > 0:
+                for q, r_out in enumerate(b_rows):
+                    k_r = k_r0 + q
+                    q_peaks = peaks_by_q[q] if peaks_by_q is not None else None
+                    spans = []
+                    if pending_fwd_end is not None and pending_fwd_end[k_r] > c_start:
+                        spans.append((c_start, min(c_end, pending_fwd_end[k_r])))
+                    if q_peaks:
+                        all_s = q_peaks[0] if len(q_peaks) == 1 else np.concatenate(q_peaks)
+                        if pending_fwd_end is not None:
+                            max_fwd = int(all_s.max()) + retain_radius
+                            if max_fwd > c_end and max_fwd > pending_fwd_end[k_r]:
+                                pending_fwd_end[k_r] = min(S, max_fwd)
+                        for s_val in all_s.tolist():
+                            ca = max(valid_lo, int(s_val) - retain_radius)
+                            cb = min(c_end, int(s_val) + retain_radius)
+                            if cb > ca:
+                                spans.append((ca, cb))
+                    if spans:
+                        spans.sort()
+                        merged = [list(spans[0])]
+                        for sa, sb in spans[1:]:
+                            if sa <= merged[-1][1]:
+                                if sb > merged[-1][1]:
+                                    merged[-1][1] = sb
+                            else:
+                                merged.append([sa, sb])
+                        w_spans = _intersect_runs(
+                            np.asarray(merged, dtype=np.int64), written_runs)
+                        if w_spans.size > 0:
+                            for d_idx, (_, info) in enumerate(members):
+                                t_d0 = time.perf_counter()
+                                out_d = info.out
+                                t_row_1d = tbuf_det[d_idx][q]
+                                out_row_ptr = out_d[r_out].ctypes.data
+                                t_row_ptr = t_row_1d.ctypes.data
+                                for sa, sb in w_spans:
+                                    sa_i, sb_i = int(sa), int(sb)
+                                    if stream_cp is not None:
+                                        stream_cp(
+                                            out_row_ptr + sa_i * 8,
+                                            t_row_ptr + sa_i * 8,
+                                            (sb_i - sa_i) * 8,
+                                        )
+                                        used_nt_stream = True
+                                    else:
+                                        out_d[r_out, sa_i:sb_i] = t_row_1d[sa_i:sb_i]
+                                dt_corr_d[d_idx] += time.perf_counter() - t_d0
+
+            # Save cross-chunk boundary collar into persistent ping-pong pool when needed.
+            if need_collars and has_blocks and ck_idx + 1 < n_chunks and min_fut < S:
+                collar_lo = max(grp_min_col, min_fut - r_pad)
+                if collar_lo < c_end:
+                    t_c0 = time.perf_counter()
+                    c_len = c_end - collar_lo
+                    step_elems = kr * c_len
+                    total_elems = D * step_elems
+                    dst_pool = collar_pools[write_pool_idx]
+                    if dst_pool is None or write_off + total_elems > dst_pool.size:
+                        new_cap = max(
+                            write_off + total_elems,
+                            0 if dst_pool is None else dst_pool.size * 2,
+                            max(1, n_batches) * D * max(c_len, 4096),
+                        )
+                        grown = _aligned_zeros(new_cap, dtype=np.complex64)
+                        if dst_pool is not None and write_off > 0:
+                            grown[:write_off] = dst_pool[:write_off]
+                        dst_pool = grown
+                        collar_pools[write_pool_idx] = dst_pool
+                    for d_idx in range(D):
+                        base_off = write_off + d_idx * step_elems
+                        dst_pool[base_off : base_off + step_elems].reshape(kr, c_len)[:] = (
+                            tbuf_det[d_idx][:kr, collar_lo:c_end]
+                        )
+                    saved_collars[b_idx] = (collar_lo, c_end, dst_pool, write_off)
+                    write_off += total_elems
+                    dt_share = (time.perf_counter() - t_c0) / D
+                    for d_idx in range(D):
+                        dt_corr_d[d_idx] += dt_share
+    return dt_fine_cohort, used_nt_stream
+
+
+def _assemble_leaf_results(cohort_leaf_preps, out_results):
+    """Each tiled leaf job's FilterResults from its subs' peaks, into out_results: the
+    chunks' peaks joined in block order, bins merged where the job asked for a larger bin
+    size. Records each plan's trigger count and time."""
+    for j, W_p, merge_bs, job_subs in cohort_leaf_preps:
+        lists = ([], [], [], [], [])
+        for sub_rec in job_subs:
+            g_f, sub_st, sl, active_plan = sub_rec.group, sub_rec.starts, sub_rec.slabs, sub_rec.plan
+            nt_f, parts, tot_sum, dt_sum = sub_rec.ntemplates, sub_rec.parts, sub_rec.total, sub_rec.seconds
+            active_plan._last_n_triggers = tot_sum
+            active_plan._record_batch_time(dt_sum)
+            if tot_sum == 0 or not parts:
+                continue
+            shape = (sl.starts.size, nt_f, sl.nbins)
+            if sl.order is None and all(
+                parts[i][0] > parts[i - 1][0] for i in range(1, len(parts))
+            ):
+                if len(parts) == 1 and parts[0][0] == 0:
+                    sp = parts[0][1]
+                else:
+                    per_block = nt_f * sl.nbins
+                    sp = _SparsePeaks(
+                        shape,
+                        np.concatenate([p.flat + b0 * per_block for b0, p in parts]),
+                        np.concatenate([p.idx for _, p in parts]),
+                        np.concatenate([p.val for _, p in parts]),
+                    )
+            else:
+                sp = _SparsePeaks.combine(parts, shape, sl.order)
+            _consume_into(lists, sp, None, sub_st, g_f, None, g_f.n, None)
+        if merge_bs and lists[0]:
+            cols = [np.concatenate(c) for c in lists]
+            for bs_m in merge_bs:
+                cols = list(_merge_window_bins(W_p, bs_m, *cols))
+            for lst, c in zip(lists, cols):
+                lst[:] = [c]
+        out_results[j] = _results_from(lists)
+
+
 class TimeDomainFilterBank:
     """Filter bank that ingests raw time-domain filters and optimizes blocking dynamically.
 
@@ -3109,9 +4037,19 @@ class TimeDomainFilterBank:
         corr_times = [0.0] * len(corr_jobs)
         dt_filter_total = 0.0
         fallback_leaves = list(independent_leaves)
-        allowed_corr_keys = {"windows", "scales", "templates", "out", "out_support", "wait"}
-        allowed_leaf_keys = {"windows", "binsize", "threshold", "template_index", "profile"}
         all_ephemeral = retain_radius == 0
+
+        def _correlate_untiled(indices):
+            """Correlate these jobs with correlate_series and leave their leaves to
+            filter_series_many."""
+            nonlocal all_ephemeral
+            all_ephemeral = False
+            for ci in indices:
+                c_bank, c_ser, c_kw = corr_jobs[ci]
+                t_c0 = time.perf_counter()
+                c_bank.correlate_series(c_ser, **(c_kw or {}))
+                corr_times[ci] = time.perf_counter() - t_c0
+                fallback_leaves.extend(leaf_by_corr[ci])
 
         # Screen candidate correlation jobs and group compatible multi-detector jobs into cohorts.
         cand_jobs = []
@@ -3122,16 +4060,12 @@ class TimeDomainFilterBank:
                 bool(dep_indices)
                 and corr_bank.engine in ("corr", "flat", "hier", "dif")
                 and corr_kw.get("wait", True)
-                and not (set(corr_kw) - allowed_corr_keys)
+                and not (set(corr_kw) - _TILED_CORR_KEYS)
                 and corr_kw.get("out") is not None
             )
             info = _tiled_job(corr_bank, corr_series, corr_kw, dep_indices) if can_tile else None
             if info is None:
-                all_ephemeral = False
-                t_c0 = time.perf_counter()
-                corr_bank.correlate_series(corr_series, **corr_kw)
-                corr_times[ci] = time.perf_counter() - t_c0
-                fallback_leaves.extend(dep_indices)
+                _correlate_untiled([ci])
             else:
                 cand_jobs.append((ci, info))
 
@@ -3143,857 +4077,71 @@ class TimeDomainFilterBank:
         used_nt_stream = False
         for members in cohorts:
             D = len(members)
-            corr_bank, _, S, W_corr, _, first_out, sel_arr, _, _, _ = members[0][1]
-            n_out_rows = first_out.shape[0]
+            first = members[0][1]
+            corr_bank, S, W_corr = first.bank, first.S, first.windows
+            n_out_rows = first.out.shape[0]
             w_corr_samples = int((W_corr[:, 1] - W_corr[:, 0]).sum())
             if auto_cohort_cap is not None and D * n_out_rows * w_corr_samples * 8 > auto_cohort_cap:
-                all_ephemeral = False
-                for ci, _ in members:
-                    c_bank, c_ser, c_kw = corr_jobs[ci]
-                    t_c0 = time.perf_counter()
-                    c_bank.correlate_series(c_ser, **(c_kw or {}))
-                    corr_times[ci] = time.perf_counter() - t_c0
-                    fallback_leaves.extend(leaf_by_corr[ci])
+                _correlate_untiled([ci for ci, _ in members])
                 continue
 
-            # Partition each group's template rows into contiguous-template batches so small-N
-            # SIMD correlation groups (n <= 4096 or n == 8192) fill SIMD lanes without wasted work.
-            grp_rows_map = {}
-            if sel_arr is not None:
-                for out_row, tmpl_id in enumerate(sel_arr):
-                    g_m, li = corr_bank._template_map[int(tmpl_id)]
-                    grp_rows_map.setdefault(id(g_m), (g_m, []))[1].append((int(li), int(out_row)))
-                grp_work = []
-                for g_m in corr_bank._groups:
-                    entry = grp_rows_map.get(id(g_m))
-                    if entry is not None:
-                        entry[1].sort(key=lambda pair: pair[0])
-                        grp_work.append(entry)
-            else:
-                grp_work = []
-                for g_m in corr_bank._groups:
-                    g_indices = g_m.template_indices
-                    if len(g_indices) > 0:
-                        grp_work.append((
-                            g_m,
-                            [(li, int(out_row)) for li, out_row in enumerate(g_indices)],
-                        ))
+            # Template batches that fill SIMD lanes, and the scratch rows they write.
+            pre_grp_batches, row_slot, max_kr = _template_batches(
+                corr_bank, first.selection, n_out_rows)
+            raw_pool, stride_det, tbuf_det, dirty_map = _tile_scratch(corr_bank, D, S, max_kr)
 
-            row_slot = [0] * n_out_rows
-            pre_grp_batches = []
-            max_kr = 1
-            for g_m, row_pairs in grp_work:
-                nt_sel_g = len(row_pairs)
-                max_kr_g = 8 if g_m.n <= 4096 else (4 if g_m.n == 8192 else 1)
-                batches = []
-                k_cur = 0
-                while k_cur < nt_sel_g:
-                    li0 = row_pairs[k_cur][0]
-                    k_end = k_cur + 1
-                    while (
-                        k_end < nt_sel_g
-                        and k_end - k_cur < max_kr_g
-                        and row_pairs[k_end][0] == li0 + (k_end - k_cur)
-                    ):
-                        k_end += 1
-                    kr = k_end - k_cur
-                    if kr > max_kr:
-                        max_kr = kr
-                    b_rows = tuple(row_pairs[k][1] for k in range(k_cur, k_end))
-                    b_contig_out = all(b_rows[q] == b_rows[0] + q for q in range(kr))
-                    batches.append((k_cur, li0, kr, b_rows, b_contig_out))
-                    for q, r_out in enumerate(b_rows):
-                        row_slot[r_out] = q
-                    k_cur = k_end
-                pre_grp_batches.append((g_m, row_pairs, batches))
-
-            # Obtain or grow persistent zero-initialized L3 tile scratch on corr_bank.
-            # Stagger detector buffers by 256 samples (2 KiB) so power-of-two/64-aligned spans
-            # do not alias onto identical L2/L3 cache sets across detectors.
-            det_span = max_kr * S
-            pad_s = 256 if (det_span & 63) == 0 else 0
-            stride_det = det_span + pad_s
-            need_total = D * stride_det
-            raw_pool = corr_bank.__dict__.get("_l3_tile_pool")
-            prev_layout = corr_bank.__dict__.get("_l3_tile_layout")
-            dirty_map = corr_bank.__dict__.setdefault("_l3_tile_dirty_map", {})
-            if raw_pool is None or raw_pool.size < need_total:
-                raw_pool = _aligned_zeros(need_total, dtype=np.complex64)
-                corr_bank.__dict__["_l3_tile_pool"] = raw_pool
-                corr_bank.__dict__["_l3_tile_layout"] = (S, stride_det)
-                dirty_map.clear()
-            elif prev_layout != (S, stride_det):
-                raw_pool[:need_total] = 0
-                corr_bank.__dict__["_l3_tile_layout"] = (S, stride_det)
-                dirty_map.clear()
-            tbuf_det = [
-                raw_pool[d * stride_det : d * stride_det + det_span].reshape(max_kr, S)
-                for d in range(D)
-            ]
-
-            # Check per-cohort preparation cache when trials are locked and scales are absent.
-            memo_ok = (not playing() and not getattr(corr_bank, "_in_trial", False)
-                       and all(info.scales is None for _, info in members))
-            memo_key = None
-            if memo_ok:
-                leaf_sigs = []
-                for d_idx, (_, info) in enumerate(members):
-                    for j in info.leaves:
-                        lb, ls, lk = leaf_jobs[j]
-                        if (getattr(lb, "_in_trial", False)
-                                or not isinstance(ls, np.ndarray)
-                                or (lk and ((set(lk) - allowed_leaf_keys)
-                                            or lk.get("template_index") is not None))):
-                            memo_ok = False
-                            break
-                        w_arg = lk.get("windows") if lk else None
-                        if w_arg is not None and type(w_arg) is not slice:
-                            memo_ok = False
-                            break
-                        w_sig = None if w_arg is None else (w_arg.start, w_arg.stop, w_arg.step)
-                        leaf_sigs.append((
-                            j, d_idx, id(lb), getattr(lb, "_layout_rank", None),
-                            ls.ctypes.data, ls.dtype.char, ls.shape, ls.strides,
-                            w_sig, lk.get("binsize") if lk else None,
-                            lk.get("threshold") if lk else None,
-                        ))
-                    if not memo_ok:
-                        break
-                if memo_ok:
-                    mem_sigs = tuple(
-                        (info.out.ctypes.data, info.out.shape,
-                         None if info.support is None else info.support.tobytes())
-                        for _, info in members
-                    )
-                    memo_key = (
-                        D, S, max_kr, stride_det, W_corr.tobytes(), members[0][1].selection_key,
-                        eff_tile_bytes, id(raw_pool), mem_sigs, tuple(leaf_sigs),
-                    )
-
+            # The cohort's preparation: kept from the last call with the same jobs, or made.
+            memo_key = _cohort_memo_key(corr_bank, members, leaf_jobs, S, max_kr, stride_det,
+                                        W_corr, eff_tile_bytes, raw_pool)
             prep_cache = corr_bank.__dict__.setdefault("_cached_cohort_preps", OrderedDict())
-            cached_prep = prep_cache.get(memo_key) if memo_key is not None else None
-            if cached_prep is not None:
-                valid_cache = all(
-                    wref() is leaf_jobs[j_ref][0] for wref, j_ref in cached_prep["bank_refs"]
-                )
-                if valid_cache:
-                    for ap, ep, real_m, _ in cached_prep["plan_checks"]:
-                        if getattr(ap, "_mf", None) is not ep:
-                            valid_cache = False
-                            break
-                        if ap.__dict__.get("_applied_real", False) is not real_m and hasattr(ap, "_sync_direct_prices"):
-                            valid_cache = False
-                            break
-                        if real_m and ap.__dict__.get("_ep_real") != (ep, True):
-                            valid_cache = False
-                            break
-                if not valid_cache:
-                    cached_prep = None
-
-            if cached_prep is not None:
+            prep = prep_cache.get(memo_key) if memo_key is not None else None
+            if prep is not None and not _prep_still_valid(prep, leaf_jobs):
+                prep = None
+            if prep is not None:
                 prep_cache.move_to_end(memo_key)
-                for ap, _, _, _ in cached_prep["plan_checks"]:
-                    ap._dataset = False
-                    if ap._data_ready:
-                        ap._data_ready.clear()
-                for srec in cached_prep["all_sub_recs"]:
-                    srec[9].clear()
-                    srec[10] = 0
-                    srec[11] = 0.0
-                cohort_empty_leaves = cached_prep["cohort_empty_leaves"]
-                cohort_leaf_preps = cached_prep["cohort_leaf_preps"]
-                compiled_groups = cached_prep["compiled_groups"]
-                w_span = cached_prep["w_span"]
+                _reset_prep(prep)
             else:
-                # Validate and bind all dependent leaf jobs across the cohort to tbuf views.
-                cohort_ok = True
-                ep_modes = {}
-                subs_by_row = [[[] for _ in range(D)] for _ in range(n_out_rows)]
-                cohort_leaf_preps = []
-                cohort_empty_leaves = []
-                all_sub_recs = []
-                plan_checks = []
-                bank_refs = []
-                row_stride_bytes = S * 8
-
-                for d_idx, (ci, info) in enumerate(members):
-                    _, _, _, _, _, out_arr, _, _, _, dep_indices = info
-                    out_lo = out_arr.ctypes.data
-                    out_hi = out_lo + out_arr.nbytes
-                    for j in dep_indices:
-                        l_bank, l_ser_raw, l_kw = leaf_jobs[j]
-                        l_kw = l_kw or {}
-                        if (l_bank.engine != "hier" or l_kw.get("template_index") is not None
-                                or (set(l_kw) - allowed_leaf_keys)
-                                or not isinstance(l_ser_raw, np.ndarray)
-                                or l_ser_raw.ndim != 1 or l_ser_raw.size != S
-                                or l_ser_raw.strides != (8,)
-                                or l_ser_raw.dtype not in (np.complex64, np.float32)
-                                or l_ser_raw.ctypes.data + (S - 1) * 8 + l_ser_raw.itemsize > out_hi):
-                            cohort_ok = False
-                            break
-                        off_b = l_ser_raw.ctypes.data - out_lo
-                        out_row, rem_b = divmod(off_b, row_stride_bytes)
-                        if out_row < 0 or out_row >= n_out_rows:
-                            cohort_ok = False
-                            break
-                        q_slot = row_slot[out_row]
-                        t_row_base = tbuf_det[d_idx][q_slot]
-                        if l_ser_raw.dtype == np.complex64:
-                            if rem_b != 0:
-                                cohort_ok = False
-                                break
-                            tbuf_view = t_row_base
-                        else:
-                            if rem_b == 0:
-                                tbuf_view = t_row_base.real
-                            elif rem_b == 4:
-                                tbuf_view = t_row_base.imag
-                            else:
-                                cohort_ok = False
-                                break
-
-                        thr_arg = l_kw.get("threshold")
-                        eff_thr = l_bank.threshold if thr_arg is None else float(thr_arg)
-                        if not np.isfinite(eff_thr) or eff_thr < l_bank.threshold or eff_thr <= 0.0:
-                            cohort_ok = False
-                            break
-                        ser_t = l_bank._input_series(tbuf_view)
-                        if ser_t.ctypes.data != tbuf_view.ctypes.data or ser_t.size != S:
-                            cohort_ok = False
-                            break
-
-                        bank_refs.append((weakref.ref(l_bank), j))
-                        windows = l_kw.get("windows")
-                        wkey = ((S, windows.start, windows.stop, windows.step)
-                                if type(windows) is slice else None)
-                        wmemo = l_bank.__dict__.setdefault("_window_memo", {})
-                        hit = wmemo.get(wkey) if wkey is not None else None
-                        if hit is not None:
-                            W_leaf, cache_key = hit
-                        else:
-                            W_leaf = _normalize_windows(windows, S)
-                            cache_key = (S, W_leaf.tobytes())
-                            if wkey is not None:
-                                if len(wmemo) >= 64:
-                                    wmemo.clear()
-                                W_leaf.flags.writeable = False
-                                wmemo[wkey] = (W_leaf, cache_key)
-                        if W_leaf.shape[0] == 0:
-                            cohort_empty_leaves.append(j)
-                            continue
-
-                        prep = TimeDomainFilterBank._prepare_cpu_sparse_job(
-                            l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr,
-                            l_kw.get("profile", _SAME_PROFILE))
-                        if prep is None:
-                            cohort_ok = False
-                            break
-
-                        W_p, merge_bs, entries = prep
-                        job_subs = []
-                        for g_f, sub_st, sl, _, _, active_plan, ser_in, bs, thr_f, plan_profile in entries:
-                            active_plan.use_profile(plan_profile)
-                            nt_f = active_plan.ntemplates
-                            active_plan._require_templates(0, nt_f)
-                            active_plan._dataset = False
-                            active_plan._data_ready = set()
-                            real = ser_in.dtype == np.float32
-                            stride = 2 if real and ser_in.strides == (8,) else 1
-
-                            ep_prev = getattr(active_plan, "_mf", None)
-                            if (ep_prev is not None and id(ep_prev) in ep_modes
-                                    and ep_modes[id(ep_prev)] != (real, stride)):
-                                cohort_ok = False
-                                break
-                            active_plan._want_real = real
-                            ep = active_plan._execution_plan()
-                            if id(ep) in ep_modes and ep_modes[id(ep)] != (real, stride):
-                                cohort_ok = False
-                                break
-                            held_mode = active_plan.__dict__.get("_ep_real")
-                            if real or (held_mode is not None and held_mode[0] is ep and held_mode[1]):
-                                if not ep.set_real_series(real, stride) and real:
-                                    cohort_ok = False
-                                    break
-                                active_plan._ep_real = (ep, real)
-                            if (active_plan.__dict__.get("_applied_real") is not real
-                                    and hasattr(active_plan, "_sync_direct_prices")):
-                                active_plan._sync_direct_prices(ep, real)
-                            ep_modes[id(ep)] = (real, stride)
-                            plan_checks.append((active_plan, ep, real, stride))
-
-                            cser = (np.lib.stride_tricks.as_strided(
-                                ser_in, shape=(2 * ser_in.size - 1,), strides=(4,))
-                                if stride == 2 else ser_in)
-                            dgroup = int(ep.series_group())
-                            slab_info = _layout_slabs(sl, dgroup, g_f.n, S)
-                            sub_rec = [
-                                g_f, sub_st, sl, active_plan, ep, cser,
-                                nt_f, bs, float(thr_f), [], 0, 0.0, slab_info, 0,
-                            ]
-                            job_subs.append(sub_rec)
-                            all_sub_recs.append(sub_rec)
-                            subs_by_row[out_row][d_idx].append(sub_rec)
-                        if not cohort_ok:
-                            break
-                        cohort_leaf_preps.append((j, W_p, merge_bs, job_subs))
-                    if not cohort_ok:
-                        break
-
-                if not cohort_ok:
-                    all_ephemeral = False
-                    for ci, _ in members:
-                        c_bank, c_ser, c_kw = corr_jobs[ci]
-                        t_c0 = time.perf_counter()
-                        c_bank.correlate_series(c_ser, **(c_kw or {}))
-                        corr_times[ci] = time.perf_counter() - t_c0
-                        fallback_leaves.extend(leaf_by_corr[ci])
+                bound = _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det)
+                if bound is None:
+                    _correlate_untiled([ci for ci, _ in members])
                     continue
-
-                # Precompile layout, chunk boundaries, and C batch job lists per group.
-                w_span = int((W_corr[:, 1] - W_corr[:, 0]).sum())
-                compiled_groups = []
-                for g_m, row_pairs, batches in pre_grp_batches:
-                    nt_sel_g = len(row_pairs)
-                    max_batch_kr = max((b[2] for b in batches), default=1)
-                    row_indices_arr = np.array([r_out for _, r_out in row_pairs], dtype=np.int64)
-                    li_arr = np.array([li for li, _ in row_pairs], dtype=np.int64)
-                    is_contig_out = (
-                        nt_sel_g == n_out_rows
-                        and row_indices_arr[0] == 0
-                        and np.array_equal(row_indices_arr, np.arange(n_out_rows, dtype=np.int64))
-                    ) or (
-                        row_indices_arr[-1] - row_indices_arr[0] + 1 == nt_sel_g
-                        and np.array_equal(
-                            row_indices_arr,
-                            np.arange(row_indices_arr[0], row_indices_arr[0] + nt_sel_g, dtype=np.int64),
-                        )
-                    )
-                    out_slice_obj = (slice(int(row_indices_arr[0]), int(row_indices_arr[0]) + nt_sel_g)
-                                     if is_contig_out else row_indices_arr)
-
-                    st, bounds, keep, _ = corr_bank._windows_layout(g_m, S, W_corr, None)
-                    M = int(st.size)
-                    if M > 0:
-                        w_out_samples = int((keep[:, 1] - keep[:, 0]).sum()) * nt_sel_g
-                        tmpl_vals = nt_sel_g * _stored_bins(g_m)
-                        cplan = g_m.get_correlation_plan()
-                        cplan._require_templates(0, len(g_m.template_indices))
-                        ep_m = cplan._continuous_plan()
-                        lo_v, hi_v = cplan.valid
-                        s64 = st.astype(np.int64)
-                        if bounds is not None:
-                            b64 = bounds.astype(np.int64)
-                            col0 = s64 + b64[:, 0]
-                            col1 = s64 + b64[:, 1]
-                        else:
-                            col0 = s64 + lo_v
-                            col1 = np.minimum(s64 + hi_v, S)
-                        written_runs = _interval_runs(S, col0, col1)
-                    else:
-                        w_out_samples = tmpl_vals = 0
-                        cplan = ep_m = None
-                        lo_v = hi_v = 0
-                        col0 = col1 = np.empty(0, dtype=np.int64)
-                        written_runs = np.empty((0, 2), dtype=np.int64)
-
-                    unwritten_runs = np.concatenate(([0], written_runs.ravel(), [S])).reshape(-1, 2)
-                    det_edge_runs = []
-                    for _, info in members:
-                        _, _, _, edges_d = corr_bank._windows_layout(g_m, S, W_corr, info.support)
-                        det_edge_runs.append(edges_d.reshape(-1, 2))
-
-                    if W_corr.shape[0] > 1 and M > 0:
-                        full_edges = np.concatenate(([0], keep.ravel(), [S])).reshape(-1, 2)
-                        bridged_edges = _intersect_runs(full_edges, written_runs)
-                    else:
-                        bridged_edges = np.empty((0, 2), dtype=np.int64)
-
-                    if M == 0:
-                        raw_chunks = [(0, 0, S)]
-                        grp_min_col = 0
-                    else:
-                        grp_min_col = int(col0.min())
-                        batch_span_bytes = D * int(col1.max() - grp_min_col) * 8 * max_batch_kr
-                        kt = min(M, max(1, int(math.ceil(batch_span_bytes / eff_tile_bytes))))
-                        if kt <= 1:
-                            raw_chunks = [(0, M, S)]
-                        else:
-                            raw_chunks = []
-                            m_prev = 0
-                            for ck_i in range(1, kt + 1):
-                                if ck_i == kt:
-                                    m_next = M
-                                else:
-                                    m_next = (M * ck_i) // kt
-                                    if g_m.n <= 4096:
-                                        m_next = min(M, ((m_next + 15) // 16) * 16)
-                                if m_next > m_prev:
-                                    hz = S if m_next == M else int(col0[m_next:].min())
-                                    raw_chunks.append((m_prev, m_next, hz))
-                                    m_prev = m_next
-
-                    comp_chunks = []
-                    for ck_idx, (m0, m1, horizon) in enumerate(raw_chunks):
-                        has_b = m1 > m0
-                        if has_b:
-                            st_c = st[m0:m1]
-                            bnd_c = bounds[m0:m1] if bounds is not None else None
-                            c_start = int(col0[m0:m1].min())
-                            c_end = int(col1[m0:m1].max())
-                            if m1 - m0 == 1 or W_corr.shape[0] <= 1:
-                                t_runs = ((c_start, c_end),)
-                            else:
-                                brk = np.flatnonzero(col0[m0 + 1:m1] > col1[m0:m1 - 1]) + 1
-                                r_starts = col0[m0:m1][np.concatenate(([0], brk))]
-                                r_stops = col1[m0:m1][np.concatenate((brk - 1, [m1 - m0 - 1]))]
-                                t_runs = tuple(
-                                    (int(ra), int(rb)) for ra, rb in zip(r_starts, r_stops) if rb > ra
-                                )
-                            chunk_bridges = (
-                                _intersect_runs(bridged_edges, np.asarray(t_runs, dtype=np.int64))
-                                if bridged_edges.size > 0 and t_runs else np.empty((0, 2), dtype=np.int64)
-                            )
-                        else:
-                            st_c = bnd_c = None
-                            c_start = c_end = 0
-                            t_runs = ()
-                            chunk_bridges = np.empty((0, 2), dtype=np.int64)
-
-                        chunk_batch_jobs = []
-                        for k_r0, li0, kr, b_rows, b_contig_out in batches:
-                            c_jobs = []
-                            back_subs = []
-                            for d_idx in range(D):
-                                for q, out_row in enumerate(b_rows):
-                                    cid = d_idx * kr + q
-                                    for sub_rec in subs_by_row[out_row][d_idx]:
-                                        slab_info = sub_rec[12]
-                                        s_cur = sub_rec[13]
-                                        if slab_info[0]:
-                                            _, _, slab_r1, slab_req_end, _ = slab_info
-                                            if s_cur >= slab_req_end.size:
-                                                continue
-                                            s_next = (slab_req_end.size if horizon >= S
-                                                      else int(np.searchsorted(slab_req_end, horizon, side="right")))
-                                            if s_next <= s_cur:
-                                                continue
-                                            r0 = 0 if s_cur == 0 else int(slab_r1[s_cur - 1])
-                                            r1 = int(slab_r1[s_next - 1])
-                                            sub_rec[13] = s_next
-                                            sl = sub_rec[2]
-                                            ph_slice = None if sl.phase is None else sl.phase[r0:r1]
-                                            c_jobs.append((
-                                                sub_rec[4], sub_rec[5],
-                                                sl.starts[r0:r1], sl.low[r0:r1], sl.high[r0:r1],
-                                                0, sub_rec[6], sub_rec[7], sub_rec[8], None, ph_slice, cid,
-                                            ))
-                                            back_subs.append((sub_rec, q, r0, r1))
-                                        else:
-                                            _, _, sorted_r0, sorted_r1, sorted_req_end, _ = slab_info
-                                            if s_cur >= sorted_req_end.size:
-                                                continue
-                                            s_next = (sorted_req_end.size if horizon >= S
-                                                      else int(np.searchsorted(sorted_req_end, horizon, side="right")))
-                                            if s_next <= s_cur:
-                                                continue
-                                            sub_rec[13] = s_next
-                                            sl = sub_rec[2]
-                                            run_r0 = int(sorted_r0[s_cur])
-                                            run_r1 = int(sorted_r1[s_cur])
-                                            slices = []
-                                            for k_s in range(s_cur + 1, s_next):
-                                                nr0 = int(sorted_r0[k_s])
-                                                nr1 = int(sorted_r1[k_s])
-                                                if nr0 == run_r1:
-                                                    run_r1 = nr1
-                                                else:
-                                                    slices.append((run_r0, run_r1))
-                                                    run_r0, run_r1 = nr0, nr1
-                                            slices.append((run_r0, run_r1))
-                                            for r0, r1 in slices:
-                                                ph_slice = None if sl.phase is None else sl.phase[r0:r1]
-                                                c_jobs.append((
-                                                    sub_rec[4], sub_rec[5],
-                                                    sl.starts[r0:r1], sl.low[r0:r1], sl.high[r0:r1],
-                                                    0, sub_rec[6], sub_rec[7], sub_rec[8], None, ph_slice, cid,
-                                                ))
-                                                back_subs.append((sub_rec, q, r0, r1))
-
-                            min_fut = S
-                            if has_b and ck_idx + 1 < len(raw_chunks) and len(batches) > 1:
-                                for d_idx in range(D):
-                                    for out_row in b_rows:
-                                        for sub_rec in subs_by_row[out_row][d_idx]:
-                                            s_cur = sub_rec[13]
-                                            suf_min = sub_rec[12][-1]
-                                            if s_cur < suf_min.size:
-                                                v_min = int(suf_min[s_cur])
-                                                if v_min < min_fut:
-                                                    min_fut = v_min
-                            chunk_batch_jobs.append((
-                                k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut,
-                            ))
-
-                        comp_chunks.append((
-                            has_b, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs,
-                        ))
-
-                    compiled_groups.append((
-                        g_m, nt_sel_g, max_batch_kr, len(batches), row_indices_arr, li_arr,
-                        is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
-                        cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
-                        det_edge_runs, grp_min_col, comp_chunks,
-                    ))
-
+                subs_by_row, leaf_preps, empty_leaves, subs, plan_checks, bank_refs = bound
+                groups, w_span = _compile_groups(corr_bank, members, pre_grp_batches,
+                                                 subs_by_row, S, W_corr, n_out_rows,
+                                                 eff_tile_bytes)
+                prep = _CohortPrep(bank_refs, plan_checks, subs, empty_leaves, leaf_preps,
+                                   groups, w_span)
                 if memo_key is not None:
-                    prep_cache[memo_key] = {
-                        "bank_refs": bank_refs,
-                        "plan_checks": plan_checks,
-                        "all_sub_recs": all_sub_recs,
-                        "cohort_empty_leaves": cohort_empty_leaves,
-                        "cohort_leaf_preps": cohort_leaf_preps,
-                        "compiled_groups": compiled_groups,
-                        "w_span": w_span,
-                    }
+                    prep_cache[memo_key] = prep
                     while len(prep_cache) > 4:
                         prep_cache.popitem(last=False)
 
-            for j_empty in cohort_empty_leaves:
+            for j_empty in prep.empty_leaves:
                 out_results[j_empty] = _EMPTY_FILTER_RESULTS
 
             for ci, _ in members:
-                corr_bank._add_corr_in(w_span)
+                corr_bank._add_corr_in(prep.w_span)
 
+            # Run each middle-bank group across its time chunks and template batches.
             dt_corr_d = [0.0] * D
             dt_fine_cohort = 0.0
             collar_pools = corr_bank.__dict__.setdefault("_l3_collar_pools", [None, None])
-
-            # Process each middle-bank group across time chunks and template batches.
-            for (
-                g_m, nt_sel_g, max_batch_kr, n_batches, row_indices_arr, li_arr,
-                is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
-                cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
-                det_edge_runs, grp_min_col, comp_chunks,
-            ) in compiled_groups:
-                if M > 0:
-                    for _ in range(D):
-                        corr_bank._add_corr_work(g_m.n, dict(
-                            blocks=M, pairs=M * nt_sel_g,
-                            out_samples=w_out_samples, tmpl_values=tmpl_vals,
-                        ))
-                    cplan._dataset = False
-                    if cplan._data_ready:
-                        cplan._data_ready.clear()
-
-                # Clear any dirty regions in tbuf slots used by this group that its blocks do not overwrite.
-                t_c0 = time.perf_counter()
-                new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
-                for d_idx in range(D):
-                    t_det = tbuf_det[d_idx]
-                    for q in range(max_batch_kr):
-                        d_lo, d_hi = dirty_map.get((d_idx, q), (0, 0))
-                        if d_hi > d_lo:
-                            stale = _intersect_runs(
-                                unwritten_runs, np.array([[d_lo, d_hi]], dtype=np.int64))
-                            for sa, sb in stale:
-                                if sb > sa:
-                                    t_det[q, int(sa):int(sb)] = 0
-                        dirty_map[(d_idx, q)] = new_dirty
-                dt_share = (time.perf_counter() - t_c0) / D
-                for d_idx in range(D):
-                    dt_corr_d[d_idx] += dt_share
-
-                # Clear out_arr margins per detector when out is materialized or partially retained.
-                det_scales = [None] * D
-                if retain_radius != 0:
-                    for d_idx, (_, info) in enumerate(members):
-                        t_d0 = time.perf_counter()
-                        _, _, _, _, _, out_d, sel_d, _, sc_d, _ = info
-                        for ea, eb in det_edge_runs[d_idx]:
-                            if eb > ea:
-                                out_d[out_slice_obj, int(ea):int(eb)] = 0
-                        if sc_d is not None:
-                            row_sc = (sc_d[sel_d[row_indices_arr]] if sel_d is not None
-                                      else sc_d[g_m.template_indices[li_arr]])
-                            det_scales[d_idx] = row_sc
-                            for ua, ub in unwritten_runs:
-                                if ub > ua:
-                                    ua_i, ub_i = int(ua), int(ub)
-                                    if is_contig_out:
-                                        sub_v = out_d[out_slice_obj, ua_i:ub_i]
-                                        np.multiply(sub_v, row_sc[:, None], out=sub_v)
-                                    else:
-                                        for k_r, r_out in enumerate(row_indices_arr):
-                                            np.multiply(
-                                                out_d[r_out, ua_i:ub_i], row_sc[k_r],
-                                                out=out_d[r_out, ua_i:ub_i],
-                                            )
-                        dt_corr_d[d_idx] += time.perf_counter() - t_d0
-                else:
-                    for d_idx, (_, info) in enumerate(members):
-                        _, _, _, _, _, _, sel_d, _, sc_d, _ = info
-                        if sc_d is not None:
-                            det_scales[d_idx] = (
-                                sc_d[sel_d[row_indices_arr]] if sel_d is not None
-                                else sc_d[g_m.template_indices[li_arr]]
-                            )
-
-                n_chunks = len(comp_chunks)
-                need_collars = n_chunks > 1 and n_batches > 1
-                pending_fwd_end = (
-                    [0] * nt_sel_g
-                    if (retain_radius is not None and retain_radius > 0 and n_chunks > 1)
-                    else None
-                )
-                saved_collars = [None] * n_batches if need_collars else None
-                r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
-
-                # Resolve per-detector C correlation callables once per group.
-                if M > 0:
-                    has_real_corr = hasattr(ep_m, "correlate_series_continuous_real")
-                    det_run_fns = [
-                        ep_m.correlate_series_continuous_real
-                        if info.series.dtype == np.float32 and has_real_corr
-                        else ep_m.correlate_series_continuous
-                        for _, info in members
-                    ]
-                else:
-                    det_run_fns = None
-
-                for ck_idx, (has_blocks, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs) in enumerate(comp_chunks):
-                    has_bridges = chunk_bridges.size > 0
-                    write_pool_idx = ck_idx & 1
-                    write_off = 0
-
-                    for b_idx, (k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut) in enumerate(chunk_batch_jobs):
-                        # Restore any cross-chunk boundary collar saved from the previous chunk.
-                        if saved_collars is not None and saved_collars[b_idx] is not None:
-                            t_c0 = time.perf_counter()
-                            saved_lo, saved_hi, src_pool, src_off = saved_collars[b_idx]
-                            c_len = saved_hi - saved_lo
-                            step_elems = kr * c_len
-                            for d_idx in range(D):
-                                base_off = src_off + d_idx * step_elems
-                                tbuf_det[d_idx][:kr, saved_lo:saved_hi] = (
-                                    src_pool[base_off : base_off + step_elems].reshape(kr, c_len)
-                                )
-                            saved_collars[b_idx] = None
-                            valid_lo = saved_lo
-                            dt_share = (time.perf_counter() - t_c0) / D
-                            for d_idx in range(D):
-                                dt_corr_d[d_idx] += dt_share
-                        elif n_batches == 1 and ck_idx > 0:
-                            valid_lo = grp_min_col
-                        else:
-                            valid_lo = c_start
-
-                        # Correlate batch [li0, li0 + kr) across all detectors in the cohort into L3 tbuf.
-                        if has_blocks:
-                            out_row_first = b_rows[0]
-                            for d_idx, (_, info) in enumerate(members):
-                                t_d0 = time.perf_counter()
-                                ser_d = info.series
-                                out_d = info.out
-                                r_sc = det_scales[d_idx]
-                                t_det_batch = tbuf_det[d_idx][:kr]
-                                direct_mirror = (
-                                    retain_radius is None
-                                    and r_sc is None
-                                    and not has_bridges
-                                    and b_contig_out
-                                    and set_mirror is not None
-                                )
-                                if direct_mirror:
-                                    set_mirror(out_d[out_row_first].ctypes.data, S)
-                                    used_nt_stream = True
-                                det_run_fns[d_idx](ser_d, st_c, lo_v, hi_v, li0, kr, t_det_batch, bnd_c)
-                                if has_bridges:
-                                    for za, zb in chunk_bridges:
-                                        t_det_batch[:, int(za):int(zb)] = 0
-                                if r_sc is not None:
-                                    if kr == 1:
-                                        sc_val = r_sc[k_r0]
-                                        t_row_1d = t_det_batch[0]
-                                        for ra, rb in t_runs:
-                                            np.multiply(t_row_1d[ra:rb], sc_val, out=t_row_1d[ra:rb])
-                                    else:
-                                        sc_vec = r_sc[k_r0 : k_r0 + kr, None]
-                                        for ra, rb in t_runs:
-                                            np.multiply(t_det_batch[:, ra:rb], sc_vec, out=t_det_batch[:, ra:rb])
-                                if retain_radius is None and not direct_mirror:
-                                    for q, r_out in enumerate(b_rows):
-                                        t_row_1d = t_det_batch[q]
-                                        out_row_ptr = out_d[r_out].ctypes.data
-                                        t_row_ptr = t_row_1d.ctypes.data
-                                        for ra, rb in t_runs:
-                                            if stream_cp is not None:
-                                                stream_cp(
-                                                    out_row_ptr + ra * 8,
-                                                    t_row_ptr + ra * 8,
-                                                    (rb - ra) * 8,
-                                                )
-                                                used_nt_stream = True
-                                            else:
-                                                out_d[r_out, ra:rb] = t_row_1d[ra:rb]
-                                dt_corr_d[d_idx] += time.perf_counter() - t_d0
-
-                        # Filter all ready slabs of this batch across all detectors in one C call.
-                        t_f0 = time.perf_counter()
-                        peaks_by_q = None
-                        if c_jobs:
-                            c_out = _core.HMF.run_series_batch_sparse(c_jobs)
-                            dt_b = time.perf_counter() - t_f0
-                            dt_each = dt_b / len(c_jobs)
-                            dt_fine_cohort += dt_b
-                            for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
-                                sub_rec[10] += tot
-                                sub_rec[11] += dt_each
-                                if tot > 0:
-                                    sl = sub_rec[2]
-                                    nt_f = sub_rec[6]
-                                    fl_arr = np.frombuffer(fl, np.int64)
-                                    ix_arr = np.frombuffer(ix, np.int64)
-                                    vl_arr = np.frombuffer(vl, np.complex64)
-                                    sp = _SparsePeaks((r1 - r0, nt_f, sl.nbins), fl_arr, ix_arr, vl_arr)
-                                    sub_rec[9].append((r0, sp))
-                                    if retain_radius is not None and retain_radius > 0:
-                                        keep_pk = (
-                                            np.ones(vl_arr.size, dtype=bool)
-                                            if eff_ret_thr <= 0.0
-                                            else (np.abs(vl_arr) >= eff_ret_thr)
-                                        )
-                                        if np.any(keep_pk):
-                                            bi = fl_arr[keep_pk] // (nt_f * sl.nbins)
-                                            s_pos = sl.starts[r0 + bi].astype(np.int64) + ix_arr[keep_pk]
-                                            if peaks_by_q is None:
-                                                peaks_by_q = [[] for _ in range(kr)]
-                                            peaks_by_q[q].append(s_pos)
-                        else:
-                            dt_fine_cohort += time.perf_counter() - t_f0
-
-                        # Materialize collar spans around triggers when retain_radius > 0.
-                        if has_blocks and retain_radius is not None and retain_radius > 0:
-                            for q, r_out in enumerate(b_rows):
-                                k_r = k_r0 + q
-                                q_peaks = peaks_by_q[q] if peaks_by_q is not None else None
-                                spans = []
-                                if pending_fwd_end is not None and pending_fwd_end[k_r] > c_start:
-                                    spans.append((c_start, min(c_end, pending_fwd_end[k_r])))
-                                if q_peaks:
-                                    all_s = q_peaks[0] if len(q_peaks) == 1 else np.concatenate(q_peaks)
-                                    if pending_fwd_end is not None:
-                                        max_fwd = int(all_s.max()) + retain_radius
-                                        if max_fwd > c_end and max_fwd > pending_fwd_end[k_r]:
-                                            pending_fwd_end[k_r] = min(S, max_fwd)
-                                    for s_val in all_s.tolist():
-                                        ca = max(valid_lo, int(s_val) - retain_radius)
-                                        cb = min(c_end, int(s_val) + retain_radius)
-                                        if cb > ca:
-                                            spans.append((ca, cb))
-                                if spans:
-                                    spans.sort()
-                                    merged = [list(spans[0])]
-                                    for sa, sb in spans[1:]:
-                                        if sa <= merged[-1][1]:
-                                            if sb > merged[-1][1]:
-                                                merged[-1][1] = sb
-                                        else:
-                                            merged.append([sa, sb])
-                                    w_spans = _intersect_runs(
-                                        np.asarray(merged, dtype=np.int64), written_runs)
-                                    if w_spans.size > 0:
-                                        for d_idx, (_, info) in enumerate(members):
-                                            t_d0 = time.perf_counter()
-                                            out_d = info.out
-                                            t_row_1d = tbuf_det[d_idx][q]
-                                            out_row_ptr = out_d[r_out].ctypes.data
-                                            t_row_ptr = t_row_1d.ctypes.data
-                                            for sa, sb in w_spans:
-                                                sa_i, sb_i = int(sa), int(sb)
-                                                if stream_cp is not None:
-                                                    stream_cp(
-                                                        out_row_ptr + sa_i * 8,
-                                                        t_row_ptr + sa_i * 8,
-                                                        (sb_i - sa_i) * 8,
-                                                    )
-                                                    used_nt_stream = True
-                                                else:
-                                                    out_d[r_out, sa_i:sb_i] = t_row_1d[sa_i:sb_i]
-                                            dt_corr_d[d_idx] += time.perf_counter() - t_d0
-
-                        # Save cross-chunk boundary collar into persistent ping-pong pool when needed.
-                        if need_collars and has_blocks and ck_idx + 1 < n_chunks and min_fut < S:
-                            collar_lo = max(grp_min_col, min_fut - r_pad)
-                            if collar_lo < c_end:
-                                t_c0 = time.perf_counter()
-                                c_len = c_end - collar_lo
-                                step_elems = kr * c_len
-                                total_elems = D * step_elems
-                                dst_pool = collar_pools[write_pool_idx]
-                                if dst_pool is None or write_off + total_elems > dst_pool.size:
-                                    new_cap = max(
-                                        write_off + total_elems,
-                                        0 if dst_pool is None else dst_pool.size * 2,
-                                        max(1, n_batches) * D * max(c_len, 4096),
-                                    )
-                                    grown = _aligned_zeros(new_cap, dtype=np.complex64)
-                                    if dst_pool is not None and write_off > 0:
-                                        grown[:write_off] = dst_pool[:write_off]
-                                    dst_pool = grown
-                                    collar_pools[write_pool_idx] = dst_pool
-                                for d_idx in range(D):
-                                    base_off = write_off + d_idx * step_elems
-                                    dst_pool[base_off : base_off + step_elems].reshape(kr, c_len)[:] = (
-                                        tbuf_det[d_idx][:kr, collar_lo:c_end]
-                                    )
-                                saved_collars[b_idx] = (collar_lo, c_end, dst_pool, write_off)
-                                write_off += total_elems
-                                dt_share = (time.perf_counter() - t_c0) / D
-                                for d_idx in range(D):
-                                    dt_corr_d[d_idx] += dt_share
+            for grp in prep.groups:
+                dt_fine, streamed = _run_tiled_group(
+                    grp, corr_bank, members, tbuf_det, dirty_map, collar_pools, S,
+                    retain_radius, eff_ret_thr, set_mirror, stream_cp, dt_corr_d)
+                dt_fine_cohort += dt_fine
+                used_nt_stream = used_nt_stream or streamed
 
             # Assemble FilterResults for every tiled leaf job in the cohort.
             t_f0 = time.perf_counter()
-            for j, W_p, merge_bs, job_subs in cohort_leaf_preps:
-                lists = ([], [], [], [], [])
-                for sub_rec in job_subs:
-                    g_f, sub_st, sl, active_plan = sub_rec[0], sub_rec[1], sub_rec[2], sub_rec[3]
-                    nt_f, parts, tot_sum, dt_sum = sub_rec[6], sub_rec[9], sub_rec[10], sub_rec[11]
-                    active_plan._last_n_triggers = tot_sum
-                    active_plan._record_batch_time(dt_sum)
-                    if tot_sum == 0 or not parts:
-                        continue
-                    shape = (sl.starts.size, nt_f, sl.nbins)
-                    if sl.order is None and all(
-                        parts[i][0] > parts[i - 1][0] for i in range(1, len(parts))
-                    ):
-                        if len(parts) == 1 and parts[0][0] == 0:
-                            sp = parts[0][1]
-                        else:
-                            per_block = nt_f * sl.nbins
-                            sp = _SparsePeaks(
-                                shape,
-                                np.concatenate([p.flat + b0 * per_block for b0, p in parts]),
-                                np.concatenate([p.idx for _, p in parts]),
-                                np.concatenate([p.val for _, p in parts]),
-                            )
-                    else:
-                        sp = _SparsePeaks.combine(parts, shape, sl.order)
-                    _consume_into(lists, sp, None, sub_st, g_f, None, g_f.n, None)
-                if merge_bs and lists[0]:
-                    cols = [np.concatenate(c) for c in lists]
-                    for bs_m in merge_bs:
-                        cols = list(_merge_window_bins(W_p, bs_m, *cols))
-                    for lst, c in zip(lists, cols):
-                        lst[:] = [c]
-                out_results[j] = _results_from(lists)
+            _assemble_leaf_results(prep.leaf_preps, out_results)
             dt_fine_cohort += time.perf_counter() - t_f0
 
             for d_idx, (ci, _) in enumerate(members):
                 corr_times[ci] = dt_corr_d[d_idx]
             dt_filter_total += dt_fine_cohort
+
 
         if used_nt_stream and stream_fn is not None:
             stream_fn()
