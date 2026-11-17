@@ -128,7 +128,7 @@ SOURCES = (
     + [(s, CXX + ARCH, DEFS) for s in HWY_SRC]   # same baseline, or the
                                                  # dispatch tables disagree
     + [(s, BASE + ARCH, []) for s in ("src/matchfilt.c", "src/hmf.c", "src/dispatch.c",
-                                      "python/matchedfilter/_core.c")]
+                                      "src/simulate.c", "python/matchedfilter/_core.c")]
 )
 
 
