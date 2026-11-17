@@ -56,20 +56,35 @@ del _cls
 
 
 def taps_to_spectra(taps, counts, n, max_taps=None, out=None):
-    """Convert time-domain FIR filter taps to frequency-domain spectra in C.
+    """Transform FIR taps to their spectra on one block length, in C.
 
-    Vectorized implementation with AVX-512 SIMD and circular center-tap roll alignment.
-    Releases the Python GIL during transformation.
+    Each row's centre tap, ``counts[t] // 2``, is rolled to lag 0 before the transform. The
+    GIL is released while it runs.
 
-    Parameters:
-        taps: 2D array of shape (n_templates, max_taps) float32
-        counts: 1D array of tap counts (int64 or int32)
-        n: FFT block size (int)
-        max_taps: Optional maximum taps (defaults to taps.shape[1])
-        out: Optional output array of shape (n_templates, n) complex64
+    Parameters
+    ----------
+    taps : ndarray
+        (n_templates, max_taps) float32.
+    counts : array_like of int
+        Taps used per row.
+    n : int
+        The block length.
+    max_taps : int, optional
+        Columns of ``taps`` read. Default None: all of them.
+    out : ndarray, optional
+        (n_templates, n) complex64 output. Default None: a new array.
 
-    Returns:
-        Complex64 array of shape (n_templates, n) with forward FFT spectra.
+    Returns
+    -------
+    ndarray
+        (n_templates, n) complex64, each row's unnormalised forward transform; ``out`` when
+        given.
+
+    Raises
+    ------
+    ValueError
+        If ``taps`` is not 2-D, ``counts`` does not give one count per row, or ``out`` has
+        the wrong shape.
     """
     taps_arr = np.ascontiguousarray(taps, dtype=np.float32)
     if taps_arr.ndim != 2:
@@ -112,12 +127,21 @@ def targets():
 
 
 def set_target(name):
-    """Narrow the choice to one of :func:`targets`, or restore the default with ``None``
-    (``MF_ISA``'s target when it is set, else the hardware's choice).
+    """Narrow the SIMD target to one of :func:`targets`, or restore the default.
 
-    For comparing targets in one process.  Plans already created keep the kernel they
-    were built with, so create the plan after setting this.  Raises ValueError for a
-    target that is not in :func:`targets`, and then changes nothing.
+    For comparing targets in one process. Plans already created keep the kernels they were
+    built with, so create the plan after setting this.
+
+    Parameters
+    ----------
+    name : str or None
+        A target :func:`targets` lists. None restores the default: ``MF_ISA``'s target when
+        it is set, else the hardware's choice.
+
+    Raises
+    ------
+    ValueError
+        For a target :func:`targets` does not list; nothing is changed.
     """
     _core.set_target(name)
 

@@ -58,7 +58,25 @@ def arch_keys(vendor, name):
 
 
 class Device:
-    """One place a filter can run.  Compare and print it as ``"gpu:0"``."""
+    """One place a filter can run, as :func:`devices` lists it.
+
+    It compares and prints as its spec, for example ``"gpu:0"``.
+
+    Attributes
+    ----------
+    kind : str
+        ``"cpu"`` or ``"gpu"``.
+    index : int
+        The device's ordinal among its kind.
+    name : str
+        The device's name.
+    backend : str
+        The backend that reaches it (for example ``"vulkan"``, ``"cuda"``, ``"metal"``).
+    is_software : bool
+        Whether it is a software renderer rather than hardware.
+    arch : tuple
+        Architecture facts the backend reports.
+    """
 
     __slots__ = ("kind", "index", "name", "backend", "is_software", "arch")
 
@@ -177,11 +195,30 @@ def devices():
 
 
 def parse(spec):
-    """Turn ``None`` / a string / a :class:`Device` into a :class:`Device`.
+    """The :class:`Device` a device specification names.
 
-    ``None`` consults ``MF_DEVICE`` and otherwise gives the CPU, so a harness
-    can move a whole benchmark to another backend without editing the code
-    that builds the plans -- the same reason ``MF_ISA`` exists.
+    Parameters
+    ----------
+    spec : str, Device or None
+        ``"cpu"``, ``"gpu"``, ``"gpu:<n>"``, ``"cuda"``, ``"auto"`` (any hardware GPU,
+        else the CPU) or a :class:`Device`. None reads ``MF_DEVICE`` and otherwise gives
+        the CPU, so a harness can move a whole run to another device without editing the
+        code that builds the plans.
+
+    Returns
+    -------
+    Device
+        The device.
+
+    Raises
+    ------
+    TypeError
+        If ``spec`` is not a string, a Device or None.
+    ValueError
+        For an unknown kind, an ordinal that is not an integer, or no device with that
+        ordinal.
+    RuntimeError
+        For ``"gpu"`` when no hardware GPU is available.
     """
     if isinstance(spec, Device):
         return spec

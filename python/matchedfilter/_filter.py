@@ -339,16 +339,34 @@ def _host_copy(a, dtype):
 
 
 class MatchedFilter:
-    """Correlate a set of data segments against a set of templates.
+    """Correlate a set of data segments against a set of templates and report peaks.
 
-    Inputs are the segments' spectra.  Every pair (d, t) gives
-    ``IFFT(data_d * conj(template_t))``, of which only the loudest sample per bin
-    is reported.  The transform is unnormalised, matching FFTW and MKL, so a perfect
-    match returns ``n * energy``.
+    Inputs are the segments' spectra. Every pair (d, t) gives
+    ``IFFT(data_d * conj(template_t))``, of which only the loudest sample per bin is
+    reported. The transform is unnormalised, matching FFTW and MKL, so a perfect match
+    returns ``n * energy``. Setting a spectrum stores it once in the layout the correlation
+    reads, so that cost is paid once rather than per pair.
 
-    ``ndata`` and ``ntemplates`` are arbitrary; they need not match or be powers
-    of two.  Setting a segment transforms it once and stores it in the layout the
-    correlation loop wants, so that cost is paid once rather than per pair.
+    Parameters
+    ----------
+    n : int
+        The transform length.
+    ndata : int, optional
+        The number of data spectra the filter holds (default 1). Need not be a power of two.
+    ntemplates : int, optional
+        The number of template spectra the filter holds (default 1).
+    device : str or Device, optional
+        Where the filter runs, as :meth:`matchedfilter.device.Device.parse` takes it.
+        Default None: ``MF_DEVICE``, else the CPU.
+    valid : tuple of int, optional
+        The half-open lag interval ``(lo, hi)`` valid in each block, which series calls
+        search. Default None: every lag.
+
+    Raises
+    ------
+    ValueError
+        If ``ndata`` or ``ntemplates`` is below one, the window is invalid, or on the CPU
+        ``n`` exceeds the filter's limit.
     """
     #: Whether this is a HierarchicalFilter, for the shared code paths that differ for one
     #: (a class attribute, not isinstance: _filter does not import _hierarchical).
@@ -573,10 +591,15 @@ class MatchedFilter:
             store[int(index)] = _as_c64(spectra, self.n, "spectrum")
 
     def set_data(self, spectra, index=None):
-        """Set one data spectrum (with ``index``) or all from a (ndata, n) array.
+        """Set one data spectrum or all of them.
 
-        Inputs are frequency domain - the unnormalised forward transform of the
-        segment, natural order.
+        Parameters
+        ----------
+        spectra : ndarray
+            The unnormalised forward transform of each segment, in natural order: shape (n,)
+            with ``index``, else (ndata, n).
+        index : int, optional
+            The data slot to set. Default None: all of them.
         """
         index = self._input_index(index, self.ndata)
         if self._gpu is not None:
@@ -609,9 +632,17 @@ class MatchedFilter:
         self._mark_ready("data", None)
 
     def set_template_source(self, source):
-        """Give a callable that returns the (ntemplates, n) spectra set_templates is called
-        with: the plan then keeps no copy of its own, and a rebuilt plan (a new chain, a
-        trial) reloads from the source."""
+        """Give the filter a source of its template spectra instead of a copy.
+
+        The filter then keeps no copy of its own, and a rebuilt plan (a new chain, a trial)
+        reloads its templates from the source.
+
+        Parameters
+        ----------
+        source : callable
+            Called with no arguments, it returns the (ntemplates, n) spectra
+            :meth:`set_templates` would be given.
+        """
         self._template_source = source
 
     def _hold(self, a):
@@ -620,9 +651,17 @@ class MatchedFilter:
         return None if getattr(self, "_template_source", None) is not None else a.copy()
 
     def set_templates(self, spectra, index=None):
-        """Set one template spectrum (with ``index``) or all from a (ntemplates, n) array.
+        """Set one template spectrum or all of them.
 
-        Conjugation happens here, once, rather than in the pair loop.
+        The spectra are conjugated here, once, rather than in the pair loop.
+
+        Parameters
+        ----------
+        spectra : ndarray
+            The templates' unnormalised forward transforms: shape (n,) with ``index``, else
+            (ntemplates, n).
+        index : int, optional
+            The template slot to set. Default None: all of them.
         """
         index = self._input_index(index, self.ntemplates)
         if self._gpu is not None:
@@ -732,6 +771,26 @@ class MatchedFilter:
         return self._execution_plan()
 
     def nbins(self, binsize, window=None):
+        """The number of peak bins a call with this bin size and window reports.
+
+        Parameters
+        ----------
+        binsize : int
+            Samples per bin.
+        window : tuple of int, optional
+            ``(start, end)`` lags searched. Default None: the whole block.
+
+        Returns
+        -------
+        int
+            The number of bins, the last one partial when ``binsize`` does not divide the
+            window.
+
+        Raises
+        ------
+        ValueError
+            If ``binsize`` is below one or the window is empty.
+        """
         binsize = int(binsize)
         if binsize < 1:
             raise ValueError("binsize must be >= 1")
@@ -752,40 +811,43 @@ class MatchedFilter:
 
     def run(self, binsize=None, threshold=0.0, window=None,
             data=None, templates=None, counts=False, raw=False):
-        """Correlate and report the loudest sample per bin.
+        """Correlate every selected pair and report the loudest sample per bin.
 
-        Returns a structured array of shape ``(ndata, ntemplates, nbins)`` with
-        fields ``index`` (lag, int64) and ``value`` (complex64).  A bin whose
-        maximum does not exceed ``threshold`` comes back with ``index == -1``
-        and ``value == 0``, so bin j always sits at slot j and the result can
-        be indexed by frequency without searching.
+        Parameters
+        ----------
+        binsize : int, optional
+            Samples per bin. Default None: the whole window is one bin.
+        threshold : float, optional
+            A bin whose maximum does not exceed this magnitude is reported empty (default 0).
+        window : tuple of int, optional
+            ``(start, end)`` lags searched. Default None: the whole block.
+        data : tuple of int, optional
+            ``(start, count)`` of the data slots to run. The result equals the matching slice
+            of a full run. Default None: all.
+        templates : tuple of int, optional
+            ``(start, count)`` of the template slots to run. Default None: all.
+        counts : bool, optional
+            Also return how many bins of each pair crossed the threshold (default False).
+        raw : bool, optional
+            Return ``(index, value)`` as two plain arrays instead of a structured array
+            (default False). Assembling the structured array can cost more than the filtering
+            in small calls made in a tight loop.
 
-        For the magnitude, take ``np.abs(peaks["value"])``.  It was a third
-        field once; it equalled that expression exactly, so it only cost a
-        copy.
+        Returns
+        -------
+        peaks : ndarray or tuple of ndarray
+            A structured array of shape (ndata, ntemplates, nbins) with fields ``index`` (the
+            lag, int64) and ``value`` (complex64), or with ``raw=True`` the two arrays. Bin j
+            is at slot j. A bin whose maximum does not exceed the threshold has
+            ``index == -1`` and ``value == 0``. The magnitude is ``np.abs(peaks["value"])``.
+        counts : ndarray
+            With ``counts=True`` only: (ndata, ntemplates), the bins that crossed the
+            threshold.
 
-        ``data`` and ``templates`` restrict the run to a sub-range, given as
-        ``(start, count)``; the answer is identical to the matching slice of a
-        full run.  ``window=(start, end)`` restricts the lags searched.
-
-        With ``counts=True`` returns ``(peaks, counts)``, where counts has shape
-        ``(ndata, ntemplates)`` and holds how many bins crossed the threshold.
-
-        ``raw=True`` returns ``(index, value)`` as two plain arrays
-        of shape ``(ndata, ntemplates, nbins)`` instead of assembling a
-        structured array.  A caller driving small batches in a tight loop pays
-        for that assembly on every call -- a field copy here and a
-        structured-array slice at the other end -- which can exceed the filter
-        work itself.
-
-        Results may reuse buffers; do not rely on retention across calls.  The next ``run`` on this
-        filter overwrites it in place; ``.copy()`` anything that must outlive
-        that call.  Six allocations are nothing beside a 2^20 transform, but a
-        caller driving small batches pays them every time -- at 37 templates
-        they were 15 of the 21 us a call took -- so the buffer is kept.  The
-        trap is real enough that it caught the first draft of the worked
-        example in ``matchedfilter.tutorial``, which compared a full run
-        against a windowed one and printed the windowed answer twice.
+        Notes
+        -----
+        The result is the filter's own buffer, which the next call overwrites in place. Copy
+        anything that must outlive that call.
         """
         _check_threshold(threshold)
         t0 = time.perf_counter()
@@ -1145,31 +1207,52 @@ class MatchedFilter:
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
                    decimated=None, bin_phase=None):
-        """Filter a series using this filter's ``valid`` overlap-save window.
+        """Filter a series with overlap-save blocks over this filter's ``valid`` window.
 
-        ``run_series(series)`` derives contiguous blocks and returns peak
-        indices in series coordinates. ``run_blocks`` accepts explicit block
-        starts and windows, returning block-local lag indices. Passing those
-        arguments here remains supported for existing callers.
+        ``run_series(series)`` lays contiguous blocks over the series itself. Explicit blocks
+        (``starts``, ``win_start``, ``win_end``) are also accepted, as :meth:`run_blocks` takes
+        them. Blocks with equal windows are grouped internally; the output keeps the caller's
+        order.
 
-        ``bin_phase`` (explicit blocks only): one value per block, numbering block b's
-        bins from ``win_start[b] - bin_phase[b]`` rather than from ``win_start[b]``, so that
-        a window spanning several blocks keeps its own bin grid; a bin cut by a block edge is
-        then two partial bins, one per block. Bins before ``win_start[b]`` are empty, which
-        lets blocks with fewer bins share one call with the rest.
+        Parameters
+        ----------
+        series : ndarray
+            The series, complex64.
+        starts : array_like of int, optional
+            Explicit block starts. Default None: contiguous blocks over the series.
+        win_start, win_end : array_like of int, optional
+            With ``starts``, each block's searched lags.
+        binsize : int, optional
+            Samples per bin. Default None: one bin per block window.
+        threshold : float, optional
+            A bin whose maximum does not exceed this magnitude is reported empty (default 0).
+        templates : tuple of int, optional
+            ``(start, count)`` of the templates to run. Default None: all.
+        raw : bool, optional
+            Return ``(index, value)`` as two plain arrays (default False).
+        decimated : bool, optional
+            For a band-limited flat filter, whether the series is already decimated. Default
+            None: decided from the series' ``sample_rate`` and ``input_sample_rate``.
+        bin_phase : array_like of int, optional
+            Explicit blocks only: one value per block, numbering block b's bins from
+            ``win_start[b] - bin_phase[b]``, so that a window spanning several blocks keeps one
+            bin grid. A bin cut by a block edge is then two partial bins, one per block, and
+            bins before ``win_start[b]`` are empty.
 
-        Returns a structured array of shape
-        ``(nblocks, ntemplates, nbins)``, or with ``raw=True`` the two plain
-        arrays ``(index, value)`` of that shape.
+        Returns
+        -------
+        ndarray or tuple of ndarray
+            A structured array of shape (nblocks, ntemplates, nbins) with fields ``index``
+            (int64) and ``value`` (complex64), or with ``raw=True`` the two plain arrays
+            ``(index, value)`` of that shape. Without explicit blocks, ``index`` is in series
+            coordinates; with them, it is the lag within the block. A bin with no sample above
+            the threshold has ``index == -1`` and ``value == 0``.
 
-        Equal-window blocks are grouped internally; output retains caller order.
-        Flat CPU batches use up to ``ndata`` slots. Hierarchical CPU batches
-        use a bounded internal group (normally eight). GPU batches follow the
-        series memory budget independently of ``ndata``.
-
-        Raw CPU results reuse buffers; copy retained results.
-        A later run() requires set_data() again because series execution
-        uses the plan's data slots. This rule applies on both devices.
+        Notes
+        -----
+        Series calls use the filter's data slots, so a later :meth:`run` needs
+        :meth:`set_data` again. Raw CPU results are the filter's buffers; copy what must be
+        kept.
         """
         _check_threshold(threshold)
         is_outer = not getattr(self, '_in_series_call', False)
@@ -1313,10 +1396,35 @@ class MatchedFilter:
 
     def run_blocks(self, series, starts, win_start, win_end,
                    binsize=None, threshold=0.0, templates=None, raw=False):
-        """Filter explicit blocks; peak indices are block-local lag positions.
+        """Filter explicit blocks of a series.
 
-        ``starts``, ``win_start`` and ``win_end`` contain one entry per block.
-        This form supports irregular overlap-save layouts and per-block windows.
+        This form takes irregular overlap-save layouts and a window per block.
+
+        Parameters
+        ----------
+        series : ndarray
+            The series, complex64.
+        starts : array_like of int
+            Each block's first sample.
+        win_start, win_end : array_like of int
+            Each block's searched lags.
+        binsize : int, optional
+            Samples per bin. Default None: one bin per block window.
+        threshold : float, optional
+            A bin whose maximum does not exceed this magnitude is reported empty (default 0).
+        templates : tuple of int, optional
+            ``(start, count)`` of the templates to run. Default None: all.
+        raw : bool, optional
+            Return ``(index, value)`` as two plain arrays (default False).
+
+        Returns
+        -------
+        ndarray or tuple of ndarray
+            A structured array of shape (nblocks, ntemplates, nbins) with fields ``index``
+            (int64) and ``value`` (complex64), or with ``raw=True`` the two plain arrays
+            ``(index, value)`` of that shape. Without explicit blocks, ``index`` is in series
+            coordinates; with them, it is the lag within the block. A bin with no sample above
+            the threshold has ``index == -1`` and ``value == 0``.
         """
         return self.run_series(series, starts, win_start, win_end,
                                binsize=binsize, threshold=threshold,
@@ -1325,7 +1433,40 @@ class MatchedFilter:
     def run_series_dif(self, series, starts, win_start, win_end,
                        binsize=None, threshold=0.0, templates=None, raw=False,
                        decimated=False, bin_phase=None):
-        """Filter a full-rate series using 2-channel decimation-in-frequency (DIF)."""
+        """Filter explicit blocks of a full-rate series by two-channel decimation in frequency.
+
+        For band-limited flat filters; :meth:`run_series` calls it for them.
+
+        Parameters
+        ----------
+        series : ndarray
+            The series, complex64.
+        starts : array_like of int
+            Each block's first sample.
+        win_start, win_end : array_like of int
+            Each block's searched lags.
+        binsize : int, optional
+            Samples per bin. Default None: the block length.
+        threshold : float, optional
+            A bin whose maximum does not exceed this magnitude is reported empty (default 0).
+        templates : tuple of int, optional
+            ``(start, count)`` of the templates to run. Default None: all.
+        raw : bool, optional
+            Return ``(index, value)`` as two plain arrays (default False).
+        decimated : bool, optional
+            Whether the series is already decimated (default False).
+        bin_phase : array_like of int, optional
+            As :meth:`run_series` takes it.
+
+        Returns
+        -------
+        ndarray or tuple of ndarray
+            A structured array of shape (nblocks, ntemplates, nbins) with fields ``index``
+            (int64) and ``value`` (complex64), or with ``raw=True`` the two plain arrays
+            ``(index, value)`` of that shape. Without explicit blocks, ``index`` is in series
+            coordinates; with them, it is the lag within the block. A bin with no sample above
+            the threshold has ``index == -1`` and ``value == 0``.
+        """
         _check_threshold(threshold)
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
         st, ws, we = _block_arrays(ser, starts, win_start, win_end, "run_series_dif")
@@ -1984,30 +2125,53 @@ class MatchedFilter:
             settle()
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
-        """Allocate a NumPy array backed by this filter's GPU shared memory.
+        """A NumPy array backed by this filter's GPU shared memory.
 
-        CPU filters return ordinary NumPy storage. On GPU, contiguous full
-        banks passed to the setters bind directly without an input copy.
-        Set ``readback=True`` for an output that NumPy will read or modify
-        after GPU execution. Vulkan then prefers host-cached memory instead
-        of the faster GPU-write, uncached CPU-read memory used by default.
-        Keep mutations outside run/run_series calls; call the setter again
-        after editing a bank to invalidate hierarchical coarse caches.
-        NumPy views and CPU DLPack consumers retain the allocation's lifetime.
-        This does not export a CUDA/ROCm allocation or an asynchronous stream.
+        On a GPU, contiguous full banks passed to the setters bind directly without an input
+        copy. A CPU filter returns ordinary NumPy storage. Keep edits outside run calls, and
+        call the setter again after editing a bank so that hierarchical caches are refreshed.
+        NumPy views and CPU DLPack consumers keep the allocation alive. It is not exported as a
+        CUDA or ROCm allocation.
+
+        Parameters
+        ----------
+        shape : tuple of int
+            The array's shape.
+        dtype : dtype, optional
+            The array's dtype (default complex64).
+        readback : bool, optional
+            True for an output the host reads or modifies after GPU execution: Vulkan then
+            prefers host-cached memory over the faster write-combined memory used by default.
+            Default False.
+
+        Returns
+        -------
+        ndarray
+            The array. Its contents are not initialised.
         """
         if self._gpu is None:
             return np.empty(shape, dtype=dtype)
         return self._gpu.empty_shared(shape, dtype, readback=readback)
 
     def set_memory_limits(self, *, cache_bytes=None, series_bytes=None):
-        """Set GPU dispatch-cache and series-temporary budgets in bytes.
+        """Set the GPU dispatch-cache and series working-storage budgets.
 
-        Defaults: 512 MiB of dispatch buffers, 32 storage shapes (and up to
-        256 Vulkan command recordings), and 64 MiB of series working storage. A single dispatch/block can exceed a
-        budget. The source-series upload (unless already shared) and final
-        returned output are not included in the batch working budget.
-        Changing the cache budget releases existing dispatch buffers.
+        A single dispatch or block can exceed a budget. The source series' upload (unless it is
+        already shared) and the returned output are not counted. Changing the cache budget
+        releases the existing dispatch buffers.
+
+        Parameters
+        ----------
+        cache_bytes : int, optional
+            Dispatch-buffer budget in bytes (default 512 MiB, with up to 32 storage shapes and
+            256 Vulkan command recordings). None leaves it unchanged.
+        series_bytes : int, optional
+            Series working-storage budget in bytes (default 64 MiB). None leaves it unchanged.
+
+        Raises
+        ------
+        ValueError
+            On a CPU filter, or for a budget below one byte.
         """
         if self._gpu is None:
             raise ValueError("memory budgets apply to GPU filters")
@@ -2030,11 +2194,10 @@ class MatchedFilter:
 
 
 class CorrelationFilter(MatchedFilter):
-    """Return every complex lag for each data/template pair.
+    """Return every complex lag for each data and template pair.
 
-    Spectra, device selection and pair selectors follow :class:`MatchedFilter`.
-    ``run`` returns ``(ndata, ntemplates, n)`` complex64 samples in natural
-    lag order. No peak threshold or binning is applied.
+    Spectra, device selection and pair selectors follow :class:`MatchedFilter`, and so do
+    the constructor's parameters. No threshold or binning is applied.
     """
 
     _gpu_sizes = frozenset(1 << k for k in range(10, 23))
@@ -2143,12 +2306,29 @@ class CorrelationFilter(MatchedFilter):
         return out
 
     def run(self, data=None, templates=None, out=None, scales=None, wait=True):
-        """Return the full unnormalised circular correlation for each pair.
+        """The full unnormalised circular correlation of each selected pair.
 
-        wait=False, with ``out`` from :meth:`empty_shared` and no ``scales``: a GPU backend
-        that can (Vulkan) leaves the work in flight. Work on the same device that reads
-        ``out`` is ordered after it; read it on the host only after :meth:`wait`.
-        Elsewhere the call finishes as with wait=True."""
+        Parameters
+        ----------
+        data : tuple of int, optional
+            ``(start, count)`` of the data slots. Default None: all.
+        templates : tuple of int, optional
+            ``(start, count)`` of the template slots. Default None: all.
+        out : ndarray, optional
+            Preallocated (ndata, ntemplates, n) complex64 output. Default None: a new array.
+        scales : array_like of float, optional
+            One factor per selected template, applied to its output. Default None.
+        wait : bool, optional
+            False, with ``out`` from :meth:`empty_shared` and no ``scales``: a GPU backend that
+            can (Vulkan) leaves the work in flight. Work on the same device that reads ``out``
+            is ordered after it; read it on the host only after :meth:`wait`. Elsewhere the
+            call finishes as with True (the default).
+
+        Returns
+        -------
+        ndarray
+            complex64 (ndata, ntemplates, n), lags in natural order; ``out`` when given.
+        """
         d0, nd, t0, nt = self._pair_range(data, templates)
         result = self._full_output((nd, nt, self.n), out)
         if self._gpu is None:
@@ -2164,9 +2344,36 @@ class CorrelationFilter(MatchedFilter):
         return result
 
     def run_series(self, series, starts=None, templates=None, out=None, scales=None):
-        """Correlate a series into continuous output over the configured valid window.
+        """Correlate a series with overlap-save blocks.
 
-        With explicit ``starts``, preserve the block-major full-output form.
+        Without ``starts`` the output is continuous, over this filter's ``valid`` window. With
+        explicit ``starts`` it is block-major, as :meth:`run_blocks` returns it.
+
+        Parameters
+        ----------
+        series : ndarray
+            The series, 1-D complex64.
+        starts : array_like of int, optional
+            Explicit block starts. Default None: contiguous blocks.
+        templates : tuple of int, optional
+            ``(start, count)`` of the templates. Default None: all.
+        out : ndarray, optional
+            With ``starts`` only: preallocated (nblocks, ntemplates, n) complex64 output.
+        scales : array_like of float, optional
+            One factor per selected template, applied to its output. Default None.
+
+        Returns
+        -------
+        ndarray
+            Without ``starts``: (ntemplates, len(series)) complex64, the filter's own buffer,
+            zero before the first block's valid lags. With ``starts``: (nblocks, ntemplates,
+            n).
+
+        Raises
+        ------
+        ValueError
+            If ``out`` is given without ``starts``, or the continuous output would exceed the
+            filter's output limit.
         """
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
         if ser.ndim != 1:
@@ -2235,10 +2442,23 @@ class CorrelationFilter(MatchedFilter):
         return result
 
     def run_blocks(self, series, starts, templates=None, out=None):
-        """Return every lag for explicit blocks as ``(blocks, templates, n)``.
+        """Every lag of explicit blocks of a series.
 
-        Unlike ``run_series(series)``, this form has block-major output and
-        accepts a caller-owned ``out`` buffer for reuse.
+        Parameters
+        ----------
+        series : ndarray
+            The series, 1-D complex64.
+        starts : array_like of int
+            Each block's first sample.
+        templates : tuple of int, optional
+            ``(start, count)`` of the templates. Default None: all.
+        out : ndarray, optional
+            Preallocated (nblocks, ntemplates, n) complex64 output, for reuse.
+
+        Returns
+        -------
+        ndarray
+            complex64 (nblocks, ntemplates, n); ``out`` when given.
         """
         return self.run_series(series, starts, templates=templates, out=out)
 

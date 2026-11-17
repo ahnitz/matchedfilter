@@ -197,12 +197,11 @@ class _Resolved(NamedTuple):
 
 
 class HierarchicalFilter(MatchedFilter):
-    """Matched filter that gates on cheap coarse correlations and refines on demand.
+    """A matched filter that gates pairs on cheap coarse correlations and refines on demand.
 
-    Most of a template's SNR sits in the low part of its band. A gate chain
-    correlates only low bands -- tier 0 at band b1 on every pair, tier i at
-    band b_i on the survivors of tier i-1 -- and pays for the full correlation
-    only for pairs that pass every tier.
+    Most of a template's SNR sits in the low part of its band. A gate chain correlates only
+    low bands -- tier 0 at band b1 on every pair, tier i at band b_i on the survivors of
+    tier i-1 -- and pays for the full correlation only for pairs that pass every tier.
 
         >>> hf = matchedfilter.HierarchicalFilter(1 << 12, ndata=16, ntemplates=16,
         ...                                       snr=5.5, fd=1e-2)
@@ -212,23 +211,39 @@ class HierarchicalFilter(MatchedFilter):
         >>> peaks = hf.run(binsize=1024, threshold=t)
         >>> hf.config, hf.refine_rate          # the chain in use, fraction refined
 
-    Surviving pairs normally receive a full correlation and binned peak search;
-    equivalent transform paths can differ by floating-point rounding. With
-    :meth:`set_taps`, direct refinement can instead search near the last coarse
-    candidate for a single-bin result. With several excursions this can return
-    a smaller local maximum than the whole-bin search. ``MF_DIRECT_REFINE=0``
-    disables that approximation. The gate can omit peaks; ``fd`` is its modelled
-    false-dismissal target at strength ``snr``, shared between the chain's tiers.
-    Use :class:`MatchedFilter` for an ungated full-bin search.
+    The chain is chosen from the reference: every chain of up to ``max_tiers`` bands is
+    priced by a model (gate thresholds from the profile, noise pass rates simulated from it,
+    tier costs calibrated on this machine), and the cheapest runs. A joint trial on the real
+    workload can choose another Q15 screen setting (``MF_AUTOTUNE=0`` keeps the model's);
+    inside a ``TimeDomainFilterBank`` the bank's trial decides.
 
-    The chain is chosen automatically from the reference: every chain of up to
-    ``max_tiers`` bands is priced by a model (gate thresholds from the profile,
-    noise pass rates simulated from it, tier costs calibrated on this machine).
-    The model's best runs; the chain is not timed on the workload. A joint trial on
-    the real workload can find another Q15 screen setting clearly faster
-    (``MF_AUTOTUNE=0`` keeps the model's). Inside a ``TimeDomainFilterBank`` the bank's
-    trial decides. Pin a chain with ``chain=(b1, b2, ...)``; pass explicit thresholds with
-    :meth:`set_coarse_threshold` to skip the model entirely.
+    Surviving pairs normally receive a full correlation and binned peak search. With
+    :meth:`set_taps`, a survivor can instead be refined by direct correlation near its last
+    coarse candidate, for single-bin results; with several excursions in a bin this can
+    return a smaller local maximum than the whole-bin search (``MF_DIRECT_REFINE=0`` turns
+    it off). The gate can omit peaks; use :class:`MatchedFilter` for an ungated search.
+
+    Parameters
+    ----------
+    n, ndata, ntemplates, device, valid
+        As :class:`MatchedFilter` takes them.
+    snr : float, optional
+        The signal strength the gates are calibrated at (default 5.5).
+    fd : float, optional
+        The modelled false-dismissal budget at ``snr``, shared between the chain's tiers
+        (default 0.01).
+    chain : tuple of int, optional
+        Pin the chain's bands ``(b1, b2, ...)``. Default None: the model chooses.
+    max_tiers : int, optional
+        The most tiers a chosen chain may have (default 3).
+    search_window : tuple of int, optional
+        ``(start, stop)`` lags the gates are calibrated for, where a call searches less
+        than the whole block. Default None: the whole block.
+
+    Raises
+    ------
+    ValueError
+        If ``max_tiers`` is below one, or as :class:`MatchedFilter` raises.
     """
     _is_hierarchical = True
 
@@ -302,15 +317,16 @@ class HierarchicalFilter(MatchedFilter):
                       "_ep_real")
 
     def use_profile(self, profile):
-        """Run with the calibration held for the noise profile `profile` from the next call
-        on: any hashable name (None is the plan's first, unnamed one). A profile not seen
-        before starts uncalibrated; set its reference (set_reference) while it is in use.
-        The templates, taps and data are the plan's, whatever the profile.
+        """Run with one noise profile's calibration from the next call on.
+
+        A profile not seen before starts uncalibrated; set its reference
+        (:meth:`set_reference`) while it is in use. The templates, taps and data are the
+        plan's, whatever the profile.
 
         Parameters
         ----------
         profile : hashable or None
-            The name of the profile to use.
+            The profile's name. None is the plan's first, unnamed one.
         """
         if self._gpu is not None and profile != self.__dict__.get("_profile"):
             raise NotImplementedError("several profiles in one plan are not supported on a GPU")
@@ -411,7 +427,18 @@ class HierarchicalFilter(MatchedFilter):
         return bool(q) and self._q15_ok(tuple(chain))
 
     def arm_config(self, label):
-        """(chain, screen on) this plan runs for a joint-trial arm."""
+        """The configuration this plan runs for a joint-trial arm.
+
+        Parameters
+        ----------
+        label : str
+            The arm's label.
+
+        Returns
+        -------
+        tuple
+            ``(chain, screen)``: the chain's bands, and whether the Q15 screen runs.
+        """
         if self._chain is None:
             self._chain = self._choose_chain()          # first use: the model's choice
             self._q15 = False
@@ -421,11 +448,28 @@ class HierarchicalFilter(MatchedFilter):
         return chain, bool(q) and self._q15_ok(chain)
 
     def arm_configs(self, label):
-        """arm_config(label) of every profile this plan holds, in the order of `profiles`."""
+        """:meth:`arm_config` of every profile this plan holds.
+
+        Parameters
+        ----------
+        label : str
+            The arm's label.
+
+        Returns
+        -------
+        tuple
+            One ``(chain, screen)`` per profile, in the order of ``profiles``.
+        """
         return tuple(self._each_profile(lambda: self.arm_config(label)))
 
     def use_arm(self, label):
-        """Run arm label from the next call on, in every profile."""
+        """Run a joint-trial arm from the next call on, in every profile.
+
+        Parameters
+        ----------
+        label : str
+            The arm's label.
+        """
         self._arm = str(label)
 
         def one():
@@ -434,7 +478,13 @@ class HierarchicalFilter(MatchedFilter):
         self._each_profile(one)
 
     def lock_arm(self, label):
-        """Run arm label from now on (a trial's lock), in every profile."""
+        """Run a joint-trial arm from now on, in every profile, and record it as the lock.
+
+        Parameters
+        ----------
+        label : str
+            The arm's label.
+        """
         self.use_arm(label)
         self._each_profile(lambda: self.autotune_info.update(status="locked", arm=self._arm))
 
@@ -954,10 +1004,20 @@ class HierarchicalFilter(MatchedFilter):
     def set_coarse_threshold(self, value):
         """Set the gate thresholds directly, bypassing the model.
 
-        ``value`` is one number per tier of the pinned chain (a bare number
-        for a one-tier chain). Each tier's coarse maximum is compared against
-        its threshold; a pair that falls below any is dismissed. The guarantee
-        becomes whatever these thresholds imply. Pass None to return to the model.
+        Each tier's coarse maximum is compared with its threshold, and a pair below any is
+        dismissed. The false-dismissal rate is then whatever these thresholds give.
+
+        Parameters
+        ----------
+        value : float, sequence of float or None
+            One threshold per tier of the pinned chain (a bare number for a one-tier chain).
+            None returns to the model.
+
+        Raises
+        ------
+        ValueError
+            Without a pinned chain, for the wrong number of thresholds, or for a threshold that
+            is negative or not finite.
         """
         if value is None:
             self._cal_thr = None
@@ -976,22 +1036,36 @@ class HierarchicalFilter(MatchedFilter):
         self._resolved = None
 
     def set_first_stage(self, snr):
-        """Calibrate the gate against `snr` rather than the constructor's.
+        """Calibrate the gates at another signal strength than the constructor's.
 
-        Final triggers are still cut at the threshold passed to :meth:`run`;
-        this sets only where the gate decides a full reconstruction is needed.
-        Pass ``None`` or a non-positive value to use the constructor's SNR.
+        Final triggers are still cut at the threshold passed to :meth:`run`; this sets only
+        where the gates decide a full reconstruction is needed.
+
+        Parameters
+        ----------
+        snr : float or None
+            The strength to calibrate at. None or a value that is not positive returns to the
+            constructor's ``snr``.
         """
         self._fs_snr = float(snr) if snr is not None and float(snr) > 0 else None
         self._resolved = None
 
     def set_reference(self, power):
-        """Set the reference SNR distribution: expected power per bin of the filter output.
+        """Set the reference profile: the expected power per bin of the filter output.
 
-        Only its shape matters. The profile must describe every template in
-        this plan. Pass ``None`` to use each template's own band fraction
-        (explicit thresholds only). Changing it recalibrates the thresholds of
-        the chain in use.
+        Only its shape matters, and it must describe every template of the plan. Changing it
+        recalibrates the thresholds of the chain in use.
+
+        Parameters
+        ----------
+        power : ndarray or None
+            A 1-D array of length n. None uses each template's own band fraction, which only
+            explicit thresholds (:meth:`set_coarse_threshold`) allow.
+
+        Raises
+        ------
+        ValueError
+            If the array is not one-dimensional of length n.
         """
         if power is not None:
             p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
@@ -1451,14 +1525,21 @@ class HierarchicalFilter(MatchedFilter):
         self._mark_ready("template", None)
 
     def set_taps(self, taps, counts=None):
-        """Each template's real or complex FIR taps, for the direct refine on CPU and GPU.
+        """Give each template's FIR taps, for the direct refine on the CPU and GPU.
 
-        taps (ntemplates, m) float32 or complex64, row t's first counts[t] taps valid (all m
-        when counts is None), the centre tap counts[t] // 2 at lag 0 -- the filter whose
-        spectrum set_templates holds, at the data's sample rate (time_domain.template_spectra
-        with tap and data rates equal). run_series then refines a survivor by direct correlation
-        at the lags around its last tier's firing coarse lags wherever that is priced
-        cheaper than a whole-block transform; MF_DIRECT_REFINE=0 turns it off."""
+        The taps are the filter whose spectrum :meth:`set_templates` holds, at the data's
+        sample rate (:func:`matchedfilter.template_spectra` with tap and data rates equal).
+        :meth:`run_series` then refines a survivor by direct correlation at the lags around its
+        last tier's coarse candidates wherever that is priced below a whole-block transform.
+
+        Parameters
+        ----------
+        taps : ndarray
+            (ntemplates, m) float32 or complex64. Row t's centre tap, ``counts[t] // 2``, is at
+            lag 0.
+        counts : array_like of int, optional
+            Valid taps per row. Default None: all m.
+        """
         arr = np.asarray(taps)
         cplx = np.iscomplexobj(arr)
         taps = np.ascontiguousarray(arr, dtype=np.complex64 if cplx else np.float32)
@@ -1489,6 +1570,19 @@ class HierarchicalFilter(MatchedFilter):
         return self._mf.direct_stats() if self._mf is not None else {}
 
     def set_hermitian(self, hermitian: bool):
+        """Say whether half-length templates are Hermitian-packed real filters.
+
+        Templates of shape (ntemplates, n // 2) are either a real filter's spectrum, packed with
+        the Nyquist bin in the imaginary part of bin 0 and the upper half its conjugate mirror,
+        or a band-limited spectrum that is zero above n // 2. Changing the convention drops the
+        plan's shared screeners and, unless the chain is pinned, its chosen chain, and re-reads
+        such templates on a GPU.
+
+        Parameters
+        ----------
+        hermitian : bool
+            True for Hermitian-packed real filters.
+        """
         h = bool(hermitian)
         if h != self._hermitian:
             self._hermitian = h

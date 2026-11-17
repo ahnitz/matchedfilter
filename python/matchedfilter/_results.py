@@ -88,6 +88,21 @@ class _Deferred:
 
 
 class FilterResults(NamedTuple):
+    """The peaks a time-domain filtering call found, one entry per peak.
+
+    Attributes
+    ----------
+    template_indices : ndarray
+        int64, the template's index in the bank's input.
+    sample_indices : ndarray
+        int64, the peak's sample in the series.
+    snr : ndarray
+        complex64, the peak's complex SNR.
+    block_starts : ndarray
+        int64, the first sample of the block that found it.
+    block_lengths : ndarray
+        int64, the FFT block length that found it.
+    """
     template_indices: np.ndarray   # int64: index into original input templates
     sample_indices: np.ndarray     # int64: sample index in continuous series
     snr: np.ndarray                # complex64: peak complex SNR

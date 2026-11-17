@@ -27,10 +27,24 @@ __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesC
 class Leaf:
     """A searched bank of FIR templates filtering its parent's output.
 
-    taps: (T, max_taps) float32 or complex64 rows, counts: taps per row (centre tap
-    counts[t] // 2 at lag 0, as TimeDomainFilterBank). lags: per-template sample offset
-    subtracted from a peak's sample before the threshold envelope is evaluated there
-    (default 0). node_id: the caller's name for the group, handed back to hooks."""
+    Parameters
+    ----------
+    taps : ndarray
+        (T, max_taps) float32 or complex64 rows. Row t's centre tap, ``counts[t] // 2``, is
+        at lag 0, as :class:`TimeDomainFilterBank` takes them.
+    counts : array_like of int
+        Taps used per row.
+    lags : array_like of int, optional
+        Per template, a sample offset subtracted from a peak's sample before the threshold
+        envelope is evaluated there. Default None: 0.
+    node_id : object, optional
+        The caller's name for the group, handed back to hooks.
+
+    Raises
+    ------
+    ValueError
+        If ``lags`` does not give one offset per template.
+    """
 
     def __init__(self, taps, counts, lags=None, node_id=None):
         self.taps = taps
@@ -43,9 +57,24 @@ class Leaf:
 
 
 class Inner:
-    """An FIR filter on its parent's output whose own output its children filter.
+    """An FIR filter on its parent's output, whose own output its children filter.
 
-    taps: 1D taps (count of them used; centre tap count // 2 at lag 0)."""
+    Parameters
+    ----------
+    taps : ndarray
+        1-D taps. The centre tap, ``count // 2``, is at lag 0.
+    count : int, optional
+        Taps used. Default None: all of them.
+    children : sequence, optional
+        The nodes that filter this one's output: :class:`Inner` or :class:`Leaf`.
+    node_id : object, optional
+        The caller's name for the node, handed back to hooks.
+
+    Raises
+    ------
+    ValueError
+        If ``taps`` is not one row or ``count`` is not in [1, len(taps)].
+    """
 
     def __init__(self, taps, count=None, children=(), node_id=None):
         self.taps = np.asarray(taps)
@@ -62,13 +91,27 @@ class Inner:
 class Root:
     """The root filter: a one-sided spectrum on the input blocks' frequency grid.
 
-    Its output for an input block D is the real series scale * C2R(conj(spectrum) D) over
-    bins [band[0], band[1]) (twice the real part of the analytic series), scale given per
-    block by the caller. profile: (w, delta_f), the expected signal power spectrum the leaf
-    banks' gates are calibrated with (TimeDomainFilterBank.set_reference), or a dict
-    {channel: (w, delta_f)} where the channels' noise spectra differ (two detectors): each
-    leaf bank then holds a calibration for every channel's profile over one copy of its
-    templates. A channel the dict does not name takes the first profile."""
+    Its output for an input block D is the real series ``scale * C2R(conj(spectrum) D)``
+    over bins [band[0], band[1]) (twice the real part of the analytic series), with the
+    scale given per block by the caller (:class:`BlockInput`).
+
+    Parameters
+    ----------
+    spectrum : ndarray
+        The one-sided spectrum, complex64.
+    band : tuple of int
+        ``(first, stop)`` bins the root filters.
+    children : sequence, optional
+        The nodes that filter the root's output: :class:`Inner` or :class:`Leaf`.
+    profile : tuple or dict, optional
+        ``(w, delta_f)``, the expected signal power spectrum the leaf banks' gates are
+        calibrated with (:meth:`TimeDomainFilterBank.set_reference`), or a dict
+        ``{channel: (w, delta_f)}`` where the channels' noise spectra differ (two
+        detectors). Each leaf bank then holds a calibration for every channel's profile over
+        one copy of its templates. A channel the dict does not name takes the first profile.
+    node_id : object, optional
+        The caller's name for the root, handed back to hooks.
+    """
 
     def __init__(self, spectrum, band, children=(), profile=None, node_id=None):
         self.spectrum = np.ascontiguousarray(spectrum, dtype=np.complex64)
@@ -81,10 +124,23 @@ class Root:
 class BlockInput:
     """One channel's input: transformed blocks of a common length n.
 
-    spectra: one-sided spectra (n/2 + 1 bins, complex64), one per block. valid: per block,
-    the (start, stop) samples of its output that are searched (pycbc: a segment's analyse
-    range). tags: opaque per-block objects handed back to hooks. root_scale(root, block)
-    gives the root output's scale for a block."""
+    Parameters
+    ----------
+    spectra : sequence of ndarray
+        One one-sided spectrum per block (n/2 + 1 bins, complex64).
+    valid : sequence of tuple of int
+        Per block, the (start, stop) samples of its output that are searched (pycbc: a
+        segment's analysis range).
+    root_scale : callable
+        ``root_scale(root, block)`` gives the root output's scale for a block.
+    tags : sequence, optional
+        Opaque per-block objects handed back to hooks.
+
+    Raises
+    ------
+    ValueError
+        If ``valid`` or ``tags`` does not give one entry per block.
+    """
 
     def __init__(self, spectra, valid, root_scale, tags=None):
         self.spectra = list(spectra)
@@ -98,13 +154,38 @@ class BlockInput:
 
 
 class ChunkContext(NamedTuple):
+    """What an ``on_chunk`` hook is given after a chunk.
+
+    Attributes
+    ----------
+    chunk : int
+        The chunk's number.
+    channels : list of str
+        The channels active in the chunk.
+    tags : dict
+        Per channel, the chunk's tag from :class:`BlockInput`.
+    """
     chunk: int
     channels: List[str]
     tags: Dict[str, object]
 
 
 class SeriesContext(NamedTuple):
-    """A node's output for one chunk, for every active channel."""
+    """A node's output for one chunk, for every active channel, as ``on_series`` is given it.
+
+    Attributes
+    ----------
+    node : Root
+        The node.
+    chunk : int
+        The chunk's number.
+    channels : list of str
+        The channels active in the chunk.
+    tags : dict
+        Per channel, the chunk's tag.
+    series : dict
+        Per channel, the node's output series.
+    """
     node: object
     chunk: int
     channels: List[str]
@@ -122,7 +203,12 @@ def _spans_cover(support, requested):
 
 
 class PeaksContext:
-    """A leaf group's peaks for one chunk, with read access to its ancestors' series."""
+    """A leaf's peaks for one chunk, with read access to its ancestors' series.
+
+    An ``on_peaks`` hook is given one per leaf per chunk. Its attributes ``root``,
+    ``leaf``, ``chunk``, ``channels`` and ``tags`` say where it is, and ``peaks`` holds per
+    channel the leaf's :class:`FilterResults` above the threshold envelope.
+    """
 
     def __init__(self, search, root, leaf, chunk, channels, tags, peaks, held, scales,
                  support=None):
@@ -132,13 +218,36 @@ class PeaksContext:
         self._support = support or {}
 
     def envelope(self, channel):
-        """The threshold envelope's values at channel's peaks (aligned with them), as the
-        search evaluated them -- e(sample - lag) -- or None without an envelope."""
+        """The threshold envelope's values at a channel's peaks.
+
+        Parameters
+        ----------
+        channel : str
+            The channel.
+
+        Returns
+        -------
+        ndarray or None
+            Aligned with ``peaks[channel]``: the envelope as the search evaluated it,
+            ``e(sample - lag)``. None without an envelope.
+        """
         return self._scales.get(channel)
 
     def support(self, channel, node=None):
-        """The computed (start, stop) intervals for node (default: this leaf's parent) in
-        channel for this chunk."""
+        """The intervals of a node's output that were computed in a channel for this chunk.
+
+        Parameters
+        ----------
+        channel : str
+            The channel.
+        node : Root or Inner, optional
+            The node. Default None: this leaf's parent.
+
+        Returns
+        -------
+        list of tuple of int
+            (start, stop) intervals in the node's series.
+        """
         node = self._search._parent[id(self.leaf)] if node is None else node
         chan_sup = self._support.get(channel)
         if chan_sup is not None and id(node) in chan_sup:
@@ -147,9 +256,27 @@ class PeaksContext:
         return [(0, len(ser))]
 
     def series(self, channel, node=None, span=None):
-        """The output of node (default: this leaf's parent) in channel, for this chunk.
-        Note: returns a callback-scoped view; copy if retaining past the hook. If span=(start,
-        stop) is given, verifies that interval lies within the node's computed support."""
+        """The output of a node in a channel, for this chunk.
+
+        Parameters
+        ----------
+        channel : str
+            The channel.
+        node : Root or Inner, optional
+            The node. Default None: this leaf's parent.
+        span : tuple of int, optional
+            ``(start, stop)`` the caller will read; checked to lie within the computed support.
+
+        Returns
+        -------
+        ndarray
+            A view valid only during the hook; copy it to keep it.
+
+        Raises
+        ------
+        ValueError
+            If ``span`` lies outside the node's computed support.
+        """
         node = self._search._parent[id(self.leaf)] if node is None else node
         self._search._settle()
         ser = self._held[channel][id(node)]
@@ -162,9 +289,33 @@ class PeaksContext:
         return ser
 
     def refilter(self, channel, windows, binsize, threshold, template_index=None):
-        """This leaf bank over its parent's series in channel, in other windows, bin size
-        and threshold. No envelope applies. Raises ValueError if windows fall outside the
-        parent series' computed support in channel."""
+        """Filter this leaf's parent series again, in other windows, bin size and threshold.
+
+        No envelope applies.
+
+        Parameters
+        ----------
+        channel : str
+            The channel.
+        windows : optional
+            Windows in the forms :meth:`TimeDomainFilterBank.filter_series` takes.
+        binsize : int
+            Samples per peak bin.
+        threshold : float
+            SNR threshold.
+        template_index : int, optional
+            Filter only this template. Default None: every template of the leaf.
+
+        Returns
+        -------
+        FilterResults
+            The peaks, as :meth:`TimeDomainFilterBank.filter_series` returns them.
+
+        Raises
+        ------
+        ValueError
+            If the windows fall outside the parent series' computed support.
+        """
         ser = self.series(channel)
         # The bank's parser (time_domain._normalize_windows): the windows filter_series takes,
         # parsed as it parses them, so the support check and the call cannot disagree.
@@ -352,16 +503,36 @@ _ROOT_PLANS: Dict[int, object] = {}
 
 
 class HierarchicalSearch:
-    """Run a forest of hierarchies over input blocks, delivering peaks through hooks.
+    """Run a forest of filter hierarchies over input blocks, delivering peaks through hooks.
 
-    threshold: the leaf search threshold T. envelope_floor: the least value any threshold
-    envelope returned by a hook may take (default 1: envelopes only raise the threshold);
-    leaf banks are calibrated at T * envelope_floor, so no envelope can need a peak their
-    gates dismissed. leaf_options: keyword arguments for each leaf's TimeDomainFilterBank
-    (engine, false_dismissal, binsize, coarse_band_hz, first_stage_snr, device,
-    fft_lengths, tap_sample_rate, data_sample_rate). context: samples beyond a leaf's
-    windows over which hooks may read or refilter its parent's series. min_pad: minimum
-    guard samples any leaf's parent series holds past its windows (e.g. for chisq blocks)."""
+    Parameters
+    ----------
+    roots : sequence of Root
+        The hierarchies.
+    threshold : float
+        The leaf search threshold T.
+    envelope_floor : float, optional
+        The least value any threshold envelope a hook returns may take (default 1:
+        envelopes only raise the threshold). Leaf banks are calibrated at
+        T * envelope_floor, so no envelope can need a peak their gates dismissed.
+    leaf_options : dict, optional
+        Keyword arguments for each leaf's :class:`TimeDomainFilterBank` (engine,
+        false_dismissal, binsize, coarse_band_hz, first_stage_snr, device, fft_lengths,
+        tap_sample_rate, data_sample_rate), not ``threshold``.
+    context : int, optional
+        Samples beyond a leaf's windows over which hooks may read or refilter its parent's
+        series (default 0).
+    min_pad : int, optional
+        The fewest guard samples any leaf's parent series holds past its windows, for
+        example for chi-squared blocks (default 0).
+
+    Raises
+    ------
+    ValueError
+        For a threshold that is negative or not finite, an envelope floor below the
+        minimum, a ``threshold`` in ``leaf_options``, or a negative ``context`` or
+        ``min_pad``.
+    """
 
     _MIN_ENVELOPE_FLOOR = 1e-3
 
@@ -423,12 +594,27 @@ class HierarchicalSearch:
         return channel if channel in prof else next(iter(prof), None)
 
     def leaf_bank(self, root, leaf, channel=None):
-        """The TimeDomainFilterBank that searches leaf below root: one bank for the leaf,
-        built on first use, holding a calibration for each of root's profiles (a noise
-        profile a channel, or one for all). It is given `channel`'s profile as a reference
-        the first time that channel asks; a filtering call names the profile it runs
-        (profile=). The templates and the compiled plans' template storage are the leaf's,
-        once, whatever the number of profiles."""
+        """The bank that searches a leaf below a root, built on first use.
+
+        One bank serves the leaf, holding a calibration for each of the root's profiles; its
+        templates are stored once whatever the number of profiles. A channel's profile is set
+        as its reference the first time that channel asks, and a filtering call names the
+        profile it runs (``profile=``).
+
+        Parameters
+        ----------
+        root : Root
+            The leaf's root.
+        leaf : Leaf
+            The leaf.
+        channel : str, optional
+            The channel whose profile the bank is to hold.
+
+        Returns
+        -------
+        TimeDomainFilterBank
+            The leaf's bank.
+        """
         prof = root.profile
         which = self._channel_profile(root, channel)
         if isinstance(prof, dict):
@@ -462,9 +648,21 @@ class HierarchicalSearch:
             yield from self._leaves_below(c)
 
     def pad(self, root):
-        """The most samples any leaf's parent series holds past the leaf's windows below root:
-        the longest block any of root's leaf banks uses or may still choose (at least min_pad).
-        Builds (and calibrates) every leaf bank below root."""
+        """The most samples any leaf's parent series holds past its windows, below a root.
+
+        This builds and calibrates every leaf bank below the root.
+
+        Parameters
+        ----------
+        root : Root
+            The root.
+
+        Returns
+        -------
+        int
+            The longest block any of the root's leaf banks uses or may still choose, and at
+            least ``min_pad``.
+        """
         return max([self.min_pad] + [self._leaf_block_length(root, lf)
                                      for lf in self._leaves_below(root)])
 
@@ -529,16 +727,27 @@ class HierarchicalSearch:
     def run(self, inputs: Dict[str, BlockInput], windows: Optional[Callable] = None,
             on_series: Optional[Callable] = None, on_peaks: Optional[Callable] = None,
             on_chunk: Optional[Callable] = None):
-        """Filter every input block through each root's hierarchy.
+        """Filter every input block through each root's hierarchy and call the hooks.
 
-        windows(leaf, chunk, channel, extra): where leaf peaks are searched, widened by
-        extra samples: None (the block's valid span), a list of (start, stop), or empty
-        (the leaf is skipped in this chunk and channel). Windows are clipped to the valid
-        span. on_series(SeriesContext) runs when a root's output for a chunk is ready (the
-        root only: inner nodes' series are read through PeaksContext.series) and may return
-        {channel: envelope}: envelope(samples) -> threshold scale at those
-        samples (>= envelope_floor), applied to every leaf below the root. on_peaks
-        (PeaksContext) runs per leaf per chunk; on_chunk(ChunkContext) after a chunk."""
+        Parameters
+        ----------
+        inputs : dict
+            ``{channel: BlockInput}``.
+        windows : callable, optional
+            ``windows(leaf, chunk, channel, extra)`` says where a leaf's peaks are searched,
+            widened by ``extra`` samples: None (the block's valid span), a list of
+            (start, stop), or empty (the leaf is skipped in this chunk and channel). Windows
+            are clipped to the valid span.
+        on_series : callable, optional
+            ``on_series(SeriesContext)`` runs when a root's output for a chunk is ready (inner
+            nodes' series are read through :meth:`PeaksContext.series`). It may return
+            ``{channel: envelope}``, where ``envelope(samples)`` gives the threshold scale at
+            those samples (at least ``envelope_floor``), applied to every leaf below the root.
+        on_peaks : callable, optional
+            ``on_peaks(PeaksContext)`` runs per leaf per chunk.
+        on_chunk : callable, optional
+            ``on_chunk(ChunkContext)`` runs after a chunk.
+        """
         channels = list(inputs)
         nchunks = max(len(inputs[c].spectra) for c in channels) if channels else 0
         for root in self.roots:

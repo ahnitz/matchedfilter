@@ -859,14 +859,39 @@ def template_spectra(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Each template's filter on one block length, and the lags where it is valid.
 
-    The filters are those TimeDomainFilterBank.filters_f holds for a block of
-    block_length (conjugate spectrum, centre tap at lag 0); nothing else is
-    built: no plans, no groups. With out (T, block_length) complex64, C-contiguous,
-    they are written there and nothing is allocated for them.
+    The filters are those a :class:`TimeDomainFilterBank` holds for a block of
+    ``block_length`` (conjugate spectrum, centre tap at lag 0). Nothing else is built.
 
-    Returns (filters, valid): valid is (T, 2) int64, each template's [start, stop)
-    of lags in a block whose correlation is not wrapped by its own taps.
-    Raises if a template does not fit the block.
+    Parameters
+    ----------
+    taps : ndarray
+        (T, m) float32 or complex64 taps.
+    tap_counts : sequence of int or None
+        Taps used per row. None: all m.
+    block_length : int
+        The FFT block length.
+    tap_sample_rate : float, optional
+        Sample rate of the taps in Hz (default 2048).
+    data_sample_rate : float, optional
+        Sample rate of the data in Hz (default 2048).
+    analytic : bool, optional
+        Whether the data is analytic (default False).
+    out : ndarray, optional
+        (T, block_length) complex64, C-contiguous: the filters are written there and nothing
+        is allocated for them.
+
+    Returns
+    -------
+    filters : ndarray
+        (T, block_length) complex64.
+    valid : ndarray
+        (T, 2) int64: each template's [start, stop) of lags in a block whose correlation is
+        not wrapped by its own taps.
+
+    Raises
+    ------
+    ValueError
+        If a template does not fit the block.
     """
     taps = np.ascontiguousarray(taps, dtype=_tap_dtype(taps))
     if taps.ndim == 1:
@@ -893,9 +918,32 @@ def template_spectra(
 
 def template_valid(tap_counts, block_length, *, tap_sample_rate=2048.0,
                    data_sample_rate=2048.0):
-    """The lags where each template's correlation on a block of block_length is valid (not
-    wrapped by its own taps): (T, 2) int64 [start, stop), as template_spectra returns with
-    the filters, from the tap counts alone. Raises if a template does not fit the block."""
+    """The lags where each template's correlation on one block length is valid.
+
+    The same ``valid`` as :func:`template_spectra` returns, from the tap counts alone.
+
+    Parameters
+    ----------
+    tap_counts : sequence of int
+        Taps per template.
+    block_length : int
+        The FFT block length.
+    tap_sample_rate : float, optional
+        Sample rate of the taps in Hz (default 2048).
+    data_sample_rate : float, optional
+        Sample rate of the data in Hz (default 2048).
+
+    Returns
+    -------
+    ndarray
+        (T, 2) int64: each template's [start, stop) of lags in a block whose correlation is
+        not wrapped by its own taps.
+
+    Raises
+    ------
+    ValueError
+        If a template does not fit the block.
+    """
     counts = np.ascontiguousarray(tap_counts, dtype=np.int64)
     n = int(block_length)
     rate_ratio = float(tap_sample_rate) / float(data_sample_rate)
@@ -909,13 +957,63 @@ def template_valid(tap_counts, block_length, *, tap_sample_rate=2048.0,
 
 
 class TimeDomainFilterBank:
-    """Filter bank that ingests raw time-domain filters and optimizes blocking dynamically.
+    """A bank of time-domain FIR templates filtered over continuous series.
 
-    PyCBC passes raw time-domain FIR taps and sample rates.
-    TimeDomainFilterBank clusters templates by length, chooses optimal FFT block sizes
-    per cluster, handles rate conversion (zero-padding or Nyquist truncation), rolls center
-    taps circularly, and executes overlap-save filtering returning trigger coordinates
-    directly in continuous series coordinates.
+    The bank takes each template's taps and sample rate, groups the templates by length,
+    chooses an FFT block size per group, converts between the tap and data sample rates, and
+    runs overlap-save filtering. Results are in the series' own sample coordinates.
+
+    Parameters
+    ----------
+    taps : ndarray or sequence of ndarray
+        The templates' taps: a (T, m) float32 or complex64 array, or a sequence of 1-D
+        arrays. Row t's centre tap, ``tap_counts[t] // 2``, is lag 0. Complex taps are
+        quadrature filters applied to a real series.
+    tap_counts : sequence of int, optional
+        Taps used per row. Defaults to every column of the array, or each array's length.
+    tap_sample_rate : float, optional
+        Sample rate of the taps in Hz (default 2048).
+    data_sample_rate : float, optional
+        Sample rate of the series in Hz (default 2048).
+    engine : str, optional
+        ``"hier"`` (default) for gated hierarchical filtering, ``"flat"`` for a full
+        search of every pair, or ``"corr"`` for full correlation output
+        (:meth:`correlate_series`).
+    threshold : float, optional
+        The SNR threshold a peak must exceed (default 5.0). A call may raise it.
+    false_dismissal : float, optional
+        The hierarchical gates' false-dismissal budget per plan at ``threshold``
+        (default 0.001).
+    first_stage_snr : float, optional
+        SNR the gates are calibrated at, if not ``threshold`` (default 0: ``threshold``).
+    coarse_band_hz : float or tuple of float, optional
+        Pins the gate chain: one first band, or every band, in Hz. Default None: the cost
+        model chooses the chain.
+    device : str, optional
+        Where the bank runs, as :meth:`matchedfilter.device.Device.parse` takes it.
+        Default None: ``MF_DEVICE``, else the CPU.
+    max_batch_size : int, optional
+        The most templates one group holds. Default None: no limit.
+    fft_lengths : sequence of int, optional
+        The block sizes the bank may use. Default None: powers of two from 1024 or 2048
+        up to 65536.
+    reference : ndarray or dict, optional
+        A reference profile, set as :meth:`set_reference` sets it. Default None.
+    analytic : bool, optional
+        Whether the series is analytic (positive frequencies only). Default False.
+    bandlimited : bool, optional
+        Run flat filtering as two-channel decimation in frequency (``engine`` becomes
+        ``"dif"``). Default False.
+    pack_templates : bool, optional
+        Store real hierarchical templates Hermitian-packed, in half the memory. Exact, but
+        slower to refine. Default False.
+    binsize : int, optional
+        Samples per peak bin, fixing the bins on each window's grid. With the hierarchical
+        engine, it also lets the bank choose block sizes by cost once a reference is set.
+        Default None: one peak per block.
+    max_block_length : int, optional
+        The largest block size the bank may choose by cost (default 8192). The caller
+        pads its series and guards its windows by the longest block.
     """
 
     def __init__(
@@ -1329,11 +1427,34 @@ class TimeDomainFilterBank:
         ]
 
     def get_filter_f(self, template_index: int) -> np.ndarray:
-        """Return the frequency-domain filter for a specific template."""
+        """The frequency-domain filter of one template.
+
+        Parameters
+        ----------
+        template_index : int
+            The template, as indexed in the bank's input.
+
+        Returns
+        -------
+        ndarray
+            The template's conjugate spectrum on its group's block length, complex64, with the
+            centre tap at lag 0.
+        """
         return self.filters_f[template_index]
 
     def get_block_length(self, template_index: int) -> int:
-        """Return the FFT block length for a specific template."""
+        """The FFT block length one template is filtered with.
+
+        Parameters
+        ----------
+        template_index : int
+            The template, as indexed in the bank's input.
+
+        Returns
+        -------
+        int
+            The block length of the template's group.
+        """
         return int(self.block_lengths[template_index])
 
     def set_reference(
@@ -1342,21 +1463,27 @@ class TimeDomainFilterBank:
         delta_f: Optional[float] = None,
         profile=_SAME_PROFILE,
     ) -> None:
-        """Set reference SNR profile across all hierarchical groups.
+        """Set the reference profile the hierarchical gates are calibrated with.
 
-        Parameters:
-            reference:
-                - Dict mapping block length N -> 1D reference array of length N, OR
-                - 1D array of power spectrum w(f) on fine grid with frequency spacing delta_f, OR
-                - 1D reference profile if all groups share the same block size.
-            delta_f: Frequency resolution of fine grid (required when reference is w(f)).
-            profile: optional name of the noise profile this reference calibrates (any
-                hashable). A bank holds one calibration per name over one set of
-                templates: the first reference set also settles the block sizes, a
-                reference under a further name adds that profile's chain, thresholds
-                and screeners, and a filtering call names the profile it runs
-                (``profile=``). Default: the profile in use (the bank's only one unless
-                ``use_profile`` or a named reference chose another).
+        Parameters
+        ----------
+        reference : ndarray or dict
+            One of: a dict mapping block length to a 1-D reference of that length; the power
+            spectrum w(f) on a fine frequency grid of spacing ``delta_f``; or a 1-D reference
+            when every group has one block length.
+        delta_f : float, optional
+            The fine grid's frequency spacing in Hz. Required when ``reference`` is w(f).
+        profile : hashable, optional
+            The name of the noise profile this reference calibrates. A bank holds one
+            calibration per name over one set of templates. The first reference also settles
+            the block sizes; a reference under another name adds that profile's chain,
+            thresholds and screeners. Default: the profile in use (the bank's only one unless
+            :meth:`use_profile` or a named reference chose another).
+
+        Raises
+        ------
+        ValueError
+            If the reference holds no power or is not finite.
         """
         if not isinstance(reference, dict):
             # A profile with no power, or one that is not finite, is a noise spectrum that is
@@ -1519,8 +1646,14 @@ class TimeDomainFilterBank:
                 plan.use_profile(key)
 
     def use_profile(self, profile) -> None:
-        """Filter with the calibration of the noise profile `profile` from the next call on
-        (a name a reference was set under; None is the bank's first when it was not named)."""
+        """Filter with one noise profile's calibration from the next call on.
+
+        Parameters
+        ----------
+        profile : hashable or None
+            A name a reference was set under. None is the bank's first profile when it was set
+            without a name.
+        """
         if profile != self.__dict__.get("_profile"):
             self._profile = profile
             self._sync_plans()
@@ -1751,7 +1884,23 @@ class TimeDomainFilterBank:
         ref_template,
         f_high: Optional[float] = None
     ) -> None:
-        """Compute closed-form reference SNR profile and set across all groups."""
+        """Set the reference profile from a template and a noise spectrum.
+
+        The profile is |h|^2 / S (:func:`reference_profile`) between the template's ``f_lower``
+        and ``f_high``, on the frequency grid of ``stilde``.
+
+        Parameters
+        ----------
+        stilde : FrequencySeries
+            Supplies the frequency spacing ``delta_f``.
+        psd : array_like
+            The noise power spectral density S on that grid.
+        ref_template : array_like
+            The template's frequency-domain waveform h. Its ``f_lower`` attribute, where it has
+            one, is the lower cutoff.
+        f_high : float, optional
+            Upper frequency cutoff in Hz. Default None: none.
+        """
         flo = float(getattr(ref_template, 'f_lower', 0.0) or 0.0)
         fhi = float(f_high or 0.0)
         df = float(stilde.delta_f)
@@ -1774,34 +1923,35 @@ class TimeDomainFilterBank:
         template_index: Optional[int] = None,
         profile=_SAME_PROFILE,
     ) -> FilterResults:
-        """Filter a continuous series across all template groups (or a specific template).
+        """Filter a continuous series with every template, or one, and return the peaks.
 
-        Parameters:
-            profile: the noise profile whose calibration the call runs with (a name a
-                reference was set under; default: the one in use).
-            series: Continuous data series (e.g. complex reference SNR). The
-                hierarchical engine's coarse gate is calibrated for an analytic
-                (positive-frequency) series, which is what pycbc passes.
-            windows: Analysis windows in series coordinates: None (the whole
-                series), a slice, a sequence of slices or (start, stop) pairs,
-                or a (K, 2) integer array. Python slice rules apply; overlapping
-                or touching windows merge, so the result depends only on the
-                union of samples. One call returns exactly what one call per
-                (merged) window would, and a block that no window intersects
-                is never computed. Each peak search stays inside its window.
-                Padding for filter context is the caller's job.
-            binsize: Samples per peak bin. Defaults to the bank's binsize, else the
-                block size N (1 bin per block).
-            threshold: Optional SNR threshold override. None uses bank threshold.
-            template_index: Optional single template index to filter.
+        Parameters
+        ----------
+        series : ndarray
+            The continuous series. The hierarchical gates are calibrated for an analytic
+            (positive-frequency) series, which is what pycbc passes.
+        windows : slice, sequence or ndarray, optional
+            Analysis windows in series coordinates: None (the whole series), a slice, a
+            sequence of slices or (start, stop) pairs, or a (K, 2) integer array. Python slice
+            rules apply. Overlapping or touching windows merge, so the result depends only on
+            the union of samples, and a block no window intersects is not computed. Each peak
+            search stays inside its window. Padding for filter context is the caller's job.
+        binsize : int, optional
+            Samples per peak bin. Defaults to the bank's ``binsize``, else the block length (one
+            bin per block).
+        threshold : float, optional
+            SNR threshold for this call. Default None: the bank's.
+        template_index : int, optional
+            Filter only this template. Default None: every template.
+        profile : hashable, optional
+            The noise profile whose calibration the call runs with. Default: the one in use.
 
-        Returns:
-            FilterResults namedtuple with:
-                template_indices: index into original input templates
-                sample_indices: sample index in continuous series
-                snr: complex peak SNR value
-                block_starts: start sample of block containing each trigger
-                block_lengths: FFT block length used for each trigger
+        Returns
+        -------
+        FilterResults
+            One entry per peak above the threshold: the template's index in the bank's input,
+            the sample index in the series, the complex SNR, and the start and length of the
+            block that found it.
         """
         if profile is not _SAME_PROFILE:
             self.use_profile(profile)
@@ -2068,13 +2218,26 @@ class TimeDomainFilterBank:
         return _Deferred(build) if pending else build()
 
     def empty_shared(self, shape, dtype=np.complex64, input=False):
-        """An array in this bank's device memory (host-readable), for outputs a caller reuses:
-        correlate_series(out=...) writes such an array in place, and a fine bank on the same
-        device reads its rows in place. On a CPU bank, ordinary page-aligned memory.
+        """An array in this bank's device memory that the host can read, for reused buffers.
 
-        input=True: an input series the host rewrites before every call (a segment's data)
-        and this bank reads in place: the backend may keep it in host memory mapped by the
-        device rather than migrating it there and back each call."""
+        :meth:`correlate_series` writes such an array in place (``out=``), and a bank on the
+        same device reads its rows in place. On a CPU bank it is ordinary page-aligned memory.
+
+        Parameters
+        ----------
+        shape : tuple of int
+            The array's shape.
+        dtype : dtype, optional
+            The array's dtype (default complex64).
+        input : bool, optional
+            True for an input series the host rewrites before every call: the backend may keep
+            it in host memory the device maps, rather than moving it each call. Default False.
+
+        Returns
+        -------
+        ndarray
+            The array. Its contents are not initialised.
+        """
         self._groups
         for g in self._groups:
             plan = g.get_correlation_plan() if self.engine == 'corr' else g.plan
@@ -2133,18 +2296,26 @@ class TimeDomainFilterBank:
 
     @staticmethod
     def filter_series_many(jobs, wait=True):
-        """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
-        result the list of their FilterResults, identical to calling each in turn.
+        """Run several :meth:`filter_series` calls as one batch.
 
-        On a GPU every call is submitted before any is collected, and each job's work goes to
-        its own compute queue: the device runs banks concurrently and works on early banks
-        while the host uploads later ones, and the host waits once rather than per call.
-        On a CPU the calls simply run in order.
+        On a GPU every call is submitted before any is collected and each job's work has its own
+        compute queue, so the device runs banks concurrently and the host waits once. On a CPU
+        the calls run in order. The results equal those of calling each job in turn.
 
-        wait=False returns, per job, an object whose result() gives its FilterResults: the GPU
-        keeps working while the caller prepares the next batch (keeping the device busy keeps
-        its clock up). The jobs' input series must not be overwritten until then. A later
-        batch on the same banks first finishes whatever of this one it would overwrite.
+        Parameters
+        ----------
+        jobs : sequence of tuple
+            ``(bank, series, kwargs)`` per call, kwargs as :meth:`filter_series` takes them.
+        wait : bool, optional
+            True (default) returns the results. False returns, per job, an object whose
+            ``result()`` gives them, so the GPU keeps working while the caller prepares the next
+            batch. The jobs' series must not be overwritten until then. A later batch on the
+            same banks first finishes whatever of this one it would overwrite.
+
+        Returns
+        -------
+        list
+            Per job, its FilterResults, or with ``wait=False`` the object that gives them.
         """
         paired = _joint_round(jobs)
         if paired is not None:
@@ -2447,49 +2618,48 @@ class TimeDomainFilterBank:
         templates: Optional[Sequence[int]] = None,
         out_support=None,
     ) -> np.ndarray:
-        """Correlate a continuous series across all templates (or a specific template, or a
-        list of them).
+        """Correlate a continuous series with every template, one, or a list of them.
 
-        Templates are filtered using their dynamically partitioned FFT block sizes
-        for optimal cache and SIMD efficiency. Returns continuous correlation series
-        in the original template ordering.
+        Templates are filtered at their groups' block lengths. Rows are in the bank's template
+        order.
 
-        Parameters:
-            series: Continuous data series (1D complex64).
-            windows: Analysis windows in series coordinates, in the same forms as
-                     `filter_series`. Only blocks intersecting a window are
-                     computed. The output holds the correlation inside the union
-                     of the windows and exact zeros everywhere else, including
-                     the parts of partially covered blocks outside every window.
-                     Padding for filter context is the caller's job.
-            scales: Optional per-template scale factors. Must have length `n_templates`
-                    (or 1 / length matching template if `template_index` is specified).
-            template_index: Optional single template index to filter. If specified,
-                            returns a 1D array of shape `(len(series),)`.
-            templates: Optional distinct template indices: output row j is template
-                       templates[j], shape `(len(templates), len(series))`. Templates
-                       adjacent both here and in a block-size group are correlated in one
-                       call, which transforms each block once for all of them; list them in
-                       bank order (ascending) to make those runs long.
-            out_support: With `out`: where `out` may hold nonzero values on entry, in the
-                     forms `windows` takes; elsewhere it is taken to be exact zero already
-                     and is not written. A caller reusing `out` passes the windows of the
-                     call that last filled it (after a call, `out` is zero outside its
-                     windows). None: `out` may hold anything, and all of it is written.
-            out: Optional preallocated output array. If `template_index` is None, shape
-                 must be `(n_templates, len(series))` and dtype `complex64`. If `template_index`
-                 is specified, shape can be `(len(series),)` or `(1, len(series))`.
-                 Every sample is overwritten, so it need not be cleared.
-                 If None, a new array is allocated.
-            wait: False, with `out` a device-shared array (`empty_shared`) on a backend
-                  that can (Vulkan): return once the work is submitted. Later work on the
-                  same device -- e.g. filter_series_many reading `out` -- is ordered after
-                  it on the device, so the GPU is fed without a host round trip. Before
-                  reading `out` on the host, call `wait()`.
+        Parameters
+        ----------
+        series : ndarray
+            The continuous series, 1-D complex64.
+        windows : slice, sequence or ndarray, optional
+            Analysis windows in series coordinates, in the forms :meth:`filter_series` takes.
+            Only blocks a window intersects are computed. The output holds the correlation
+            inside the union of the windows and exact zeros everywhere else. Padding for filter
+            context is the caller's job.
+        scales : ndarray or sequence of float, optional
+            Per-template scale factors: one per template, or one with ``template_index``.
+        template_index : int, optional
+            Correlate only this template; the result is then 1-D.
+        out : ndarray, optional
+            Preallocated complex64 output: ``(n_templates, len(series))``, or with
+            ``template_index`` ``(len(series),)`` or ``(1, len(series))``. Every sample is
+            written, so it need not be cleared. Default None: a new array.
+        wait : bool, optional
+            False, with ``out`` from :meth:`empty_shared` on a backend that can (Vulkan),
+            returns once the work is submitted. Later work on the same device, such as
+            :meth:`filter_series_many` reading ``out``, is ordered after it. Call :meth:`wait`
+            before reading ``out`` on the host. Default True.
+        templates : sequence of int, optional
+            Distinct template indices: output row j is template ``templates[j]``. Templates
+            adjacent both here and in a block-size group share one call, which transforms each
+            block once for all of them, so list them in ascending order.
+        out_support : optional
+            With ``out``: where ``out`` may hold nonzero values on entry, in the forms
+            ``windows`` takes. Elsewhere it is taken to be zero already and is not written. A
+            caller reusing ``out`` passes the windows of the call that last filled it. Default
+            None: all of ``out`` is written.
 
-        Returns:
-            If `template_index` is None: 2D complex64 array of shape `(n_templates, len(series))`.
-            If `template_index` is specified: 1D complex64 array of shape `(len(series),)`.
+        Returns
+        -------
+        ndarray
+            complex64, ``(n_templates, len(series))``, ``(len(templates), len(series))``, or with
+            ``template_index`` ``(len(series),)``. It is ``out`` when that was given.
         """
         from .device import parse as _parse_device
 
