@@ -67,7 +67,7 @@ def c16_threshold_exp(band):
 
 
 def c16_template_exp(ct0):
-    """The exponent the fp16 tier's packed templates are scaled by (2^et), from their largest
+    """The exponent the fp16 tier's packed templates are scaled by (2^tmpl_exp), from their largest
     component; 0 when there is nothing to place."""
     a = np.asarray(ct0)
     if a.size == 0:
@@ -78,16 +78,16 @@ def c16_template_exp(ct0):
     return int(max(-100, min(100, C16_TEMPLATE_EXP - math.floor(math.log2(tm)))))
 
 
-def c16_data_exp(band, raw_thr, et):
-    """The data exponent (2^ed, applied to each element before it is rounded to half) that puts
-    the tier's threshold, raw_thr * 2^(et + ed), at 2^c16_threshold_exp(band). Powers of two,
-    so in range every value is the unscaled one times an exact factor and the decision is
-    unchanged; out of range they are what keeps it: on an Iris Xe, which flushes fp16
+def c16_data_exp(band, raw_thr, tmpl_exp):
+    """The data exponent (2^data_exp, applied to each element before it is rounded to half
+    precision) that puts the tier's threshold, raw_thr * 2^(tmpl_exp + data_exp), at
+    2^c16_threshold_exp(band). Powers of two, so in range every value is the unscaled one
+    times an exact factor and the decision is unchanged; out of range they are what keeps it: on an Iris Xe, which flushes fp16
     subnormals, templates of ~5e-5 were flushed to zero and every pair dismissed."""
     if not (0.0 < float(raw_thr) < math.inf):
         return 0
-    ed = int(round(c16_threshold_exp(band) - math.log2(float(raw_thr)) - et))
-    return max(-100, min(100, ed))
+    data_exp = int(round(c16_threshold_exp(band) - math.log2(float(raw_thr)) - tmpl_exp))
+    return max(-100, min(100, data_exp))
 
 
 def pow2_scaled(a, e):
@@ -472,9 +472,9 @@ class HierOps:
         lo, hi, binsize, wbins = hier_window(n, window, binsize)
         nbins = wbins if nbins is None else max(wbins, int(nbins))
         rw_key = None if row_windows is None else row_windows[0]
-        rw = None if row_windows is None else row_windows[1]
+        row_tables = None if row_windows is None else row_windows[1]
         if nbins > MAX_BINS:
-            if rw is not None:
+            if row_tables is not None:
                 raise ValueError("grouped dispatch exceeds the kernel bin limit")
             return split_bins(
                 lambda w, ud, ut: self.hier_peaks(
@@ -538,18 +538,18 @@ class HierOps:
                 raise ValueError("band_offsets must have one valid offset (< n // 2) per tier")
         shifted = any(k0s)
         bands = tuple(b for b, _, _ in tiers)
-        half = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
-        half1 = (len(bands) > 1 and self.packed_fp16 and self._shipped("c16", bands[1])
+        tier0_fp16 = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
+        tier1_fp16 = (len(bands) > 1 and self.packed_fp16 and self._shipped("c16", bands[1])
                  and self._shipped("tier1_c16", bands[1]))
-        layout0 = self._coarse_layout(bands[0]) if half else None
+        layout0 = self._coarse_layout(bands[0]) if tier0_fp16 else None
         shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         top = max(bands)
 
-        dv, tv = shared_view(data, self), shared_view(tmpl, self)
+        data_view, tmpl_view = shared_view(data, self), shared_view(tmpl, self)
         one_bin_possible = (
             any(g_lo < g_hi and g_hi - 1 - g_lo < binsize for g_lo, g_hi, _, _ in rw_key)
-            if rw is not None else (lo < hi and (hi - 1) // binsize == lo // binsize))
+            if row_tables is not None else (lo < hi and (hi - 1) // binsize == lo // binsize))
         want_direct = (direct is not None and n <= 65536 and self._shipped("refine_td", n)
                        and one_bin_possible)
         # The feed: claim the deferred forward of these spectra when its bands move fewer
@@ -565,68 +565,70 @@ class HierOps:
                           else (None if refine_reach is None
                                 else min(max(float(refine_reach), 0.0), 1.0)))
         banded = band_forward_wanted(n, top, reach_for_feed, forced=forced_feed)
-        tier0_ok = half and self._shipped("fwd_tier0", n)
+        tier0_ok = tier0_fp16 and self._shipped("fwd_tier0", n)
         bands_ok = self.inplace_feed and (not shifted or len(tiers) == 1)
-        if dv is not None and (tier0_ok or bands_ok) and banded:
+        if data_view is not None and (tier0_ok or bands_ok) and banded:
             claim = self._exec_claim(slot, data, nd)
             if claim is not None:
                 CLAIMS[0] += 1
                 feed = "tier0" if tier0_ok else "bands"
         use_direct = bool(want_direct and claim is not None)
         # Each tier's input and its stride: the spectra rows (n), the band rows, or packed.
-        ed, et = 0, 0
-        ed1, et1 = 0, 0
+        data_exp, tmpl_exp = 0, 0
+        data_exp1, tmpl_exp1 = 0, 0
         k0_extra = (k0s,) if shifted else ()
         cl_extra = (("cl", cl_sig),) if cl_sig is not None else ()
         storage_key = ("hierstore", n, bands, nd, nt, nbins, rw_key is not None,
-                       dv is not None and data.ctypes.data, tv is not None and tmpl.ctypes.data,
+                       data_view is not None and data.ctypes.data,
+                       tmpl_view is not None and tmpl.ctypes.data,
                        slot if async_submit else None, *k0_extra, *cl_extra)
         uploads = self._input_uploads(storage_key, data, tmpl, upload_data, upload_tmpl)
-        if half or half1:
+        if tier0_fp16 or tier1_fp16:
             held = self.__dict__.setdefault("_c16_template_exp", {})
-            if half:
+            if tier0_fp16:
                 if uploads[1] or storage_key not in held:
                     held[storage_key] = c16_template_exp(ct0)
-                et = held[storage_key]
-                ed = c16_data_exp(bands[0], tiers[0][2], et)
-            if half1:
+                tmpl_exp = held[storage_key]
+                data_exp = c16_data_exp(bands[0], tiers[0][2], tmpl_exp)
+            if tier1_fp16:
                 key1 = (storage_key, 1)
                 if uploads[1] or key1 not in held:
                     held[key1] = c16_template_exp(ct1)
-                et1 = held[key1]
-                ed1 = c16_data_exp(bands[1], tiers[1][2], et1)
-        self._last_c16_scale = 2.0 ** (et + ed)         # tier-0 values / this = unscaled
-        self._last_c16_scale1 = 2.0 ** (et1 + ed1) if half1 else 1.0
+                tmpl_exp1 = held[key1]
+                data_exp1 = c16_data_exp(bands[1], tiers[1][2], tmpl_exp1)
+        self._last_c16_scale = 2.0 ** (tmpl_exp + data_exp)     # tier-0 values / this = unscaled
+        self._last_c16_scale1 = 2.0 ** (tmpl_exp1 + data_exp1) if tier1_fp16 else 1.0
         # How a sparse result is read (_sparse_way): a paired choice per call shape, played on
         # this call (Choice.play) when the call is waited on; each way has its own record.
         handles = {}
 
         def run(way, layout=layout0):
             gate = False if use_direct else (self._gate_use(bands[1]) if len(bands) > 1 else None)
-            t1_extra = ((half1, ed1),) if half1 else ()
+            t1_extra = ((tier1_fp16, data_exp1),) if tier1_fp16 else ()
             key = ("hier", n, bands, nd, nt, nbins, layout, gate, feed, use_direct, way,
-                   rw_key is not None, ed, storage_key, *k0_extra, *t1_extra)
+                   rw_key is not None, data_exp, storage_key, *k0_extra, *t1_extra)
             table = self._exec_table()
             rec = table.get(key)
             fresh = rec is None
             if fresh:
-                rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
-                                        ed, dv, tv, data, tmpl, claim, k0s,
+                rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, tier0_fp16, feed,
+                                        way, row_tables, data_exp, data_view, tmpl_view, data,
+                                        tmpl, claim, k0s,
                                         use_direct=use_direct, cl_meta=cl_meta,
-                                        half1=half1, ed1=ed1)
+                                        tier1_fp16=tier1_fp16, data_exp1=data_exp1)
                 table[key] = rec
             self._cache_touch(key)
             self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
             # every way's record takes the call's inputs (a play runs each on this call)
             up = (True, True, *uploads[2:]) if fresh else uploads
-            self._hier_upload(rec, storage_key, up, data, tmpl, tiers, half, et, slot,
-                              cl_meta=cl_meta, half1=half1, et1=et1)
-            if rw is not None:
+            self._hier_upload(rec, storage_key, up, data, tmpl, tiers, tier0_fp16, tmpl_exp, slot,
+                              cl_meta=cl_meta, tier1_fp16=tier1_fp16, tmpl_exp1=tmpl_exp1)
+            if row_tables is not None:
                 # Every row-window table in one upload, each at its section (_hier_record).
                 span = (self._section_offset(rec.buffers, "rw0")
                         - self._section_offset(rec.buffers, "rw"))
-                tables = [np.ascontiguousarray(rw, np.uint32)] + [
-                    band_windows(rw, n, b, lag_pad=cl_lag_pad if j == 0 else 0)
+                tables = [np.ascontiguousarray(row_tables, np.uint32)] + [
+                    band_windows(row_tables, n, b, lag_pad=cl_lag_pad if j == 0 else 0)
                     for j, b in enumerate(bands)
                 ]
                 packed = np.zeros((len(tables), span // 4), np.uint32)
@@ -634,13 +636,16 @@ class HierOps:
                     packed[j, :t.size] = t.reshape(-1)
                 self._x_upload(rec.buffers["rws"], packed, slot)
 
-            binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
-                                     et, rw is not None, layout, claim, data, k0s,
+            binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2,
+                                     tier0_fp16, data_exp,
+                                     tmpl_exp, row_tables is not None, layout, claim, data, k0s,
                                      direct=direct if use_direct else None, cl_meta=cl_meta,
-                                     half1=half1, ed1=ed1, et1=et1)
+                                     tier1_fp16=tier1_fp16, data_exp1=data_exp1,
+                                     tmpl_exp1=tmpl_exp1)
             shape = (nd, nt, nbins)
             if handle_out is not None:
-                slots = self._call_slots(bands, half, sparse, use_direct=use_direct, half1=half1)
+                slots = self._call_slots(bands, tier0_fp16, sparse, use_direct=use_direct,
+                                         tier1_fp16=tier1_fp16)
                 handles[way] = (HierHandle(
                     key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
                     tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
@@ -657,10 +662,10 @@ class HierOps:
             handle_out.append(handles[way])
         return res
 
-    def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, half, et, slot,
-                     cl_meta=None, half1=False, et1=0):
+    def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, tier0_fp16, tmpl_exp, slot,
+                     cl_meta=None, tier1_fp16=False, tmpl_exp1=0):
         """Inputs found stale (_input_uploads): the spectra and templates where the record owns
-        them, and the tiers' templates -- each fp16 tier's packed at its 2^et -- always."""
+        them, and the tiers' templates -- each fp16 tier's packed at its 2^tmpl_exp -- always."""
         if uploads[0] and "data" in rec.owned:
             self._x_upload(rec.buffers["data"], np.ascontiguousarray(data, np.complex64), slot)
         if uploads[0]:
@@ -670,8 +675,8 @@ class HierOps:
                 self._x_upload(rec.buffers["tmpl"], np.ascontiguousarray(tmpl, np.complex64),
                                slot)
             for i, (_, ct, _) in enumerate(tiers):
-                use_half = (half if i == 0 else half1)
-                texp = et if i == 0 else et1
+                use_half = (tier0_fp16 if i == 0 else tier1_fp16)
+                texp = tmpl_exp if i == 0 else tmpl_exp1
                 self._x_upload(rec.buffers["ct%d" % i],
                                pack_half2(pow2_scaled(ct, texp)) if use_half
                                else np.ascontiguousarray(ct, np.complex64), slot)
@@ -680,10 +685,51 @@ class HierOps:
                 self._x_upload(rec.buffers["clmem"], cl_meta[2], slot)
             self._uploaded["tmpl"][storage_key] = uploads[3]
 
-    def _hier_record(self, key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw, ed, dv,
-                     tv, data, tmpl, claim, k0s=None, use_direct=False, cl_meta=None,
-                     half1=False, ed1=0):
-        """Buffers and the recording of one call shape (see the module docstring)."""
+    def _hier_record(self, key, n, tiers, nd, nt, nbins, layout, tier0_fp16, feed, way,
+                     row_tables, data_exp, data_view, tmpl_view, data, tmpl, claim, k0s=None,
+                     use_direct=False, cl_meta=None, tier1_fp16=False, data_exp1=0):
+        """Buffers and the recording of one call shape (see the module docstring).
+
+        Parameters
+        ----------
+        key : tuple
+            The call shape's key in the context's record table.
+        n : int
+            The fine transform length.
+        tiers : sequence of tuple
+            Per gate tier, (band, its templates, its raw threshold).
+        nd, nt, nbins : int
+            Data rows, templates and output bins of the call.
+        layout : tuple or None
+            The fp16 coarse kernel's layout at tier 0 (None when that tier is FP32).
+        tier0_fp16, tier1_fp16 : bool
+            Whether tier 0, and tier 1, run the fp16 coarse kernel.
+        feed : str
+            How the tiers read the data: "inplace", "pack", "tier0" or "bands".
+        way : str
+            How a sparse result is read back (the context's sparse way).
+        row_tables : ndarray or None
+            Per data row, the uint32 [lo, hi] window a grouped call narrows it to.
+        data_exp, data_exp1 : int
+            The power-of-two exponent applied to the data as fp16 tier 0, and tier 1, read it.
+        data_view, tmpl_view : object or None
+            The device's view of data and tmpl where they are shared arrays, else None.
+        data, tmpl : ndarray
+            The call's data and template spectra.
+        claim : object or None
+            The deferred forward of the data this call claimed, if any.
+        k0s : tuple of int, optional
+            Each tier's first bin (band offset). Default: 0 for every tier.
+        use_direct : bool, optional
+            Whether survivors are refined by direct time-domain correlation.
+        cl_meta : tuple, optional
+            The shared screeners' cluster tables for tier 0, when the tier runs them.
+
+        Returns
+        -------
+        Record
+            The recording, with its buffers.
+        """
         from ._coarse import coarse_launch
         from ._gpuexec import Arg, Record
         k0s = (0,) * len(tiers) if k0s is None else k0s
@@ -693,14 +739,14 @@ class HierOps:
         pairs0 = nd * nc
         pairs = nd * nt
         out = pairs * nbins
-        rowwin = rw is not None
-        cb0 = 4 if half else 8
-        cb1 = 4 if half1 else 8
-        t1_ppg = (1024 // bands[1]) if half1 else 0
-        t1_shift = ((2 * t1_ppg).bit_length() - 1) if half1 else 0
+        rowwin = row_tables is not None
+        cb0 = 4 if tier0_fp16 else 8
+        cb1 = 4 if tier1_fp16 else 8
+        t1_ppg = (1024 // bands[1]) if tier1_fp16 else 0
+        t1_shift = ((2 * t1_ppg).bit_length() - 1) if tier1_fp16 else 0
         align = max(16, int(self.storage_offset_alignment))
         count_step = max(32 if t1_shift else 16, align)
-        estimate = (sum(a.nbytes for a, v in ((data, dv), (tmpl, tv)) if v is None)
+        estimate = (sum(a.nbytes for a, v in ((data, data_view), (tmpl, tmpl_view)) if v is None)
                     + sum((cb0 * b * nc if i == 0 else cb1 * b * nt) for i, b in enumerate(bands))
                     + pairs0 * 12 + pairs * (4 + (16 if last else 0)) + out * 12 + 64
                     + ((nc + 1 + nt) * 4 if cl_meta is not None else 0)
@@ -709,11 +755,11 @@ class HierOps:
                        else 0)
                     + (out * 16 if way == "compact" else 0)
                     + (pairs * 4 + count_step if use_direct else 0))
-        self._exec_room(estimate, [v for v in (dv, tv) if v is not None])
+        self._exec_room(estimate, [v for v in (data_view, tmpl_view) if v is not None])
         rec = Record()
         buf = lambda name, nbytes, **kw: self._exec_buffer(rec, name, nbytes=nbytes, **kw)
-        bd = self._exec_buffer(rec, "data", dv, data.nbytes)
-        bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
+        bd = self._exec_buffer(rec, "data", data_view, data.nbytes)
+        bt = self._exec_buffer(rec, "tmpl", tmpl_view, tmpl.nbytes)
         for i, b in enumerate(bands):
             nti = nc if i == 0 else nt
             pi = pairs0 if i == 0 else pairs
@@ -794,28 +840,31 @@ class HierOps:
         if feed == "pack":
             # Each tier's band from the spectra: each fp16 tier's packed at its data scale.
             for i, b in enumerate(bands):
-                h = int((i == 0 and half) or (i == 1 and half1))
-                dexp = ed if i == 0 else ed1
+                h = int((i == 0 and tier0_fp16) or (i == 1 and tier1_fp16))
+                dexp = data_exp if i == 0 else data_exp1
                 lst.dispatch(self._x_kernel("pack", n), (nd * b + 255) // 256,
                              [bd, B["band%d" % i]],
                              (n, b, nd * b, h, _bits(2.0 ** dexp if h else 1.0), k0s[i]))
             lst.barrier()
             lst.stamp("pack")
+        def tier_exp(i):
+            """The data exponent fp16 tier i applies as it reads (0 for an FP32 tier)."""
+            if i == 0 and tier0_fp16:
+                return data_exp
+            return data_exp1 if (i == 1 and tier1_fp16) else 0
+
         # Tier inputs: (buffer, row stride in elements (0: the tier's own band), data scale
         # exponent applied as the tier reads it).
         if feed == "inplace":
-            src = [(bd, n, ed if (i == 0 and half) else (ed1 if (i == 1 and half1) else 0))
-                   for i in range(len(bands))]
+            src = [(bd, n, tier_exp(i)) for i in range(len(bands))]
         elif feed == "bands":
-            src = [(B["bands"], max(bands),
-                    ed if (i == 0 and half) else (ed1 if (i == 1 and half1) else 0))
-                   for i in range(len(bands))]
+            src = [(B["bands"], max(bands), tier_exp(i)) for i in range(len(bands))]
         else:                                   # tier0 or pack: the bands as written
             src = [(B["band0"], 0, 0)] + ([(B["band1"], 0, 0)] if last else [])
         for i, b in enumerate(bands):
             sbuf, stride, scale = src[i]
             if i == 0:
-                if half:
+                if tier0_fp16:
                     kern = self._coarse_kernel(b, layout, stride, scale, rowwin)
                     _, groups = coarse_launch(nd, nc, layout[1], layout[2], 0)
                 else:
@@ -833,7 +882,7 @@ class HierOps:
                     lst.dispatch(self._x_kernel("compact", n), (pairs + 255) // 256,
                                  [S("cval0"), S("surv0"), S("args0")], (Arg("compact0", 3),))
             else:
-                if half1:
+                if tier1_fp16:
                     kern = self._x_kernel("tier1_c16", b,
                                           dict(stride=stride, scale=scale, rowwin=rowwin, twt=1))
                     lst.listed(kern, S("t1args"), -(-pairs // (2 * t1_ppg)),
@@ -888,7 +937,7 @@ class HierOps:
             lst.stamp("peaks")
         # What the host reads: the counts, then the peaks as `way` reads them.
         lst.readback(counts, count_step * len(names))
-        if dv is not None and way != "rows":
+        if data_view is not None and way != "rows":
             # The survivors: the refine-block fraction every call on shared spectra notes.
             lst.readback(S(survs), pairs * 4)
         if way == "dense":
@@ -903,9 +952,9 @@ class HierOps:
         rec.native = lst.end()
         return rec
 
-    def _hier_binds(self, n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed, et,
-                    rowwin, layout, claim, data, k0s=None, direct=None, cl_meta=None,
-                    half1=False, ed1=0, et1=0):
+    def _hier_binds(self, n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, tier0_fp16,
+                    data_exp, tmpl_exp, rowwin, layout, claim, data, k0s=None, direct=None,
+                    cl_meta=None, tier1_fp16=False, data_exp1=0, tmpl_exp1=0):
         """The per-run words and bindings of a hier_peaks call."""
         from ._coarse import coarse_launch
         k0s = (0,) * len(tiers) if k0s is None else k0s
@@ -917,8 +966,8 @@ class HierOps:
         start = (lambda first: ROWWIN_ON) if rowwin else (lambda first: first)
         b0, _, thr0 = tiers[0]
         cs, ce, csp, csh = coarse_span(n, b0, lo, hi, lag_pad=lag_pad0)
-        thr0 = thr0 * (2.0 ** (et + ed) if half else 1.0)
-        if half:
+        thr0 = thr0 * (2.0 ** (tmpl_exp + data_exp) if tier0_fp16 else 1.0)
+        if tier0_fp16:
             slot_val, _ = coarse_launch(nd, nc, layout[1], layout[2], csp)
             gate_bits = (0 if (direct is not None and len(tiers) == 1)
                          else self._gate_bits(thr0, b0, layout))
@@ -927,7 +976,7 @@ class HierOps:
                                0 if len(tiers) > 1 else 1, gate_bits)
         else:
             binds["coarse"] = (nc, start(cs), ce, csp, csh & 0xFFFFFFFF, 1, 0)
-        pack_shift = ((2048 // tiers[1][0]).bit_length() - 1) if half1 else 0
+        pack_shift = ((2048 // tiers[1][0]).bit_length() - 1) if tier1_fp16 else 0
         if cl_meta is not None:
             binds["compact0"] = (pairs0, nc, nt, _bits(thr0), pack_shift)
         else:
@@ -935,8 +984,8 @@ class HierOps:
         if len(tiers) > 1:
             b1, _, thr1 = tiers[1]
             cs1, ce1, csp1, csh1 = coarse_span(n, b1, lo, hi)
-            if half1:
-                thr1 = thr1 * (2.0 ** (et1 + ed1))
+            if tier1_fp16:
+                thr1 = thr1 * (2.0 ** (tmpl_exp1 + data_exp1))
                 gate = False if direct is not None else self._gate_use(b1)
                 gate_bits1 = _bits(max(float(thr1), _TINY)) if gate else 0
                 binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF,
@@ -955,8 +1004,8 @@ class HierOps:
             binds["listed"] = (nser, code)
             b1 = tiers[1][0] if len(tiers) > 1 else 0
             k0_1 = k0s[1] if len(k0s) > 1 else 0
-            scale1 = _bits(2.0 ** ed1) if (len(tiers) > 1 and half1) else 0
-            binds["tier0"] = (nser, b0, b1, _bits(2.0 ** ed if half else 1.0),
+            scale1 = _bits(2.0 ** data_exp1) if (len(tiers) > 1 and tier1_fp16) else 0
+            binds["tier0"] = (nser, b0, b1, _bits(2.0 ** data_exp if tier0_fp16 else 1.0),
                               scale1, k0s[0], k0_1, code)
             binds["bands"] = (nser, max(b for b, _, _ in tiers), k0s[0], code)
             if direct is not None:
@@ -1058,18 +1107,18 @@ class HierOps:
                 and self._uploaded["tmpl"].get(h.storage) == h.tsig
                 and self._slot_values(h.slots) == h.values)
 
-    def _call_slots(self, bands, half, sparse, use_direct=False, half1=False):
+    def _call_slots(self, bands, tier0_fp16, sparse, use_direct=False, tier1_fp16=False):
         """The kernel slots a hier_peaks call over these bands consults: ((what, band,
         (default, alternative)), ...) (time_domain's device trial plays them)."""
         from ._gpuexec import SPARSE_WAYS
         out = []
-        if half:
+        if tier0_fp16:
             pair = self._kernel_pair("coarse", bands[0])
             if pair[1] is not None:
                 out.append(("coarse", bands[0], self._slot_labels("coarse", bands[0], pair)))
         can_gate1 = (not use_direct and len(bands) > 1
-                     and ((half1 and bands[1] // 16 <= self.subgroup_size)
-                          or (not half1 and self._shipped("tier1", bands[1])
+                     and ((tier1_fp16 and bands[1] // 16 <= self.subgroup_size)
+                          or (not tier1_fp16 and self._shipped("tier1", bands[1])
                               and self._shipped("tier1gate", bands[1]))))
         if can_gate1:
             pair = self._kernel_pair("gateway", bands[1])

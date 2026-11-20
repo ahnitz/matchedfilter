@@ -161,7 +161,7 @@ def test_plan_tier1_fp16_feeds_binds_and_slots(b1, want_half1, want_shift, inpla
         # Directly verify b1=64 packShift == 5 (2 * PPG = 32 pairs/WG).
         tiers_64 = ((32, h[:, :32], 0.35), (64, h[:, :64], 0.85))
         b64 = ctx._hier_binds(n, tiers_64, nd, nt, 1, 0, n, n, 11, 25.0, True, 0, 0, False,
-                              (32, 4, 2, True), None, d, half1=True, ed1=0, et1=0)
+                              (32, 4, 2, True), None, d, tier1_fp16=True, data_exp1=0, tmpl_exp1=0)
         assert b64["compact0"][-1] == 5
 
     if want_half1:
@@ -177,9 +177,9 @@ def test_plan_tier1_fp16_feeds_binds_and_slots(b1, want_half1, want_shift, inpla
         ctx._kernel_pair = lambda what, band: (("gate", "elect") if what == "gateway"
                                                else (((32, 2, 1, False), None)))
         assert ("gateway", b1_eff, ("gate", "elect")) in ctx._call_slots(
-            (b0, b1_eff), True, False, use_direct=False, half1=True)
+            (b0, b1_eff), True, False, use_direct=False, tier1_fp16=True)
         assert all(s[0] != "gateway" for s in ctx._call_slots(
-            (b0, b1_eff), True, False, use_direct=True, half1=True))
+            (b0, b1_eff), True, False, use_direct=True, tier1_fp16=True))
         if inplace:
             assert dict(tier_op[1][2])["stride"] == n
             assert dict(tier_op[1][2])["scale"] == ed1
@@ -226,12 +226,12 @@ def test_plan_tier1_fp16_narrow_subgroup_and_tier0_feed():
 
     rec_512 = ctx_t0._hier_record(
         ("t0", 512), n, tiers_512, nd, nt, 1, (32, 4, 2, True), True, "tier0", "dense", None,
-        0, d, h, d, h, claim, (64, 96), use_direct=True, half1=True, ed1=ed1)
+        0, d, h, d, h, claim, (64, 96), use_direct=True, tier1_fp16=True, data_exp1=ed1)
     assert rec_512.buffers["band1"].nbytes == nd * 512 * 4
     taps_stub = (series, 32, 0, 4, 4096)
     binds_512 = ctx_t0._hier_binds(
         n, tiers_512, nd, nt, 1, 0, n, n, 11, 25.0, True, 0, 0, False, (32, 4, 2, True),
-        claim, d, (64, 96), direct=taps_stub, half1=True, ed1=ed1, et1=et1)
+        claim, d, (64, 96), direct=taps_stub, tier1_fp16=True, data_exp1=ed1, tmpl_exp1=et1)
     assert len(binds_512["tier0"]) == 8
     assert binds_512["tier0"][4] == _gpuhier._bits(2.0 ** ed1)
     assert binds_512["tier0"][5:7] == (64, 96)
@@ -240,11 +240,11 @@ def test_plan_tier1_fp16_narrow_subgroup_and_tier0_feed():
 
     rec_1024 = ctx_t0._hier_record(
         ("t0", 1024), n, tiers_1024, nd, nt, 1, (32, 4, 2, True), True, "tier0", "dense", None,
-        0, d, h, d, h, claim, (64, 96), half1=False, ed1=0)
+        0, d, h, d, h, claim, (64, 96), tier1_fp16=False, data_exp1=0)
     assert rec_1024.buffers["band1"].nbytes == nd * 1024 * 8
     binds_1024 = ctx_t0._hier_binds(
         n, tiers_1024, nd, nt, 1, 0, n, n, 11, 25.0, True, 0, 0, False, (32, 4, 2, True),
-        claim, d, (64, 96), half1=False, ed1=0, et1=0)
+        claim, d, (64, 96), tier1_fp16=False, data_exp1=0, tmpl_exp1=0)
     assert binds_1024["tier0"][4] == 0
     assert _words(binds_512, rec_512.native[1])[0] == binds_512["tier0"]
 
@@ -313,11 +313,11 @@ def test_cuda_ptx_tier1_fp16_abi_and_codegen(monkeypatch):
                             layout, True, feed, "dense", rw_arr if use_rw else None,
                             ed0, bd, bt, data_arr, tmpl_arr, claim,
                             use_direct=use_direct, cl_meta=cl_meta if use_cl else None,
-                            half1=True, ed1=ed1)
+                            tier1_fp16=True, data_exp1=ed1)
                         binds = ctx._hier_binds(
                             n, tiers, nd, nt, 1, 0, n, n, 11, 25.0, True, ed0, et0, use_rw,
                             layout, claim, data_arr, direct=direct_arg,
-                            cl_meta=cl_meta if use_cl else None, half1=True, ed1=ed1, et1=et1)
+                            cl_meta=cl_meta if use_cl else None, tier1_fp16=True, data_exp1=ed1, tmpl_exp1=et1)
                         for block, at, fn_name, off in rec.native.args:
                             if off < 0:
                                 _cudacompute._pack_words(-off)(block, at, *binds[fn_name])
