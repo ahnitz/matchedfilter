@@ -1,13 +1,13 @@
 # The FP16 first gate on ARM NEON (src/gate16.cc)
 
-Written 2026-10-09 by the Metal track (phase 5). Machine: Mac mini, Apple M2 (empire). The gate
-is built only where Highway reports FP16 vector arithmetic on AArch64 (every Apple silicon
-core); x86 and other ARM builds compile stubs and run the FP32 path unchanged.
+The gate is built only where Highway reports FP16 vector arithmetic on AArch64 (every Apple
+silicon core); x86 and other ARM builds compile stubs and run the FP32 path unchanged. The
+measurements on this page were made on an Apple M2 (Mac mini).
 
 ## What and why
 
 The hierarchical filter's tier 0 correlates every (block, template) pair at its coarse band. On
-the M2 CPU fine stage it was the largest single cost (36% of samples). NEON runs an FP16 FMA on
+the M2 it was the fine stage's largest single cost (36% of samples). NEON runs an FP16 FMA on
 8 lanes in the time FP32 runs 4 (measured on one performance core: 143 against 72 GFLOP/s), and
 a gate only has to decide "maybe": every survivor is still refined exactly, in FP32.
 
@@ -40,16 +40,12 @@ The gate reports each pair's FP16 maximum over the searched window, its own stat
 hierarchical filter compares it with the tier threshold, as the GPU's fp16 tier and the x86
 Q15 screen do theirs. It tracks the FP32 maximum to a few u rms(y) (u = 2^-11; below). What
 that does to the search is the chain's false dismissal against the flat filter, measured by
-injection on Apple silicon (CI's macOS arm64 runner, 2026-10-30; `tools/fdr_audit.py --n 2048
-4096 --inj 20000`, 10 profiles x 4 chains, fd 1e-2): no case was off its plan, and the pooled
-dismissal was 1.041x the budget (+- 0.011 binomial), as the FP32 path's 1.036x on dev2 in the
-same audit.
+injection on Apple silicon (CI's macOS arm64 runner; `tools/fdr_audit.py --n 2048 4096 --inj
+20000`, 10 profiles x 4 chains, fd 1e-2): no case was off its plan, and the pooled dismissal
+was 1.041x the budget (+- 0.011 binomial), as the FP32 path's 1.036x on a Zen 5 in the same
+audit.
 
-Until then it reported an upper bound on the FP32 maximum, B = |y16(k')| (1 + 3u) + kappa u
-rms(y) with kappa = 16, so that it passed every pair the FP32 gate passed. The same audit put
-single-tier chains at bands 1024 and 2048 at 0.15-0.22x their plans: the bound passed pairs
-the plan never priced, and the refine did their work. The parts of that bound are still the
-gate's error model:
+The gate's error has two parts:
 
 - **(1 + 3u): choosing the lag on FP16 powers.** Each FP16 power is within a factor (1 ± u)^2
   of the FP16 transform's |y|^2 (one exact power-of-two scale, one product, one FMA), so the
@@ -66,11 +62,7 @@ normalised as
 
     e = (|y16|max  -  |y32|max) / (u rms)
 
-(measured 2026-10-09, when the gate added the bound's terms to this; e below is without
-kappa).
-
-**Transform error alone.** The earlier build scanned in FP32, so the lag choice was exact and
-B with kappa=0 was the plain |y16|max.
+**Transform error alone** (the lag chosen in FP32, so the lag choice adds nothing):
 
 | case | pairs | max \|e\| | note |
 |---|---|---|---|
@@ -79,68 +71,10 @@ B with kappa=0 was the plain |y16|max.
 | chain (64,256) | 479k | 8.16 | |
 | chain (1024) | 479k | 9.82 | |
 
-**The bound's build.** FP16 lag choice plus the (1+3u) factor; 638k pairs per case.
-
-| case | most negative e | mean e | 99.99% \|e\| |
-|---|---|---|---|
-| chain (256,512), seed 5 | -1.62 | +6.7 | 15.3 |
-| + transients, seed 3 | -1.87 | +6.8 | 26.1 |
-| + transients, seed 11 | -1.98 | +6.8 | 25.4 |
-| chain (64,256) | -1.90 | +5.9 | 13.7 |
-| chain (1024) | -1.30 | +7.5 | 16.8 |
-
-Positive e is slack: the bound sits above the FP32 maximum.
-
-**How much headroom kappa = 16 had** (the bound, until 2026-10-30)
-
-- The transform error alone never went beyond 12.9 u rms in about 2.9M pairs. The worst case
-  had loud transients and sat 7.1 standard deviations out.
-- With the (1+3u) factor, the bound's worst slack was -2 u rms, 14 units inside kappa.
-
-**What the bound's margin cost**
-
-- (1+3u) added 0.15% of the peak.
-- kappa u rms added 0.8% of rms, about 0.3% of a typical coarse maximum.
-- On the ladder neither moved the pass rate noticeably (fine_triggers 588 in both modes); the
-  audit by injection found the single-tier chains at bands 1024 and 2048 far below their
-  plans (above).
-
-The probability that the bound failed was below the measured resolution (0 in about 3.2M
-pairs).
-
-### Paired false-dismissal audit with the bound, 2026-10-09 (tools/verify_cascade_fdr.py)
-
-(The tool has since been folded into `tools/fdr_audit.py`.)
-
-Run with `--shapes all --injections 20000 --seed 42` in each mode. The figures are misses among
-about 11.5k ground-truth fine detections per shape; the budget is 0.1%, about 11.5 misses.
-
-| shape | single FP32 | single FP16 | cascade FP32 | cascade FP16 |
-|---|---|---|---|---|
-| inspiral_canonical | 15 | 13 | 16 | 16 |
-| aligo_o4_inspiral | 14 | 12 | 9 | 9 |
-| notched_lines | 14 | 12 | 6 | 6 |
-| bimodal_resonance | 22 | 21 | 15 | 14 |
-| bandpass_plateau | 8 | 7 | 7 | 7 |
-| skewed_edge | 3 | 2 | 2 | 2 |
-
-- **No shape got worse.** FP16 misses are at most the FP32 misses on every shape and tier, as
-  the superset argument requires. The few fewer misses are pairs the margin lets through.
-- **Two shapes are over budget in both modes.** inspiral_canonical's cascade and
-  bimodal_resonance's single tier and cascade miss more than about 11.5. The FP32 gate has
-  identical counts there, so this is a property of the thresholds and was not introduced here.
-
-### End-to-end check with the bound, 2026-10-09 (tools/gate16_check.py, ladder `--check`)
-
-- **Setup.** The realistic ladder ran on the CPU in one process, FP16 gate then FP32 gate, with
-  the same seed: bank3, H1 profiles, 1 top, 8 segments, warm-up 2.
-- **Calls.** 558 calls.
-- **max_snr_diff.** 0.0.
-- **Peaks found by only one mode.** 0 one-sided peaks in either direction (reference-only 0,
-  device-only 0).
-- **gate_margin_peaks.** 0.
-
-The refine is FP32 in both modes, so every peak is bit-identical.
+The transform error never went beyond 12.9 u rms in about 2.9M pairs; the worst case had
+loud transients. An earlier design reported an upper bound on the FP32 maximum in place of
+the gate's own statistic. It was removed because the bound passed pairs no plan priced:
+single-tier chains at bands 1024 and 2048 dismissed 0.15-0.22x their plans.
 
 ## Timing
 
@@ -156,50 +90,5 @@ segments.
 | FP32 | 9.95 s | 2.13e6 | 1.96e6 |
 | FP16 | 6.36 s | 3.34e6 | 2.93e6 |
 
-The FP16 gate makes the fine stage 1.56x faster and the whole search 1.49x faster.
-gate16_check repeated this independently: 6.29 s against 9.85 s.
-
-**Where the time goes now** (`sample`, 15 s of the FP16 fine stage):
-
-| function | samples |
-|---|---|
-| FP16 product and loader (codelet_prod_broadcast) | 2348 |
-| FP16 twiddle passes (codelet_tw) | 1733 |
-| ap_gate16_run (Parseval sums and window scan) | 1396 |
-| FP32 refine (codelet_prod) | 570 |
-| run_pairs_pooled_pb | 553 |
-| gather_template_batch | 503 |
-
-The scan fell from 1995 to 1396 samples with these changes:
-
-- Parseval in place of an FP32 pass over every lag.
-- The window maximum found in FP16.
-- Independent accumulator chains.
-
-The first FP16 rewrite was slower, at 2578 samples, because one FMA chain was bound by latency.
-
-## Not done / next
-
-- **The scan is still a third of the transform's cost.** Fusing the window scan into the
-  transform's final pass, so the outputs are not re-read, is the remaining lever.
-- **The over-budget shapes need threshold work.** inspiral_canonical and bimodal_resonance
-  exceed budget under both gates; that belongs to the threshold calibration, not to this gate.
-
-## Where the ARM CPU is parked (2026-10-13): ~960 ms per segment, 41.7%
-
-One M2 performance core, ladder bank3 / H1, steady segment, shared cost file:
-
-| stage | ms | roofline ms | what was measured |
-|---|---:|---:|---|
-| q15 screen b256 (int16) | 467 | 244 | 51% of the int16 peak; ~67% of SIMD issue: ~2.0 instructions per ALU op (16-point codelet keeps 32 vectors live: ~45 spill/fill per ~430), the int16 FFT is add-heavy (~8100 ALU ops vs 6500 FMA-equivalents per 8 pairs: ~80% of peak at perfect issue). Constant strides -1.5%; window max ~3%; data already broadcast across the 8 template lanes |
-| tier 1 b512 (fp32, pooled) | 138 | 48 | gathers on NEON 4x4 transposes |
-| tier 0 b256 behind the screen (fp32, pooled) | 102 | 32 | the FP16 gate over survivors is priced (q15-tier0) and loses: 1190 vs 833 ticks per pair (template gathers) |
-| middle (vDSP, priced corr-pfft) | ~86 | 39 | vDSP 103 vs 169 us per pair at n=65536 |
-| forward (vDSP, priced cpu-fft) | ~85 | 25 | vDSP 4.0 vs 7.0 us per 2048-point block |
-| refine + follow-ups | ~55 | ~16 | |
-| tier 2 b1024 | 25 | 9 | |
-
-FP16 gate alone (no screen): 589 ms (max-only scan; was 634), behind the screen + FP32
-tier 0 (569 ms), so the Q15 trial keeps the screen. Not built: an 8x8x4 Q15 factorisation
-to remove the spills (an extra memory pass of about the spills' traffic; a few percent).
-Reaching 50% (~800 ms) would need a cheaper screen algorithm, not a better kernel.
+On this workload the FP16 gate made the fine stage 1.56x faster and the whole search 1.49x
+faster. `tools/gate16_check.py` repeated it independently: 6.29 s against 9.85 s.

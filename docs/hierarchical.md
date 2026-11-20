@@ -104,7 +104,7 @@ list is required; do not use `f=1` as a zero-dismissal guarantee.
 The model runs at plan preparation, not in the filtering loop. Its
 simulations, draws and plans are cached by entry count (least recently used
 first) and shared by profiles that agree in shape and in each band's signal
-response (`gatechain._similar_get`). Tighter budgets need more signal draws:
+response (`_gatedraws._similar_get`). Tighter budgets need more signal draws:
 2 (round(j / fd) - 1) detections, j about 48 set by the per-plan tail bound
 (`gatemodel._nsamp_for`, `fit_order`): 9,398 at .01, 95,998 at .001, 959,998 at
 .0001. Requests below the available resolution (fd under 5.5e-5) refuse rather

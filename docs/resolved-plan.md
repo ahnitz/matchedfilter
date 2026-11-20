@@ -63,7 +63,7 @@ instance's `use_arm` and `lock_arm`, outside the `_Resolved` record.
 
 **Known caveat:**
 - `chain_thresholds` reuses a cached result for a profile that agrees with an earlier one
-  in shape (cosine) and in every band's signal response (`gatechain._similar_get`). A
+  in shape (cosine) and in every band's signal response (`_gatedraws._similar_get`). A
   process's thresholds can therefore depend on which profiles it saw first.
 - `_resolve` keys on the profile it is given. E6 added no persisted record of the resolved
   plan, since no divergence remained to need one; one would be the fix if a divergence

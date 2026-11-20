@@ -42,12 +42,12 @@ the tree before the first release. They remain in the repository history at the 
   models, and what checks them.
 - [The CPU direct refine](cpu-direct-refine.md): refining survivors by direct correlation
   near the coarse peak, and when it does not apply.
-- [Q15 coarse screen](cpu-q15-gate.md): the x86 first tier in int16, with its measurements
-  since 2026-10-09.
+- [Q15 coarse screen](cpu-q15-gate.md): the x86 first tiers in int16: how they gate, how they are
+  chosen, and what was measured.
 - [FP16 first gate on ARM NEON](cpu-neon-fp16-gate.md): the ARM first tier in half
-  precision, with its 2026-10-09 measurements.
+  precision: its statistic, error model and timing.
 - [Hierarchical search design](hierarchical-search-design.md): `search.HierarchicalSearch`;
-  phase 1 is implemented, later phases are proposals (status 2026-10-17).
+  what is implemented, and the later phases that are proposals.
 
 ## Development
 

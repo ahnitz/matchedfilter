@@ -1,258 +1,126 @@
 # Q15 coarse screen (x86 CPU first tier)
 
-Replaces `src/int16_coarse.h` / `MF_COARSE_INT16` (AVX2-only, N 256/512, 8 int16
-lanes in a `__m128i`, so no lane advantage over float; its conj sign had been
-fixed, its 0.55% error was never budgeted).
+On x86 the first tiers of a hierarchical chain can run in 16-bit fixed point (Q15) instead
+of FP32. An int16 vector holds twice the lanes of a float one, so a call screens 16 pairs
+on AVX2 and 32 on AVX-512. This page describes the screen, how it gates, how it is chosen
+and what was measured. [Reduced-precision gates](reduced-precision-gates.md) states the
+error model it shares with the FP16 gate on ARM.
 
 ## What it is
 
-`src/q15-inl.h` + generated `src/codelets-q15-inl.h` (`src/gen_q15.py`): the
-pair-batched coarse transform of conj(d*t) in int16 Q15, split-radix codelets,
-four-step N = M1*M2 for N = 64..1024, Highway-generic with **twice the float
-lane count** (16 pairs on AVX2, 32 on AVX-512BW). Inputs are quantised once per
-template and once per data block (`matchfilt.c`) so that
-`|d_q|_2 |t_q|_2 / 2^15 + 1.5N <= 30000`, which bounds every intermediate (each
-is a unit-weight partial sum of products, and the codelets scale each component
-before adding, so no sum of re and im forms first). The transform's adds therefore
-wrap: within the contract they equal saturating adds bit for bit, and are cheaper
-(Zen 5: 72.7 to 69.2 TSC ticks per pair at N = 256). The final |z|^2 sum saturates.
+`src/q15-inl.h` with the generated `src/codelets-q15-inl.h` (`src/gen_q15.py`) is the
+pair-batched coarse transform of conj(d t) in int16 Q15: split-radix codelets and a
+four-step N = M1 M2 transform for N = 64 to 1024, generic over Highway targets.
 
-For partial AVX-512 N256 template groups, tail packing
-uses the spare lanes for additional data blocks with the same search window.
-Each useful lane retains the original quantized operands and arithmetic.
+Inputs are quantised once per template and once per data block (`matchfilt.c`) so that
+`|d_q|_2 |t_q|_2 / 2^15 + 1.5 N <= 30000`. That bounds every intermediate: each is a
+unit-weight partial sum of products, and the codelets scale each component before adding.
+The transform's adds therefore wrap; within the bound they equal saturating adds bit for
+bit and cost less (Zen 5: 72.7 to 69.2 TSC ticks per pair at N = 256). The final |z|^2 sum
+saturates.
 
-**Since 2026-10-22 the screen is the first tier itself** (`hmf.c`,
-[reduced-precision-gates.md](reduced-precision-gates.md)): a pair passes when its
-int16 maximum reaches the tier's threshold, with no margin and no float run of the
-tier behind it. Survivors' peaks are still refined exactly. What it answers to is
-the chain's false-dismissal budget against the flat filter, as every tier does.
+For partial AVX-512 template groups at N = 256, tail packing uses the spare lanes for
+further data blocks with the same search window. Each lane keeps its own quantised operands
+and arithmetic (`tests/test_q15_tail_packing.py`).
 
-**The tiers between the first and the last gate the same way on their survivor lists**
-(`ap_mf_q15_pairs`, `q15_screen_perm`). A batch takes its lanes from one slab of QW data
-blocks and two adjacent groups of QW templates. Inside the product codelets (`*_prod_perm`),
-each lane's operands are looked up in vectors the screen already has: the templates' own
-prepacked groups, and each block's data laid out across its slab (built eight blocks at a
-time, `q15_slab8`). There is no gather pass, and a lane's maximum is bit-identical to the one
-the dense screen gives the same pair (`tests/test_q15_pairs.py`). The last tier stays FP32,
-because the direct refine reads its coarse lag. On the production replica (n = 2048,
-256/512/1024) tier 1 costs 509 ticks per input against 753 for FP32 (-32%), and the gated
-work drops 8.8%.
+## How it gates
 
-Before that it was a **screen in front of the float tier**: a pair was rejected only
-if its int16 maximum plus the error margin stayed below the tier threshold, and
-every other pair was re-run by the float tier, so survivors, peaks and triggers were
-the float path's. The sections below describe that design and its measurements;
-the margin still applies to `ap_mf_q15_screen` called on its own
-(`ap_mf_set_q15_margin`).
+**The screen is the first tier itself** (`hmf.c`). A pair passes when its int16 maximum
+reaches the tier's threshold. There is no margin and no float run of the tier behind it.
+Survivors' peaks are still refined exactly. Like every tier, the screen answers to the
+chain's false-dismissal budget against the flat filter.
 
-## Accuracy evidence
+**The tiers between the first and the last gate the same way, on their survivor lists**
+(`ap_mf_q15_pairs`, `q15_screen_perm`). A batch takes its lanes from one slab of data
+blocks and two adjacent groups of templates. Inside the product codelets each lane's
+operands are looked up in vectors the screen already holds: the templates' prepacked
+groups, and each block's data laid out across its slab (`q15_slab8`). There is no gather
+pass, and a lane's maximum is bit-identical to the one the dense screen gives the same pair
+(`tests/test_q15_pairs.py`).
 
-* Error of the screen statistic vs float64, in Q units, 40,960 pairs per N
-  (noise data; random and ladder-profile-shaped templates):
+The last tier stays FP32, because the direct refine reads its coarse lag.
 
-  | N | rms | max | margin 5 sqrt(N) |
-  |---|---|---|---|
-  | 64 | 3.71 | 17.2 | 40 |
-  | 128 | 5.29 | 24.5 | 57 |
-  | 256 | 7.32 | 32.1 | 80 |
-  | 512 | 10.34 | 46.3 | 113 |
-  | 1024 | 14.34 | 60.7 | 160 |
+`ap_mf_q15_screen` called on its own, outside a chain, rejects a pair only if its int16
+maximum plus a margin of 5 sqrt(N) stays below the threshold (`ap_mf_set_q15_margin`).
 
-  rms = 0.46 sqrt(N) (sum of independent Q15 roundings); max seen 4.6 rms. The
-  margin is ~10.7 rms, derived from the rms, not swept against pass/fail. A
-  first provisional margin of 2 sqrt(N) was found *too small* by this
-  measurement (max/margin 1.0-1.08) and replaced.
-* The mag^2 estimate's own rounding (+1 LSB) and the float tier's (1e-4 rel.)
-  are added on the conservative side in `ap_mf_q15_screen`.
-* Because survivors are re-run in float, the false-dismissal budget is the
-  float chain's; it adds dismissals only if a Q15 error exceeds 10.7 rms.
-  Caveat: the margin is statistical (roundings modelled independent); a
-  worst-case deterministic bound (~N LSB) is too loose to use. Adversarially
-  constructed inputs could in principle exceed it; noise-dominated data cannot
-  in any practical sense.
-* Tests (`tests/test_coarse_q15.py`): no pair with float max >= thr is ever
-  rejected (N 64..1024, injections, partial windows/lane groups); hierarchical
-  results bit-identical with the screen on/off for chains (256,), (512,),
-  (128, 512). On the ladder, fine triggers identical (490) on/off at a fixed chain.
+## Accuracy
+
+Error of the screen's statistic against float64, in Q units, over 40,960 pairs per N (noise
+data; random and profile-shaped templates):
+
+| N | rms | max | 5 sqrt(N) |
+|---|---|---|---|
+| 64 | 3.71 | 17.2 | 40 |
+| 128 | 5.29 | 24.5 | 57 |
+| 256 | 7.32 | 32.1 | 80 |
+| 512 | 10.34 | 46.3 | 113 |
+| 1024 | 14.34 | 60.7 | 160 |
+
+The rms is 0.46 sqrt(N), a sum of independent Q15 roundings, and the largest error seen is
+4.6 rms. The error does not grow with the peak: it is 0.44 to 0.47 sqrt(N) for noise,
+profile-shaped inputs, injections reaching 29,000 LSB, loud transients and full-scale
+inputs alike.
+
+In a chain the screen's error is part of the statistic the gate model's thresholds are
+judged on: `tools/fdr_audit.py --q15` measures every profile and chain against the flat
+filter by injection, and the merge gate runs it. The standalone margin of 5 sqrt(N) is 10.7
+rms. A tighter 3.12 sqrt(N) was tried and rejected: the worst error used up to 0.63 of it,
+and it changed the fine stage's time by less than run-to-run noise.
 
 ## Selection
 
-The screen is one dimension of the joint trial (`_trial`): its arms `q15=1` and `q15=0` run beside the block-size arms, in the same paired
-rounds. Each plan's chain is the cost model's under every arm; the chain is not an arm.
-Each arm gets an untimed settling run, followed by one timed run, on identical input; the
-arm order reverses on the next round. Decisions use paired ratios to the default
-(the cost model's screen setting for each plan's chain), so a large group is not compared
-with a small group's cost per pair. There are at least `MF_TRIAL_ROUNDS` complete rounds
-(five by default), and at most twice that many. A challenger needs at least 75% of the rounds
-to beat the default by more than the 5% tie margin, and must then win again in fresh rounds
-alone against the default. An unresolved contest at the cap keeps the default; this is an
-uncertainty fallback, not proof of a win.
+The screen is one dimension of the joint trial (`_trial`): its arms `q15=1` and `q15=0`
+run beside the block-size arms, in the same paired rounds. Each plan's chain is the cost
+model's under every arm; the chain is not an arm. The default is the cost model's screen
+setting for each plan's chain (`CostModel.first_tier`), and decisions use paired ratios to
+it. A challenger must beat the default by more than the 5% tie margin in at least 75% of
+the rounds, and then win again in fresh rounds alone against the default. An unresolved
+contest at the cap of rounds keeps the default.
 
-Each pass's lock, with its arms' medians, persists in `MF_COST_FILE`; the rounds of an open
-pass do not. `MF_AUTOTUNE=0` retains the cost-model screen choice. Availability follows the backend (`ap_q15_lanes`).
-Replayed calls count as calibration work, including in native work counters.
+`MF_AUTOTUNE=0` keeps the cost model's choice. Each pass's lock persists in `MF_COST_FILE`.
+The screen is available where the back end has it (`ap_q15_lanes`).
 
-## Measured (ladder, test27 bank + H1 profiles, 1 top x 6 segments, steady, pinned)
+For the model's choice, `calibrate_costs` measures per band the screen alone, the pairs it
+passes at a calibration density, and what each pass costs beyond the screen (compaction).
+The model prices the screen at every band from 64 to 1024 and every chain.
 
-dev1 (Ryzen 9 5950X, AVX2, load < 1), 3 interleaved reps, autotune on:
-fine 3.24-3.25 s -> 2.73-2.74 s (**1.19x**); trial locks q15=True every time
-(1.95e-7 -> 1.63e-7 s/pair). Tier 0 (band 256): 437 -> 330 cycles/pair; the
-screen 288 cycles/pair; 6.8% of pairs re-run in float (float tier passes 4.5%).
-Standalone kernel (dev2 Zen 5, loaded): 1.6-2.3x over the float pair kernel.
+## The window maximum inside the last pass
 
-### All hosts (2026-10-09, base = main 46fe361 before the screen, steady fine stage, 2 interleaved reps each)
+The four-step screen's second pass can take the window maximum itself (`qsr{8,16,32}_twmax`
+in `gen_q15.py`) rather than store its outputs for a third loop to read. The statistic is
+bit-identical either way. Fusing pays only when the batch's working set overflows the L1
+data cache and the register file can hold the extra live values without spilling:
 
-| host | CPU | base | screen | gain | note |
-|---|---|---|---|---|---|
-| dev1 | Ryzen 9 5950X (Zen 3, AVX2) | 3.24 s | 2.73 s | 1.19x | load < 1 |
-| dev3 | Ryzen 5 5500U (Zen 2, AVX2) | 4.49-4.51 s | 3.93-3.94 s | 1.14x | load < 1 |
-| dev4 | i5-13500H (Raptor Lake P-core, AVX2) | 2.84-2.85 s | 2.63 s | 1.08x | load < 1 |
-| haswell | Xeon E5-2698 v3 | 11.24-11.49 s | 9.15-9.48 s | 1.22x | shared node, load ~38/64 |
-| dev2 | Ryzen AI Max+ 395 (Zen 5, AVX-512) | -- | -- | -- | load 20-40 all day; only the standalone kernel figure above |
+| Machine, target | Batch working set / L1D | Vector registers | Fused against separate |
+|---|---|---|---|
+| Zen 5, AVX-512 (32 lanes) | 67 KB / 48 KB | 32 | fewer cycles |
+| Apple M2, NEON | fits in 128 KB | 32 | slower |
+| Zen 3, AVX2 (16 lanes) | 33 KB / 32 KB | 16 | 11% slower (spills) |
 
-Fine triggers identical with and without the screen on every host. The trial chose the screen on every run.
-Warm-up grows 5-18 s, from the screen's cost calibration plus its trials (calibration only runs once per process, or is
-read from MF_COST_FILE).
+The dispatch in `src/q15-inl.h` therefore depends on the target's lane count and on the
+batch's working set (`ap_q15_batch_bytes`) against the L1 size the OS reports
+(`ap_l1d_bytes`).
 
-### Pricing (MF_AUTOTUNE=0)
+For a window containing `[32, 224)` at N = 256, every 16-point row includes output indices
+2 to 13. The generated `qsr16_twmax_middle` reduces those twelve without tests and keeps
+four edge tests for the exact clipped window; other windows use the general codelet. On
+Zen 5 (AVX-512, one core, 32 data blocks, window `[20, 236)`) this took about 2% fewer
+cycles per pair, and about 3% off the screen's time on a production-shaped ladder.
 
-`calibrate_costs` also measures, per band with a screen: the screen alone (threshold
-unreachable), the pairs it passes at a calibration density (as the tier's gate it passes
-the tier's pairs, an excess of 1), and what each pass costs beyond the screen itself
-(compaction). `CostModel.first_tier` picks the cheaper first tier; `choose_chain` records
-the choice and a plan built with autotune off uses it. With autotune on, the joint trial's
-on/off arms still decide. Cost files written by a build without the screen are keyed apart
-(`,q15`).
+## Measured gains
 
-### In-situ gap: none on AVX2
+Production ladder (one top template, six segments, steady fine stage), the screen in front
+of the float tier as first introduced, 2026-10-09:
 
-The 1.6-2.3x was the Zen 5 / AVX-512 standalone figure. On dev1 (AVX2) the standalone
-kernel at the in-situ shape (32 blocks x 343 templates, band 256, window from n/4)
-is 1.52-1.58x, against 437/288 = 1.52x in situ, so nothing is lost in the
-integration. Two attempts to go further were measured and are not kept:
-* fusing the window maximum into pass 2 (no store of pass-2 outputs): the screen got
-  slower in situ, 288 -> 373 cycles/pair on dev1 (the per-output mask branch and the
-  extra live registers in a 16-register file);
-* other factorisations (256 = 8x32 / 32x8, 512 = 16x32): within +-3% of 16x16 / 32x16.
-The per-pair threshold work is a vectorised per-lane computation, one per (template
-group, block); it is not significant next to ~4.5K cycles per 16-lane call.
-
-### Where the fine stage goes now (dev1, screen on)
-
-Tier 0 (band 256) is 330 of ~420 cycles/pair: the screen 288, plus the float re-run of
-6.5% of pairs (the float tier itself passes 4.5%). Tier 1 is 76, tier 2 14, refine 2.
-The middle stage (correlation) is 0.39 s against 2.73 s. The next x86 lever is still
-the first tier, not refine or forward: (a) the screen kernel's op count on AVX2
-(split-radix int16 at ~4.4K cycles per 16-lane 256-point call), (b) the recheck excess
-(2 points of the 6.5%, ~9% of tier 0) that a smaller derived margin would cut, and (c)
-a cheaper 128-band screened first tier, which the model now prices.
-
-## Fused window maximum: when a pass's working set leaves L1 (2026-10-13)
-
-The four-step screen's pass 2 used to write every output back to its scratch and a third
-loop re-read the scratch for the window maximum. `qsr{8,16,32}_twmax` (gen_q15.py) take the
-maximum inside pass 2 instead; same Q_MUL squares, so the statistic is bit-identical.
-
-Counters (tools/perf_counters.py), N = 256, the ladder's band:
-
-| machine, target | batch working set / L1D | vector regs | IPC, L1 miss (separate) | fused vs separate |
+| Host | CPU | Without | With | Gain |
 |---|---|---|---|---|
-| Zen 5, AVX-512 (32 lanes) | 67 KB / 48 KB | 32 | 1.4-2.7, 28-30% | 12-32% fewer cycles |
-| Apple M2, NEON | fits / 128 KB | 32 | -- | +51 ms/segment (slower; ARM agent) |
-| Zen 3, AVX2 (16 lanes) | 33 KB / 32 KB | 16 | 3.5, 7% | 11% slower (IPC 3.5 -> 3.0: spills) |
+| dev1 | Ryzen 9 5950X (Zen 3, AVX2) | 3.24 s | 2.73 s | 1.19x |
+| dev3 | Ryzen 5 5500U (Zen 2, AVX2) | 4.49-4.51 s | 3.93-3.94 s | 1.14x |
+| dev4 | i5-13500H (P-core, AVX2) | 2.84-2.85 s | 2.63 s | 1.08x |
+| haswell | Xeon E5-2698 v3 (shared node) | 11.24-11.49 s | 9.15-9.48 s | 1.22x |
 
-**Transferable rule:** fusing a reduction into a transform's last pass pays only when the
-batch's working set overflows L1D *and* the register file can hold the extra live values
-without spilling. Neither condition alone decides: the M2 has the registers but nothing to
-save; Zen 3 overflows (barely, 7% misses) but spills. The selection computes the working
-set from N, the lanes and the template group (`ap_q15_batch_bytes`), compares it with L1D
-from the OS (`ap_l1d_bytes`: sysconf, sysfs, sysctl), and compiles the fused codelets only
-on 32-register targets (`AP_Q15_VREGS32`). With L1D unknown, the 512-bit width stands in.
+Since then the screen became the tier's own gate and the middle tiers gained it. On the
+production replica (n = 2048, chain 256/512/1024) a Q15 second tier costs 509 ticks per
+input against 753 for FP32, and the gated work drops 8.8%.
 
-### N = 256 fixed-stride routing and broad windows
-
-The N = 256 fixed-stride branch bypassed the selection above and always ran a separate
-pass 2 and maximum. The earlier N = 256 fused measurements therefore did not describe
-the committed dispatch. Pass 1 now keeps its constant strides while pass 2 reaches the
-same cache/register policy; AVX2 and SSE4 retain the separate maximum.
-
-For a window containing `[32, 224)`, every 16-point row includes output indices 2..13.
-The generated `qsr16_twmax_middle` reduces those twelve outputs without tests, retaining
-four edge tests for the exact clipped window. Other windows use the general codelet.
-This covers the ladder's actual coarse windows (starts 17..23, ends 232..238), rather
-than assuming its valid region starts at N/4.
-
-Against ff5911cd on a Ryzen AI Max+ 395 (Zen 5), AVX3 pinned to one core, warm Q15
-calls with 32 data blocks, 80/128/254 templates and window `[20, 236)` improved
-1.015–1.031x over nine alternating rounds. A paired counter run at 128 templates
-measured about 2% fewer cycles (median 126.0 to 122.6 per pair) and fewer instructions
-(498.3 to 439.1); L1 misses were essentially unchanged. On a representative ladder workload
-(synthetic PSD-colored data with real bank/profiles, cap 401, one top bank [id 4],
-4698 fine templates across 27 middle banks, chain 256/512/1024, Q15 enabled), screen time
-fell from 136.16/138.44 to 132.19/134.15 ms per segment, about 3%. The larger historical
-12–32% figure above was not reproduced against the fixed-stride baseline.
-
-The fixed-point arithmetic and `5 sqrt(N)` margin are unchanged. Before/after screen
-statistics and decisions matched bit for bit across N = 64..1024, full/clipped/single-lag
-windows and partial lane groups on AVX3, AVX2 and SSE4. The window regression in
-`tests/test_coarse_q15.py` also compares each clipped maximum with the maximum of its
-individual single-lag statistics, including the specialized dispatch boundaries.
-
-## Margin: 5 sqrt(N) kept; a tighter Gaussian-tail margin rejected (2026-10-09)
-
-A 3.12 sqrt(N) margin was derived from a 4e-11 Gaussian tail (rms 0.46-0.47 sqrt(N),
-tails Gaussian to 4 rms on 307k noise pairs). Checked against the merge gate
-(`tools/gate_margin.py`, criterion margin use < 0.5) and against 10k pairs per input
-family (noise, profile, injection, loud transient, full scale; N = 128..1024):
-
-* the error does not grow with the peak: rms 0.44-0.47 sqrt(N) in every family,
-  including injections whose peaks reach 29000 LSB -- no peak-proportional term is
-  needed, unlike the fp16 gate whose rounding is relative;
-* but the worst error seen is 3.2-4.2 rms per family (4.6 in 307k pairs), so 3.12 sqrt(N)
-  (6.6 rms) is used up to 0.63 -- it fails the 2x-headroom rule; the gate needs
-  > ~9.2 rms = 4.3 sqrt(N);
-* and it bought nothing measurable: screen pass rate 6.5% -> 5.8%, fine stage
-  2.73 -> 2.70-2.72 s on dev1, inside run-to-run noise.
-
-So the margin stays 5 sqrt(N) (10.7 rms). Harness, all families, N = 64..1024: 0
-dismissals, margin use max 0.31.
-
-## Band-128 screened first tier
-
-Already a candidate: the model prices the screen at every band 64..1024 and every chain.
-On the ladder workload it ranks (256,512,1024) first (416 vs 434/457 ticks for the next
-two), and no 128-first chain reaches the top six, screened or not; the trials agree.
-
-## dev2
-
-Load stayed high most of the day; one window at load ~8: base 1.71 s -> 1.49 s (1.15x).
-A second rep was invalidated by load rising to 18.
-
-## Pricing a bounding first tier on the GPU (gatechain, 2026-10-09)
-
-Since then: from 2026-10-19 every GPU backend's coarse tier reports the bound and one
-switch covers them all (`gatechain._RAW_GATE_SWITCH`); from 2026-10-22 that switch is
-`MF_COARSE_RAW=1` (what `MF_VK_C16_BOUND=0` did); from 2026-10-27 GPU cost-model keys also
-name the sparse fit (`_calibration.calibrate_costs_gpu`). The record below is as written
-on 2026-10-09.
-
-A first tier that reports an upper bound of the FP32 statistic (Vulkan fp16 coarse with
-`MF_VK_C16_BOUND`) passes a superset of the pairs
-the gate model's noise draws assume; the extra pairs go straight to the next stage. That is
-safe but was unpriced. Now, backend-neutrally:
-
-* `_RAW_GATE_SWITCH` maps a GPU backend to the switch that makes its first tier report the
-  raw statistic, and a gate kind (`c16b` for Vulkan). A backend whose kernel gains a bound
-  adds a row; Metal and CUDA have none yet, so they price as before (`f32`).
-* `calibrate_costs_gpu` measures, per band, the refined-pair count at thresholds placed at
-  the calibration densities with the raw gate (in a child process: the switch is baked into
-  pipelines and recorded command buffers, so it cannot be flipped within a context), and
-  the bounded gate's count at the same thresholds: `CostModel.excess[b]`.
-* `CostModel.chain_cost` scales the first stage after tier 0 by `pass_excess(b, reach)`.
-  Later tiers are not scaled: the extra pairs sit just under the gate, and a later tier
-  rejects them at its modelled rate or better.
-* Cost files are keyed by gate kind (`gpu,n,device,c16b`), so a model measured without the
-  bound is not reused for one with it.
-
-Measured on the 8060S (n = 2048): bounded / raw pass rate 1.06-1.09 at 1% density and
-1.04-1.07 at 10%, rising with band (64 -> 1024). Calibration grows by about 2 s per n.
+These are observations on those machines and that workload, not a promise for others.

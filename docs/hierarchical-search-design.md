@@ -1,8 +1,10 @@
 # Hierarchical search: design
 
-Status: phase 1 implemented (python/matchedfilter/search.py, root stage in C:
-ap_root_real) and used by pycbc_inspiral_fir, 2026-10-17. Phases 2 and 3 are
-proposals; "Next" lists what is planned now.
+Status: phase 1 is implemented (`python/matchedfilter/search.py`; the root stage in C,
+`ap_root_real`) and used by `pycbc_inspiral_fir`. Of phase 3, a chunk's leaf searches run
+as one batch (`TimeDomainFilterBank.filter_series_many`, and with their middle
+correlations `correlate_and_filter_many`). Phase 2, the rest of phase 3 and the per-call
+leaf threshold below are proposals, not implemented.
 
 ## Why
 
@@ -223,7 +225,7 @@ the buffer bookkeeping are removed.
    several roots in flight within the budget, the root stage on the device
    so the whole chain stays resident.
 
-## Next (planned 2026-10-17)
+## Proposed: a per-call leaf threshold
 
 **Per-call leaf threshold from the envelope.** Today every leaf call gates at
 T * envelope_floor, a bound for the whole run (pycbc: 1 / rf_max from the variance
@@ -242,15 +244,6 @@ below it.
   floor; with pycbc's default (floor 1, e >= 1) only loud stretches gain.
 - Validation: identical peaks with and without, at floors 1 and 0.5, and the
   envelope tests; fine-stage time with a boosting envelope.
-
-**Open from the 2026-10-17 comparison** (phase 1 against the pre-search code; the
-cleanups changed none of them):
-- fine stage about 1% slower on dev1 and dev2; cause not yet measured;
-- chisq + follow-up about 10% slower (about 0.6% of steady time); cause not measured;
-- cold start: a bank whose 4096 price lands within TIE of 2048 also prices 8192, an
-  ~11 s calibration on dev1 for a size that does not win (gatechain.price_block_sizes).
-- GPU (dev2, chain pinned): steady fine about 10-15% slower than the pre-search code
-  (GPU rates vary about 15% run to run); cause not measured.
 
 ## Open questions
 

@@ -1,15 +1,10 @@
 # Architecture
 
-This page describes the library as it is at revision `33e22fa7` (2026-10-27): what the
-public API is, how the code is layered, and the models and measured choices that decide
-what a hierarchical call runs. Every statement names the module or function it describes,
-so it can be checked against the code. Where the code and this page disagree, the code is
-right and this page needs fixing. The dated documents in this directory record how the
-design got here; [the index](README.md) separates them from the reference pages.
-
-Several parts are being changed in parallel with this page: import cleanup, the
-environment switches, the GPU cost model and the simulation kernel. The sections on them
-describe the concepts and link to the code rather than restating internals.
+This page describes the library as it is: what the public API is, how the code is
+layered, and the models and measured choices that decide what a hierarchical call runs.
+Every statement names the module or function it describes, so it can be checked against
+the code. Where the code and this page disagree, the code is right and this page needs
+fixing.
 
 ## Public API
 
@@ -56,16 +51,18 @@ import; its allowlist (`UPWARD`) has been empty since 2026-10-22. From the botto
 | extension | `_core`, the compiled C extension, below every Python module |
 | foundation | `_config` (environment registry), `_choice` (measured choices), `_settings` (tunable dimensions), `_costfile` (`MF_COST_FILE`), `_results`, `_windows`, `_gpu_cache`, `_gputime`, `_coarse`, `_shared`, `_kernel_id`, `_execution_policy` |
 | platform | `device`, `_vulkan`, `_cuda`, `_metal` (enumeration only), `_vksubgroup` |
-| models | `gatemodel`, `gatechain` (gate model, chain planning, cost model), `_chains`, `_prices`, `_trial` |
+| models | `gatemodel` (the two-tier gate), `_gatedraws` (the draws a plan rests on), `_costmodel` (the cost model), `gatechain` (chain planning), `_screeners` (shared screeners), `_signal_law`, `_chains`, `_prices`, `_trial` |
 | gpu host | `_gpuhost`, `_gpuhier`, `_gpuexec` |
 | backends | `_vkcompute`, `_cudacompute`, `_mtlcompute` |
-| workloads | `_filter`, `_hierarchical`, `time_domain`, `_layout`, `_calibration`, `search`, `_roofline`, `__init__` |
+| workloads | `_filter`, `_hierarchical`, `time_domain` (the bank), `_batches` (several banks' calls as one), `_layout`, `_calibration`, `search`, `_roofline`, `__init__` |
 | applications | `benchmark`, `tutorial`, `demo`, `precision` |
 
 The cost calibrations run hierarchical plans, so they live in `_calibration` (workloads),
 above the model they feed. When the package loads, `_calibration` binds its `calibrate_costs`
 to the public name `gatechain.calibrate_costs`: one function, whichever name plans, tools and
-tests call. A model is cached and stored under the calls it was measured with (blocks,
+tests call. `gatechain` also binds the cost model's names and the public names of
+`_gatedraws` under its own, so callers reach the planner's whole interface in one module;
+private names are reached in the module that defines them. A model is cached and stored under the calls it was measured with (blocks,
 rounds, seed) as well as n, templates and series group, so a calibration with other calls
 never hands its model to a default one.
 
@@ -88,6 +85,8 @@ Highway's `foreach_target.h`, so one build holds a copy per SIMD target and
 | `td-inl.h` | The direct (time-domain) refine: correlation at a few lags around a survivor's coarse peak. |
 | `kernel_avx1.cc`, `simd-avx1.h` | The `AVX` back end: SSE4's kernels with the float paths at 8 lanes, for CPUs with AVX but not AVX2. |
 | `gauss.cc` | Counter-based normal draws for the gate model's simulation, identical on every ISA. |
+| `simulate.c`, `records.cc` | The gate model's simulation: the rows' transforms (`simulate.c`, behind `simulate.h`) and the power and running-maximum kernels (`records.cc`). |
+| `tier0.cc`, `tier0_mwu.cc`, `tier0_pass.cc`, `tier0_match.cc` | Shared-screener clustering: pairing a band's vectors, merging groups and synthesising each group's screener. The last three reproduce NumPy's arithmetic operation for operation and are built without floating-point contraction. |
 
 CI checks that the generated codelet headers match their generators (`generated-files` job
 in `.github/workflows/ci.yml`).
@@ -97,9 +96,14 @@ in `.github/workflows/ci.yml`).
 `_core.c` wraps the engine for Python: the plan types `MF` (flat), `HMF` (hierarchical)
 and `Root` (the root stage of `search.HierarchicalSearch`), and module functions. Besides
 the target controls (`targets`, `set_target`, `backend`), the gate model's inner loops are
-here: `simulate` (the one simulation, below), `records_within`, `chain_candidates` (the
-threshold-split search; the Python recursion in `gatechain._chain_candidates` is its
-reference, selected by `gatechain._C_SEARCH`), and `gauss_fill`. Buffers are checked at
+here: `simulate` (the one simulation, below; its kernel is `src/simulate.c`),
+`records_within`, `chain_candidates` (the threshold-split search; the Python recursion in
+`gatechain._chain_candidates` is its reference, selected by `gatechain._C_SEARCH`),
+`plan_best` (a chain's candidate plans priced on a cost model; reference in
+`gatechain.plan_chain`, selected by `gatechain._C_PRICING`), the shared-screener routines
+(`tier0_match`, `tier0_pair_level`, `tier0_pass`, `tier0_mwu`) and `gauss_fill`. The
+single-template follow-up batch (`td_followup_batch`) is the one kernel still written in
+this file. Buffers are checked at
 the boundary independently of the Python API. `MF` and `HMF` share one implementation of
 ingest, `run` and `run_series` (`bind_set`, `bind_set_batch`, `bind_run`,
 `bind_run_series`, reading a `filter_view` of the object); every buffer a binding takes is
@@ -181,6 +185,18 @@ plan's lifetime. On the CPU, `tier_stats` gives each tier's passes and ticks (it
 on a GPU). `autotune_info` says whether the plan's chain is pinned, the model's or forced,
 and whether a trial has locked its arm.
 
+## Several banks' calls as one
+
+`TimeDomainFilterBank.filter_series_many` runs a list of bank calls as one batch
+(`_batches._run_batch`): follow-up windows, single-template calls and sparse CPU jobs each
+go to a path that takes many at once, and the rest run in turn. On a GPU every call is
+submitted before any is collected. `TimeDomainFilterBank.correlate_and_filter_many` runs a
+hierarchical search's middle correlations together with the leaf calls that read them: jobs
+on one middle bank and window layout form a cohort (the detectors of one search), which is
+correlated in cache-sized chunks into a scratch buffer that the leaf banks filter before
+the next chunk. The functions it is made of are in `_batches`, in the order it calls them.
+Its results equal those of `correlate_series` followed by `filter_series_many`.
+
 ## The gate model
 
 The gate model decides, for a chain of bands, the thresholds that meet a false-dismissal
@@ -192,12 +208,12 @@ single-tier case and the draw counts).
 ### One simulation
 
 The model is one simulation of stationary Gaussian noise with the reference's output
-spectrum (`gatechain._simulate`, which calls `_core.simulate`). Each draw is a block's n
+spectrum (`_gatedraws._simulate`, which calls `_core.simulate`). Each draw is a block's n
 bins with variance p_k. The fine statistic is their n-point transform, and band b's
 statistic is the b-point transform of bins [0, b), normalised to unit variance per
 component, so the tiers and the fine stage share their noise as the filter's do. Every
 maximum is taken over the whole searched window, over the lags the engine visits for it
-(`gatechain._engine_lags`, mirroring `hmf.c`).
+(`_gatedraws._engine_lags`, mirroring `hmf.c`).
 
 Two readers take their statistics from the same simulation:
 
@@ -229,7 +245,7 @@ than `_MAX_DETECTIONS` (1.75M, 0.7-0.9 GB of records; fd below 5.5e-5) is refuse
 `gatechain.chain_thresholds`, `gatechain.choose_chain`).
 
 Profiles that agree in shape and in every band's signal response share cached simulations
-and plans (`gatechain._similar_get`: a cosine of at least `_REUSE_COS` and a gate response
+and plans (`_gatedraws._similar_get`: a cosine of at least `_REUSE_COS` and a gate response
 within `_REUSE_RESPONSE`), because a search's banks have nearly one reference.
 
 ### Chains and the budget split
@@ -256,6 +272,19 @@ independent halves:
 - Chains whose costs are within `TIE` (5%, `_choice.TIE`) of the cheapest are tied; the
   tie goes to the cheaper chain on a calibration-free operation count (`_flop_cost`), so the
   choice does not flip with calibration noise (`gatechain.pick_stable`).
+
+### Shared screeners
+
+On a plan of four or more templates, the first tiers may screen on one coarse vector per
+group of alike templates in place of each template's own. `_screeners` pairs a leaf bank's
+templates over the first band and merges the pairs into groups of up to 16, each with a
+screener that every member overlaps well (`cluster_tier0_candidates`); a group's members
+can be paired again at the next band (`cluster_tier1_from_tier0`). The compiled routines do
+the work (`_core.tier0_match`, `tier0_pair_level`, `tier0_pass`, `tier0_mwu`). A member
+keeps only part of its signal through its group's screener, its retention, and the planner
+prices and fits a chain with those retentions (`gatechain.choose_chain`), so the plan's
+budget holds with the screeners in place. Survivors of a screener are passed to its
+members.
 
 ### What `fd` means
 
@@ -323,10 +352,10 @@ model ranks chains. It cannot change a single tier's gate; for a multi-tier chai
 among budget splits that all meet the budget, so different costs can move the thresholds.
 
 - **CPU** (`_calibration.calibrate_costs`). Synthetic analytic noise and whitened random
-  templates, at thresholds placed for target survivor densities (`gatechain._CAL_DENSITIES`),
+  templates, at thresholds placed for target survivor densities (`_costmodel._CAL_DENSITIES`),
   run through the engine; costs are read from the engine's per-tier tick counters
   (`tier_stats`), not from wall-clock differences. Calls are 32 blocks of
-  `gatechain._CAL_TEMPLATES` (64) templates at the plans' own series group. Band costs are
+  `_costmodel._CAL_TEMPLATES` (64) templates at the plans' own series group. Band costs are
   shared by every n on the same series group. The Q15 screen is priced per band, and
   `CostModel.first_tier` picks the cheaper first tier.
 - **GPU** (`_calibration.calibrate_costs_gpu`). The same construction, timed by device
@@ -341,8 +370,8 @@ among budget splits that all meet the budget, so different costs can move the th
   (`_layout`). Each is timed once per process, or once per machine with `MF_COST_FILE`,
   where the first record written is the one every process uses.
 
-Cost models are kept per process (`gatechain._COSTS`) and in `MF_COST_FILE` when it is set
-(`gatechain._stored_cost_model`; a record that is not a cost model is reported and
+Cost models are kept per process (`_costmodel._COSTS`) and in `MF_COST_FILE` when it is set
+(`_costmodel._stored_cost_model`; a record that is not a cost model is reported and
 recalibrated). A model another process stored first is the one used
 (`_costfile._store_first`). `_calibration.price_block_sizes` uses them to price a bank's
 layout at each candidate block size; that layout is one arm of the bank's joint trial
@@ -556,4 +585,4 @@ bank; [the tooling map](../tools/README.md) lists every tool.
 - [The hierarchical filter](hierarchical.md), [the resolved plan](resolved-plan.md) and
   [reduced-precision gates](reduced-precision-gates.md) for the gating contract.
 - [Environment variables](environment.md), generated from the registry.
-- [The documentation index](README.md) for every other document, reference or dated.
+- [The documentation index](README.md) for every other page.
