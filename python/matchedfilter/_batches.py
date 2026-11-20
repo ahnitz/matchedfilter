@@ -35,9 +35,9 @@ from ._windows import _merge_window_bins
 from ._windows import _normalize_windows
 from ._windows import _window_bin_phases
 from .time_domain import (
-    TimeDomainFilterBank, _SAME_PROFILE, _aligned_zeros, _bin_count_groups, _consume_into,
-    _host_copy, _intersect_runs, _interval_runs, _results_from, _settle_device_writes,
-    _stored_bins, _trial_key,
+    TimeDomainFilterBank, _SAME_PROFILE, _aligned_zeros, _bin_phases, _blocks_by_bin_count,
+    _consume_into, _host_copy, _intersect_runs, _interval_runs, _results_from,
+    _settle_device_writes, _stored_bins, _trial_key,
 )
 
 
@@ -541,21 +541,7 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
                 return None
 
             bank_refs.append((weakref.ref(l_bank), j))
-            windows = l_kw.get("windows")
-            wkey = ((S, windows.start, windows.stop, windows.step)
-                    if type(windows) is slice else None)
-            wmemo = l_bank.__dict__.setdefault("_window_memo", {})
-            hit = wmemo.get(wkey) if wkey is not None else None
-            if hit is not None:
-                W_leaf, cache_key = hit
-            else:
-                W_leaf = _normalize_windows(windows, S)
-                cache_key = (S, W_leaf.tobytes())
-                if wkey is not None:
-                    if len(wmemo) >= 64:
-                        wmemo.clear()
-                    W_leaf.flags.writeable = False
-                    wmemo[wkey] = (W_leaf, cache_key)
+            W_leaf, cache_key = l_bank._call_windows(l_kw.get("windows"), S)
             if W_leaf.shape[0] == 0:
                 cohort_empty_leaves.append(j)
                 continue
@@ -1568,12 +1554,7 @@ def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, pro
     # Build or retrieve cached block layouts and grouped SeriesLayouts per template group.
     for g in groups:
         N = g.n
-        layout = g._cached_layout
-        if layout is None or layout[0] != cache_key:
-            bstarts, bws, bwe = bank._window_layout(g, W, S)
-            g._cached_layout = (cache_key, bstarts, bws, bwe)
-        else:
-            _, bstarts, bws, bwe = layout
+        bstarts, bws, bwe = bank._group_blocks(g, W, S, cache_key)
         if bstarts.size == 0:
             continue
 
@@ -1582,18 +1563,7 @@ def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, pro
             return None
         bph = None
         if aligned:
-            pkey = ('_bin_phase', cache_key, bs)
-            memo = g.__dict__.setdefault('_phase_memo', {})
-            if pkey not in memo:
-                if len(memo) >= 16:
-                    memo.clear()
-                ph = _window_bin_phases(W, bstarts, bws, bs)
-                if ph is not None:
-                    counts = (bwe.astype(np.int64) - bws.astype(np.int64)
-                              + ph.astype(np.int64) + bs - 1) // bs
-                    ph = (ph.astype(np.int64) + bs * (counts.max() - counts)).astype(np.uint32)
-                memo[pkey] = ph
-            bph = memo[pkey]
+            bph = _bin_phases(g, g.plan, W, cache_key, bs, bstarts, bws, bwe)
             if bph is not None and bs not in merge_bs:
                 merge_bs.append(bs)
 
@@ -1603,11 +1573,7 @@ def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, pro
         if sl_list is None:
             if len(sl_memo) >= 16:
                 sl_memo.clear()
-            if bph is not None or bs >= N:
-                raw_parts = [(bstarts, bws, bwe, bph)]
-            else:
-                raw_parts = _bin_count_groups(
-                    bstarts, bws, bwe, ((bwe - bws + bs - 1) // bs).astype(np.int64))
+            raw_parts = _blocks_by_bin_count(g.plan, N, bs, bstarts, bws, bwe, bph)
             sl_list = []
             for sub_st, sub_ws, sub_we, sub_ph in raw_parts:
                 st_u = np.ascontiguousarray(sub_st, dtype=np.uintp)
@@ -1675,21 +1641,7 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
             if ser.ndim != 1:
                 continue
             S = len(ser)
-            windows = kw.get("windows")
-            wkey = ((S, windows.start, windows.stop, windows.step)
-                    if type(windows) is slice else None)
-            wmemo = bank.__dict__.setdefault('_window_memo', {})
-            hit = wmemo.get(wkey) if wkey is not None else None
-            if hit is not None:
-                W, cache_key = hit
-            else:
-                W = _normalize_windows(windows, S)
-                cache_key = (S, W.tobytes())
-                if wkey is not None:
-                    if len(wmemo) >= 64:
-                        wmemo.clear()
-                    W.flags.writeable = False
-                    wmemo[wkey] = (W, cache_key)
+            W, cache_key = bank._call_windows(kw.get("windows"), S)
             if W.shape[0] == 0:
                 out[j] = _EMPTY_FILTER_RESULTS
                 done.add(j)

@@ -1914,6 +1914,45 @@ class TimeDomainFilterBank:
 
     _window_layout = staticmethod(_window_layout)   # _windows._window_layout
 
+    def _call_windows(self, windows, S):
+        """A call's windows over a series of S samples, normalised, with their cache key.
+
+        A slice of a given series length normalises the same way every call (a search's
+        windows recur every segment), so those are memoised.
+
+        Returns
+        -------
+        W : ndarray
+            (K, 2) int64 merged windows (`_normalize_windows`); read-only when memoised.
+        cache_key : tuple
+            (S, the windows' bytes): what a group's block layout is cached under.
+        """
+        wkey = ((S, windows.start, windows.stop, windows.step)
+                if type(windows) is slice else None)
+        wmemo = self.__dict__.setdefault('_window_memo', {})
+        hit = wmemo.get(wkey) if wkey is not None else None
+        if hit is not None:
+            return hit
+        W = _normalize_windows(windows, S)
+        cache_key = (S, W.tobytes())
+        if wkey is not None:
+            if len(wmemo) >= 64:
+                wmemo.clear()
+            W.flags.writeable = False
+            wmemo[wkey] = (W, cache_key)
+        return W, cache_key
+
+    def _group_blocks(self, g, W, S, cache_key):
+        """The blocks a template group filters for windows W of a series of S samples: each
+        block's start and its searched lags (block starts, window starts, window ends), as
+        `_window_layout` lays them out. The group keeps its last layout under cache_key."""
+        layout = g._cached_layout
+        if layout is None or layout[0] != cache_key:
+            bstarts, bws, bwe = self._window_layout(g, W, S)
+            g._cached_layout = (cache_key, bstarts, bws, bwe)
+            return bstarts, bws, bwe
+        return layout[1:]
+
     def filter_series(
         self,
         series: np.ndarray,
@@ -1975,22 +2014,7 @@ class TimeDomainFilterBank:
             raise ValueError("series must be a 1D array")
         S = len(ser)
 
-        # A slice of a given series length normalises the same way every call (the
-        # search's windows recur every segment): memoised, with its layout cache key.
-        wkey = ((S, windows.start, windows.stop, windows.step)
-                if type(windows) is slice else None)
-        wmemo = self.__dict__.setdefault('_window_memo', {})
-        hit = wmemo.get(wkey) if wkey is not None else None
-        if hit is not None:
-            W, cache_key = hit
-        else:
-            W = _normalize_windows(windows, S)
-            cache_key = (S, W.tobytes())
-            if wkey is not None:
-                if len(wmemo) >= 64:
-                    wmemo.clear()
-                W.flags.writeable = False
-                wmemo[wkey] = (W, cache_key)
+        W, cache_key = self._call_windows(windows, S)
         if W.shape[0] == 0:
             return _EMPTY_FILTER_RESULTS
 
@@ -2035,11 +2059,8 @@ class TimeDomainFilterBank:
             if self.engine == 'hier' and tmpl_arg is not None:
                 # one template ungated: a plan holding just it, not the group's whole ungated
                 # bank -- on whichever device runs this call shape faster
-                layout = g._cached_layout
-                if layout is None or layout[0] != cache_key:
-                    bstarts, bws, bwe = self._window_layout(g, W, S)
-                    g._cached_layout = (cache_key, bstarts, bws, bwe)
-                on_cpu, timed = self._single_device(g, g._cached_layout[1].size)
+                nblocks = self._group_blocks(g, W, S, cache_key)[0].size
+                on_cpu, timed = self._single_device(g, nblocks)
                 active_plan = g.get_single_plan(tmpl_arg[0], on_cpu=on_cpu)
                 plan_templates = None
             elif self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0):
@@ -2054,13 +2075,7 @@ class TimeDomainFilterBank:
                 _settle_device_writes()
 
             N = g.n
-            layout = g._cached_layout
-            if layout is None or layout[0] != cache_key:
-                bstarts, bws, bwe = self._window_layout(g, W, S)
-                g._cached_layout = (cache_key, bstarts, bws, bwe)
-            else:
-                _, bstarts, bws, bwe = layout
-
+            bstarts, bws, bwe = self._group_blocks(g, W, S, cache_key)
             if bstarts.size == 0:
                 continue
 
@@ -2069,26 +2084,7 @@ class TimeDomainFilterBank:
             bs = int(binsize) if binsize is not None else (self.binsize or N)
             bph = None
             if aligned:
-                pkey = ('_bin_phase', cache_key, bs)
-                memo = g.__dict__.setdefault('_phase_memo', {})
-                if pkey not in memo:
-                    if len(memo) >= 16:
-                        memo.clear()
-                    ph = _window_bin_phases(W, bstarts, bws, bs)
-                    if ph is not None:
-                        # Every entry at the call's bin count: one with fewer bins starts its
-                        # numbering whole bins earlier (empty bins before its window), so the
-                        # bank is one call rather than one per bin count -- each call pays its
-                        # setup and the Q15 screen's preparation again.
-                        w_end = (np.minimum(bwe, N)
-                                 if getattr(active_plan, '_bandlimited', False)
-                                 and not getattr(active_plan, '_is_hierarchical', False)
-                                 else bwe).astype(np.int64)
-                        counts = (w_end - bws.astype(np.int64) + ph.astype(np.int64)
-                                  + bs - 1) // bs
-                        ph = (ph.astype(np.int64) + bs * (counts.max() - counts)).astype(np.uint32)
-                    memo[pkey] = ph
-                bph = memo[pkey]
+                bph = _bin_phases(g, active_plan, W, cache_key, bs, bstarts, bws, bwe)
                 if bph is not None and bs not in merge_bs:
                     merge_bs.append(bs)
             # A repeat of a deferred call this group's plan has made before goes straight to
@@ -2114,22 +2110,7 @@ class TimeDomainFilterBank:
                             for d, st_part in zip(split.deferred(res), starts_parts):
                                 pending.append((d, st_part, g, tmpl_arg, N))
                         continue
-            if bph is not None:
-                # One call: the phases pad every entry to the same bin count (above).
-                groups_bins = [(bstarts, bws, bwe, bph)]
-            elif (getattr(active_plan, '_bandlimited', False)
-                  and not getattr(active_plan, '_is_hierarchical', False)):
-                bs_k = max(1, bs // 2) if bs < N else g.n // 2
-                wk_s = (bws // 2).astype(np.int64)
-                w_end = np.minimum(bwe, N)
-                wk_e = ((w_end + 1) // 2).astype(np.int64)
-                groups_bins = _bin_count_groups(
-                    bstarts, bws, bwe, np.maximum(1, (wk_e - wk_s + bs_k - 1) // bs_k))
-            elif bs >= N:
-                groups_bins = [(bstarts, bws, bwe, None)]
-            else:
-                groups_bins = _bin_count_groups(
-                    bstarts, bws, bwe, ((bwe - bws + bs - 1) // bs).astype(np.int64))
+            groups_bins = _blocks_by_bin_count(active_plan, N, bs, bstarts, bws, bwe, bph)
 
             # Every bin count in one GPU submission where the backend can, instead of a
             # submission and a wait per count (see MatchedFilter._run_series_ragged).
@@ -2974,6 +2955,53 @@ class TimeDomainFilterBank:
 def _stored_bins(g):
     """Bins stored per template spectrum of group g (n, or n/2 when Hermitian-packed)."""
     return g._stored_bins
+
+
+def _dif_plan(plan):
+    """Whether plan is a band-limited flat plan (two-channel decimation in frequency), whose
+    windows and bins are counted on its half-rate grid."""
+    return (getattr(plan, '_bandlimited', False)
+            and not getattr(plan, '_is_hierarchical', False))
+
+
+def _bin_phases(g, plan, W, cache_key, bs, bstarts, bws, bwe):
+    """Each block's bin phase for windows W at bin size bs, or None where every window's
+    bins already start at its blocks' window starts (`_window_bin_phases`).
+
+    Every entry is padded to the call's largest bin count: an entry with fewer bins starts
+    its numbering whole bins earlier (empty bins before its window), so the group is one
+    call rather than one per bin count; each call pays its setup and the Q15 screen's
+    preparation again. The group memoises the phases under (cache_key, bs)."""
+    pkey = ('_bin_phase', cache_key, bs)
+    memo = g.__dict__.setdefault('_phase_memo', {})
+    if pkey not in memo:
+        if len(memo) >= 16:
+            memo.clear()
+        ph = _window_bin_phases(W, bstarts, bws, bs)
+        if ph is not None:
+            w_end = (np.minimum(bwe, g.n) if _dif_plan(plan) else bwe).astype(np.int64)
+            counts = (w_end - bws.astype(np.int64) + ph.astype(np.int64) + bs - 1) // bs
+            ph = (ph.astype(np.int64) + bs * (counts.max() - counts)).astype(np.uint32)
+        memo[pkey] = ph
+    return memo[pkey]
+
+
+def _blocks_by_bin_count(plan, N, bs, bstarts, bws, bwe, bph):
+    """A group's blocks as the calls that filter them: [(starts, window starts, window
+    ends, bin phases or None)], the blocks of one call having one bin count. With bin
+    phases the blocks are one call (the phases pad every block to the same count); so are
+    they when a bin is at least a block."""
+    if bph is not None:
+        return [(bstarts, bws, bwe, bph)]
+    if _dif_plan(plan):
+        bs_k = max(1, bs // 2) if bs < N else N // 2
+        wk_s = (bws // 2).astype(np.int64)
+        wk_e = ((np.minimum(bwe, N) + 1) // 2).astype(np.int64)
+        return _bin_count_groups(
+            bstarts, bws, bwe, np.maximum(1, (wk_e - wk_s + bs_k - 1) // bs_k))
+    if bs >= N:
+        return [(bstarts, bws, bwe, None)]
+    return _bin_count_groups(bstarts, bws, bwe, ((bwe - bws + bs - 1) // bs).astype(np.int64))
 
 
 def _bin_count_groups(bstarts, bws, bwe, bin_counts):
