@@ -1057,6 +1057,14 @@ class Context(Executor, InputUploads):
         return tuple(m)
 
     def _x_kernel(self, name, n, consts=None):
+        """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`
+        (_gpuexec's module docstring lists the names and the build-time constants in consts).
+        Returns (pipeline state, threadgroup size); the constants are compiled in as macros of
+        the kernel's Metal source.
+
+        Raises UnsupportedSize where no build of the kernel was shipped that this device can run,
+        and ValueError for a name that is not a kernel.
+        """
         c = consts or {}
         macros = self._macros(c)
         if name in ("peaks", "peaks1", "gate"):
@@ -1096,6 +1104,10 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_kernel(name, n):
+        """Whether the optional kernel `name` was shipped for this backend at length n: the driver
+        primitive `_x_has_kernel` (_gpuexec). The names are compactc, tier1 (a one-bin refine
+        build), tier1_c16, fwd_tier0, items, tier1gate and refine_td; any other raises ValueError.
+        """
         if name == "compactc":
             return _shipped("compactc")
         if name == "tier1":
@@ -1202,6 +1214,11 @@ class Context(Executor, InputUploads):
 
     @_autoreleased
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
+        """Run a recording: the driver primitive `_x_run` (_gpuexec). Deferred work in pre is
+        encoded first, in the same command buffer. With wait it is committed and waited on.
+        Without, it is committed in flight and signals this context's shared event, which other
+        contexts' command buffers wait on and settle_writes() waits on from the host.
+        """
         label, ops = native
         cmd = self._command_buffer()
         for nat, b in pre:                      # deferred work first, in the same buffer
@@ -1327,6 +1344,11 @@ class Context(Executor, InputUploads):
         self._cache_order = {}
 
     def destroy(self):
+        """Release what this context holds: deferred forwards, writes still in flight (settled
+        first), cached recordings and buffers, its shared event and its queue. A context that
+        owns its device also releases its pipelines and the device; a shared device lives on.
+        Safe to call twice.
+        """
         if getattr(self, "device", None) is None:
             return
         self._retire()

@@ -411,6 +411,10 @@ class MatchedFilter:
                              % (self.n, self._cpu_max_n))
 
     def _init_state(self):
+        """Set the state every filter starts with: no result buffers, no spectra set or held, no
+        template source, empty performance counters, no GPU context, and both GPU inputs marked
+        as needing upload.
+        """
         self._buf = None
         self._sbuf = None
         #: Has any spectrum reached the plan? The hierarchical refine path
@@ -469,17 +473,10 @@ class MatchedFilter:
     # convention -- is identical, which is what lets one test body assert
     # against both.
     def _start_gpu(self):
-        # One flat-filter contract, two backends behind it. Both expose
-        # peaks() with the same signature and the same conventions, so
-        # nothing above this line knows which it got.
-        #
-        # Only the Context differs. Everything after it is shared, and it is
-        # written once for that reason: when this was a branch per backend
-        # with its own copy of the tail, the hierarchical version's early
-        # return skipped the calibration it was supposed to set, and every Metal
-        # call died in _gpu_calibration on a missing attribute.
-        #
-        # HierarchicalFilter starts its context here too, with the sizes it inherits.
+        """Create this filter's GPU context on its device. The backends expose one interface, so
+        nothing after this depends on which it is; HierarchicalFilter starts its context here
+        too. Raises ValueError where the backend has no kernels for this transform length.
+        """
         if self.n not in self._gpu_sizes:
             raise ValueError(
                 "device='gpu' supports n in %s for this filter; got %d."
@@ -546,6 +543,16 @@ class MatchedFilter:
         return d0, nd, t0, nt
 
     def _gpu_set(self, store, spectra, index, what):
+        """Hold data or template spectra for the GPU (what: "data" or "template") and mark them as
+        needing upload.
+
+        With index None, spectra is the whole bank: an array in the device's shared memory is
+        bound as it is, a template bank on a shared device is copied once into shared memory
+        that every recording binds in place, and otherwise the bank is copied on the host. A
+        template bank of shape (ntemplates, n // 2) is unpacked to full length (_unpack_half).
+        With an index, that one row of the held bank is replaced. Raises ValueError for a bank of
+        another shape.
+        """
         if what == "data":
             self._ddirty = True
         else:
@@ -719,6 +726,11 @@ class MatchedFilter:
 
     def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
                     **kw):
+        """The GPU peaks of data rows D against templates H over lags [start, end): (idx, val) of
+        shape (rows, templates, bins), or with async_submit a function that returns them. A call
+        with more pairs than one dispatch may hold (_gpu_pair_limit, and 2^31 output bins) is
+        split into dispatches by template and data ranges, each waited on in turn.
+        """
         nd, nt = D.shape[0], H.shape[0]
         nb = 1 + (end - start - 1) // binsize
         limit = min(self._gpu_pair_limit(), max(1, (2**31 - 1) // max(nb, 1)))
@@ -859,6 +871,10 @@ class MatchedFilter:
 
     def _run_inner(self, binsize=None, threshold=0.0, window=None,
                    data=None, templates=None, counts=False, raw=False):
+        """run()'s work: check the bin size and window, select the pairs, run them on the device or
+        the CPU plan, and return peaks in the form run() documents (structured or raw, with
+        counts when asked). The result arrays are this filter's reused buffers.
+        """
         n = self.n
         binsize = n if binsize is None else int(binsize)
         if binsize < 1:
@@ -1272,6 +1288,13 @@ class MatchedFilter:
     def _run_series_inner(self, series, starts=None, win_start=None, win_end=None,
                           binsize=None, threshold=0.0, templates=None, raw=False,
                           decimated=None, bin_phase=None):
+        """run_series()'s work. Without explicit blocks it lays contiguous blocks over the series
+        (_automatic_series_layout), runs them and returns indices in series coordinates; a last
+        block with fewer bins is run on its own and padded with empty bins to the common shape.
+        With explicit blocks it groups them by window and runs each group, on the device or the
+        CPU plan, and returns block-local lag indices in the caller's block order. A band-limited
+        flat filter goes to run_series_dif.
+        """
         if starts is None:
             if win_start is not None or win_end is not None or bin_phase is not None:
                 raise ValueError('win_start, win_end and bin_phase require explicit starts')

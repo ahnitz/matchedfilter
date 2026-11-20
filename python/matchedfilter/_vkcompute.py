@@ -564,6 +564,14 @@ class _FusedBatch:
             self.dev.collector = nxt
 
     def flush(self):
+        """Submit the batch's recordings as one command buffer, once.
+
+        The items' phases are replayed in lockstep, one phase after another across every item,
+        with one global barrier per distinct (stages, access) after each phase, so each item
+        sees its own phases in order. The fused recording is kept (up to 64, by the items'
+        recording serials) and submitted again when the same jobs recur. A batch flushed while
+        it is still the device's collector leaves a fresh one collecting in its place.
+        """
         if self.state != "open":
             return
         self.state = "submitted"
@@ -640,6 +648,10 @@ class _FusedBatch:
         vk.vkFreeCommandBuffers(self.dev.device, self.dev.command_pool, 1, (_vp * 1)(cmd))
 
     def _submit_fused(self, cmd):
+        """Submit the fused command buffer cmd under a new fence (self.fence), between a timestamp
+        pair when a member context is timing, and tell a profiling member its marks were
+        submitted.
+        """
         dev, vk = self.dev, self.dev.vk
         prof = next((ctx for ctx, _ in self.items if getattr(ctx, "_profile", False)), None)
         if prof is not None:
@@ -1061,6 +1073,10 @@ class _VkNative:
         return entry[0], None
 
     def record(self, binds):
+        """Record this list's operations into a new command buffer with the buffers and words in
+        binds. Returns (command buffer, the descriptor pools it made). A list that is captured
+        has its commands logged by phase as well, so that a fused batch can replay them.
+        """
         ctx = self.ctx
         pool_start = len(getattr(ctx, "_pools", []))
         if self.captured:
@@ -1081,6 +1097,10 @@ class _VkNative:
         return cmd, pools
 
     def _emit(self, rec, binds):
+        """Write this list's operations into the recording rec: barriers, timing stamps, buffer
+        fills and updates, and each dispatch (direct, or indirect for a listed kernel) with its
+        descriptor set and push-constant words, per-run arguments taken from binds.
+        """
         ctx = self.ctx
         for op in self.ops:
             kind = op[0]
@@ -1485,6 +1505,12 @@ class Context(Executor, InputUploads):
         return self._pipelines[key]
 
     def _descriptor_set(self, set_layout, bufs, offsets=None):
+        """A descriptor set of layout set_layout binding bufs in order as storage buffers, each from
+        its byte offset (offsets, default 0) to its end, at most max_binding_bytes. Bindings the
+        module declares beyond bufs get a small dummy buffer the kernel never reads; more buffers
+        than the layout has bindings raises VulkanError. The set's pool is added to self._pools,
+        which the recording's owner frees.
+        """
         vk = self.vk
         # Bindings the module declares past the caller's list (gRowWin when per-row
         # windows are off) get a small dummy buffer the kernel never reads.
@@ -1628,6 +1654,11 @@ class Context(Executor, InputUploads):
         return self.vk
 
     def _capture_end(self, cmd):
+        """End a capture (_capture_begin) and keep the recording cmd's commands by phase, in
+        self._phases, for a fused batch to replay. Nothing is kept, so the recording is never
+        fused, where a phase has a barrier between two of its commands or the phases are not the
+        ones a batch knows (_FUSED_PHASES).
+        """
         self.vk = getattr(self.vk, "_real", self.vk)
         cap, self._cap = getattr(self, "_cap", None), None
         if cap is None or cmd is None:
@@ -1691,6 +1722,10 @@ class Context(Executor, InputUploads):
         pr["marks"].setdefault(handle, []).append((q, label))
 
     def _profile_submitted(self, commands):
+        """Note that the recordings in commands are being submitted, for the per-phase profile:
+        their timestamp queries become pending and are reset. Where one is submitted again, the
+        earlier run's queries are read first, before this submission rewrites them.
+        """
         pr = self._prof
         if pr is None:
             return
@@ -1732,6 +1767,10 @@ class Context(Executor, InputUploads):
             _check(self.vk.vkQueueWaitIdle(q), "vkQueueWaitIdle")
 
     def _timestamp_resolve(self, only=None):
+        """Read the pending timestamp pairs (only: just that one) and append each label's device
+        time in milliseconds to timing_log. An interval the device's counter cannot vouch for
+        (_gputime.interval_ms) is counted in timing_rejected instead.
+        """
         ts = self._ts
         if ts is None:
             return
@@ -1796,6 +1835,15 @@ class Context(Executor, InputUploads):
     kernel_family = "vulkan"
 
     def _x_kernel(self, name, n, consts=None):
+        """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`
+        (_gpuexec's module docstring lists the names and the build-time constants in consts).
+        Returns the pipeline of the kernel's SPIR-V module, built on first use with the constants
+        as specialisation (data stride, per-row windows, subgroup size, the fp16 tier's data scale
+        and twiddle source).
+
+        Raises UnsupportedSize where no build of the kernel was shipped that this device can run,
+        and ValueError for a name that is not a kernel.
+        """
         c = consts or {}
         stride, rowwin = int(c.get("stride", 0) or 0), 1 if c.get("rowwin") else 0
         if name in ("peaks", "peaks1"):
@@ -1867,6 +1915,10 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_kernel(name, n):
+        """Whether the optional kernel `name` was shipped for this backend at length n: the driver
+        primitive `_x_has_kernel` (_gpuexec). The names are compactc, tier1 (a one-bin refine
+        build), tier1_c16, fwd_tier0, items, tier1gate and refine_td; any other raises ValueError.
+        """
         if name == "compactc":
             return _spv_shipped("compactc")
         if name == "tier1":
@@ -1981,6 +2033,11 @@ class Context(Executor, InputUploads):
             self._submit_pending(cmd, pre=pcmds, label=native.label)
 
     def _x_submit(self, native, binds, slot, pre=()):
+        """Run a recording and leave it in flight: the driver primitive `_x_submit` (_gpuexec).
+        pre is deferred work that runs first in the same submission. Returns a function that
+        waits for it and frees what the run held: on a slot, the slot's fence; without one, the
+        submission's own write token, which other queues' submissions and host readers settle.
+        """
         cmd, release = native.command(binds, transient=True)
         pcmds, frees = self._pre_commands(pre)
         frees = frees + ([release] if release is not None else [])
@@ -2147,6 +2204,10 @@ class Context(Executor, InputUploads):
         self._uploaded = {"data": {}, "tmpl": {}}
 
     def destroy(self):
+        """Release what this context created: its cached recordings and buffers, fences, and the
+        profile and timestamp query pools. The device, its pipelines and its command pool are
+        shared between contexts and live as long as the process. Safe to call twice.
+        """
         if getattr(self, "device", None) is None:
             return
         self._retire()

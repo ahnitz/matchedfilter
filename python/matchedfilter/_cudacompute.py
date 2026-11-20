@@ -804,6 +804,12 @@ class Context(Executor, InputUploads):
         self._resolve(st.value)
 
     def _resolve(self, key):
+        """Read the timing events pending under key: wait for each region's end event, add the
+        regions' elapsed times, and append (label, milliseconds) per run to timing_log, and per
+        kernel when profiling. A run's time is the sum of its kernels' and copies' regions, not
+        its first-to-last interval, which also held the host's gaps between launches.
+        last_gpu_time is the total in seconds.
+        """
         pending = self._pending_events.pop(key, None)
         if pending:
             total = 0.0
@@ -860,6 +866,10 @@ class Context(Executor, InputUploads):
 
     # ---- kernels -------------------------------------------------------------
     def _stem(self, n, entry, one_bin=False, c16=False, ppg=1, tile=1, twt=False):
+        """The file stem of the PTX module that holds entry point `entry` at length n, for the
+        build the flags select: a one-bin build where one was shipped, the fp16 coarse build at
+        its packing (ppg), tile and twiddle source (twt), or the fp16 listed refine.
+        """
         if entry == "packCoarse":
             return "pack_coarse"
         if entry == "compactPairs":
@@ -1034,6 +1044,16 @@ class Context(Executor, InputUploads):
     subgroup_size = 32
 
     def _x_kernel(self, name, n, consts=None):
+        """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`
+        (_gpuexec's module docstring lists the names and the build-time constants in consts).
+        Returns (function, block size[, lead, trail, extra]): the PTX module's entry point and
+        its block size, and for the tiered kernels how a launch orders its parameters -- the
+        first `lead` buffers, the uniform words, the remaining buffers (`trail` of them
+        optional), then `extra`, the data stride and fp16 scale passed as arguments.
+
+        Raises UnsupportedSize where no build of the kernel was shipped that this device can run,
+        and ValueError for a name that is not a kernel.
+        """
         c = consts or {}
         stride = int(c.get("stride") or 0)
         scale = (int(np.float32(2.0 ** int(c["scale"])).view(np.uint32))
@@ -1076,6 +1096,10 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_kernel(name, n):
+        """Whether the optional kernel `name` was shipped for this backend at length n: the driver
+        primitive `_x_has_kernel` (_gpuexec). The names are compactc, tier1 (a one-bin refine
+        build), tier1_c16, fwd_tier0, items, tier1gate and refine_td; any other raises ValueError.
+        """
         if name == "compactc":
             return _shipped("compactc") is not None
         if name == "tier1":
@@ -1222,6 +1246,9 @@ class Context(Executor, InputUploads):
         check_cuda(self.cuda.cuGraphLaunch(ex, stream), "cuGraphLaunch")
 
     def _issue(self, ops, stream):
+        """Issue a recording's operations on stream, in order: kernel launches, 32-bit fills (one
+        row, or rows at a pitch), host-to-device updates and device-to-host readbacks.
+        """
         for op in ops:
             kind = op[0]
             if kind == "launch":
@@ -1347,6 +1374,10 @@ class Context(Executor, InputUploads):
         return slots
 
     def destroy(self):
+        """Release what this context holds: cached recordings and buffers, its slots, the modules
+        it loaded itself, timing events, streams, and the CUDA context (the device's primary
+        context is released, an owned one destroyed). Safe to call twice.
+        """
         if not getattr(self, "ctx", None) or not self.ctx.value:
             return
         self._retire()
