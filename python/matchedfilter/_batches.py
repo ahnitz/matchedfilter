@@ -877,6 +877,150 @@ def _output_margins_and_scales(members, g_m, row_indices_arr, li_arr, is_contig_
     return det_scales
 
 
+def _copy_runs(out, row, scratch_row, runs, stream_cp):
+    """Copy sample runs of a scratch row into row ``row`` of an output array, through the
+    streaming store when there is one. Returns whether the streaming store was used."""
+    if stream_cp is None:
+        for ra, rb in runs:
+            out[row, ra:rb] = scratch_row[ra:rb]
+        return False
+    out_ptr = out[row].ctypes.data
+    scratch_ptr = scratch_row.ctypes.data
+    used = False
+    for ra, rb in runs:
+        ra, rb = int(ra), int(rb)
+        stream_cp(out_ptr + ra * 8, scratch_ptr + ra * 8, (rb - ra) * 8)
+        used = True
+    return used
+
+
+def _restore_collar(saved, tbuf_det, kr, dt_corr_d):
+    """Copy back into every detector's scratch rows the samples :func:`_save_collar` kept
+    for a batch at the end of the previous chunk. Returns the first sample restored. The time
+    is shared between the detectors' correlation times."""
+    D = len(tbuf_det)
+    t_c0 = time.perf_counter()
+    saved_lo, saved_hi, src_pool, src_off = saved
+    c_len = saved_hi - saved_lo
+    step_elems = kr * c_len
+    for d_idx in range(D):
+        base_off = src_off + d_idx * step_elems
+        tbuf_det[d_idx][:kr, saved_lo:saved_hi] = (
+            src_pool[base_off : base_off + step_elems].reshape(kr, c_len)
+        )
+    dt_share = (time.perf_counter() - t_c0) / D
+    for d_idx in range(D):
+        dt_corr_d[d_idx] += dt_share
+    return saved_lo
+
+
+def _save_collar(collar_pools, pool_idx, write_off, tbuf_det, kr, collar_lo, c_end, n_batches,
+                 dt_corr_d):
+    """Keep samples [collar_lo, c_end) of a batch's kr scratch rows, for every detector, in
+    pool ``pool_idx`` at ``write_off`` (the pool grows as needed), because leaves of the next
+    chunk still read them. Returns the record :func:`_restore_collar` takes. The time is
+    shared between the detectors' correlation times."""
+    D = len(tbuf_det)
+    t_c0 = time.perf_counter()
+    c_len = c_end - collar_lo
+    step_elems = kr * c_len
+    total_elems = D * step_elems
+    dst_pool = collar_pools[pool_idx]
+    if dst_pool is None or write_off + total_elems > dst_pool.size:
+        new_cap = max(
+            write_off + total_elems,
+            0 if dst_pool is None else dst_pool.size * 2,
+            max(1, n_batches) * D * max(c_len, 4096),
+        )
+        grown = _aligned_zeros(new_cap, dtype=np.complex64)
+        if dst_pool is not None and write_off > 0:
+            grown[:write_off] = dst_pool[:write_off]
+        dst_pool = grown
+        collar_pools[pool_idx] = dst_pool
+    for d_idx in range(D):
+        base_off = write_off + d_idx * step_elems
+        dst_pool[base_off : base_off + step_elems].reshape(kr, c_len)[:] = (
+            tbuf_det[d_idx][:kr, collar_lo:c_end]
+        )
+    dt_share = (time.perf_counter() - t_c0) / D
+    for d_idx in range(D):
+        dt_corr_d[d_idx] += dt_share
+    return collar_lo, c_end, dst_pool, write_off
+
+
+def _filter_ready_slabs(c_jobs, back_subs, kr, retain_radius, eff_ret_thr):
+    """Filter a batch's ready leaf slabs, for all detectors, in one C call, and add each
+    slab's peaks to its sub. Returns the seconds the call took and, where output is kept
+    around peaks (retain_radius > 0), per scratch row the sample positions of the peaks at
+    or above eff_ret_thr (None when there are none)."""
+    t_f0 = time.perf_counter()
+    if not c_jobs:
+        return time.perf_counter() - t_f0, None
+    peaks_by_q = None
+    c_out = _core.HMF.run_series_batch_sparse(c_jobs)
+    dt_b = time.perf_counter() - t_f0
+    dt_each = dt_b / len(c_jobs)
+    for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
+        sub_rec.total += tot
+        sub_rec.seconds += dt_each
+        if tot > 0:
+            sl = sub_rec.slabs
+            nt_f = sub_rec.ntemplates
+            fl_arr = np.frombuffer(fl, np.int64)
+            ix_arr = np.frombuffer(ix, np.int64)
+            vl_arr = np.frombuffer(vl, np.complex64)
+            sp = _SparsePeaks((r1 - r0, nt_f, sl.nbins), fl_arr, ix_arr, vl_arr)
+            sub_rec.parts.append((r0, sp))
+            if retain_radius is not None and retain_radius > 0:
+                keep_pk = (
+                    np.ones(vl_arr.size, dtype=bool)
+                    if eff_ret_thr <= 0.0
+                    else (np.abs(vl_arr) >= eff_ret_thr)
+                )
+                if np.any(keep_pk):
+                    bi = fl_arr[keep_pk] // (nt_f * sl.nbins)
+                    s_pos = sl.starts[r0 + bi].astype(np.int64) + ix_arr[keep_pk]
+                    if peaks_by_q is None:
+                        peaks_by_q = [[] for _ in range(kr)]
+                    peaks_by_q[q].append(s_pos)
+    return dt_b, peaks_by_q
+
+
+def _retained_spans(q_peaks, pending_fwd_end, k_r, valid_lo, c_start, c_end, S, retain_radius,
+                    written_runs):
+    """The sample spans of this chunk to write for one output row: retain_radius either side
+    of each of its peaks, and what a peak of an earlier chunk still reaches into this one
+    (pending_fwd_end[k_r], which this updates for the chunks after), merged and clipped to
+    the samples the group's blocks wrote. Returns an (m, 2) int64 array, or None for
+    nothing to write."""
+    spans = []
+    if pending_fwd_end is not None and pending_fwd_end[k_r] > c_start:
+        spans.append((c_start, min(c_end, pending_fwd_end[k_r])))
+    if q_peaks:
+        all_s = q_peaks[0] if len(q_peaks) == 1 else np.concatenate(q_peaks)
+        if pending_fwd_end is not None:
+            max_fwd = int(all_s.max()) + retain_radius
+            if max_fwd > c_end and max_fwd > pending_fwd_end[k_r]:
+                pending_fwd_end[k_r] = min(S, max_fwd)
+        for s_val in all_s.tolist():
+            ca = max(valid_lo, int(s_val) - retain_radius)
+            cb = min(c_end, int(s_val) + retain_radius)
+            if cb > ca:
+                spans.append((ca, cb))
+    if not spans:
+        return None
+    spans.sort()
+    merged = [list(spans[0])]
+    for sa, sb in spans[1:]:
+        if sa <= merged[-1][1]:
+            if sb > merged[-1][1]:
+                merged[-1][1] = sb
+        else:
+            merged.append([sa, sb])
+    w_spans = _intersect_runs(np.asarray(merged, dtype=np.int64), written_runs)
+    return w_spans if w_spans.size > 0 else None
+
+
 def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools, S,
                      retain_radius, eff_ret_thr, set_mirror, stream_cp, dt_corr_d):
     """Run one compiled group: for each time chunk and template batch, correlate the batch
@@ -937,20 +1081,8 @@ def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools,
         for b_idx, (k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut) in enumerate(chunk_batch_jobs):
             # Restore any cross-chunk boundary collar saved from the previous chunk.
             if saved_collars is not None and saved_collars[b_idx] is not None:
-                t_c0 = time.perf_counter()
-                saved_lo, saved_hi, src_pool, src_off = saved_collars[b_idx]
-                c_len = saved_hi - saved_lo
-                step_elems = kr * c_len
-                for d_idx in range(D):
-                    base_off = src_off + d_idx * step_elems
-                    tbuf_det[d_idx][:kr, saved_lo:saved_hi] = (
-                        src_pool[base_off : base_off + step_elems].reshape(kr, c_len)
-                    )
+                valid_lo = _restore_collar(saved_collars[b_idx], tbuf_det, kr, dt_corr_d)
                 saved_collars[b_idx] = None
-                valid_lo = saved_lo
-                dt_share = (time.perf_counter() - t_c0) / D
-                for d_idx in range(D):
-                    dt_corr_d[d_idx] += dt_share
             elif n_batches == 1 and ck_idx > 0:
                 valid_lo = grp_min_col
             else:
@@ -991,135 +1123,38 @@ def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools,
                                 np.multiply(t_det_batch[:, ra:rb], sc_vec, out=t_det_batch[:, ra:rb])
                     if retain_radius is None and not direct_mirror:
                         for q, r_out in enumerate(b_rows):
-                            t_row_1d = t_det_batch[q]
-                            out_row_ptr = out_d[r_out].ctypes.data
-                            t_row_ptr = t_row_1d.ctypes.data
-                            for ra, rb in t_runs:
-                                if stream_cp is not None:
-                                    stream_cp(
-                                        out_row_ptr + ra * 8,
-                                        t_row_ptr + ra * 8,
-                                        (rb - ra) * 8,
-                                    )
-                                    used_nt_stream = True
-                                else:
-                                    out_d[r_out, ra:rb] = t_row_1d[ra:rb]
+                            if _copy_runs(out_d, r_out, t_det_batch[q], t_runs, stream_cp):
+                                used_nt_stream = True
                     dt_corr_d[d_idx] += time.perf_counter() - t_d0
 
             # Filter all ready slabs of this batch across all detectors in one C call.
-            t_f0 = time.perf_counter()
-            peaks_by_q = None
-            if c_jobs:
-                c_out = _core.HMF.run_series_batch_sparse(c_jobs)
-                dt_b = time.perf_counter() - t_f0
-                dt_each = dt_b / len(c_jobs)
-                dt_fine_cohort += dt_b
-                for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
-                    sub_rec.total += tot
-                    sub_rec.seconds += dt_each
-                    if tot > 0:
-                        sl = sub_rec.slabs
-                        nt_f = sub_rec.ntemplates
-                        fl_arr = np.frombuffer(fl, np.int64)
-                        ix_arr = np.frombuffer(ix, np.int64)
-                        vl_arr = np.frombuffer(vl, np.complex64)
-                        sp = _SparsePeaks((r1 - r0, nt_f, sl.nbins), fl_arr, ix_arr, vl_arr)
-                        sub_rec.parts.append((r0, sp))
-                        if retain_radius is not None and retain_radius > 0:
-                            keep_pk = (
-                                np.ones(vl_arr.size, dtype=bool)
-                                if eff_ret_thr <= 0.0
-                                else (np.abs(vl_arr) >= eff_ret_thr)
-                            )
-                            if np.any(keep_pk):
-                                bi = fl_arr[keep_pk] // (nt_f * sl.nbins)
-                                s_pos = sl.starts[r0 + bi].astype(np.int64) + ix_arr[keep_pk]
-                                if peaks_by_q is None:
-                                    peaks_by_q = [[] for _ in range(kr)]
-                                peaks_by_q[q].append(s_pos)
-            else:
-                dt_fine_cohort += time.perf_counter() - t_f0
+            dt_filter, peaks_by_q = _filter_ready_slabs(
+                c_jobs, back_subs, kr, retain_radius, eff_ret_thr)
+            dt_fine_cohort += dt_filter
 
-            # Materialize collar spans around triggers when retain_radius > 0.
+            # Write the output around retained peaks when retain_radius > 0.
             if has_blocks and retain_radius is not None and retain_radius > 0:
                 for q, r_out in enumerate(b_rows):
-                    k_r = k_r0 + q
-                    q_peaks = peaks_by_q[q] if peaks_by_q is not None else None
-                    spans = []
-                    if pending_fwd_end is not None and pending_fwd_end[k_r] > c_start:
-                        spans.append((c_start, min(c_end, pending_fwd_end[k_r])))
-                    if q_peaks:
-                        all_s = q_peaks[0] if len(q_peaks) == 1 else np.concatenate(q_peaks)
-                        if pending_fwd_end is not None:
-                            max_fwd = int(all_s.max()) + retain_radius
-                            if max_fwd > c_end and max_fwd > pending_fwd_end[k_r]:
-                                pending_fwd_end[k_r] = min(S, max_fwd)
-                        for s_val in all_s.tolist():
-                            ca = max(valid_lo, int(s_val) - retain_radius)
-                            cb = min(c_end, int(s_val) + retain_radius)
-                            if cb > ca:
-                                spans.append((ca, cb))
-                    if spans:
-                        spans.sort()
-                        merged = [list(spans[0])]
-                        for sa, sb in spans[1:]:
-                            if sa <= merged[-1][1]:
-                                if sb > merged[-1][1]:
-                                    merged[-1][1] = sb
-                            else:
-                                merged.append([sa, sb])
-                        w_spans = _intersect_runs(
-                            np.asarray(merged, dtype=np.int64), written_runs)
-                        if w_spans.size > 0:
-                            for d_idx, (_, info) in enumerate(members):
-                                t_d0 = time.perf_counter()
-                                out_d = info.out
-                                t_row_1d = tbuf_det[d_idx][q]
-                                out_row_ptr = out_d[r_out].ctypes.data
-                                t_row_ptr = t_row_1d.ctypes.data
-                                for sa, sb in w_spans:
-                                    sa_i, sb_i = int(sa), int(sb)
-                                    if stream_cp is not None:
-                                        stream_cp(
-                                            out_row_ptr + sa_i * 8,
-                                            t_row_ptr + sa_i * 8,
-                                            (sb_i - sa_i) * 8,
-                                        )
-                                        used_nt_stream = True
-                                    else:
-                                        out_d[r_out, sa_i:sb_i] = t_row_1d[sa_i:sb_i]
-                                dt_corr_d[d_idx] += time.perf_counter() - t_d0
+                    w_spans = _retained_spans(
+                        peaks_by_q[q] if peaks_by_q is not None else None,
+                        pending_fwd_end, k_r0 + q, valid_lo, c_start, c_end, S, retain_radius,
+                        written_runs)
+                    if w_spans is None:
+                        continue
+                    for d_idx, (_, info) in enumerate(members):
+                        t_d0 = time.perf_counter()
+                        if _copy_runs(info.out, r_out, tbuf_det[d_idx][q], w_spans, stream_cp):
+                            used_nt_stream = True
+                        dt_corr_d[d_idx] += time.perf_counter() - t_d0
 
             # Save cross-chunk boundary collar into persistent ping-pong pool when needed.
             if need_collars and has_blocks and ck_idx + 1 < n_chunks and min_fut < S:
                 collar_lo = max(grp_min_col, min_fut - r_pad)
                 if collar_lo < c_end:
-                    t_c0 = time.perf_counter()
-                    c_len = c_end - collar_lo
-                    step_elems = kr * c_len
-                    total_elems = D * step_elems
-                    dst_pool = collar_pools[write_pool_idx]
-                    if dst_pool is None or write_off + total_elems > dst_pool.size:
-                        new_cap = max(
-                            write_off + total_elems,
-                            0 if dst_pool is None else dst_pool.size * 2,
-                            max(1, n_batches) * D * max(c_len, 4096),
-                        )
-                        grown = _aligned_zeros(new_cap, dtype=np.complex64)
-                        if dst_pool is not None and write_off > 0:
-                            grown[:write_off] = dst_pool[:write_off]
-                        dst_pool = grown
-                        collar_pools[write_pool_idx] = dst_pool
-                    for d_idx in range(D):
-                        base_off = write_off + d_idx * step_elems
-                        dst_pool[base_off : base_off + step_elems].reshape(kr, c_len)[:] = (
-                            tbuf_det[d_idx][:kr, collar_lo:c_end]
-                        )
-                    saved_collars[b_idx] = (collar_lo, c_end, dst_pool, write_off)
-                    write_off += total_elems
-                    dt_share = (time.perf_counter() - t_c0) / D
-                    for d_idx in range(D):
-                        dt_corr_d[d_idx] += dt_share
+                    saved_collars[b_idx] = _save_collar(
+                        collar_pools, write_pool_idx, write_off, tbuf_det, kr, collar_lo, c_end,
+                        n_batches, dt_corr_d)
+                    write_off += D * kr * (c_end - collar_lo)
     return dt_fine_cohort, used_nt_stream
 
 

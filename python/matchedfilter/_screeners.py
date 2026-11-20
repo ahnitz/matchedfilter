@@ -206,16 +206,14 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             float(f2_floor), sizes, int(size_cap), int(chunk_size), out_a, out_b, out_dl)
         return out_a[:count], out_b[:count], out_dl[:count]
 
-    def _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad):
-        # (k <= 4 members at 0.96 at their build lag met the engine at ~0.99)
-        return _screener_retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad,
-                                   W32, WC64, exp_all64, R, v)
-
     def _pack_cluster(bvecs_c64, offs_i32, mems_i32, alphas_arr, max_dl):
+        # A level as a Tier0Cluster, its members' retentions measured as the engine meets
+        # them (k <= 4 members at 0.96 at their build lag met the engine at ~0.99)
         nc_out = int(offs_i32.size) - 1
         specs_out = _band_slots(bvecs_c64, b0, k0, k_lo)
         lpad = int((max_dl + R - 1) // R) if max_dl > 0 else 0
-        alphas_arr = _retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad)
+        alphas_arr = _screener_retention(bvecs_c64, offs_i32, mems_i32, alphas_arr, lpad,
+                                         W32, WC64, exp_all64, R, v)
         rat = round((nc_out / float(nt)) * 20.0) / 20.0
         raw_a = float(np.mean(alphas_arr) - 0.5 * np.std(alphas_arr))
         eff_a = max(0.5, min(1.0, math.floor(raw_a * 200.0 + 1e-9) / 200.0))
@@ -238,24 +236,19 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
         pa, pb, pdl, level_128, level_v, level_dl, level_offsets, members, alphas)
     if nc == 0:
         return empty_ret
-    band_vecs_128 = level_128[:nc]
-    band_vecs = band_vecs_128.astype(np.complex64)
-    v_cl2, dl_cl2, offsets = level_v[:nc], level_dl[:nc], level_offsets[:nc + 1]
+    # The current level: its clusters' vectors, variances, lags and CSR partition
+    cur_nc = nc
+    cur_vecs_128 = level_128[:nc]
+    cur_v, cur_dl, cur_offsets = level_v[:nc], level_dl[:nc], level_offsets[:nc + 1]
+    cur_members, cur_alphas = members, alphas
 
-    cl_k2 = _pack_cluster(band_vecs, offsets, members, alphas, max_abs_dl)
-    out_levels = [cl_k2]
+    prev_cl = _pack_cluster(cur_vecs_128.astype(np.complex64), cur_offsets, cur_members,
+                            cur_alphas, max_abs_dl)
+    out_levels = [prev_cl]
     if cap_arity <= 2:
         return tuple(out_levels + [None] * (num_slots - len(out_levels)))
 
     # Passes 2..num_slots: iterative hierarchical matching + minimax weight synthesis up to cap_arity
-    cur_nc = nc
-    cur_vecs_128 = band_vecs_128
-    cur_v = v_cl2
-    cur_dl = dl_cl2
-    cur_offsets = offsets
-    cur_members = members
-    cur_alphas = alphas
-    prev_cl = cl_k2
     alpha_floor = max(0.88, min(0.93, float(rho_min) + 0.03))
     rho_min_hi = max(0.84, float(rho_min) - 0.05)
     coarse_floor_hi = rho_min_hi * (0.90 if s_step > 1 else 1.0)
@@ -302,21 +295,14 @@ def cluster_tier0_candidates(spectra, power, n, band, k0=0, rho_min=0.90, max_ar
             next_128, next_v, next_dl, next_offsets, members_hi, alphas_hi)
         if not merged:
             break
-        nc_hi = cur_nc - merged
-        band_vecs_hi_128 = next_128[:nc_hi]
-        band_vecs_hi = band_vecs_hi_128.astype(np.complex64)
-        v_hi, dl_hi, offsets_hi = next_v[:nc_hi], next_dl[:nc_hi], next_offsets[:nc_hi + 1]
-
-        cl_hi = _pack_cluster(band_vecs_hi, offsets_hi, members_hi, alphas_hi, max_dl_hi)
-        out_levels.append(cl_hi)
-        prev_cl = cl_hi
-        cur_nc = nc_hi
-        cur_vecs_128 = band_vecs_hi_128
-        cur_v = v_hi
-        cur_dl = dl_hi
-        cur_offsets = offsets_hi
-        cur_members = members_hi
-        cur_alphas = alphas_hi
+        # The merged level becomes the current one
+        cur_nc -= merged
+        cur_vecs_128 = next_128[:cur_nc]
+        cur_v, cur_dl, cur_offsets = next_v[:cur_nc], next_dl[:cur_nc], next_offsets[:cur_nc + 1]
+        cur_members, cur_alphas = members_hi, alphas_hi
+        prev_cl = _pack_cluster(cur_vecs_128.astype(np.complex64), cur_offsets, cur_members,
+                                cur_alphas, max_dl_hi)
+        out_levels.append(prev_cl)
 
     return tuple(out_levels + [None] * (num_slots - len(out_levels)))
 
@@ -414,6 +400,46 @@ def _screener_retention(bvecs, offsets, members, alphas, lag_pad, W32, WC64, exp
     return out
 
 
+def _pairs_within_clusters(offsets, members, valid, U64, v, Sr, Si, dls_ord, floor2):
+    """Pair the valid members of each multi-member cluster greedily by coherence.
+
+    Every pair of a cluster's members is scored over the coarse shifts
+    (``_core.tier0_pair_scores``); the pairs whose squared coherence reaches ``floor2`` are
+    taken best first, each member at most once.
+
+    Returns
+    -------
+    tuple of list
+        ``(first, second, lag)``: per pair the smaller template index, the larger, and the
+        coarse-shift lag of the larger against the smaller.
+    """
+    pa_l, pb_l, dl_l = [], [], []
+    for c0 in range(offsets.size - 1):
+        grp = members[offsets[c0]:offsets[c0 + 1]]
+        grp = grp[valid[grp]]
+        m_g = int(grp.size)
+        if m_g < 2:
+            continue
+        U_g = U64[grp]
+        r2 = np.empty((m_g, m_g), dtype=np.float32)
+        bs = np.empty((m_g, m_g), dtype=np.int32)
+        _core.tier0_pair_scores(np.ascontiguousarray(U_g.real), np.ascontiguousarray(U_g.imag),
+                                Sr, Si, np.ascontiguousarray(v[grp], dtype=np.float64), r2, bs)
+        ia, ib = np.nonzero(r2 >= floor2)
+        used = np.zeros(m_g, dtype=bool)
+        for e in np.argsort(-r2[ia, ib], kind="stable"):
+            a, b = int(ia[e]), int(ib[e])
+            if used[a] or used[b]:
+                continue
+            used[a] = used[b] = True
+            dl = int(dls_ord[bs[a, b]])
+            ta, tb = int(grp[a]), int(grp[b])
+            pa_l.append(min(ta, tb))
+            pb_l.append(max(ta, tb))
+            dl_l.append(dl if ta < tb else -dl)
+    return pa_l, pb_l, dl_l
+
+
 #: Smallest member retention a Tier-1 sub-screener may have (cluster_tier1_from_tier0).
 TIER1_ALPHA_MIN = 0.995
 
@@ -472,31 +498,8 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
     coarse_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
     floor2 = coarse_floor * coarse_floor
 
-    # Greedy coherence matching within each multi-member Tier-0 cluster
-    pa_l, pb_l, dl_l = [], [], []
-    for c0 in range(off0.size - 1):
-        grp = mem0[off0[c0]:off0[c0 + 1]]
-        grp = grp[valid[grp]]
-        m_g = int(grp.size)
-        if m_g < 2:
-            continue
-        U_g = U64[grp]
-        r2 = np.empty((m_g, m_g), dtype=np.float32)
-        bs = np.empty((m_g, m_g), dtype=np.int32)
-        _core.tier0_pair_scores(np.ascontiguousarray(U_g.real), np.ascontiguousarray(U_g.imag),
-                                Sr, Si, np.ascontiguousarray(v[grp], dtype=np.float64), r2, bs)
-        ia, ib = np.nonzero(r2 >= floor2)
-        used = np.zeros(m_g, dtype=bool)
-        for e in np.argsort(-r2[ia, ib], kind="stable"):
-            a, b = int(ia[e]), int(ib[e])
-            if used[a] or used[b]:
-                continue
-            used[a] = used[b] = True
-            dl = int(dls_ord[bs[a, b]])
-            ta, tb = int(grp[a]), int(grp[b])
-            pa_l.append(min(ta, tb))
-            pb_l.append(max(ta, tb))
-            dl_l.append(dl if ta < tb else -dl)
+    pa_l, pb_l, dl_l = _pairs_within_clusters(off0, mem0, valid, U64, v, Sr, Si, dls_ord,
+                                              floor2)
     if not pa_l:
         return None
 
