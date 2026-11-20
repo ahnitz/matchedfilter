@@ -368,6 +368,18 @@ def test_a_bank_proposes_sizes_chains_and_the_screen_and_starts_on_the_default()
     assert all(p._governed for p in bank._layout_plans(0))              # the bank's trial governs
 
 
+def _calls_to_lock(bank):
+    """The most calls a bank's trial can take to lock. The trial is a coordinate search: a
+    pass runs up to the cap of rounds, an arm that beats the base must win again in up to
+    as many, and a pass that moves is followed by another, one per dimension at most and a
+    last one that keeps its base. On a real clock an arm can win (20 rounds when both moves
+    pay 20%, 26 with 15% timing noise), which twice the cap did not allow for: the arm64
+    sanitizer Nightly of 2026-11-17 was still in its trial after 21 calls."""
+    moves = {m.split("=")[0] for a in bank._joint_arms() if a != _trial.DEFAULT
+             for m in a.split(",")}
+    return (len(moves) + 1) * 2 * _choice.rounds()[1] + 1
+
+
 @pytest.mark.parametrize("aa", [False, True])
 def test_a_banks_trial_runs_without_a_cost_file_switches_exactly_and_locks(aa, monkeypatch,
                                                                            tmp_path):
@@ -385,7 +397,7 @@ def test_a_banks_trial_runs_without_a_cost_file_switches_exactly_and_locks(aa, m
     plain._in_trial = False
     data = _data(rng)
     ref = set(np.unique(plain.filter_series(data).template_indices))
-    for _ in range(2 * _choice.rounds()[1] + 1):
+    for _ in range(_calls_to_lock(bank)):
         out = TimeDomainFilterBank.filter_series_many([(bank, data, {})])[0]
         assert set(np.unique(out.template_indices)) == ref
         if not bank._in_trial:
@@ -640,7 +652,7 @@ def test_multi_round_batch_bounds_sampled_banks_and_locks_all(monkeypatch):
             if b._layouts is not None and any(s is not None for s in b._layouts[1:]):
                 assert all(s is not None for s in b._layouts)
 
-    for _ in range(3 * _choice.rounds()[1]):
+    for _ in range(_calls_to_lock(banks[0])):
         if all(not b._in_trial for b in banks):
             break
         TimeDomainFilterBank.filter_series_many([(b, data, {}) for b in banks])
