@@ -218,6 +218,11 @@ autotuning). The standard benchmark is the ladder, `tools/ladder.py`. When a fid
 threshold contract violation or autotuning failure is fixed, add a test that fails on the
 old code to the file that covers that behaviour.
 
+## Use of AI assistants
+
+This library was developed with the help of AI coding assistants: Google's Gemini and
+Anthropic's Claude Code. Both wrote code, tests and documentation here.
+
 ## License
 
 MIT
