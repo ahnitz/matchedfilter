@@ -489,6 +489,40 @@ def test_a_profile_per_channel_is_one_leaf_bank_holding_each(monkeypatch):
         _assert_same_peaks(g[3], p[3], rtol=0)
 
 
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_a_gpu_search_has_a_leaf_bank_for_each_profile(monkeypatch):
+    """A GPU plan holds one calibration. On a GPU search a root with a profile per channel
+    gives every leaf a bank for each profile, calibrated on that channel's profile under no
+    name, and the search runs with the hierarchical engine (the one whose plans are
+    calibrated on the reference)."""
+    given = []
+    set_reference = TimeDomainFilterBank.set_reference
+
+    def recording(self, reference, delta_f=None, **kw):
+        given.append((self, reference, kw.get("profile")))
+        return set_reference(self, reference, delta_f=delta_f, **kw)
+    monkeypatch.setattr(TimeDomainFilterBank, "set_reference", recording)
+
+    root = _tree(np.random.default_rng(21), inner_counts=(301, 351))
+    profiles = _profiles()
+    root.profile = profiles
+    inputs = _inputs(np.random.default_rng(22), nblocks=1)
+    search = HierarchicalSearch([root], threshold=6.0,
+                                leaf_options=dict(engine="hier", binsize=512, device="gpu:0"))
+    got = _collect(search, inputs)
+    assert {(g[0], g[2]) for g in got} == {
+        (lf.node_id, ch) for lf in search._leaves_below(root) for ch in "AB"}
+    for lf in search._leaves_below(root):
+        a, b = search.leaf_bank(root, lf, "A"), search.leaf_bank(root, lf, "B")
+        assert a is not b and a.profiles == b.profiles == (None,)
+        # (a bank may be given the same reference more than once)
+        for bank, ch in ((a, "A"), (b, "B")):
+            refs = [(w, name) for bk, w, name in given if bk is bank]
+            assert refs and all(w is profiles[ch][0] and name is None for w, name in refs)
+        # no channel named, or one the root has no profile for: the first profile's bank
+        assert search.leaf_bank(root, lf) is a and search.leaf_bank(root, lf, "C") is a
+
+
 def test_one_profile_is_one_calibration_for_every_channel():
     root = _tree(np.random.default_rng(13), inner_counts=(301,))
     root.profile = _profiles()["A"]

@@ -108,7 +108,8 @@ class Root:
         calibrated with (:meth:`TimeDomainFilterBank.set_reference`), or a dict
         ``{channel: (w, delta_f)}`` where the channels' noise spectra differ (two
         detectors). Each leaf bank then holds a calibration for every channel's profile over
-        one copy of its templates. A channel the dict does not name takes the first profile.
+        one copy of its templates (on a GPU: a bank for each profile). A channel the dict
+        does not name takes the first profile.
     node_id : object, optional
         The caller's name for the root, handed back to hooks.
     """
@@ -329,7 +330,7 @@ class PeaksContext:
         bank = self._search.leaf_bank(self.root, self.leaf, channel)
         return bank.filter_series(ser, windows=windows, binsize=binsize,
                                   threshold=threshold, template_index=template_index,
-                                  profile=self._search._channel_profile(self.root, channel))
+                                  profile=self._search._call_profile(self.root, channel))
 
 
 def _merge(spans):
@@ -557,6 +558,8 @@ class HierarchicalSearch:
         if self.min_pad < 0:
             raise ValueError("min_pad must be non-negative")
         self.timings = dict(root=0.0, inner=0.0, leaf=0.0, hooks=0.0, setup=0.0)
+        # a GPU plan holds one calibration: there each profile has a leaf bank of its own
+        self._bank_per_profile = _parse_device(self.leaf_options.get("device")).kind == "gpu"
         self._parent = {}
         self._kids = {}                  # node -> (inner children, leaf children)
         self._leaf_banks = {}
@@ -593,13 +596,19 @@ class HierarchicalSearch:
             return None
         return channel if channel in prof else next(iter(prof), None)
 
+    def _call_profile(self, root, channel):
+        """The profile a filtering call in channel names to its leaf bank: the channel's
+        profile, or None where each profile has a bank of its own (a GPU search)."""
+        return None if self._bank_per_profile else self._channel_profile(root, channel)
+
     def leaf_bank(self, root, leaf, channel=None):
         """The bank that searches a leaf below a root, built on first use.
 
-        One bank serves the leaf, holding a calibration for each of the root's profiles; its
-        templates are stored once whatever the number of profiles. A channel's profile is set
-        as its reference the first time that channel asks, and a filtering call names the
-        profile it runs (``profile=``).
+        On the CPU one bank serves the leaf, holding a calibration for each of the root's
+        profiles; its templates are stored once whatever the number of profiles. A channel's
+        profile is set as its reference the first time that channel asks, and a filtering call
+        names the profile it runs (``profile=``). On a GPU a plan holds one calibration, so
+        each profile has a bank of its own, with its own copy of the templates.
 
         Parameters
         ----------
@@ -619,18 +628,21 @@ class HierarchicalSearch:
         which = self._channel_profile(root, channel)
         if isinstance(prof, dict):
             prof = prof.get(which)
-        bank = self._leaf_banks.get(id(leaf))
-        if bank is None:
+        key = (id(leaf), which) if self._bank_per_profile else id(leaf)
+        bank = self._leaf_banks.get(key)
+        new = bank is None
+        if new:
             t0 = time.perf_counter()
             opts = dict(self.leaf_options)
             opts["threshold"] = self.threshold * self.envelope_floor
-            bank = self._leaf_banks[id(leaf)] = TimeDomainFilterBank(leaf.taps, leaf.counts, **opts)
+            bank = self._leaf_banks[key] = TimeDomainFilterBank(leaf.taps, leaf.counts, **opts)
             self.timings["setup"] += time.perf_counter() - t0
-        if prof is not None and which not in bank.profiles:
+        name = self._call_profile(root, channel)
+        if prof is not None and (new if self._bank_per_profile else name not in bank.profiles):
             # the first reference settles the bank's block sizes; each calibrates its gates
             t0 = time.perf_counter()
             w, df = prof
-            bank.set_reference(w, delta_f=df, profile=which)
+            bank.set_reference(w, delta_f=df, profile=name)
             self.timings["setup"] += time.perf_counter() - t0
         return bank
 
@@ -904,7 +916,7 @@ class HierarchicalSearch:
                     # one window as a slice: filter_series memoises a slice's layout
                     where[(id(lf), c)] = len(jobs)
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w,
-                                                    profile=self._channel_profile(step.root, c))))
+                                                    profile=self._call_profile(step.root, c))))
         deferred = any(getattr(b, "device", None) is not None
                        and _parse_device(b.device).kind == "gpu"
                        for b, _, _ in jobs)
