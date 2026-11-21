@@ -78,8 +78,6 @@ VARS: Tuple[Var, ...] = (
         "round's times and ratios, and each lock, to this file as JSON lines. Each round "
         "costs one more settled and timed run.",
         usage="MF_TRIAL_AA_LOG=<file>", kind="text"),
-    Var("MF_HMF_PROF", "diagnostic", "c", "", "Per-tier CPU tick counters in hierarchical plans.",
-        usage="MF_HMF_PROF=1", kind="flag", value=False),
     Var("MF_HMF_TRACE", "diagnostic", "c", "", "Trace hierarchical plan runs to stderr.",
         usage="MF_HMF_TRACE=1", kind="flag", value=False),
     Var("MF_HMF_DUMP", "diagnostic", "c", "", "Dump coarse-pass data for the GPU mirror tests.",
@@ -151,6 +149,9 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "the plans keep their per-tier time counters always; tools/hier_bench.py "
+     "prints its profile from them",
+     ("MF_HMF_PROF",)),
     ("2026-11-21", "the roofline diagnostic reads the 256-bit Zen 5 parts (Strix Point, Krackan Point) "
      "from the CPU model",
      ("MF_ROOFLINE_DATAPATH",)),

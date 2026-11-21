@@ -18,7 +18,7 @@ It reports three things together, because none of them means much alone:
             bit.  Then internally: lowering the first stage must report a
             superset, bit for bit where both report.  An omission fails the
             one-sided guarantee and is the thing to watch.
-  profile   where the time went, with MF_HMF_PROF
+  profile   where the time went: ticks per pair in each tier and the refine
 
     python tools/hier_bench.py --fixture hier-00.npz     # a real captured call
     python tools/hier_bench.py                          # synthetic, snr 5.0
@@ -324,8 +324,6 @@ def main(argv=None):
         a.series //= 4
         a.inject //= 4
 
-    if not a.no_profile:
-        os.environ["MF_HMF_PROF"] = "1"       # read when the plan is created
     import matchedfilter as mf
     if a.isa:
         want = os.environ.get("MF_ISA")
@@ -335,10 +333,7 @@ def main(argv=None):
         mf.set_target(a.isa)
 
     if a.fixture:
-        rc = replay(mf, a.fixture, a.reps, a)
-        if not a.no_profile:
-            sys.stdout.flush()
-        return rc
+        return replay(mf, a.fixture, a.reps, a)
 
     rng = np.random.default_rng(11)
     power, h, series = dataset(mf, a.n, a.templates, a.series, a.inject,
@@ -378,12 +373,7 @@ def main(argv=None):
 
     # An explicitly open gate must report a superset, with identical values.
     # Do not request an unmeasured SNR and rely on implicit clamping.
-    if len(p.config) == 3:
-        b0, band, taps = p.config
-        opened = mf.HierarchicalFilter(a.n, 1, a.templates, chain=(b0, band))
-    else:
-        band, taps = p.config
-        opened = mf.HierarchicalFilter(a.n, 1, a.templates, chain=band)
+    opened = mf.HierarchicalFilter(a.n, 1, a.templates, chain=p.config)
     opened.set_coarse_threshold(0.0)
     opened.set_reference(power)
     opened.set_templates(h)
@@ -452,8 +442,13 @@ def main(argv=None):
               % int(((li >= 0) & (gi < 0)).sum()))
 
     if not a.no_profile:
-        sys.stdout.flush()
-        p._mf.stats()          # prints the per-stage profile to stderr
+        # the plan's own counters (x86 cycles, nanoseconds elsewhere), per pair it saw
+        pairs = max(1, p.stats[0])
+        tiers = p.tier_stats
+        print("\n  profile, ticks/pair: "
+              + " ".join("tier%d(%d)=%.0f" % (i, band, ticks / pairs)
+                         for i, (band, _, ticks) in enumerate(tiers[:-1]))
+              + " refine=%.0f" % (tiers[-1][2] / pairs))
     return 1 if fails else 0
 
 

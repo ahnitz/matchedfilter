@@ -8,6 +8,9 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-11-21: the plans keep their per-tier time counters always;
+tools/hier_bench.py prints its profile from them: MF_HMF_PROF.
+
 Removed 2026-11-21: the roofline diagnostic reads the 256-bit Zen 5 parts (Strix Point,
 Krackan Point) from the CPU model: MF_ROOFLINE_DATAPATH.
 
@@ -89,7 +92,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 |---|---|
 | `MF_AUTOTUNE_LOG=1` | Log block-size, chain and trial decisions. |
 | `MF_TRIAL_AA_LOG=<file>` | Every paired trial also runs its preference a second time, settled and timed like an arm and never a sample (an A/A arm: no decision changes), and appends each round's times and ratios, and each lock, to this file as JSON lines. Each round costs one more settled and timed run. |
-| `MF_HMF_PROF=1` | Per-tier CPU tick counters in hierarchical plans. |
 | `MF_HMF_TRACE=1` | Trace hierarchical plan runs to stderr. |
 | `MF_HMF_DUMP=<file>` | Dump coarse-pass data for the GPU mirror tests. |
 | `MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX` | FP16 gate error data for tools/gate16_error.py. |

@@ -1,6 +1,6 @@
-/* A monotonically increasing counter for the profiling paths.
+/* A monotonically increasing counter for the plans' per-tier time counters.
  *
- * Only ever used for ratios between phases of one run (MF_HMF_PROF), so the
+ * Only ever used for ratios between phases of one run, so the
  * unit does not matter as long as it is consistent: cycles on x86, nanoseconds
  * elsewhere.  __rdtsc is x86-only, and reaching for it unconditionally is what
  * dragged <x86intrin.h> into a file that has no SIMD in it at all.

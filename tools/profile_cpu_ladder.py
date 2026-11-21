@@ -52,7 +52,6 @@ def main():
         parser.error("--runs must be positive and --segments must be at least 2")
 
     os.environ.update(MF_AUTOTUNE="0", MF_CHAIN_FORCE="256,512,1024")
-    os.environ.pop("MF_HMF_PROF", None)  # per-row instrumentation distorts this workload
     import matchedfilter as mf
     from matchedfilter import _core
     if cli.target is not None:

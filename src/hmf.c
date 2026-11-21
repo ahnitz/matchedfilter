@@ -81,9 +81,9 @@ struct ap_hmf_plan {
   char *dready,*tready,*dmirrored;
   int ref_on;
   long pairs,trig;
-  unsigned long long c_ref,c_fill;
+  unsigned long long c_ref;
   unsigned long long c_series;      /* whole ap_hmf_run_series calls: transforms, ingest, tiers, refine */
-  int prof,trace;
+  int trace;
   FILE *dump;
   float *twiddles,*tw_scratch;
   float *tmpls_half,*prod_scratch;
@@ -337,7 +337,6 @@ static ap_hmf_plan *hmf_create(size_t n,size_t k,int ndata,int ntmpl,const size_
      ||!p->dtime||!p->dhave){
     ap_hmf_destroy(p); return NULL;
   }
-  p->prof=ap_env_flag("MF_HMF_PROF",0);
   p->trace=ap_env_flag("MF_HMF_TRACE",0);
   const char *dump=ap_env_text("MF_HMF_DUMP");
   p->dump=dump ? fopen(dump,"wb") : NULL;
@@ -712,12 +711,6 @@ void ap_hmf_stats(const ap_hmf_plan *p,long *pairs,long *refined){
   if(!p) return;
   if(pairs) *pairs=p->pairs;
   if(refined) *refined=p->trig;
-  if(p->prof && p->pairs){
-    fprintf(stderr,"    [prof] cycles/pair:");
-    for(int i=0;i<p->ntiers;i++)
-      fprintf(stderr," tier%d(%zu)=%.0f",i,p->tier[i].m,(double)p->tier[i].ticks/p->pairs);
-    fprintf(stderr," refine=%.0f fill=%.0f\n",(double)p->c_ref/p->pairs,(double)p->c_fill/p->pairs);
-  }
 }
 int ap_hmf_tier_stats(const ap_hmf_plan *p,int tier,long *passed,unsigned long long *ticks){
   if(!p || tier<0 || tier>p->ntiers) return -1;
@@ -2262,10 +2255,8 @@ static void empty_row(ap_peak *peaks,int *counts,size_t row,size_t nb){
 }
 
 static void reject_row(ap_hmf_plan *p,ap_peak *peaks,int *counts,size_t row,size_t nb){
-  unsigned long long f0 = p->prof ? ap_ticks() : 0;
   if(p->sparse && counts) counts[row]=0;
   else empty_row(peaks,counts,row,nb);
-  if(p->prof) p->c_fill += ap_ticks()-f0;
 }
 
 static int hmf_q15_prepare_data(ap_hmf_plan *p,hmf_tier *tr,int ql){
@@ -2328,7 +2319,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   for(int i=0;i<p->ntiers;i++)
     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
 
-  const int fast_sparse = p->sparse && counts && !p->prof;
+  const int fast_sparse = p->sparse && counts;
   if(fast_sparse && p->sparse == 1) memset(counts, 0, (size_t)nd * (size_t)nt * sizeof(int));
 
   const int *fire_d=NULL,*fire_t=NULL;

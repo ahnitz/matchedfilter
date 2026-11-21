@@ -456,7 +456,7 @@ def main():
         os.environ[name] = "1"
     os.environ.update(MF_CHAIN_FORCE="2048:256,512,1024", MF_AUTOTUNE="1",
                       VK_ICD_FILENAMES="/dev/null")
-    for name in ("MF_HMF_PROF", "MF_HMF_TRACE", "MF_HMF_DUMP"):
+    for name in ("MF_HMF_TRACE", "MF_HMF_DUMP"):
         os.environ.pop(name, None)
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "python"))
