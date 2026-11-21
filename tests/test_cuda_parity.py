@@ -390,8 +390,15 @@ def test_resident_correlation_feeds_filter_in_place():
     r_cpu = fine["cpu"].filter_series(ref[3], windows=slice(40000, 160000))
     ws = getattr(gplan, "_series_workspace", None)
     assert ws is not None and ws[1] is None, "the series was staged through the host"
-    np.testing.assert_array_equal(r_dev.sample_indices, r_cpu.sample_indices)
-    np.testing.assert_allclose(r_dev.snr, r_cpu.snr, rtol=2e-5, atol=1e-4)
+    # the same peaks; their order follows each bank's blocks, whose length a CPU bank and a
+    # GPU bank may choose differently
+    order = {d: np.lexsort((r.sample_indices, r.template_indices))
+             for d, r in (("dev", r_dev), ("cpu", r_cpu))}
+    for field in ("template_indices", "sample_indices"):
+        np.testing.assert_array_equal(getattr(r_dev, field)[order["dev"]],
+                                      getattr(r_cpu, field)[order["cpu"]])
+    np.testing.assert_allclose(r_dev.snr[order["dev"]], r_cpu.snr[order["cpu"]],
+                               rtol=2e-5, atol=1e-4)
 
 
 # ---- A3: no TypeError probing re-dispatch ----------------------------------------------------

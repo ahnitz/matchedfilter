@@ -220,3 +220,34 @@ def test_cuda_hierarchical_filter_agrees_with_cpu():
 
     np.testing.assert_array_equal(res_gpu["index"], res_cpu["index"])
     np.testing.assert_allclose(res_gpu["value"], res_cpu["value"], rtol=1e-3, atol=1e-3)
+
+
+class _Driver:
+    """A stand-in for the bound CUDA driver that reports one version."""
+
+    def __init__(self, version, status=0):
+        self.version, self.status = version, status
+
+    def cuDriverGetVersion(self, ref):
+        ref._obj.value = self.version
+        return self.status
+
+
+def test_a_kernel_is_offered_to_an_older_driver_at_the_version_it_reads(manifest):
+    """A driver older than the toolkit that built the kernels refuses their PTX version
+    (CUDA error 222). _ptx_for_driver lowers a module's .version line to the newest one the
+    driver is sure to read, (M - 4).(m - 1) for CUDA M.m, and changes nothing else; it
+    returns None for a driver that already reads the module, one before CUDA 11, or one
+    whose version is unknown."""
+    from matchedfilter._cudacompute import _ptx_for_driver
+    ptx = gzip.decompress((PTX_DIR / _flat(manifest, 2048)).read_bytes())
+    assert b"\n.version 8.7\n" in ptx
+    older = _ptx_for_driver(ptx, _Driver(11060))
+    assert older == ptx.replace(b"\n.version 8.7\n", b"\n.version 7.5\n", 1)
+    for release, version in ((12000, b"8.0"), (12060, b"8.5")):
+        assert _ptx_for_driver(ptx, _Driver(release)) == ptx.replace(
+            b"\n.version 8.7\n", b"\n.version " + version + b"\n", 1)
+    assert _ptx_for_driver(ptx, _Driver(12080)) is None      # reads 8.7
+    assert _ptx_for_driver(ptx, _Driver(13020)) is None
+    assert _ptx_for_driver(ptx, _Driver(10020)) is None
+    assert _ptx_for_driver(ptx, _Driver(11060, status=1)) is None

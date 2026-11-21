@@ -254,13 +254,18 @@ def _plan_state(bank):
     return "; ".join(out)
 
 
-def _equivalence(bank, ser, windows, **kw):
+def _equivalence(bank, ser, windows, snr_rtol=0.0, **kw):
+    """The number of peaks of a call with several windows, which must be those of one call
+    a window: the same templates and samples, and the same SNR bit for bit (snr_rtol=0) or
+    to a relative tolerance."""
     W = _normalize_windows(windows, ser.size)
     before = _plan_state(bank)
     merged = _sorted(bank.filter_series(ser, windows=windows, **kw))
     mid = _plan_state(bank)
     separate = _concat([bank.filter_series(ser, windows=slice(int(a), int(b)), **kw) for a, b in W])
-    if all(np.array_equal(m, s_) for m, s_ in zip(merged, separate)):
+    if all(np.array_equal(m, s_) for m, s_ in zip(merged[:2], separate[:2])) and (
+            np.array_equal(merged[2], separate[2]) if not snr_rtol
+            else np.allclose(merged[2], separate[2], rtol=snr_rtol, atol=0.0)):
         return len(merged[0])
     # Report enough to tell a different computation from a different choice: the plans'
     # state around the calls, a repeat of the merged call, and the differing peaks.
@@ -327,7 +332,10 @@ def test_merged_equals_separate_on_gpu(engine):
         pytest.skip(usable_gpu_reason())
     ser = _analytic(3)
     bank = _bank(engine, device=gpu)
-    n = sum(_equivalence(bank, ser, w, binsize=256) for w in GEOMETRIES.values())
+    # The peaks must be the same ones. Their SNRs are held to a few roundings, not bit for
+    # bit: on CUDA (Quadro RTX 6000) one peak of 153 came out 1.2e-8 apart, relatively,
+    # between the merged call and the separate ones.
+    n = sum(_equivalence(bank, ser, w, binsize=256, snr_rtol=1e-6) for w in GEOMETRIES.values())
     assert n > 30
 
 

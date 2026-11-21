@@ -24,6 +24,8 @@ class _Allocation:
         bisect.insort(_starts, start)
 
     def __del__(self):
+        if bisect is None:          # interpreter shutdown: the module's globals are gone
+            return
         buf = self.buffer
         start = int(buf.ptr.value if hasattr(buf.ptr, 'value') else buf.ptr)
         i = bisect.bisect_left(_starts, start)

@@ -17,6 +17,7 @@ synchronization that completes it, ``(label, device_ms)`` is appended to
 """
 import ctypes
 import gzip
+import re
 import struct
 import threading
 
@@ -95,6 +96,38 @@ class _Write:
 
 
 _PTX_DIR = _kernels.folder("cuda")
+
+_CUDA_ERROR_UNSUPPORTED_PTX_VERSION = 222
+_PTX_VERSION = re.compile(rb"^\.version (\d+)\.(\d+)$", re.M)
+
+
+def _ptx_for_driver(ptx, cuda):
+    """A PTX module's text declared as the newest PTX version the driver reads.
+
+    From CUDA 11 on, a driver of release M.m reads PTX up to version (M - 4).m, in some
+    releases one minor version less (12.8 reads 8.7); the lower of the two is declared.
+
+    Parameters
+    ----------
+    ptx : bytes
+        The module's text.
+    cuda : ctypes.CDLL
+        The bound CUDA driver library.
+
+    Returns
+    -------
+    bytes or None
+        The text with its ``.version`` line lowered, or None where the driver's version is
+        unknown or already reads the module's.
+    """
+    version = ctypes.c_int()
+    if cuda.cuDriverGetVersion(ctypes.byref(version)) != 0 or version.value < 11000:
+        return None
+    reads = (version.value // 1000 - 4, max(version.value % 1000 // 10 - 1, 0))
+    found = _PTX_VERSION.search(ptx)
+    if found is None or (int(found.group(1)), int(found.group(2))) <= reads:
+        return None
+    return ptx[:found.start()] + b".version %d.%d" % reads + ptx[found.end():]
 
 
 _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
@@ -233,14 +266,16 @@ class _Buffer:
         self.read_into(out, stream=stream)
         return out
 
-    def read_into(self, out, stream=None):
-        """Direct read into a caller-provided contiguous array (synchronous)."""
+    def read_into(self, out, offset=0, stream=None):
+        """Read the buffer's bytes from ``offset`` into a caller-provided contiguous array
+        (synchronous), on ``stream`` (default: the context's)."""
         if not out.flags.c_contiguous:
             raise ValueError("read_into needs a C-contiguous array")
-        to_copy = min(self.nbytes, out.nbytes)
+        to_copy = min(self.nbytes - offset, out.nbytes)
         if to_copy > 0:
             st = self.ctx.stream if stream is None else stream
-            self.ctx._copy_d2h(out.ctypes.data, self.dptr.value, to_copy, st, "readback")
+            self.ctx._copy_d2h(out.ctypes.data, self.dptr.value + offset, to_copy, st,
+                               "readback")
             self.ctx._sync(st)
         return out
 
@@ -947,18 +982,30 @@ class Context(Executor, InputUploads):
             # launch fails with CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES: cap the JIT's
             # allocation at 65536 / wg (64 at 1024 threads, 128 at 512).
             cap = min(255, (65536 // max(wg, 1)) // 8 * 8)
-            if cap < 255 and hasattr(self.cuda, "cuModuleLoadDataEx"):
-                options = (ctypes.c_int * 1)(0)  # CU_JIT_MAX_REGISTERS
-                values = (ctypes.c_void_p * 1)(ctypes.c_void_p(cap))
-                check_cuda(
-                    self.cuda.cuModuleLoadDataEx(ctypes.byref(mod), ptx_bytes, 1, options, values),
-                    f"cuModuleLoadDataEx({stem})",
-                )
-            else:
-                check_cuda(
-                    self.cuda.cuModuleLoadData(ctypes.byref(mod), ptx_bytes),
-                    f"cuModuleLoadData({stem})",
-                )
+
+            def load(ptx):
+                if cap < 255 and hasattr(self.cuda, "cuModuleLoadDataEx"):
+                    options = (ctypes.c_int * 1)(0)  # CU_JIT_MAX_REGISTERS
+                    values = (ctypes.c_void_p * 1)(ctypes.c_void_p(cap))
+                    check_cuda(
+                        self.cuda.cuModuleLoadDataEx(ctypes.byref(mod), ptx, 1, options, values),
+                        f"cuModuleLoadDataEx({stem})",
+                    )
+                else:
+                    check_cuda(
+                        self.cuda.cuModuleLoadData(ctypes.byref(mod), ptx),
+                        f"cuModuleLoadData({stem})",
+                    )
+            try:
+                load(ptx_bytes)
+            except _cuda.CudaError as exc:
+                # A driver older than the toolkit that built the kernels refuses their PTX
+                # version. The kernels use nothing newer than their sm_75 target, so they are
+                # offered again as the newest version this driver reads.
+                older = _ptx_for_driver(ptx_bytes, self.cuda)
+                if exc.code != _CUDA_ERROR_UNSUPPORTED_PTX_VERSION or older is None:
+                    raise
+                load(older)
             self._modules[mkey] = mod
         hfunc = ctypes.c_void_p()
         check_cuda(
