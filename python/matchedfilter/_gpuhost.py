@@ -7,6 +7,8 @@ helpers for the parts that must agree across backends.
 """
 
 from collections import OrderedDict
+import ctypes
+
 import numpy as np
 
 from ._errors import UnsupportedSize
@@ -15,6 +17,68 @@ from ._results import FilterResults, _EMPTY_FILTER_RESULTS
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).
 MAX_BINS = 2048
+
+
+def address(ptr):
+    """A host pointer as an integer, from a ctypes pointer or an integer."""
+    return int(ptr.value if hasattr(ptr, "value") else ptr)
+
+
+class MappedBuffer:
+    """Host access to a device buffer whose memory the host sees at `ptr` for `nbytes`
+    (a Vulkan buffer mapped for its lifetime, a Metal shared-storage buffer). A backend's
+    buffer class creates and frees the memory and inherits the access from here; it must
+    have a `_bytes` slot or a `__dict__`."""
+    __slots__ = ()
+
+    def write(self, array):
+        """Copy an array to the start of the buffer."""
+        flat = np.ascontiguousarray(array)
+        ctypes.memmove(self.ptr, flat.ctypes.data, flat.nbytes)
+
+    def read(self, dtype, count):
+        """A copy of the first count elements."""
+        out = np.empty(count, dtype=dtype)
+        ctypes.memmove(out.ctypes.data, self.ptr, out.nbytes)
+        return out
+
+    def view(self, dtype, count):
+        """The first count elements in place, without a copy (valid while the buffer lives).
+        The bytes are wrapped once: a result reads several views per call."""
+        raw = getattr(self, "_bytes", None)
+        if raw is None:
+            raw = self._bytes = np.frombuffer(
+                (ctypes.c_ubyte * self.nbytes).from_address(address(self.ptr)), np.uint8)
+        return raw[:count * np.dtype(dtype).itemsize].view(dtype)
+
+    def read_into(self, out):
+        """Copy the start of the buffer into a caller's contiguous array, and return it."""
+        ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
+        return out
+
+
+class Section:
+    """Bytes [offset, offset + nbytes) of a device buffer (a context's _x_section). The base
+    buffer owns the memory; the section has the base's handle and its own host pointer."""
+    __slots__ = ("base", "handle", "offset", "nbytes", "ptr")
+
+    def __init__(self, base, offset, nbytes):
+        self.base, self.handle, self.offset, self.nbytes = base, base.handle, offset, nbytes
+        self.ptr = address(base.ptr) + offset
+
+    def write(self, array):
+        """Copy an array to the start of the section, up to the section's size."""
+        flat = np.ascontiguousarray(array)
+        ctypes.memmove(self.ptr, flat.ctypes.data, min(flat.nbytes, self.nbytes))
+
+    def view(self, dtype, count):
+        """The section's first count elements in place, read through the base buffer."""
+        dtype = np.dtype(dtype)
+        whole = self.base.view(np.uint8, self.offset + count * dtype.itemsize)
+        return whole[self.offset:].view(dtype)
+
+    def destroy(self, idle=False):
+        """Nothing to free: the base buffer owns the memory."""
 
 
 def bin_shift(binsize):

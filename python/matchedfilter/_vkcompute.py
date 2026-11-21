@@ -18,7 +18,7 @@ import numpy as np
 
 from . import _config, _gputime, _kernels, _vulkan, gatechain
 from ._shared import empty_shared
-from ._gpuhost import MAX_BINS
+from ._gpuhost import MAX_BINS, MappedBuffer, Section, address
 
 _SPIRV = _kernels.folder("vulkan")
 
@@ -367,7 +367,7 @@ class _Recording:
         return self.cmd
 
 
-class _Buffer:
+class _Buffer(MappedBuffer):
     """A storage buffer plus its memory, mapped for the lifetime of the object.
 
     Host-visible throughout, with DEVICE_LOCAL preferred when the driver
@@ -401,29 +401,6 @@ class _Buffer:
         _check(vk.vkMapMemory(ctx.device, self.memory, 0, _WHOLE_SIZE, 0,
                               ctypes.byref(self.ptr)), "vkMapMemory")
 
-    def write(self, array):
-        flat = np.ascontiguousarray(array)
-        ctypes.memmove(self.ptr, flat.ctypes.data, flat.nbytes)
-
-    def read(self, dtype, count):
-        out = np.empty(count, dtype=dtype)
-        ctypes.memmove(out.ctypes.data, self.ptr, out.nbytes)
-        return out
-
-    def view(self, dtype, count):
-        """The first count elements, in place (valid while the buffer lives). The bytes are
-        wrapped once: a result reads several views per call."""
-        raw = getattr(self, "_bytes", None)
-        if raw is None:
-            raw = self._bytes = np.frombuffer((ctypes.c_char * self.nbytes).from_address(
-                int(self.ptr.value if hasattr(self.ptr, 'value') else self.ptr)), np.uint8)
-        return raw[:count * np.dtype(dtype).itemsize].view(dtype)
-
-    def read_into(self, out):
-        """Zero-copy direct read into caller-provided contiguous array."""
-        ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
-        return out
-
     def destroy(self):
         vk, dev = self.ctx.vk, self.ctx.device
         if self.handle:
@@ -431,27 +408,6 @@ class _Buffer:
             vk.vkDestroyBuffer(dev, self.handle, None)
             vk.vkFreeMemory(dev, self.memory, None)
             self.handle = None
-
-
-class _Section:
-    """Bytes [offset, offset + nbytes) of a _Buffer (Context._x_section)."""
-    __slots__ = ("base", "handle", "offset", "nbytes", "ptr")
-
-    def __init__(self, base, offset, nbytes):
-        self.base, self.handle, self.offset, self.nbytes = base, base.handle, offset, nbytes
-        ptr = base.ptr.value if hasattr(base.ptr, "value") else base.ptr
-        self.ptr = ptr + offset
-
-    def write(self, array):
-        flat = np.ascontiguousarray(array)
-        ctypes.memmove(self.ptr, flat.ctypes.data, min(flat.nbytes, self.nbytes))
-
-    def view(self, dtype, count):
-        dtype = np.dtype(dtype)
-        return self.base.view(np.uint8, self.offset + count * dtype.itemsize)[self.offset:].view(dtype)
-
-    def destroy(self):
-        pass                                    # the base buffer owns the memory
 
 
 class _CaptureVK:
@@ -2093,12 +2049,11 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_section(buf, offset, nbytes):
-        return _Section(buf, offset, nbytes)
+        return Section(buf, offset, nbytes)
 
     @staticmethod
     def _x_read(buf, out, offset=0):
-        ptr = buf.ptr.value if hasattr(buf.ptr, "value") else buf.ptr
-        ctypes.memmove(out.ctypes.data, ptr + offset, out.nbytes)
+        ctypes.memmove(out.ctypes.data, address(buf.ptr) + offset, out.nbytes)
 
     @staticmethod
     def _x_view(buf, dtype, count):

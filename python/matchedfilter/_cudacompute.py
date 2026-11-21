@@ -29,7 +29,7 @@ from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, settle as _settle
 from ._shared import empty_shared, _Borrowed
-from ._gpuhost import MAX_BINS
+from ._gpuhost import MAX_BINS, Section
 
 
 def _borrowed_dptr(self):
@@ -463,25 +463,18 @@ class _Staged:
         self.pinned.destroy(idle)
 
 
-class _Section:
-    """Bytes [offset, offset + nbytes) of a device buffer (Context._x_section): its own
-    device pointer; the host reads it through the base buffer's mirror."""
-    __slots__ = ("base", "dptr", "nbytes", "ptr", "handle", "offset")
+class _Section(Section):
+    """A section of a device buffer with its own device pointer; the host reads it through
+    the base buffer's mirror (Section.view)."""
+    __slots__ = ("dptr",)
 
     def __init__(self, base, offset, nbytes):
         self.base, self.offset, self.nbytes = base, offset, nbytes
         self.dptr = ctypes.c_uint64(base.dptr.value + offset)
         self.ptr = self.handle = self.dptr.value
 
-    def view(self, dtype, count):
-        dtype = np.dtype(dtype)
-        return self.base.view(np.uint8, self.offset + count * dtype.itemsize)[self.offset:].view(dtype)
-
     def write(self, array, stream=None):
         raise TypeError("a section is written through its base buffer")
-
-    def destroy(self, idle=False):
-        pass                                    # the base buffer owns the memory
 
 
 class _WordSlots:

@@ -22,7 +22,7 @@ import re as _re
 
 import numpy as np
 from ._shared import empty_shared
-from ._gpuhost import MAX_BINS
+from ._gpuhost import MAX_BINS, MappedBuffer, Section
 from . import _kernels
 
 _METAL_DIR = _kernels.folder("metal")
@@ -169,7 +169,7 @@ class _MTLSize(ctypes.Structure):
                 ("depth", ctypes.c_ulong)]
 
 
-class _Buffer:
+class _Buffer(MappedBuffer):
     """A shared-storage buffer, mapped for the lifetime of the object. Slotted: a search
     holds thousands, and every full garbage collection walks them."""
     __slots__ = ("ctx", "nbytes", "handle", "ptr", "_bytes", "__dict__")
@@ -192,49 +192,10 @@ class _Buffer:
                              % (flat.nbytes, self.nbytes))
         ctypes.memmove(self.ptr, flat.ctypes.data, flat.nbytes)
 
-    def read(self, dtype, count):
-        out = np.empty(count, dtype=dtype)
-        ctypes.memmove(out.ctypes.data, self.ptr, out.nbytes)
-        return out
-
-    def view(self, dtype, count):
-        """The first `count` elements as a NumPy view of the buffer (no copy). The bytes are
-        wrapped once: a result reads several views per call."""
-        raw = getattr(self, "_bytes", None)
-        if raw is None:
-            raw = self._bytes = np.frombuffer((ctypes.c_ubyte * self.nbytes).from_address(
-                self.ptr.value if hasattr(self.ptr, "value") else self.ptr), np.uint8)
-        return raw[:count * np.dtype(dtype).itemsize].view(dtype)
-
-    def read_into(self, out):
-        """Zero-copy direct read into caller-provided contiguous array."""
-        ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
-        return out
-
     def destroy(self):
         if self.handle:
             self.ctx.o.call(self.handle, b"release")
             self.handle = None
-
-
-class _Section:
-    """Bytes [offset, offset + nbytes) of a _Buffer (Context._x_section)."""
-    __slots__ = ("base", "handle", "offset", "nbytes", "ptr")
-
-    def __init__(self, base, offset, nbytes):
-        self.base, self.handle, self.offset, self.nbytes = base, base.handle, offset, nbytes
-        self.ptr = (base.ptr.value if hasattr(base.ptr, "value") else base.ptr) + offset
-
-    def write(self, array):
-        flat = np.ascontiguousarray(array)
-        ctypes.memmove(self.ptr, flat.ctypes.data, min(flat.nbytes, self.nbytes))
-
-    def view(self, dtype, count):
-        dtype = np.dtype(dtype)
-        return self.base.view(np.uint8, self.offset + count * dtype.itemsize)[self.offset:].view(dtype)
-
-    def destroy(self):
-        pass                                    # the base buffer owns the memory
 
 
 class _HostBuffer(_Buffer):
@@ -1295,7 +1256,7 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_section(buf, offset, nbytes):
-        return _Section(buf, offset, nbytes)
+        return Section(buf, offset, nbytes)
 
     @staticmethod
     def _x_read(buf, out, offset=0):
