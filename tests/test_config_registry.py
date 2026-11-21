@@ -147,8 +147,8 @@ def test_removed_and_misspelled_names_warn_and_invalid_values_raise():
         config.check_environment({"MF_BBLK": "2"})
     with pytest.warns(RuntimeWarning, match="did you mean MF_AUTOTUNE"):
         config.check_environment({"MF_AUTOTUNES": "0"})
-    with pytest.raises(ValueError, match="MF_GPU_ITEMS=maybe"):
-        config.check_environment({"MF_GPU_ITEMS": "maybe"})
+    with pytest.raises(ValueError, match="MF_SIGNAL_LAW=maybe"):
+        config.check_environment({"MF_SIGNAL_LAW": "maybe"})
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("error")

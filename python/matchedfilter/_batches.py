@@ -1231,8 +1231,6 @@ def _run_batch(jobs, wait):
 def _items_batch(jobs, out):
     """Run eligible single-template GPU jobs of a batch together; returns their indices."""
     from .device import parse as _parse_device
-    if not _config.get("MF_GPU_ITEMS"):
-        return set()
     cands = []
     side = device = None
     for j, (bank, series, kw) in enumerate(jobs):
@@ -1283,21 +1281,19 @@ def _items_batch(jobs, out):
     # Threshold-0 follow-ups: every group's items as listed entries, all in one
     # submission (_gpuhost.submit_followups). None (past what the device path takes):
     # the per-group path below.
-    dev_follow = bool(_config.get("MF_DEVICE_FOLLOWUPS"))
-    if dev_follow:
-        fast = [c[0] for c in cands if c[6] == 0.0]
-        if fast:
-            from ._gpuhost import submit_followups
-            collect = submit_followups([jobs[j] for j in fast])
-            if collect is not None:
-                # Submitted, not waited on: each job's result is read when asked for, so a
-                # caller collecting later (filter_series_many(wait=False)) never waits here.
-                for i, j in enumerate(fast):
-                    out[j] = _Deferred(lambda c=collect, i=i: c()[i])
-                    done.add(j)
-                cands = [c for c in cands if c[0] not in done]
-                if not cands:
-                    return done
+    from . import _gpuhost
+    fast = [c[0] for c in cands if c[6] == 0.0]
+    if fast:
+        collect = _gpuhost.submit_followups([jobs[j] for j in fast])
+        if collect is not None:
+            # Submitted, not waited on: each job's result is read when asked for, so a
+            # caller collecting later (filter_series_many(wait=False)) never waits here.
+            for i, j in enumerate(fast):
+                out[j] = _Deferred(lambda c=collect, i=i: c()[i])
+                done.add(j)
+            cands = [c for c in cands if c[0] not in done]
+            if not cands:
+                return done
     groups = {}
     for j, bank, g, ser, kw, bs, thr, aligned, ti_local, ti in cands:
         S = len(ser)
@@ -1317,24 +1313,22 @@ def _items_batch(jobs, out):
             (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti, W, ph))
     if not groups:
         return done
-    if dev_follow:
-        from ._gpuhost import _followup_job_ok, submit_followups
-        fast_ok = sorted(
-            m[0] for (_, _, _, thr, _), members in groups.items() if thr == 0.0
-            for m in members
-            if _followup_job_ok(m[1], m[2], m[3], m[4])
-        )
-        if fast_ok:
-            collect = submit_followups([jobs[j] for j in fast_ok])
-            if collect is not None:
-                for i, j in enumerate(fast_ok):
-                    out[j] = _Deferred(lambda c=collect, i=i: c()[i])
-                    done.add(j)
-                groups = {
-                    k: [m for m in v if m[0] not in done]
-                    for k, v in groups.items()
-                }
-                groups = {k: v for k, v in groups.items() if v}
+    fast_ok = sorted(
+        m[0] for (_, _, _, thr, _), members in groups.items() if thr == 0.0
+        for m in members
+        if _gpuhost._followup_job_ok(m[1], m[2], m[3], m[4])
+    )
+    if fast_ok:
+        collect = _gpuhost.submit_followups([jobs[j] for j in fast_ok])
+        if collect is not None:
+            for i, j in enumerate(fast_ok):
+                out[j] = _Deferred(lambda c=collect, i=i: c()[i])
+                done.add(j)
+            groups = {
+                k: [m for m in v if m[0] not in done]
+                for k, v in groups.items()
+            }
+            groups = {k: v for k, v in groups.items() if v}
     # Submit every template group's items, then collect: a backend that can leaves each
     # submission in flight (wait=False), so the device runs them back to back.
     submitted = []

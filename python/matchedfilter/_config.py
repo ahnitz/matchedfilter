@@ -116,13 +116,8 @@ VARS: Tuple[Var, ...] = (
         usage="MF_COARSE_LAYOUT=<labels>", kind="text"),
     Var("MF_VK_SUBGROUP", "override", "py", "measured", "Force a Vulkan subgroup size.",
         usage="MF_VK_SUBGROUP=<size>", kind="text"),
-    Var("MF_GPU_ITEMS", "override", "py", "on",
-        "Single-template GPU jobs of a batch run one by one.", usage="MF_GPU_ITEMS=0", kind="flag", value=True),
     Var("MF_GPU_QUEUE_AHEAD", "override", "py", "8", "GPU submissions in flight.",
         usage="MF_GPU_QUEUE_AHEAD=<n>", kind="int", value=8),
-    Var("MF_DEVICE_FOLLOWUPS", "override", "py", "on",
-        "Threshold-0 follow-ups per group rather than in one device submission.",
-        usage="MF_DEVICE_FOLLOWUPS=0", kind="flag", value=True),
     Var("MF_SINGLE_DEVICE", "override", "py", "auto",
         "Keep every call on the bank's device (the pure-GPU ladder).",
         usage="MF_SINGLE_DEVICE=bank", kind="choice", choices=("auto", "bank")),
@@ -147,6 +142,10 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "only tests set them, to reach the per-call and per-group follow-up paths; "
+     "the tests now reach those paths by replacing the batch step they fall back "
+     "from",
+     ("MF_GPU_ITEMS", "MF_DEVICE_FOLLOWUPS",)),
     ("2026-11-21", "only tests set it, for a reference written with ordinary stores; they now "
      "run that reference one template per call, which stays under the cache",
      ("MF_CORR_NO_STREAM",)),

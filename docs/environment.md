@@ -8,6 +8,10 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-11-21: only tests set them, to reach the per-call and per-group follow-up
+paths; the tests now reach those paths by replacing the batch step they fall back from:
+MF_GPU_ITEMS, MF_DEVICE_FOLLOWUPS.
+
 Removed 2026-11-21: only tests set it, for a reference written with ordinary stores;
 they now run that reference one template per call, which stays under the cache:
 MF_CORR_NO_STREAM.
@@ -117,9 +121,7 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |
-| `MF_GPU_ITEMS=0` | on | Single-template GPU jobs of a batch run one by one. |
 | `MF_GPU_QUEUE_AHEAD=<n>` | 8 | GPU submissions in flight. |
-| `MF_DEVICE_FOLLOWUPS=0` | on | Threshold-0 follow-ups per group rather than in one device submission. |
 | `MF_SINGLE_DEVICE=bank` | auto | Keep every call on the bank's device (the pure-GPU ladder). |
 
 ## Tools, builds and tests (read outside the package)

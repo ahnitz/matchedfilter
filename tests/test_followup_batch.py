@@ -52,8 +52,9 @@ def test_batched_single_template_calls_own_their_results(device, monkeypatch):
     measured policy). Here a small batch budget forces the synchronous group every call."""
     if device == "none":
         pytest.skip("no GPU backend")
-    monkeypatch.setenv("MF_GPU_ITEMS", "0")             # the per-call path, not the items batch
-    monkeypatch.setenv("MF_DEVICE_FOLLOWUPS", "0")
+    # the per-call path, not the items batch
+    from matchedfilter import _batches
+    monkeypatch.setattr(_batches, "_items_batch", lambda jobs, out: set())
     rng, banks = _banks(monkeypatch, device, nbanks=1)
     bank = banks[0]
     g = bank._groups[0]

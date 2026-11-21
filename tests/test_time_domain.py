@@ -960,17 +960,19 @@ def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
         np.testing.assert_array_equal(r1.snr, r2.snr)
 
 
-@pytest.mark.parametrize("device_followups", ["1", "0"])
+@pytest.mark.parametrize("device_followups", [True, False])
 def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups):
     """Single-template calls on device-resident rows go out as one forward and one item
     submission per template group -- or, on Vulkan and CUDA, as listed entries per template
-    group, all in one submission (_gpuhost.submit_followups; MF_DEVICE_FOLLOWUPS=0 takes the
-    per-group path) -- and each job's FilterResults equal its direct call exactly, peak order
+    group, all in one submission (_gpuhost.submit_followups; where it takes none of a
+    batch's jobs, forced here, the per-group path runs) -- and each job's FilterResults equal its direct call exactly, peak order
     included (one call per bin count), with edge blocks of fewer bins."""
     from conftest import usable_gpu
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
-    monkeypatch.setenv("MF_DEVICE_FOLLOWUPS", device_followups)
+    if not device_followups:
+        from matchedfilter import _gpuhost
+        monkeypatch.setattr(_gpuhost, "submit_followups", lambda jobs: None)
     dev = usable_gpu()
     if dev is None:
         pytest.skip(usable_gpu_reason())

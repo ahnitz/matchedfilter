@@ -402,8 +402,7 @@ def _gpu_trials(gpus, jobs, seen):
     whether this batch runs a dimension at all: an arm counts as running the batch
     differently only through dimensions it exercises (_gpu_batch), so a trial is played
     only on batches that can tell its arms apart."""
-    follow = bool(_config.get("MF_GPU_ITEMS")) and any(
-        (kw or {}).get("template_index") is not None for _, _, kw in jobs)
+    follow = any((kw or {}).get("template_index") is not None for _, _, kw in jobs)
     yield "gpu-single", {"single": ["cpu"]}, lambda d: follow
     registered = _settings.slots({g.name for g in gpus})
     yield "gpu-kernels", {d: [alt] for d, (_, alt) in registered.items()}, lambda d: d in seen

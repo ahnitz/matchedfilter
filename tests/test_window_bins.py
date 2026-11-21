@@ -117,13 +117,15 @@ def test_threshold_keeps_the_window_bins_above_it(engine, monkeypatch):
         assert v == pytest.approx(want[k], rel=2e-5, abs=1e-6)
 
 
-@pytest.mark.parametrize("device_followups", ["1", "0"])
+@pytest.mark.parametrize("device_followups", [True, False])
 @pytest.mark.parametrize("n", [2048, 4096])
 def test_batched_follow_ups_have_the_window_bins(n, device_followups, monkeypatch):
     # filter_series_many's follow-up batches on a GPU bank: the device follow-ups (refineItems)
     # and, without them, the host-built items (peaks_items) -- each its own path to the bins.
     monkeypatch.setenv("MF_AUTOTUNE", "0")
-    monkeypatch.setenv("MF_DEVICE_FOLLOWUPS", device_followups)
+    if not device_followups:
+        from matchedfilter import _gpuhost
+        monkeypatch.setattr(_gpuhost, "submit_followups", lambda jobs: None)
     device = usable_gpu() or pytest.skip("no usable GPU")
     taps, ser = _inputs()
     bank = _bank(taps, "hier", n, device)

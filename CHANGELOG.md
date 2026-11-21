@@ -80,8 +80,8 @@ Results that change are stated; everything else returns what it returned before.
   `MF_METAL_IEEE`, `MF_TC_KAPPA`, `MF_CAPTURE`, the three `MF_TEASER_*` (the figure tool
   takes `--n`, `--data`, `--templates`), `MF_ROOFLINE_DATAPATH` (the roofline diagnostic
   reads the 256-bit Zen 5 parts from the CPU model), `MF_HMF_PROF` (`tools/hier_bench.py`
-  prints its profile from the plan's counters) and `MF_CORR_NO_STREAM` (a test lever).
-  Setting a removed variable warns.
+  prints its profile from the plan's counters), and the test levers `MF_CORR_NO_STREAM`,
+  `MF_GPU_ITEMS` and `MF_DEVICE_FOLLOWUPS`. Setting a removed variable warns.
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
   (`chain_thresholds(...)["halfwidth"]`).
 - 52 shipped GPU kernels that nothing could run or nothing chose (14.7 MB), CUDA's
