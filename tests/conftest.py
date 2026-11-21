@@ -161,10 +161,9 @@ def _clean_autotune_cache():
 # --- the session leaves the developer's environment alone -------------------
 #: MF_* variables the suite keeps from the environment: the forced CPU target MF_ISA (CI's
 #: per-target jobs) and the registry's "tools" section, the tool locations and inputs that
-#: some tests read (the MF_TEASER_ names by prefix; tests/test_config_registry.py checks the
-#: set). Every other MF_* variable would change what the library does under test (a
-#: developer's MF_COST_FILE, a forced chain), so it is removed before collection;
-#: --keep-mf-env NAME keeps one deliberately.
+#: some tests read (tests/test_config_registry.py checks the set). Every other MF_* variable
+#: would change what the library does under test (a developer's MF_COST_FILE, a forced
+#: chain), so it is removed before collection; --keep-mf-env NAME keeps one deliberately.
 _KEPT_MF = {"MF_ISA", "MF_SLANGC", "MF_SLANGC_ANY_VERSION", "MF_NVRTC", "MF_CUDA_PATH",
             "MF_GATE_BANK", "MF_GATE_PROFILES"}
 _SCRUBBED = {"removed": [], "kept": []}
@@ -174,7 +173,7 @@ def pytest_configure(config):
     import os
     keep = _KEPT_MF | set(config.getoption("--keep-mf-env") or ())
     for name in sorted(n for n in os.environ if n.startswith("MF_")):
-        if name in keep or name.startswith("MF_TEASER_"):
+        if name in keep:
             _SCRUBBED["kept"].append(name)
         else:
             _SCRUBBED["removed"].append(name)

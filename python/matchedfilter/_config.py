@@ -145,11 +145,6 @@ VARS: Tuple[Var, ...] = (
         "Template bank for tools/gate.py's end-to-end checks (also `--bank`).",
         usage="MF_GATE_BANK`, `MF_GATE_PROFILES"),
     Var("MF_GATE_PROFILES", "tools", "tools", row="MF_GATE_BANK"),
-    Var("MF_TEASER_N", "tools", "tools", "4096, 16, 512",
-        "Shape of tools/teaser_figure.py's run.",
-        usage="MF_TEASER_N`, `MF_TEASER_NDATA`, `MF_TEASER_NTMPL"),
-    Var("MF_TEASER_NDATA", "tools", "tools", row="MF_TEASER_N"),
-    Var("MF_TEASER_NTMPL", "tools", "tools", row="MF_TEASER_N"),
 )
 
 #: Names in the code that are not environment variables: Metal shader macros the package
@@ -159,6 +154,8 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "tools/teaser_figure.py takes the shape of its run as arguments "
+     "(--n, --data, --templates)", ("MF_TEASER_N", "MF_TEASER_NDATA", "MF_TEASER_NTMPL")),
     ("2026-10-30", "the GPU fp16 coarse tier reports its own statistic, the raw fp16 maximum, "
      "as every narrow first tier does: its error bound passed so many more pairs than planned "
      "that single-tier chains dismissed a fifth of their budget", ("MF_COARSE_RAW",)),

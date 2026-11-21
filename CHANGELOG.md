@@ -77,7 +77,8 @@ Results that change are stated; everything else returns what it returned before.
   `MatchedFilter.set_platform_fft` and `HierarchicalMatchedFilter.set_platform_fft` are
   gone. Every platform runs the library's own transforms.
 - Environment variables `MF_COARSE_RAW`, `MF_GPU_FUSE_INTERLEAVE`, `MF_ILAY`,
-  `MF_METAL_IEEE`, `MF_TC_KAPPA` and `MF_CAPTURE`. Setting a removed variable warns.
+  `MF_METAL_IEEE`, `MF_TC_KAPPA`, `MF_CAPTURE` and the three `MF_TEASER_*` (the figure tool
+  takes `--n`, `--data`, `--templates`). Setting a removed variable warns.
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
   (`chain_thresholds(...)["halfwidth"]`).
 - 52 shipped GPU kernels that nothing could run or nothing chose (14.7 MB), CUDA's

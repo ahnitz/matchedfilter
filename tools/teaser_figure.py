@@ -27,9 +27,7 @@ import numpy as np
 import matchedfilter as mf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
-N = int(os.environ.get('MF_TEASER_N', '4096'))
-ND = int(os.environ.get('MF_TEASER_NDATA', '16'))
-NT = int(os.environ.get('MF_TEASER_NTMPL', '512'))
+N, ND, NT = 4096, 16, 512        # the workload: --n, --data, --templates (set_workload)
 PAIRS = ND * NT
 BUDGETS = (1e-2, 1e-3, 1e-4)
 _DETAILS = {}
@@ -617,6 +615,7 @@ def main(argv=None):
     from datetime import date
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out', default='docs/assets/teaser.svg')
+    ap.add_argument('--n', type=int, default=N, help='points per series (default: %(default)s)')
     ap.add_argument('--data', type=int, default=ND, help='number of data segments (default: %(default)s)')
     ap.add_argument('--templates', type=int, default=NT, help='number of templates (default: %(default)s)')
     ap.add_argument('--compare', nargs=2, metavar='JSON', help='plot two existing teaser reports without benchmarking')
@@ -635,7 +634,7 @@ def main(argv=None):
         plot(report, out)
         print('wrote', out, flush=True)
         return 0
-    set_workload(nd=args.data, nt=args.templates)
+    set_workload(n=args.n, nd=args.data, nt=args.templates)
     baseline, gpu_reference = ('MLX', mlx_ms) if sys.platform == 'darwin' else ('rocFFT', rocfft_ms)
     report = dict(n=N, data=ND, templates=NT, snr=5.5, date=date.today().isoformat(),
                   cpu=_cpu_name(), gpu=_gpu_name(), fftw_planning_limit_seconds=15,

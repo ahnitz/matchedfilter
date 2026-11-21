@@ -8,6 +8,9 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-11-21: tools/teaser_figure.py takes the shape of its run as arguments (--n,
+--data, --templates): MF_TEASER_N, MF_TEASER_NDATA, MF_TEASER_NTMPL.
+
 Removed 2026-10-30: the GPU fp16 coarse tier reports its own statistic, the raw fp16
 maximum, as every narrow first tier does: its error bound passed so many more pairs than
 planned that single-tier chains dismissed a fifth of their budget: MF_COARSE_RAW.
@@ -121,4 +124,3 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_NVRTC` | `libnvrtc.so.12` | NVRTC library for the PTX build. |
 | `MF_CUDA_PATH` | found | CUDA installation for the PTX build. |
 | `MF_GATE_BANK`, `MF_GATE_PROFILES` | unset | Template bank for tools/gate.py's end-to-end checks (also `--bank`). |
-| `MF_TEASER_N`, `MF_TEASER_NDATA`, `MF_TEASER_NTMPL` | 4096, 16, 512 | Shape of tools/teaser_figure.py's run. |
