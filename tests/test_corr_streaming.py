@@ -1,9 +1,11 @@
 """The middle stage's continuous correlation copies its output with streaming stores when the
 call's output exceeds the last-level cache (src/matchfilt.c, 6b15bb83): the rule is the
-footprint against the LLC size the OS reports, MF_CORR_NO_STREAM=1 turns it off. The two
-must write the same bytes."""
+footprint against the LLC size the OS reports. Streaming and ordinary stores must write the
+same bytes."""
 import numpy as np
 import pytest
+
+from conftest import correlate_by_template
 
 
 def _llc_bytes():
@@ -19,10 +21,11 @@ def _llc_bytes():
     return 0
 
 
-def test_continuous_correlation_streaming_stores_are_bit_identical(monkeypatch):
+def test_continuous_correlation_streaming_stores_are_bit_identical():
     """A continuous correlation whose output exceeds the LLC copies it with streaming stores
-    (6b15bb83); MF_CORR_NO_STREAM=1 keeps ordinary stores. The bytes written must be the
-    same, including rows that start off a 16-byte boundary (odd lo)."""
+    (6b15bb83); the same correlation one template per call is under the cache and keeps
+    ordinary stores. The bytes written must be the same, including rows that start off a
+    16-byte boundary (odd lo)."""
     from matchedfilter import CorrelationFilter
     from matchedfilter._filter import _automatic_series_layout
     llc = _llc_bytes()
@@ -45,16 +48,11 @@ def test_continuous_correlation_streaming_stores_are_bit_identical(monkeypatch):
     st, _, _ = _automatic_series_layout(L, cf.valid)
     assert nt * len(st) * (hi - lo) * 8 > llc
     ep = cf._execution_plan()
-    out = {}
-    for no_stream in (False, True):
-        if no_stream:
-            monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
-        else:
-            monkeypatch.delenv("MF_CORR_NO_STREAM", raising=False)
-        d = np.zeros((nt, L), np.complex64)
-        ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, d)
-        out[no_stream] = d
-    assert np.array_equal(out[False].view(np.uint32), out[True].view(np.uint32))
+    streamed = np.zeros((nt, L), np.complex64)
+    ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, streamed)
+    ordinary = np.zeros((nt, L), np.complex64)
+    correlate_by_template(ep.correlate_series_continuous, ser, st, lo, hi, nt, ordinary)
+    assert np.array_equal(streamed.view(np.uint32), ordinary.view(np.uint32))
 
 
 @pytest.mark.parametrize("real", [False, True])

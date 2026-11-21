@@ -1108,8 +1108,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     }
     return 0;
   }
-  const int stream = !ap_env_flag("MF_CORR_NO_STREAM",0)
-                     && llc && (size_t)nt*span_sum*8u > (llc/2);
+  const int stream = llc && (size_t)nt*span_sum*8u > (llc/2);
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;

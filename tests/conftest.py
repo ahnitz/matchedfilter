@@ -317,6 +317,26 @@ def assert_same_follow_up(want, got):
             np.testing.assert_array_equal(g, w, err_msg=f)
 
 
+def correlate_by_template(run, series, starts, lo, hi, nt, out, bounds=None):
+    """A continuous correlation written with ordinary stores, as the reference of the
+    streaming-store tests.
+
+    The library copies a call's output with streaming stores when the output is larger
+    than half the last-level cache (src/matchfilt.c). This runs the same correlation one
+    template per call, over each distinct block once, so that every call's output is a
+    small fraction of the cache and is written with ordinary stores. ``run`` is a plan's
+    ``correlate_series_continuous`` or its real-series form; row ``t`` of ``out`` receives
+    template ``t``.
+    """
+    import numpy as np
+    starts = np.asarray(starts)
+    rows = starts[:, None] if bounds is None else np.column_stack([starts, bounds])
+    keep = np.sort(np.unique(rows, axis=0, return_index=True)[1])
+    more = () if bounds is None else (np.ascontiguousarray(bounds[keep]),)
+    for t in range(nt):
+        run(series, np.ascontiguousarray(starts[keep]), lo, hi, t, 1, out[t:t + 1], *more)
+
+
 def fix_gpu_costs(monkeypatch):
     """Replace the measured GPU cost model with a fixed one for the rest of a test.
 

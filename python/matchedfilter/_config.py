@@ -110,8 +110,6 @@ VARS: Tuple[Var, ...] = (
         "Blocks per hierarchical series batch.", usage="MF_DGROUP=<n>", kind="int"),
     Var("MF_PBMAX", "override", "c", "built-in",
         "Largest n run as pair-batched transforms.", usage="MF_PBMAX=<n>", kind="int"),
-    Var("MF_CORR_NO_STREAM", "override", "c", "off",
-        "No non-temporal stores in continuous correlation.", usage="MF_CORR_NO_STREAM=1", kind="flag", value=False),
     Var("MF_BAND_FORWARD", "override", "py", "measured", "GPU band forward off/on.",
         usage="MF_BAND_FORWARD=0/1", kind="flag"),
     Var("MF_COARSE_LAYOUT", "override", "py", "measured", "Force GPU coarse layouts by label.",
@@ -149,6 +147,9 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "only tests set it, for a reference written with ordinary stores; they now "
+     "run that reference one template per call, which stays under the cache",
+     ("MF_CORR_NO_STREAM",)),
     ("2026-11-21", "the plans keep their per-tier time counters always; tools/hier_bench.py "
      "prints its profile from them",
      ("MF_HMF_PROF",)),

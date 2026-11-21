@@ -8,6 +8,10 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-11-21: only tests set it, for a reference written with ordinary stores;
+they now run that reference one template per call, which stays under the cache:
+MF_CORR_NO_STREAM.
+
 Removed 2026-11-21: the plans keep their per-tier time counters always;
 tools/hier_bench.py prints its profile from them: MF_HMF_PROF.
 
@@ -110,7 +114,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |
 | `MF_PBMAX=<n>` | built-in | Largest n run as pair-batched transforms. |
-| `MF_CORR_NO_STREAM=1` | off | No non-temporal stores in continuous correlation. |
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
+from conftest import correlate_by_template
 from matchedfilter import CorrelationFilter, TimeDomainFilterBank
 from matchedfilter._filter import _automatic_series_layout
 from matchedfilter.search import BlockInput, HierarchicalSearch, Inner, Leaf, Root
@@ -99,8 +100,9 @@ def test_windowed_correlation_across_targets_and_alignments(n, real):
 
 @pytest.mark.parametrize("n", [128, 4096])
 @pytest.mark.parametrize("real", [False, True])
-def test_streaming_stores_bit_identical_across_targets_bounds_and_alignments(monkeypatch, n, real):
-    """Above-LLC streaming correlation and MF_CORR_NO_STREAM=1 must write identical bits across
+def test_streaming_stores_bit_identical_across_targets_bounds_and_alignments(n, real):
+    """Above-LLC streaming correlation and the same correlation with ordinary stores (one
+    template per call: conftest.correlate_by_template) must write identical bits across
     every SIMD target, base pointer alignment (0..48B), and per-block bounds."""
     llc = _llc_bytes()
     if llc > (128 << 20):
@@ -145,11 +147,9 @@ def test_streaming_stores_bit_identical_across_targets_bounds_and_alignments(mon
 
             for base_off in (0, 8, 16, 32, 48):
                 sentinel = np.complex64(42.0 - 19.0j)
-                monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
                 ref = _alloc_with_offset((nt, L), base_off, sentinel)
-                run(ser, st, lo, hi, 0, nt, ref, bounds)
+                correlate_by_template(run, ser, st, lo, hi, nt, ref, bounds)
 
-                monkeypatch.delenv("MF_CORR_NO_STREAM", raising=False)
                 got = _alloc_with_offset((nt, L), base_off, sentinel)
                 run(ser, st, lo, hi, 0, nt, got, bounds)
 
@@ -267,7 +267,7 @@ def test_hierarchical_search_cpu_multi_chunk_reuses_aligned_buffers():
 
 @pytest.mark.parametrize("n", [8192, 16384, 32768])
 @pytest.mark.parametrize("real", [False, True])
-def test_large_balanced_carry_streaming_and_l2_blocking_bit_identical(monkeypatch, n, real):
+def test_large_balanced_carry_streaming_and_l2_blocking_bit_identical(n, real):
     """Large balanced transforms (n >= 8192, ndata > 1) exercise L2-aware g=1 series_spectra
     blocking and 64B-misaligned carry-streaming across all SIMD targets and window shapes."""
     llc = _llc_bytes()
@@ -311,11 +311,9 @@ def test_large_balanced_carry_streaming_and_l2_blocking_bit_identical(monkeypatc
 
             for base_off in offs:
                 sentinel = np.complex64(-31.25 + 17.5j)
-                monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
                 ref = _alloc_with_offset((nt, L), base_off, sentinel)
-                run(ser, st, lo, hi, 0, nt, ref, bounds)
+                correlate_by_template(run, ser, st, lo, hi, nt, ref, bounds)
 
-                monkeypatch.delenv("MF_CORR_NO_STREAM", raising=False)
                 got = _alloc_with_offset((nt, L), base_off, sentinel)
                 run(ser, st, lo, hi, 0, nt, got, bounds)
 
@@ -399,7 +397,7 @@ def test_correlate_series_out_none_modes_and_recycled_buffer_lifetime():
 
 @pytest.mark.parametrize("n", [1024, 2048, 4096, 8192, 16384, 32768, 65536])
 @pytest.mark.parametrize("real", [False, True])
-def test_multi_template_continuous_bit_identical_to_single_template(monkeypatch, n, real):
+def test_multi_template_continuous_bit_identical_to_single_template(n, real):
     """Multi-template continuous correlation (nt = 2, 3, 4, 5, 14) with Stage-A reuse,
     fused group-major forward ingest, and L2 data-block tiling must be bit-for-bit identical
     to single-template (nt = 1) execution across all SIMD targets, alignments, and stream modes."""
@@ -440,8 +438,7 @@ def test_multi_template_continuous_bit_identical_to_single_template(monkeypatch,
             run = ep.correlate_series_continuous_real if real else ep.correlate_series_continuous
 
             sentinel = np.complex64(-23.75 + 41.5j)
-            # Single-template reference (nt = 1 per call) with non-streaming stores
-            monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
+            # Single-template reference (nt = 1 per call): small outputs, ordinary stores
             ref = _alloc_with_offset((nt_max, L), 8, sentinel)
             for t in range(nt_max):
                 row = _alloc_with_offset((1, L), (8 + t * L * 8) & 63, sentinel)
@@ -451,7 +448,7 @@ def test_multi_template_continuous_bit_identical_to_single_template(monkeypatch,
             for do_stream in stream_modes:
                 for nt in ((4, 14) if do_stream else (2, 3, 4, 5, 14)):
                     if do_stream:
-                        monkeypatch.delenv("MF_CORR_NO_STREAM", raising=False)
+                        # padding blocks carry the call's output past the cache
                         span = hi - lo
                         n_pad = int((4 * llc) // (5 * nt * span * 8)) + 2
                         st = np.concatenate([np.zeros(n_pad, dtype=np.uintp), st_base])
@@ -460,7 +457,6 @@ def test_multi_template_continuous_bit_identical_to_single_template(monkeypatch,
                             b_base,
                         ])
                     else:
-                        monkeypatch.setenv("MF_CORR_NO_STREAM", "1")
                         st, bnds = st_base, b_base
 
                     for base_off in (0, 24):
