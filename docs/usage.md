@@ -240,6 +240,12 @@ aliases of `"gpu"` and `"gpu:<n>"`: they pick a GPU of any backend, not only a
 CUDA one. NVIDIA GPUs run through the CUDA driver where it is installed; other
 GPUs on Linux and Windows use Vulkan, and macOS uses Metal. GPU execution requires a compatible driver.
 
+GPU execution is experimental. The CPU path is the one developed and measured
+for release; the GPU path passes the same tests but lags it. A
+`HierarchicalSearch` plans each bank on the host, which in a measured search
+job left one GPU no faster than one CPU core, and a search with several noise
+profiles keeps a separate leaf bank per profile on a GPU.
+
 | Capability | CPU | GPU |
 |---|---|---|
 | Peak-only transform sizes | powers of two, 64–1,048,576 | powers of two, 64–65,536; device limits apply |

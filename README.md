@@ -86,6 +86,13 @@ required. Unsupported GPU requests raise an error. See the
 [usage guide](https://ahnitz.github.io/matchedfilter/using-it.html)
 for platform and device limits.
 
+**GPU execution is experimental.** The CPU path is the one developed and
+measured for release. The GPU path passes the same test suite on Vulkan, CUDA
+and Metal, but it lags the CPU path: a `HierarchicalSearch` plans each bank on
+the host, and in a measured search job that setup left one GPU no faster than
+one CPU core. A search with several noise profiles keeps a separate leaf bank
+per profile on a GPU. Its interface and its results near threshold may change.
+
 ## Hierarchical filtering
 
 `HierarchicalFilter` screens each pair using a low-frequency band, then runs

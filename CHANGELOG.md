@@ -125,6 +125,9 @@ Results that change are stated; everything else returns what it returned before.
 - GPU cost calibration priced the same work 0.25-4x differently between processes on a
   Radeon 8060S, and under CPU load scaled a process's prices by an anchor timed on an idle
   device. Models stored by the old method are measured again.
+- A `HierarchicalSearch` with a noise profile per channel failed on a GPU ("several profiles
+  in one plan are not supported on a GPU"). On a GPU it keeps a leaf bank per profile.
+- The CUDA kernels load on drivers older than CUDA 12.8, which refused them (error 222).
 - `MF_GPU_PROFILE=1` could lose the Vulkan device on the first call of a profiled run.
 - CPU cost calibration failed (`KeyError 'recheck'`) for a size calibrated after a smaller
   one on the same series group.
@@ -134,6 +137,8 @@ Results that change are stated; everything else returns what it returned before.
 
 ### Documentation
 
+- GPU execution is labelled experimental in the README and the usage guide: it passes the
+  same tests as the CPU path but lags it in a search.
 - `docs/architecture.md` is the reference for the library as it is: the public API, the
   layers, the C engine, the GPU host layer, the gate model, the cost models and the
   measured choices. `docs/README.md` lists every page.
