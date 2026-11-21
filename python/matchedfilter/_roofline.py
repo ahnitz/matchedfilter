@@ -97,7 +97,6 @@ import numpy as np
 from .time_domain import _stored_bins, _normalize_windows
 from ._peaks import _MEASURED, _read
 from ._filter import _compute_module
-from . import _config
 
 #: Bytes per complex value at each precision.
 CBYTES = {"fp32": 8, "fp16": 4, "int16": 4}

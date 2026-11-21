@@ -19,7 +19,6 @@ import numpy as np
 import time
 import weakref
 
-from . import _config
 from . import _core
 from . import _settings
 from . import _trial
