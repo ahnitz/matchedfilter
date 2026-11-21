@@ -397,18 +397,20 @@ def _x86_core(info):
     flags = set(info.get("flags", "").split())
     vendor = info.get("vendor_id", "")
     fam = int(info.get("cpu family", "0"))
+    model = int(info.get("model", "0"))
     isa = 512 if "avx512f" in flags else 256 if "avx2" in flags else 128
     ports = 2 if "fma" in flags else 1
     if vendor == "AuthenticAMD":
-        # Zen 5 (family 0x1a) executes AVX-512 at full width (desktop, Strix Halo; mobile
-        # Strix Point is 256-bit: MF_ROOFLINE_DATAPATH=256); Zen 4 (0x19) double-pumps 256.
-        datapath = 512 if fam >= 0x1a else 256 if fam >= 0x17 else 128
+        # Zen 5 (family 0x1a) executes AVX-512 at full width on desktop, server and Strix
+        # Halo parts; the mobile Strix Point (models 0x20-0x2f) and Krackan Point
+        # (0x60-0x6f) have a 256-bit datapath. Zen 4 (0x19) double-pumps 256.
+        narrow = fam == 0x1a and (model >> 4) in (0x2, 0x6)
+        datapath = 512 if fam >= 0x1a and not narrow else 256 if fam >= 0x17 else 128
         name = {0x1a: "Zen 5", 0x19: "Zen 3/4", 0x17: "Zen 1/2"}.get(fam, "AMD")
     else:
         datapath = isa
         name = "Intel"
-    datapath = _config.get("MF_ROOFLINE_DATAPATH", datapath)
-    imul = _x86_int16_mul_ports(vendor, fam, int(info.get("model", "0")))
+    imul = _x86_int16_mul_ports(vendor, fam, model)
     return min(isa, datapath), ports, name, imul
 
 

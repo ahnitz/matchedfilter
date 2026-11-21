@@ -92,9 +92,6 @@ VARS: Tuple[Var, ...] = (
         usage="MF_GPU_TIMING=1", kind="flag", value=False),
     Var("MF_GPU_PROFILE", "diagnostic", "py", "", "Phase timestamps in recorded Vulkan plans.",
         usage="MF_GPU_PROFILE=1", kind="flag", value=False),
-    Var("MF_ROOFLINE_DATAPATH", "diagnostic", "py", "",
-        "SIMD datapath width for `_roofline` where detection is wrong (e.g. 256 on Strix "
-        "Point).", usage="MF_ROOFLINE_DATAPATH=<bits>", kind="int"),
     Var("MF_VK_SUBGROUP_MEASURING", "diagnostic", "py", "",
         "Internal: marks the subprocess that measures Vulkan subgroup sizes.", kind="flag", value=False),
     # Measurement overrides
@@ -154,6 +151,9 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "the roofline diagnostic reads the 256-bit Zen 5 parts (Strix Point, Krackan Point) "
+     "from the CPU model",
+     ("MF_ROOFLINE_DATAPATH",)),
     ("2026-11-21", "tools/teaser_figure.py takes the shape of its run as arguments "
      "(--n, --data, --templates)", ("MF_TEASER_N", "MF_TEASER_NDATA", "MF_TEASER_NTMPL")),
     ("2026-10-30", "the GPU fp16 coarse tier reports its own statistic, the raw fp16 maximum, "

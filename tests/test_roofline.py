@@ -131,6 +131,10 @@ def test_x86_int16_peak_counts_multiply_pipes():
     zen5 = {"flags": "avx avx2 fma avx512f", "vendor_id": "AuthenticAMD", "cpu family": "26",
             "model": "112"}
     assert r._x86_core(zen5)[3] == 2
+    # Zen 5 runs AVX-512 at full width except on the mobile Strix Point and Krackan Point.
+    assert r._x86_core(zen5)[0] == 512
+    assert r._x86_core(dict(zen5, model="36"))[0] == 256
+    assert r._x86_core(dict(zen5, model="96"))[0] == 256
     skx = {"flags": "avx avx2 fma avx512f", "vendor_id": "GenuineIntel", "cpu family": "6",
            "model": "85"}
     assert r._x86_core(skx)[3] == 2

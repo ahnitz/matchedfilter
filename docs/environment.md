@@ -8,6 +8,9 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-11-21: the roofline diagnostic reads the 256-bit Zen 5 parts (Strix Point,
+Krackan Point) from the CPU model: MF_ROOFLINE_DATAPATH.
+
 Removed 2026-11-21: tools/teaser_figure.py takes the shape of its run as arguments (--n,
 --data, --templates): MF_TEASER_N, MF_TEASER_NDATA, MF_TEASER_NTMPL.
 
@@ -92,7 +95,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX` | FP16 gate error data for tools/gate16_error.py. |
 | `MF_GPU_TIMING=1` | Device-time collection across GPU contexts. |
 | `MF_GPU_PROFILE=1` | Phase timestamps in recorded Vulkan plans. |
-| `MF_ROOFLINE_DATAPATH=<bits>` | SIMD datapath width for `_roofline` where detection is wrong (e.g. 256 on Strix Point). |
 | `MF_VK_SUBGROUP_MEASURING` | Internal: marks the subprocess that measures Vulkan subgroup sizes. |
 
 ## Measurement overrides (change what runs)
