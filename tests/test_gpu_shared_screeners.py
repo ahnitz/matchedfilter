@@ -47,24 +47,18 @@ def test_cuda_ptx_compactc_abi_and_buffer_sizing(monkeypatch):
     for feed, half in (("inplace", True), ("tier0", True), ("bands", False), ("pack", True)):
         monkeypatch.setattr(ctx, "inplace_feed", feed != "pack")
         claim = None if feed in ("inplace", "pack") else (series, starts, n, nd, (nd + 2) * n, 0)
-        rec = ctx._hier_record(
-            ("test_cl", feed, half), n, tiers_two, nd, nt, 4,
-            layout if half else None, half, feed, "dense", None,
-            ed if half else 0, bd, bt, data_arr, tmpl_arr, claim,
-            cl_meta=cl_meta,
-        )
+        shape = _gpuhier.HierShape(
+            n, tiers_two, nd, nt, 4, layout=layout if half else None, tier0_fp16=half,
+            data_exp=ed if half else 0, tmpl_exp=et if half else 0, cluster=cl_meta,
+            claim=claim)
+        rec = ctx._hier_record(shape, feed, "dense", bd, bt, data_arr, tmpl_arr)
         # Tier-0 coarse output holds nd * nc pairs while surv0 holds worst-case nd * nt uint32 indices
         assert rec.buffers["cval0"].nbytes == nd * nc * 8
         assert rec.buffers["surv0"].nbytes == nd * nt * 4
         assert rec.buffers["cloff"].nbytes == (nc + 1) * 4
         assert rec.buffers["clmem"].nbytes == nt * 4
 
-        binds = ctx._hier_binds(
-            n, tiers_two, nd, nt, 4, 0, n, 512, 9, 6.0, half,
-            ed if half else 0, et if half else 0, False,
-            layout if half else None, claim, data_arr,
-            cl_meta=cl_meta,
-        )
+        binds = ctx._hier_binds(shape, 0, n, 512, 6.0)
         for block, at, fn_name, off in rec.native.args:
             if off < 0:
                 _cudacompute._pack_words(-off)(block, at, *binds[fn_name])

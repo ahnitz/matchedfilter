@@ -138,14 +138,11 @@ def test_cuda_inplace_feed_and_ptx_param_abi(monkeypatch):
 
         for feed, half in (("inplace", True), ("tier0", True), ("bands", False)):
             claim = None if feed == "inplace" else (series, starts, n, nd, (nd + 2) * n, 0)
-            rec = ctx._hier_record(
-                ("test", feed, half), n, tiers_two, nd, nt, 4,
-                layout if half else None, half, feed, "dense", None,
-                ed if half else 0, bd, bt, data_arr, tmpl_arr, claim)
-            binds = ctx._hier_binds(
-                n, tiers_two, nd, nt, 4, 0, n, 512, 9, 6.0, half,
-                ed if half else 0, et if half else 0, False,
-                layout if half else None, claim, data_arr)
+            shape = _gpuhier.HierShape(
+                n, tiers_two, nd, nt, 4, layout=layout if half else None, tier0_fp16=half,
+                data_exp=ed if half else 0, tmpl_exp=et if half else 0, claim=claim)
+            rec = ctx._hier_record(shape, feed, "dense", bd, bt, data_arr, tmpl_arr)
+            binds = ctx._hier_binds(shape, 0, n, 512, 6.0)
             # Apply dynamic Arg bindings exactly as Context._enqueue does before cuLaunchKernel.
             for block, at, fn_name, off in rec.native.args:
                 if off < 0:

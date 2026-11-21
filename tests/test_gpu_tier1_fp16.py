@@ -160,8 +160,9 @@ def test_plan_tier1_fp16_feeds_binds_and_slots(b1, want_half1, want_shift, inpla
     if b1 == 64:
         # Directly verify b1=64 packShift == 5 (2 * PPG = 32 pairs/WG).
         tiers_64 = ((32, h[:, :32], 0.35), (64, h[:, :64], 0.85))
-        b64 = ctx._hier_binds(n, tiers_64, nd, nt, 1, 0, n, n, 11, 25.0, True, 0, 0, False,
-                              (32, 4, 2, True), None, d, tier1_fp16=True, data_exp1=0, tmpl_exp1=0)
+        shape_64 = _gpuhier.HierShape(n, tiers_64, nd, nt, 1, layout=(32, 4, 2, True),
+                                      tier0_fp16=True, tier1_fp16=True)
+        b64 = ctx._hier_binds(shape_64, 0, n, n, 25.0)
         assert b64["compact0"][-1] == 5
 
     if want_half1:
@@ -224,27 +225,25 @@ def test_plan_tier1_fp16_narrow_subgroup_and_tier0_feed():
     et1 = _gpuhier.c16_template_exp(h[:, :512])
     ed1 = _gpuhier.c16_data_exp(512, 0.8, et1)
 
-    rec_512 = ctx_t0._hier_record(
-        ("t0", 512), n, tiers_512, nd, nt, 1, (32, 4, 2, True), True, "tier0", "dense", None,
-        0, d, h, d, h, claim, (64, 96), use_direct=True, tier1_fp16=True, data_exp1=ed1)
-    assert rec_512.buffers["band1"].nbytes == nd * 512 * 4
     taps_stub = (series, 32, 0, 4, 4096)
-    binds_512 = ctx_t0._hier_binds(
-        n, tiers_512, nd, nt, 1, 0, n, n, 11, 25.0, True, 0, 0, False, (32, 4, 2, True),
-        claim, d, (64, 96), direct=taps_stub, tier1_fp16=True, data_exp1=ed1, tmpl_exp1=et1)
+    shape_512 = _gpuhier.HierShape(
+        n, tiers_512, nd, nt, 1, layout=(32, 4, 2, True), tier0_fp16=True, tier1_fp16=True,
+        data_exp1=ed1, tmpl_exp1=et1, band_offsets=(64, 96), claim=claim, direct=taps_stub)
+    rec_512 = ctx_t0._hier_record(shape_512, "tier0", "dense", d, h, d, h)
+    assert rec_512.buffers["band1"].nbytes == nd * 512 * 4
+    binds_512 = ctx_t0._hier_binds(shape_512, 0, n, n, 25.0)
     assert len(binds_512["tier0"]) == 8
     assert binds_512["tier0"][4] == _gpuhier._bits(2.0 ** ed1)
     assert binds_512["tier0"][5:7] == (64, 96)
     # Direct refine requires elected coarse lag: nbins=1 and gate_bits1=0.
     assert binds_512["tier"][5] == 1 and binds_512["tier"][6] == 0
 
-    rec_1024 = ctx_t0._hier_record(
-        ("t0", 1024), n, tiers_1024, nd, nt, 1, (32, 4, 2, True), True, "tier0", "dense", None,
-        0, d, h, d, h, claim, (64, 96), tier1_fp16=False, data_exp1=0)
+    shape_1024 = _gpuhier.HierShape(
+        n, tiers_1024, nd, nt, 1, layout=(32, 4, 2, True), tier0_fp16=True,
+        band_offsets=(64, 96), claim=claim)
+    rec_1024 = ctx_t0._hier_record(shape_1024, "tier0", "dense", d, h, d, h)
     assert rec_1024.buffers["band1"].nbytes == nd * 1024 * 8
-    binds_1024 = ctx_t0._hier_binds(
-        n, tiers_1024, nd, nt, 1, 0, n, n, 11, 25.0, True, 0, 0, False, (32, 4, 2, True),
-        claim, d, (64, 96), tier1_fp16=False, data_exp1=0, tmpl_exp1=0)
+    binds_1024 = ctx_t0._hier_binds(shape_1024, 0, n, n, 25.0)
     assert binds_1024["tier0"][4] == 0
     assert _words(binds_512, rec_512.native[1])[0] == binds_512["tier0"]
 
@@ -295,7 +294,6 @@ def test_cuda_ptx_tier1_fp16_abi_and_codegen(monkeypatch):
         taps_buf = _StubBuf(0x9400000, nt * 128 * 4)
         data_arr = np.zeros((nd, n), np.complex64)
         tmpl_arr = np.zeros((nt, n), np.complex64)
-        rw_arr = np.tile(np.array([0, n, 0], dtype=np.uint32), (nd, 1))
 
         for feed in ("inplace", "tier0", "bands", "pack"):
             for use_cl in (False, True):
@@ -308,16 +306,13 @@ def test_cuda_ptx_tier1_fp16_abi_and_codegen(monkeypatch):
                                  else (series, starts, n, nd, (nd + 2) * n, 0))
                         tiers = ((128, ct0_cl if use_cl else ct0_un, 3.5), (512, ct1, 4.5))
                         direct_arg = (taps_buf, 64, 0, 4, 8192) if use_direct else None
-                        rec = ctx._hier_record(
-                            ("c16_t1", feed, use_cl, use_direct, use_rw), n, tiers, nd, nt, 1,
-                            layout, True, feed, "dense", rw_arr if use_rw else None,
-                            ed0, bd, bt, data_arr, tmpl_arr, claim,
-                            use_direct=use_direct, cl_meta=cl_meta if use_cl else None,
-                            tier1_fp16=True, data_exp1=ed1)
-                        binds = ctx._hier_binds(
-                            n, tiers, nd, nt, 1, 0, n, n, 11, 25.0, True, ed0, et0, use_rw,
-                            layout, claim, data_arr, direct=direct_arg,
-                            cl_meta=cl_meta if use_cl else None, tier1_fp16=True, data_exp1=ed1, tmpl_exp1=et1)
+                        shape = _gpuhier.HierShape(
+                            n, tiers, nd, nt, 1, layout=layout, tier0_fp16=True,
+                            tier1_fp16=True, data_exp=ed0, data_exp1=ed1, tmpl_exp=et0,
+                            tmpl_exp1=et1, cluster=cl_meta if use_cl else None,
+                            row_windows=use_rw, claim=claim, direct=direct_arg)
+                        rec = ctx._hier_record(shape, feed, "dense", bd, bt, data_arr, tmpl_arr)
+                        binds = ctx._hier_binds(shape, 0, n, n, 25.0)
                         for block, at, fn_name, off in rec.native.args:
                             if off < 0:
                                 _cudacompute._pack_words(-off)(block, at, *binds[fn_name])

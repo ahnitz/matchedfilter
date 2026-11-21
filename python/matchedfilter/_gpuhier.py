@@ -26,6 +26,7 @@ fraction this shape measured last time, on every backend. Listed stages are boun
 a device with indirect dispatch sizes them by the count, one without strides a fixed grid
 (the driver's `listed` op).
 """
+import dataclasses
 import hashlib
 import math
 
@@ -122,6 +123,76 @@ class HierHandle:
     def __init__(self, **kw):
         for k, v in kw.items():
             setattr(self, k, v)
+
+
+@dataclasses.dataclass
+class HierShape:
+    """What one hier_peaks call asks of the device. The record, the uploads and the per-run
+    words of the call all read it.
+
+    Parameters
+    ----------
+    n : int
+        The fine transform length.
+    tiers : sequence of tuple
+        Per gate tier, (band, its templates, its raw threshold).
+    nd, nt, nbins : int
+        Data rows, templates and output bins of the call.
+    layout : tuple, optional
+        The fp16 coarse kernel's layout at tier 0. Default: None (that tier is FP32).
+    tier0_fp16, tier1_fp16 : bool, optional
+        Whether tier 0, and tier 1, run the fp16 coarse kernel. Default: False.
+    data_exp, data_exp1 : int, optional
+        The power-of-two exponent applied to the data as fp16 tier 0, and tier 1, read it.
+        Default: 0.
+    tmpl_exp, tmpl_exp1 : int, optional
+        The power-of-two exponent the templates of fp16 tier 0, and tier 1, are packed at.
+        Default: 0.
+    band_offsets : tuple of int, optional
+        Each tier's first bin. Default: None (0 for every tier).
+    cluster : tuple, optional
+        The shared screeners' tables for tier 0, (clusters, offsets, members, lag pad).
+        Default: None (tier 0 screens every template).
+    row_windows : bool, optional
+        Whether each data row has its own window (a grouped call). Default: False.
+    claim : tuple, optional
+        The deferred forward of the data this call claimed. Default: None.
+    direct : tuple, optional
+        The taps and words of the direct time-domain refine. Default: None (survivors are
+        refined by transform only).
+    """
+    n: int
+    tiers: tuple
+    nd: int
+    nt: int
+    nbins: int
+    layout: tuple = None
+    tier0_fp16: bool = False
+    tier1_fp16: bool = False
+    data_exp: int = 0
+    data_exp1: int = 0
+    tmpl_exp: int = 0
+    tmpl_exp1: int = 0
+    band_offsets: tuple = None
+    cluster: tuple = None
+    row_windows: bool = False
+    claim: tuple = None
+    direct: tuple = None
+
+    @property
+    def bands(self):
+        """Each tier's band."""
+        return tuple(b for b, _, _ in self.tiers)
+
+    @property
+    def k0s(self):
+        """Each tier's first bin."""
+        return (0,) * len(self.tiers) if self.band_offsets is None else self.band_offsets
+
+    @property
+    def nc(self):
+        """The rows tier 0 screens: the clusters, or every template."""
+        return self.nt if self.cluster is None else self.cluster[0]
 
 
 def _count_names(ntiers, banded, compact, direct=False):
@@ -542,7 +613,6 @@ class HierOps:
         tier1_fp16 = (len(bands) > 1 and self.packed_fp16 and self._shipped("c16", bands[1])
                  and self._shipped("tier1_c16", bands[1]))
         layout0 = self._coarse_layout(bands[0]) if tier0_fp16 else None
-        shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         top = max(bands)
 
@@ -601,28 +671,29 @@ class HierOps:
         # How a sparse result is read (_sparse_way): a paired choice per call shape, played on
         # this call (Choice.play) when the call is waited on; each way has its own record.
         handles = {}
+        shape = HierShape(
+            n, tiers, nd, nt, nbins, layout=layout0, tier0_fp16=tier0_fp16,
+            tier1_fp16=tier1_fp16, data_exp=data_exp, data_exp1=data_exp1, tmpl_exp=tmpl_exp,
+            tmpl_exp1=tmpl_exp1, band_offsets=k0s, cluster=cl_meta,
+            row_windows=row_tables is not None, claim=claim,
+            direct=direct if use_direct else None)
 
-        def run(way, layout=layout0):
+        def run(way):
             gate = False if use_direct else (self._gate_use(bands[1]) if len(bands) > 1 else None)
             t1_extra = ((tier1_fp16, data_exp1),) if tier1_fp16 else ()
-            key = ("hier", n, bands, nd, nt, nbins, layout, gate, feed, use_direct, way,
+            key = ("hier", n, bands, nd, nt, nbins, layout0, gate, feed, use_direct, way,
                    rw_key is not None, data_exp, storage_key, *k0_extra, *t1_extra)
             table = self._exec_table()
             rec = table.get(key)
             fresh = rec is None
             if fresh:
-                rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, tier0_fp16, feed,
-                                        way, row_tables, data_exp, data_view, tmpl_view, data,
-                                        tmpl, claim, k0s,
-                                        use_direct=use_direct, cl_meta=cl_meta,
-                                        tier1_fp16=tier1_fp16, data_exp1=data_exp1)
+                rec = self._hier_record(shape, feed, way, data_view, tmpl_view, data, tmpl)
                 table[key] = rec
             self._cache_touch(key)
             self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
             # every way's record takes the call's inputs (a play runs each on this call)
             up = (True, True, *uploads[2:]) if fresh else uploads
-            self._hier_upload(rec, storage_key, up, data, tmpl, tiers, tier0_fp16, tmpl_exp, slot,
-                              cl_meta=cl_meta, tier1_fp16=tier1_fp16, tmpl_exp1=tmpl_exp1)
+            self._hier_upload(rec, shape, storage_key, up, data, tmpl, slot)
             if row_tables is not None:
                 # Every row-window table in one upload, each at its section (_hier_record).
                 span = (self._section_offset(rec.buffers, "rw0")
@@ -636,22 +707,18 @@ class HierOps:
                     packed[j, :t.size] = t.reshape(-1)
                 self._x_upload(rec.buffers["rws"], packed, slot)
 
-            binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2,
-                                     tier0_fp16, data_exp,
-                                     tmpl_exp, row_tables is not None, layout, claim, data, k0s,
-                                     direct=direct if use_direct else None, cl_meta=cl_meta,
-                                     tier1_fp16=tier1_fp16, data_exp1=data_exp1,
-                                     tmpl_exp1=tmpl_exp1)
-            shape = (nd, nt, nbins)
+            binds = self._hier_binds(shape, lo, hi, binsize, t2)
+            out_shape = (nd, nt, nbins)
             if handle_out is not None:
                 slots = self._call_slots(bands, tier0_fp16, sparse, use_direct=use_direct,
                                          tier1_fp16=tier1_fp16)
                 handles[way] = (HierHandle(
                     key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
-                    tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
+                    tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key,
+                    shape=out_shape,
                     sparse=sparse, way=way, claim=claim is not None,
                     slots=slots, values=self._slot_values(slots)))
-            return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1, slot,
+            return self._hier_run(rec, binds, out_shape, sparse, way, len(tiers) > 1, slot,
                                   async_submit)
 
         # The sparse read, the coarse layout and the gate way are kernel slots the device
@@ -662,10 +729,10 @@ class HierOps:
             handle_out.append(handles[way])
         return res
 
-    def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, tier0_fp16, tmpl_exp, slot,
-                     cl_meta=None, tier1_fp16=False, tmpl_exp1=0):
+    def _hier_upload(self, rec, shape, storage_key, uploads, data, tmpl, slot):
         """Inputs found stale (_input_uploads): the spectra and templates where the record owns
         them, and the tiers' templates -- each fp16 tier's packed at its 2^tmpl_exp -- always."""
+        cl_meta = shape.cluster
         if uploads[0] and "data" in rec.owned:
             self._x_upload(rec.buffers["data"], np.ascontiguousarray(data, np.complex64), slot)
         if uploads[0]:
@@ -674,9 +741,9 @@ class HierOps:
             if "tmpl" in rec.owned:
                 self._x_upload(rec.buffers["tmpl"], np.ascontiguousarray(tmpl, np.complex64),
                                slot)
-            for i, (_, ct, _) in enumerate(tiers):
-                use_half = (tier0_fp16 if i == 0 else tier1_fp16)
-                texp = tmpl_exp if i == 0 else tmpl_exp1
+            for i, (_, ct, _) in enumerate(shape.tiers):
+                use_half = (shape.tier0_fp16 if i == 0 else shape.tier1_fp16)
+                texp = shape.tmpl_exp if i == 0 else shape.tmpl_exp1
                 self._x_upload(rec.buffers["ct%d" % i],
                                pack_half2(pow2_scaled(ct, texp)) if use_half
                                else np.ascontiguousarray(ct, np.complex64), slot)
@@ -685,45 +752,21 @@ class HierOps:
                 self._x_upload(rec.buffers["clmem"], cl_meta[2], slot)
             self._uploaded["tmpl"][storage_key] = uploads[3]
 
-    def _hier_record(self, key, n, tiers, nd, nt, nbins, layout, tier0_fp16, feed, way,
-                     row_tables, data_exp, data_view, tmpl_view, data, tmpl, claim, k0s=None,
-                     use_direct=False, cl_meta=None, tier1_fp16=False, data_exp1=0):
+    def _hier_record(self, shape, feed, way, data_view, tmpl_view, data, tmpl):
         """Buffers and the recording of one call shape (see the module docstring).
 
         Parameters
         ----------
-        key : tuple
-            The call shape's key in the context's record table.
-        n : int
-            The fine transform length.
-        tiers : sequence of tuple
-            Per gate tier, (band, its templates, its raw threshold).
-        nd, nt, nbins : int
-            Data rows, templates and output bins of the call.
-        layout : tuple or None
-            The fp16 coarse kernel's layout at tier 0 (None when that tier is FP32).
-        tier0_fp16, tier1_fp16 : bool
-            Whether tier 0, and tier 1, run the fp16 coarse kernel.
+        shape : HierShape
+            What the call asks of the device.
         feed : str
             How the tiers read the data: "inplace", "pack", "tier0" or "bands".
         way : str
-            How a sparse result is read back (the context's sparse way).
-        row_tables : ndarray or None
-            Per data row, the uint32 [lo, hi] window a grouped call narrows it to.
-        data_exp, data_exp1 : int
-            The power-of-two exponent applied to the data as fp16 tier 0, and tier 1, read it.
+            How the result is read back: "dense", or a sparse result's "rows" or "compact".
         data_view, tmpl_view : object or None
             The device's view of data and tmpl where they are shared arrays, else None.
         data, tmpl : ndarray
             The call's data and template spectra.
-        claim : object or None
-            The deferred forward of the data this call claimed, if any.
-        k0s : tuple of int, optional
-            Each tier's first bin (band offset). Default: 0 for every tier.
-        use_direct : bool, optional
-            Whether survivors are refined by direct time-domain correlation.
-        cl_meta : tuple, optional
-            The shared screeners' cluster tables for tier 0, when the tier runs them.
 
         Returns
         -------
@@ -732,14 +775,15 @@ class HierOps:
         """
         from ._coarse import coarse_launch
         from ._gpuexec import Arg, Record
-        k0s = (0,) * len(tiers) if k0s is None else k0s
-        bands = tuple(b for b, _, _ in tiers)
-        last = len(tiers) - 1
-        nc = nt if cl_meta is None else cl_meta[0]
+        n, nd, nt, nbins, layout = shape.n, shape.nd, shape.nt, shape.nbins, shape.layout
+        tier0_fp16, tier1_fp16 = shape.tier0_fp16, shape.tier1_fp16
+        data_exp, data_exp1 = shape.data_exp, shape.data_exp1
+        bands, k0s, nc, cl_meta = shape.bands, shape.k0s, shape.nc, shape.cluster
+        rowwin, use_direct = shape.row_windows, shape.direct is not None
+        last = len(bands) - 1
         pairs0 = nd * nc
         pairs = nd * nt
         out = pairs * nbins
-        rowwin = row_tables is not None
         cb0 = 4 if tier0_fp16 else 8
         cb1 = 4 if tier1_fp16 else 8
         t1_ppg = (1024 // bands[1]) if tier1_fp16 else 0
@@ -952,13 +996,33 @@ class HierOps:
         rec.native = lst.end()
         return rec
 
-    def _hier_binds(self, n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, tier0_fp16,
-                    data_exp, tmpl_exp, rowwin, layout, claim, data, k0s=None, direct=None,
-                    cl_meta=None, tier1_fp16=False, data_exp1=0, tmpl_exp1=0):
-        """The per-run words and bindings of a hier_peaks call."""
+    def _hier_binds(self, shape, lo, hi, binsize, t2):
+        """The per-run words and bindings of a hier_peaks call.
+
+        Parameters
+        ----------
+        shape : HierShape
+            What the call asks of the device.
+        lo, hi : int
+            The window of lags the call searches, [lo, hi).
+        binsize : int
+            Lags per output bin.
+        t2 : float
+            The squared threshold a peak must reach, 0 for none.
+
+        Returns
+        -------
+        dict
+            By the name a recording binds it under, the words or the buffer of this run.
+        """
         from ._coarse import coarse_launch
-        k0s = (0,) * len(tiers) if k0s is None else k0s
-        nc = nt if cl_meta is None else cl_meta[0]
+        n, tiers, nd, nt, nbins = shape.n, shape.tiers, shape.nd, shape.nt, shape.nbins
+        tier0_fp16, tier1_fp16, layout = shape.tier0_fp16, shape.tier1_fp16, shape.layout
+        data_exp, data_exp1 = shape.data_exp, shape.data_exp1
+        tmpl_exp, tmpl_exp1 = shape.tmpl_exp, shape.tmpl_exp1
+        rowwin, claim, direct = shape.row_windows, shape.claim, shape.direct
+        k0s, nc, cl_meta = shape.k0s, shape.nc, shape.cluster
+        shift = bin_shift(binsize)
         lag_pad0 = 0 if cl_meta is None else cl_meta[3]
         pairs0 = nd * nc
         pairs = nd * nt
