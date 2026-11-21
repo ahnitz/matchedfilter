@@ -196,7 +196,7 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
     pass's base's timed replay (passed through keep() as soon as it is taken, before another
     arm's replay can reuse its buffers). When the search ends, every subject locks its winner
     (lock_arm); otherwise they are left on the base of the pass now open. `work` (the round's
-    pairs) only scales the logs (MF_AUTOTUNE_LOG, MF_TRIAL_AA_LOG): rounds are judged as
+    pairs) only scales the log (MF_AUTOTUNE_LOG): rounds are judged as
     ratios to DEFAULT."""
     def use(label):
         for s in subjects:
@@ -213,7 +213,7 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
     ch = tr.choice
     try:
         res = ch.play(run, set(), config=lambda a: tuple(s.arm_config(a) for s in subjects),
-                      warm=warm, keep=keep, work=work)
+                      warm=warm, keep=keep)
     except BaseException:
         use(ch.preference)
         raise

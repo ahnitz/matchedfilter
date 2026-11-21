@@ -82,6 +82,8 @@ Results that change are stated; everything else returns what it returned before.
   reads the 256-bit Zen 5 parts from the CPU model), `MF_HMF_PROF` (`tools/hier_bench.py`
   prints its profile from the plan's counters), and the test levers `MF_CORR_NO_STREAM`,
   `MF_GPU_ITEMS` and `MF_DEVICE_FOLLOWUPS`. Setting a removed variable warns.
+- The A/A diagnostic of the measured choices: `MF_TRIAL_AA_LOG`, the extra arm it ran, and
+  `tools/trial_power.py`, which read its log.
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
   (`chain_thresholds(...)["halfwidth"]`).
 - 52 shipped GPU kernels that nothing could run or nothing chose (14.7 MB), CUDA's

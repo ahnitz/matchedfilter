@@ -72,12 +72,6 @@ VARS: Tuple[Var, ...] = (
     # Diagnostics
     Var("MF_AUTOTUNE_LOG", "diagnostic", "py", "", "Log block-size, chain and trial decisions.",
         usage="MF_AUTOTUNE_LOG=1", kind="flag", value=False),
-    Var("MF_TRIAL_AA_LOG", "diagnostic", "py", "",
-        "Every paired trial also runs its preference a second time, settled and timed like "
-        "an arm and never a sample (an A/A arm: no decision changes), and appends each "
-        "round's times and ratios, and each lock, to this file as JSON lines. Each round "
-        "costs one more settled and timed run.",
-        usage="MF_TRIAL_AA_LOG=<file>", kind="text"),
     Var("MF_HMF_TRACE", "diagnostic", "c", "", "Trace hierarchical plan runs to stderr.",
         usage="MF_HMF_TRACE=1", kind="flag", value=False),
     Var("MF_HMF_DUMP", "diagnostic", "c", "", "Dump coarse-pass data for the GPU mirror tests.",
@@ -142,6 +136,9 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "the A/A diagnostic (a second, undeciding run of each trial's preference, "
+     "logged for tools/trial_power.py) is gone with its tool",
+     ("MF_TRIAL_AA_LOG",)),
     ("2026-11-21", "only tests set them, to reach the per-call and per-group follow-up paths; "
      "the tests now reach those paths by replacing the batch step they fall back "
      "from",
