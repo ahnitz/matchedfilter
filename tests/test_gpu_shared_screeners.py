@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from conftest import kernel_dir, usable_gpu, usable_gpu_reason
+from conftest import fix_gpu_costs, kernel_dir, usable_gpu, usable_gpu_reason
 from spectral_profiles import binomtest
 
 import matchedfilter as mf
@@ -87,6 +87,7 @@ def test_gpu_clustered_tier0_arities_windows_and_feeds(profile_name, monkeypatch
     """GPU Tier-0 screeners (k in {1, 2, 3, 4}, k0=0 and k0>0, interior & wrap windows) match flat."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
+    fix_gpu_costs(monkeypatch)      # the test asserts a choice the costs decide
     n, nd, nt = 2048, 8, 20
     if profile_name == "deadzone_bandpass":
         power, psd, templates = _make_colored_correlated_bank(
@@ -245,6 +246,7 @@ def test_gpu_clustered_tier0_empirical_fdr_respects_budget(monkeypatch):
     """GPU Tier-0 screeners (k <= 4) respect the false-dismissal budget on interior and edge lags."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
+    fix_gpu_costs(monkeypatch)      # the test asserts a choice the costs decide
     n, nt = 2048, 16
     snr, fd = 5.5, 0.05
     win = (256, 1792)

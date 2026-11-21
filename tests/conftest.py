@@ -317,6 +317,27 @@ def assert_same_follow_up(want, got):
             np.testing.assert_array_equal(g, w, err_msg=f)
 
 
+def fix_gpu_costs(monkeypatch):
+    """Replace the measured GPU cost model with a fixed one for the rest of a test.
+
+    Whether a plan shares screeners at its first tier is decided by comparing prices from
+    the cost model, which on a GPU is timed on the device. A test that asserts the decision
+    then depends on the machine's load: the two tests that did failed about half the time
+    beside twelve other processes. The numbers are a Radeon 8060S at n=2048 on a quiet
+    machine (2026-11-21), rounded; what matters is that they are the same on every run.
+    """
+    from matchedfilter import _calibration, _costmodel
+    dense = {64: 0.3, 128: 0.5, 256: 1.0, 512: 2.3, 1024: 4.8}
+    survivor = {64: 0.8, 128: 0.8, 256: 1.4, 512: 2.8, 1024: 7.9}
+
+    def fixed(n, device, *args, **kwargs):
+        return _costmodel.CostModel(
+            n, dense, {b: [(0.01, c), (0.1, c)] for b, c in survivor.items()},
+            [(0.01, 43.0), (0.1, 22.0)], block=52.0,
+            feed={"band": {64: 0.0, 128: 4.0, 256: -1.5, 512: -0.5, 1024: 8.0}, "full": 23.0})
+    monkeypatch.setattr(_calibration, "calibrate_costs_gpu", fixed)
+
+
 def usable_gpu_reason():
     """Why there is no usable GPU, phrased so it does not mislead: a GPU that enumerated and
     failed the probe is named with its error, apart from there being no GPU at all."""

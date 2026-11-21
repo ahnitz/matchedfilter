@@ -22,6 +22,7 @@ import struct
 import numpy as np
 import pytest
 from conftest import (
+    fix_gpu_costs,
     forced_coarse_layouts,
     gpu_backend,
     gpu_context,
@@ -593,6 +594,7 @@ def test_gpu_tier1_fp16_shifted_bands_and_clustered_tier0(gpu_dev, monkeypatch):
     # 2. Clustered Tier-0 (`compactPairsClustered` writing `t1args` via `packShift`) on (128, 512).
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "128,512")
+    fix_gpu_costs(monkeypatch)      # the assertion below is on a choice the costs decide
     from test_shared_screeners import _make_quad_correlated_bank
     power, psd, c_tmpls = _make_quad_correlated_bank(n, 16, 128, chain_drift=0.14, seed=515)
     c_data = ((rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n)))
