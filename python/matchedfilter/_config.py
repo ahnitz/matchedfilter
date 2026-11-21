@@ -76,10 +76,6 @@ VARS: Tuple[Var, ...] = (
         usage="MF_HMF_TRACE=1", kind="flag", value=False),
     Var("MF_HMF_DUMP", "diagnostic", "c", "", "Dump coarse-pass data for the GPU mirror tests.",
         usage="MF_HMF_DUMP=<file>", kind="text"),
-    Var("MF_GATE16_DEBUG", "diagnostic", "c", "",
-        "FP16 gate error data for tools/gate16_error.py.",
-        usage="MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX", kind="flag", value=False),
-    Var("MF_GATE16_DEBUG_MAX", "diagnostic", "c", row="MF_GATE16_DEBUG", kind="flag", value=False),
     Var("MF_GPU_TIMING", "diagnostic", "py", "", "Device-time collection across GPU contexts.",
         usage="MF_GPU_TIMING=1", kind="flag", value=False),
     Var("MF_GPU_PROFILE", "diagnostic", "py", "", "Phase timestamps in recorded Vulkan plans.",
@@ -136,6 +132,10 @@ SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-11-21", "the FP16 gate's debug mode (an electing scan and the pair's all-lag rms, for "
+     "tools/gate16_error.py) is gone with its tool; the gate reports its window "
+     "maximum only",
+     ("MF_GATE16_DEBUG", "MF_GATE16_DEBUG_MAX",)),
     ("2026-11-21", "the A/A diagnostic (a second, undeciding run of each trial's preference, "
      "logged for tools/trial_power.py) is gone with its tool",
      ("MF_TRIAL_AA_LOG",)),

@@ -8,6 +8,10 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-11-21: the FP16 gate's debug mode (an electing scan and the pair's all-lag
+rms, for tools/gate16_error.py) is gone with its tool; the gate reports its window
+maximum only: MF_GATE16_DEBUG, MF_GATE16_DEBUG_MAX.
+
 Removed 2026-11-21: the A/A diagnostic (a second, undeciding run of each trial's
 preference, logged for tools/trial_power.py) is gone with its tool: MF_TRIAL_AA_LOG.
 
@@ -104,7 +108,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_AUTOTUNE_LOG=1` | Log block-size, chain and trial decisions. |
 | `MF_HMF_TRACE=1` | Trace hierarchical plan runs to stderr. |
 | `MF_HMF_DUMP=<file>` | Dump coarse-pass data for the GPU mirror tests. |
-| `MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX` | FP16 gate error data for tools/gate16_error.py. |
 | `MF_GPU_TIMING=1` | Device-time collection across GPU contexts. |
 | `MF_GPU_PROFILE=1` | Phase timestamps in recorded Vulkan plans. |
 | `MF_VK_SUBGROUP_MEASURING` | Internal: marks the subprocess that measures Vulkan subgroup sizes. |

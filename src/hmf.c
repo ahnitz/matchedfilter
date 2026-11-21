@@ -2565,9 +2565,8 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                                  : (use_q15 ? (ap_peak){0,0.f,0.f,0.f} : tr->cebuf[row]);
         int fire = qstat || (use_q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
         if(i==0 && fire){
-          /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
-             MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */
-          if(p->dump){ float rec[8]={ce.magnitude,0.0f,(tr->g16&&!qstat)?ce.im:ce.magnitude,thr,thr,thr,
+          /* rec[2] repeats the maximum */
+          if(p->dump){ float rec[8]={ce.magnitude,0.0f,ce.magnitude,thr,thr,thr,
                                      (float)(d0+d),(float)(t0+t)};
                        fwrite(rec,sizeof rec,1,p->dump); }
           const long pair=first_pair+(long)row+1;

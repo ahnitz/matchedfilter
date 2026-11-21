@@ -68,9 +68,8 @@ tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted.
   when `ap_mf_q15_screen` runs alone, is set to at least twice the worst error measured over
   the `tools/gate_margin.py` families: noise, profile, injection, loud transient, full scale.
   That is the merge gate's criterion for a gate with a margin: margin use < 0.5.
-- **Measurement tools:**
-  - `tools/gate16_error.py` for the CPU fp16 gate;
-  - `tools/gate_margin.py` for all of them (`--gate q15 gpu-c16 cpu-g16`).
+- **Measurement tool:** `tools/gate_margin.py` for all of them
+  (`--gate q15 gpu-c16 cpu-g16`).
 
 ## What checks it
 

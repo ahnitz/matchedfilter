@@ -54,10 +54,11 @@ The gate's error has two parts:
 - **u rms(y): the transform's own rounding.** rms is taken over ALL m lags, so an
   out-of-window glitch, which raises the error everywhere, shows in it.
 
-### Measured error (tools/gate16_error.py)
+### Measured error
 
-The fine bank is the ladder's largest, with H1 profiles and the chain pinned. Every (block,
-template) pair is dumped through `MF_HMF_DUMP` with tier thresholds 0, and the error is
+Measured with a tool since removed (it read the pair's all-lag rms from a debug mode of the
+gate). The fine bank is the ladder's largest, with H1 profiles and the chain pinned. Every
+(block, template) pair is dumped through `MF_HMF_DUMP` with tier thresholds 0, and the error is
 normalised as
 
     e = (|y16|max  -  |y32|max) / (u rms)

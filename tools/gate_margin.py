@@ -32,8 +32,8 @@ that scales nothing overflows). Each family runs at the requested N.
 Vulkan), so the same command runs the full harness on every GPU.
     python tools/gate_margin.py --gate q15 gpu-c16 --json out.json
 
-The NEON fp16 gate (src/gate16.cc) reports its statistic through MF_GATE16_DEBUG and is
-measured by tools/gate16_error.py on ARM; an adapter belongs here once the gate is exposed
+The NEON fp16 gate (src/gate16.cc) is checked here end to end only (cpu-g16: the peaks of
+a loud run against the FP32 tier); a per-call adapter belongs here once the gate is exposed
 per call (as q15_screen is).
 """
 import argparse

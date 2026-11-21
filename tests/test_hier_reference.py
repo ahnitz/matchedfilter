@@ -59,8 +59,7 @@ def test_even_coarse_maximum_matches_the_c_implementation(tmp_path):
     old = os.environ.get("MF_HMF_DUMP")
     os.environ["MF_HMF_DUMP"] = str(dump)
     # This checks the FP32 coarse kernel against its mirror bit for bit; the FP16 first
-    # gate (ARM) reports an upper bound instead and has its own measurement
-    # (tools/gate16_error.py, tests/test_gate16.py).
+    # gate (ARM) reports its own statistic and has its own test (tests/test_gate16.py).
     old16 = os.environ.get("MF_GATE16")
     os.environ["MF_GATE16"] = "0"
     oldtune = os.environ.get("MF_AUTOTUNE")

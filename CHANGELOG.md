@@ -84,6 +84,8 @@ Results that change are stated; everything else returns what it returned before.
   `MF_GPU_ITEMS` and `MF_DEVICE_FOLLOWUPS`. Setting a removed variable warns.
 - The A/A diagnostic of the measured choices: `MF_TRIAL_AA_LOG`, the extra arm it ran, and
   `tools/trial_power.py`, which read its log.
+- The FP16 gate's debug mode (`MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX`): the electing scan
+  and the all-lag rms it reported, and `tools/gate16_error.py`, which read them.
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
   (`chain_thresholds(...)["halfwidth"]`).
 - 52 shipped GPU kernels that nothing could run or nothing chose (14.7 MB), CUDA's

@@ -126,7 +126,7 @@ refilter calls: time per call, first and repeated, and the peaks against the cap
 `setup_breakdown.py` (the setup's time by part), `setup_decisions_diff.py` (two replays'
 decisions compared).
 
-**Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `gate16_error.py`,
+**Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier),
 `gate16_check.py`, `fdr_audit.py` (every profile
 and chain against the flat filter, two-sided; `--device` adds the device's own filter, the
 GPU fp16 tier), `split_bias.py` (each plan's dismissal on model draws it was
