@@ -117,6 +117,11 @@ Results that change are stated; everything else returns what it returned before.
 
 ### Fixed
 
+- A false-dismissal budget outside (0, 1) no longer makes plan setup run without end: a
+  `TimeDomainFilterBank` or `HierarchicalFilter` given one raises `ValueError`. The bank
+  also refuses, by name, an unknown `engine` (it ran as the flat engine), sample rates
+  that are not positive, a negative `binsize`, `coarse_band_hz` or `first_stage_snr` (they
+  were ignored), a `max_batch_size` below 1, and tap counts outside their templates.
 - A bank refuses a reference that holds no power or is not finite when it is set, naming
   the profile. A detector with no data gave an all-zero reference and the job failed later
   with an unrelated message.

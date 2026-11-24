@@ -1043,6 +1043,29 @@ class TimeDomainFilterBank:
         self.false_dismissal = float(false_dismissal)
         self.first_stage_snr = float(first_stage_snr)
         self.coarse_band_hz = coarse_band_hz
+        # Arguments outside what the bank can run are refused here, by name, rather than
+        # ignored or left to fail (or loop) deep in the planner.
+        for name, rate in (("tap_sample_rate", self.tap_sample_rate),
+                           ("data_sample_rate", self.data_sample_rate)):
+            if not (np.isfinite(rate) and rate > 0.0):
+                raise ValueError("%s must be positive and finite; got %r" % (name, rate))
+        if not 0.0 < self.false_dismissal < 1.0:
+            raise ValueError("false_dismissal must be between 0 and 1, exclusive; got %r"
+                             % (false_dismissal,))
+        if not (np.isfinite(self.first_stage_snr) and self.first_stage_snr >= 0.0):
+            raise ValueError("first_stage_snr must be finite and >= 0 (0: the threshold); "
+                             "got %r" % (first_stage_snr,))
+        if coarse_band_hz is not None:
+            bands = np.atleast_1d(np.asarray(coarse_band_hz, dtype=np.float64))
+            if not (np.isfinite(bands).all() and (bands >= 0.0).all()):
+                raise ValueError("coarse_band_hz must be finite and >= 0 (0 or None: the "
+                                 "model's chain); got %r" % (coarse_band_hz,))
+        if max_batch_size is not None and int(max_batch_size) < 1:
+            raise ValueError("max_batch_size must be >= 1, or None for no limit; got %r"
+                             % (max_batch_size,))
+        if binsize is not None and (int(binsize) != binsize or int(binsize) < 0):
+            raise ValueError("binsize must be a positive integer, or None for one peak per "
+                             "block; got %r" % (binsize,))
         self.device = device
         self.analytic = bool(analytic)
         # Off by default: halving the stored hierarchical templates (Hermitian
@@ -1057,6 +1080,10 @@ class TimeDomainFilterBank:
                 'correlation': 'corr', 'corr': 'corr'}.get(engine, engine).lower()
         if bandlimited:
             mode = 'dif'
+        if mode not in ('flat', 'hier', 'corr', 'dif'):
+            raise ValueError("unknown engine %r: one of 'hier', 'flat', 'corr' (or their "
+                             "aliases 'matchedfilter-hierarchical', 'matchedfilter', 'pycbc', "
+                             "'correlation')" % (engine,))
         self.engine = mode
 
         # Parse inputs. Complex taps are quadrature filters (complex_taps): the analytic
@@ -1089,6 +1116,11 @@ class TimeDomainFilterBank:
 
         if len(tap_counts) != n_templates:
             raise ValueError(f"tap_counts length ({len(tap_counts)}) does not match n_templates ({n_templates})")
+        held = np.array([len(t) for t in taps], dtype=np.int64)
+        if np.any(tap_counts < 0) or np.any(tap_counts > held):
+            bad = int(np.flatnonzero((tap_counts < 0) | (tap_counts > held))[0])
+            raise ValueError("tap_counts[%d] = %d is outside its template's %d taps"
+                             % (bad, int(tap_counts[bad]), int(held[bad])))
 
         self.n_templates = n_templates
         self.tap_counts = tap_counts

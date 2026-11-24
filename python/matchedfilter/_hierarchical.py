@@ -255,6 +255,10 @@ class HierarchicalFilter(MatchedFilter):
         self._init_common(n, ndata, ntemplates, device, valid)
         self.snr = float(snr)
         self.fd = float(fd)
+        # Outside (0, 1) the gate model has no budget to solve for (and looped looking for one).
+        if not 0.0 < self.fd < 1.0:
+            raise ValueError("fd (the false-dismissal budget) must be between 0 and 1, "
+                             "exclusive; got %r" % (fd,))
         self.max_tiers = int(max_tiers)
         if self.max_tiers < 1:
             raise ValueError("max_tiers must be >= 1")
