@@ -17,14 +17,14 @@ from ._choice import (_AUTOTUNE_LOCK, TIE as _TIE, _autotune_enabled, held, play
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
 from ._windows import _normalize_windows, _window_layout, _merge_window_bins, _window_bin_phases
 # The bank's layout planning lives in _layout.
-from ._layout import _corr_partition, _partition_templates, _corr_block_costs
+from ._layout import _corr_partition, _partition_templates
 from . import _core, _choice
 from ._hierarchical import _record_cpu_trial
 from ._results import _SparsePeaks, _Deferred
 from ._filter import _from_any, _automatic_series_layout
 from ._shared import containing_samples, shared_buffer, shared_view
-from .device import parse as _parse_device
-from .gatechain import rebin_profile
+from . import _layout, gatechain
+from . import device as _device
 
 
 def reference_profile(template, psd, f_low, f_high, delta_f) -> np.ndarray:
@@ -186,7 +186,7 @@ def _small_blocks_fit(device):
     at 2048 since a decimation scheme removed on 2026-10-05; no measurement chose that. GPU
     banks keep it."""
     try:
-        if _parse_device(device).kind != "cpu":
+        if _device.parse(device).kind != "cpu":
             return False
     except (TypeError, ValueError):
         return False
@@ -272,7 +272,7 @@ def _joint_round(jobs):
         groups.setdefault(key, {})[id(bank)] = bank
     if not groups:
         return None
-    gpu = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
+    gpu = any(_device.parse(b.device).kind == "gpu" for b, _, _ in jobs)
 
     def settle_for(sub):
         banks = [b for b, _, _ in sub]
@@ -380,7 +380,7 @@ class _BankArms:
 def _max_tiers(device) -> int:
     """Gate tiers the device's hierarchical engine executes (HierarchicalFilter._MAX_TIERS)."""
     from . import HierarchicalFilter
-    return min(3, HierarchicalFilter._MAX_TIERS[_parse_device(device).kind])
+    return min(3, HierarchicalFilter._MAX_TIERS[_device.parse(device).kind])
 
 
 #: "the profile in use": the default of the calls that take a profile (None is a profile's name).
@@ -420,7 +420,7 @@ def _gpu_batch(jobs, run):
     differently runs it, waited, back to back), its lock then in force for every batch
     (_settings). One trial plays a batch; the others take their locks or defaults. Returns
     run()'s results."""
-    parsed = [_parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None]
+    parsed = [_device.parse(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None]
     gpus = [d for d in parsed if d.kind == "gpu"]
     if not gpus:
         return run()
@@ -690,7 +690,7 @@ class _TemplateGroup:
         """
         from . import MatchedFilter
         # Which plan: the group's own on a GPU, the block length's shared one on the CPU.
-        if _parse_device(self.device).kind == 'gpu' and not on_cpu:
+        if _device.parse(self.device).kind == 'gpu' and not on_cpu:
             plan = self.__dict__.get('_single_gpu_plan')
             if plan is None:
                 plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
@@ -1194,13 +1194,13 @@ class TimeDomainFilterBank:
         order = np.argsort(counts, kind="stable")
         Ls = counts[order]
         ns = sorted(int(n) for n in candidate_ns)
-        is_gpu = _parse_device(self.device).kind == "gpu"
+        is_gpu = _device.parse(self.device).kind == "gpu"
         cap = int(self.max_batch_size) if self.max_batch_size is not None else M
         # On CPU, reconstruct s1 = b + w*(3n/4) to cancel 3rd-point w(n) calibration jitter and
         # the 8-block L3-vs-DRAM streaming step, subtracting a uniform write floor across n.
         # On GPU, w(n) is measured over ~512K samples in VRAM and captures LDS spill above 8192.
         group_per_samp = 0.0 if is_gpu else 6e-10
-        raw_costs = [(n, *_corr_block_costs(n, self.device)) for n in ns]
+        raw_costs = [(n, *_layout._corr_block_costs(n, self.device)) for n in ns]
         if is_gpu:
             costs = raw_costs
         else:
@@ -1621,7 +1621,7 @@ class TimeDomainFilterBank:
             if fine_df is not None:
                 profiles = {}
                 for n in hier_ns:
-                    ref_g = rebin_profile(ref_arr, fine_df, self.data_sample_rate, n)
+                    ref_g = gatechain.rebin_profile(ref_arr, fine_df, self.data_sample_rate, n)
                     profiles[n] = ref_g.astype(np.float32) if ref_g is not None else None
             else:
                 # A per-bin profile without delta_f must cover every block size.
@@ -2265,7 +2265,7 @@ class TimeDomainFilterBank:
         later processes through MF_COST_FILE. A batch's single-template jobs follow the device
         trial instead (_settings "single", _items_batch): batched, the GPU call is another
         dispatch. MF_AUTOTUNE=0 or MF_SINGLE_DEVICE=bank keeps the bank's device."""
-        if (self.engine != 'hier' or _parse_device(self.device).kind != 'gpu'
+        if (self.engine != 'hier' or _device.parse(self.device).kind != 'gpu'
                 or not _autotune_enabled() or _config.get("MF_SINGLE_DEVICE") == "bank"
                 or "_single_force" in self.__dict__ or playing()):
             return None
@@ -2292,7 +2292,7 @@ class TimeDomainFilterBank:
         force = self.__dict__.get("_single_force")
         if force is not None:
             return force == "cpu", bool(self.__dict__.get("_single_timed"))
-        if _parse_device(self.device).kind != 'gpu' or _config.get("MF_SINGLE_DEVICE") == "bank":
+        if _device.parse(self.device).kind != 'gpu' or _config.get("MF_SINGLE_DEVICE") == "bank":
             return False, False
         w = _single_choice(self.device, g.n, nblocks).winner
         return w is not None and _side_of(w) == "cpu", False
@@ -2579,7 +2579,7 @@ class TimeDomainFilterBank:
         # A GPU-shared dest is zeroed on the device: host writes would pull its pages
         # back to the CPU (CUDA managed memory) only for the next kernel to fault them in.
         need_gpu = (W.shape[0] > 0 or getattr(g, '_corr_plan', None) is not None
-                    or _parse_device(self.device).kind == 'gpu')
+                    or _device.parse(self.device).kind == 'gpu')
         gpu = getattr(g.get_correlation_plan(), '_gpu', None) if need_gpu else None
         if gpu is not None and settle:
             q = getattr(gpu, 'queue', None)
@@ -2672,7 +2672,7 @@ class TimeDomainFilterBank:
             # A GPU forward reads one lane of a complex row (stride 2) in place; the CPU's
             # half-size transforms take a contiguous series.
             lane = (a.dtype == np.float32 and a.ndim == 1 and a.strides == (8,)
-                    and _parse_device(self.device).kind != 'cpu')
+                    and _device.parse(self.device).kind != 'cpu')
             ser = a if lane else np.ascontiguousarray(a, np.float32)
         else:
             ser = _host_copy(a, np.complex64)
@@ -2838,7 +2838,7 @@ class TimeDomainFilterBank:
     def _correlation_reads_real(self) -> bool:
         """Whether every group's correlation plan reads a real series itself: the CPU's, or a
         GPU's whose forward takes real samples (one-stage, n <= 65536)."""
-        if _parse_device(self.device).kind == 'cpu':
+        if _device.parse(self.device).kind == 'cpu':
             return True
         self._groups
         return all(_gpu_reads_real(g.get_correlation_plan()._gpu, g.n) for g in self._groups)
@@ -2854,7 +2854,7 @@ class TimeDomainFilterBank:
         """
         dtype = np.dtype(np.complex64)
         nbytes = int(np.prod(shape)) * dtype.itemsize
-        if nbytes > 0 and _parse_device(self.device).kind == 'cpu' and w_span > S // 2:
+        if nbytes > 0 and _device.parse(self.device).kind == 'cpu' and w_span > S // 2:
             page = 16384
             need = nbytes + page
             pool = self.__dict__.setdefault('_corr_out_pool', [])

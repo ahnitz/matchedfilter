@@ -128,10 +128,10 @@ from ._errors import UnsupportedSize
 from ._gpuhier import HierOps
 from ._gpuhost import (
     MAX_BINS, bin_shift, plan_items, split_items, FollowupUnsupported, assemble_followups,
-    followup_layout, ROWWIN_ON, grouped_row_windows, hier_peaks_grouped)
+    ROWWIN_ON, grouped_row_windows, hier_peaks_grouped)
 from ._shared import shared_view, sparse_from_dense, sparsified
 from ._results import _SparsePeaks
-from ._settings import slot as kernel_slot
+from . import _gpuhost, _settings
 
 
 #: Drivers whose devices batch submissions across contexts (register_fusion).
@@ -867,7 +867,7 @@ class Executor(HierOps):
         holder = getattr(self, "_device_state", None) or self
         name = (getattr(holder, "device_name", "") or getattr(self, "device_name", "")
                 or getattr(self, "name", ""))
-        way = kernel_slot(name, "sparse", "flat", *SPARSE_WAYS["flat"])
+        way = _settings.slot(name, "sparse", "flat", *SPARSE_WAYS["flat"])
         res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
                              upload_tmpl, slot, async_submit, way == "compact", rowtab)
         if way == "dense":
@@ -1117,7 +1117,7 @@ class Executor(HierOps):
         return owner._submit_followups(jobs, holder)
 
     def _submit_followups(self, jobs, holder):
-        groups, layout = followup_layout(jobs, self)
+        groups, layout = _gpuhost.followup_layout(jobs, self)
         if not groups:
             return lambda: assemble_followups(layout, lambda gw: None)
         prior = holder.__dict__.pop("followups_inflight", None)

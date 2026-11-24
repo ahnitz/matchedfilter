@@ -10,7 +10,7 @@ import numpy as np
 from ._prices import price_once
 from ._filter import _automatic_series_layout
 from . import _core
-from ._choice import fastest_of_rounds as _fastest_of_rounds
+from . import _choice
 from .device import parse as _parse_device
 
 
@@ -185,7 +185,7 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
         t0 = time.perf_counter()
         runs[i]()
         return time.perf_counter() - t0
-    best = _fastest_of_rounds(range(len(runs)), time_one, 5)
+    best = _choice.fastest_of_rounds(range(len(runs)), time_one, 5)
     per_block = [best[i] / blocks[i] for i in range(len(runs))]
     s1 = max((per_block[1] - per_block[0]) / 14.0, 0.0)        # per template at valid[0]
     w = max((per_block[1] - per_block[2]) / (16.0 * (valid[1] - valid[2])), 0.0)

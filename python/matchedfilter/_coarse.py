@@ -3,7 +3,8 @@ Metal hosts (one launch rule, so hosts and harnesses that dispatch a coarse buil
 directly cannot disagree)."""
 from . import _config, _costfile
 import re
-from ._choice import _log_autotune, fastest_of_rounds
+from . import _choice
+from ._choice import _log_autotune
 
 
 def coarse_launch(nd, nt, ppg, tile, cspan):
@@ -117,18 +118,18 @@ def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
         cs = list(st(out) if callable(st) else st)
         if not cs:
             continue
-        times = fastest_of_rounds(cs, time_screen, rounds) if time_screen else {}
+        times = _choice.fastest_of_rounds(cs, time_screen, rounds) if time_screen else {}
         if times is None:
             return None
         keep = [c for c in cs if not times or times[c] <= screen_cut * min(times.values())]
-        full = fastest_of_rounds(keep, time_full, rounds)
+        full = _choice.fastest_of_rounds(keep, time_full, rounds)
         if full is None:
             return None
         times.update(full)
         out.update(times)
     lead = sorted(out, key=out.get)[:RETIME]
     if len(lead) > 1:
-        again = fastest_of_rounds(lead, time_full, RETIME_ROUNDS)
+        again = _choice.fastest_of_rounds(lead, time_full, RETIME_ROUNDS)
         if again is None:
             return None
         out.update(again)

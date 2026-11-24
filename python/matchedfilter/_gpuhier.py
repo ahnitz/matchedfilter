@@ -41,7 +41,7 @@ from ._shared import pack_half2, shared_view
 from . import gatechain
 from ._results import _SparsePeaks
 from ._coarse import coarse_launch, forced_layout, shortlist, layout_label, screen
-from ._settings import slot as kernel_slot
+from . import _settings
 
 #: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
 #: component in [2^C16_TEMPLATE_EXP, 2^(C16_TEMPLATE_EXP+1)), leaving fp16's lower 18 octaves
@@ -266,7 +266,7 @@ class HierOps:
         if second is None:
             return first
         a, b = self._slot_labels(what, band, (first, second))
-        return second if kernel_slot(self._dev_name(), what, band, a, b) == b else first
+        return second if _settings.slot(self._dev_name(), what, band, a, b) == b else first
 
     def _slot_labels(self, what, band, pair):
         """A kernel pair's labels as its slot names them."""
@@ -1077,7 +1077,7 @@ class HierOps:
         """How a sparse result is read -- its survivors' rows gathered on the host, or the hits
         compacted on the device: a kernel slot of the device trial (_gpuexec.SPARSE_WAYS)."""
         from ._gpuexec import SPARSE_WAYS
-        return kernel_slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
+        return _settings.slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, slot, async_submit):
         """Run a recorded call and return its result (a tracked collector when async)."""
@@ -1186,7 +1186,7 @@ class HierOps:
 
     def _slot_values(self, slots):
         name = self._dev_name()
-        return tuple(kernel_slot(name, w, b, *pair) for w, b, pair in slots)
+        return tuple(_settings.slot(name, w, b, *pair) for w, b, pair in slots)
 
     def hier_replay(self, h, slot, async_submit, validated=False):
         """Submit a hier_peaks call again from its handle, or None if the handle is stale.
