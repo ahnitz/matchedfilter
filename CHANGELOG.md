@@ -2,7 +2,7 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
-## Unreleased
+## 0.1.0a10
 
 Changes since 0.1.0a9, by what a user of the library sees. The development record behind
 each entry (measurements, commits, studies) is in the repository history at the tag
