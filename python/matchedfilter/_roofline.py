@@ -97,6 +97,8 @@ import numpy as np
 from .time_domain import _stored_bins, _normalize_windows
 from ._peaks import _MEASURED, _read
 from ._filter import _compute_module
+from . import _core
+from .device import parse
 
 #: Bytes per complex value at each precision.
 CBYTES = {"fp32": 8, "fp16": 4, "int16": 4}
@@ -192,7 +194,6 @@ def _sub(a, b):
 def _backend_c16(device):
     """Whether the device runs tier 0 at `band` in packed fp16 (its driver's _x_has_c16: an
     fp16 coarse build shipped for the band), as a function of band; None on a CPU."""
-    from .device import parse
     d = parse(device)
     if d.kind != "gpu":
         return None
@@ -205,7 +206,6 @@ def tier_precision(device, tier, band):
     if c16 is not None:                                     # GPU: packed fp16 tier 0
         return "fp16" if tier == 0 and c16(band) else "fp32"
     if tier == 0:
-        from . import _core
         if getattr(_core, "gate16", lambda: False)():      # ARM FP16 first gate
             return "fp16"
     return "fp32"
@@ -325,7 +325,6 @@ def cpu_tick_rate():
     if platform.machine().lower() not in ("x86_64", "amd64", "i386", "i686"):
         _TICK_RATE = 1e9
         return _TICK_RATE
-    from . import _core
     n, nt, blocks = 1024, 8, 64
     rng = np.random.default_rng(0)
     spec = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
@@ -464,7 +463,6 @@ def cpu_peaks(measure_bandwidth=True):
 def gpu_peaks(device, ctx=None):
     """Theoretical peaks of a GPU from API-queryable counts plus a stated formula: the
     driver's peak model (Context._x_peaks), which ctx -- a context on the device -- runs."""
-    from .device import parse
     d = parse(device)
     if ctx is None:
         raise ValueError("no context on %s to ask for its peaks" % device)
@@ -472,7 +470,6 @@ def gpu_peaks(device, ctx=None):
 
 
 def peaks(device, ctx=None, measure_bandwidth=True):
-    from .device import parse
     d = parse(device)
     return cpu_peaks(measure_bandwidth) if d.kind == "cpu" else gpu_peaks(device, ctx)
 

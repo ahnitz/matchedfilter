@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core
-from matchedfilter import _screeners
 
 
 def _reference(U_raw, ref, W, steps):

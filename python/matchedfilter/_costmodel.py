@@ -16,6 +16,9 @@ from contextlib import contextmanager
 from . import _config
 from ._choice import TIE
 from ._costfile import _cost_warn, _load_cost_file
+from . import _core
+from ._kernel_id import gpu_kernel_id as identity
+from .device import parse as _parse
 
 
 #: CostModel's interpolation tables as arrays, per table (a model's rows do not change once
@@ -362,7 +365,6 @@ def cpu_gate_kind():
     """'f16' when new CPU hierarchical plans run the FP16 first gate (gate16.cc: ARM with
     FP16 vectors, unless MF_GATE16=0), else 'f32'. Costs, block prices and chain choices
     are cached per kind."""
-    from . import _core
     return "f16" if getattr(_core, "gate16", lambda: False)() else "f32"
 
 
@@ -374,7 +376,6 @@ _CAL_DENSITIES = (0.1, 0.01)
 
 def gpu_kernel_id(backend="vulkan"):
     """Identity of the shipped kernels whose measured choices this backend stores."""
-    from ._kernel_id import gpu_kernel_id as identity
     return identity(backend)
 
 
@@ -412,7 +413,6 @@ _Q15_BAND = {}
 
 def _q15_band(b):
     """Whether this back end has a Q15 screen for a first tier at band b."""
-    from . import _core
     b = int(b)
     if b not in _Q15_BAND:
         try:
@@ -424,7 +424,6 @@ def _q15_band(b):
 
 def default_series_group(n):
     """Blocks a CPU plan filters together, as HierarchicalFilter uses without an execution policy."""
-    from . import _core
     n_i = max(1, int(n))
     grp = 64
     while grp > 1 and grp * 8 * n_i > 512 * 1024:
@@ -445,7 +444,6 @@ def _run_ms(log):
 def _is_gpu(device):
     """Whether `device` names a GPU (the cost model's band forward and fp16 gate)."""
     try:
-        from .device import parse as _parse
         return _parse(device).kind == "gpu"
     except Exception:
         return False

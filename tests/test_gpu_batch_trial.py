@@ -11,7 +11,6 @@ from matchedfilter import TimeDomainFilterBank, _batches
 def test_batches_are_fused_and_equal_their_direct_calls(monkeypatch, tmp_path):
     from conftest import usable_gpu
     from test_time_domain import _whitened_inspiral_bank
-    from matchedfilter import time_domain as td
     dev = usable_gpu()
     if dev is None:
         pytest.skip(usable_gpu_reason())

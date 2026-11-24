@@ -26,6 +26,7 @@ import sys
 
 import numpy as np
 from ._choice import _autotune_enabled
+from . import _choice, _kernel_id
 
 #: Samples per candidate (after warm-up), each one sample for the shared rule:
 #: the mean of back-to-back calls over at least ~0.1 s -- a single call is ~1 ms on a Radeon
@@ -148,7 +149,6 @@ def choose(ctx):
     rng = getattr(ctx, "subgroup_range", None)
     if not rng or len(_candidates(rng)) < 2 or _config.get("MF_VK_SUBGROUP_MEASURING"):
         return reported
-    from . import _choice, _kernel_id
     if not _autotune_enabled():
         return reported
     sizes = [reported] + [s for s in _candidates(rng) if s != reported]

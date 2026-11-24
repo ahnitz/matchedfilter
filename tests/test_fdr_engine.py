@@ -3,7 +3,6 @@ single and multi-tier chains, whole-block and windowed searches (see test_fdr_ca
 docstring for the claims and their budgets)."""
 import pytest
 
-from matchedfilter import gatechain as gc
 from matchedfilter import _gatedraws as gd
 from spectral_profiles import binomtest
 from fdr_support import ALPHA, engine_misses, profile

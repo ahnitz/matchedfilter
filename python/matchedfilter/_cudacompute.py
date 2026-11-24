@@ -29,7 +29,9 @@ from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, settle as _settle
 from ._shared import empty_shared, _Borrowed
-from ._gpuhost import MAX_BINS, Section
+from ._gpuhost import MAX_BINS, Section, hier_peaks_grouped
+from . import _peaks as _pk
+from ._coarse import candidates
 
 
 def _borrowed_dptr(self):
@@ -1157,7 +1159,6 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def hier_peaks_grouped(self, *args, **kwargs):
-        from ._gpuhost import hier_peaks_grouped
         return hier_peaks_grouped(self, *args, **kwargs)
 
     def _x_coarse_candidates(self, band):
@@ -1165,7 +1166,6 @@ class Context(Executor, InputUploads):
         (_coarse.candidates): each shipped build this device's block limits hold
         (MAX_THREADS_PER_BLOCK, MAX_SHARED_MEMORY_PER_BLOCK), its twiddles computed or from
         the fp16 table (the "w" builds)."""
-        from ._coarse import candidates
         return candidates(band, lambda ppg, tile, twt: _shipped(self._stem(
                               band, "fusedTierB", c16=True, ppg=ppg, tile=tile, twt=bool(twt))),
                           lambda tile: (0, 1), self.max_invocations, self.max_shared_memory)
@@ -1386,7 +1386,6 @@ class Context(Executor, InputUploads):
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): driver attributes plus a stated formula."""
-        from . import _peaks as _pk
         a = self._attr
         sms, khz = a(16), a(13)              # MULTIPROCESSOR_COUNT, CLOCK_RATE (kHz)
         mem_khz, bus = a(36), a(37)          # MEMORY_CLOCK_RATE (kHz), GLOBAL_MEMORY_BUS_WIDTH

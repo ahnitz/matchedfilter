@@ -360,7 +360,6 @@ def test_the_tail_and_the_window_allowance_are_their_distributions(fd):
 def test_coarse_never_exceeds_its_local_fine_maximum():
     """With all power in band (f = 1, no 1/sqrt(f) rescaling) the coarse lags are a subset of
     the fine grid, so the coarse maximum cannot exceed its local fine maximum."""
-    from matchedfilter import gatechain as gc
     p = np.zeros(1024); p[:512] = 1.
     C, F = gd.signal_draws(p, 1024, [128, 512], 5., 8000, 71)
     assert np.all(C[:, 1] <= F[:, 1] + 2e-6)
@@ -383,7 +382,7 @@ def test_invalid_model_profile_is_rejected(power):
 
 
 def test_unresolvable_budget_refuses_without_sampling(monkeypatch):
-    from matchedfilter import gatemodel as gm, gatechain as gc
+    from matchedfilter import gatemodel as gm
     def forbidden(*args, **kwargs):
         raise AssertionError("unresolvable request allocated samples")
     monkeypatch.setattr(gd, 'signal_draws', forbidden)
@@ -391,7 +390,6 @@ def test_unresolvable_budget_refuses_without_sampling(monkeypatch):
 
 
 def test_sampling_cache_includes_seed_and_exact_snr(monkeypatch):
-    from matchedfilter import gatechain as gc
     from collections import OrderedDict
     monkeypatch.setattr(gd, '_SIGNAL_CACHE', OrderedDict())
     monkeypatch.setattr(gd, '_SIMILAR', {})
@@ -403,7 +401,6 @@ def test_sampling_cache_includes_seed_and_exact_snr(monkeypatch):
 
 
 def test_sampling_cache_is_bounded(monkeypatch):
-    from matchedfilter import gatechain as gc
     from collections import OrderedDict
     monkeypatch.setattr(gd, '_SIGNAL_CACHE', OrderedDict())
     monkeypatch.setattr(gd, '_CACHE_MAX', 3)

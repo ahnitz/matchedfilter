@@ -22,6 +22,7 @@ from . import _vulkan, _config
 import re
 import platform
 import sys
+from . import _core
 
 _VENDORS = {0x1002: "AMD", 0x10DE: "NVIDIA", 0x8086: "Intel",
             0x13B5: "ARM", 0x5143: "Qualcomm", 0x106B: "Apple"}
@@ -120,7 +121,6 @@ _CPU_DEVICES = {}
 def _cpu_device():
     """The CPU Device for the current backend. Cached: it reads /proc/cpuinfo, and plans parse
     their device often (28k times in one bench run, 1.1 s)."""
-    from . import _core
     b = _core.backend()
     hit = _CPU_DEVICES.get(b)
     if hit is None:

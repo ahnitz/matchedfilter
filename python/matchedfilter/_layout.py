@@ -9,6 +9,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from ._prices import price_once
 from ._filter import _automatic_series_layout
+from . import _core
+from ._choice import fastest_of_rounds as _fastest_of_rounds
+from .device import parse as _parse_device
 
 
 def _partition_templates(
@@ -123,7 +126,6 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     differently), through the same continuous path the bank uses there.
     """
     n = int(n)
-    from .device import parse as _parse_device
     dkey = "cpu" if _parse_device(device).kind == "cpu" else str(device)
     # corr4: the fixed cost has a floor (_corr_measure); files with corr3 entries hold zeros
     key = "corr4,%d" % n if dkey == "cpu" else "corr4,%d,%s" % (n, dkey)
@@ -153,7 +155,6 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     leaving half the valid span, each the fastest of 5 interleaved rounds
     (_choice.fastest_of_rounds). The fixed cost is at least half the per-template cost."""
     from . import CorrelationFilter
-    from ._choice import fastest_of_rounds as _fastest_of_rounds
     runs, blocks, valid = [], [], []
     short = n - (n - taps) // 2
     for nt, tp in ((2, taps), (16, taps), (16, short)):
@@ -202,7 +203,6 @@ def _batch_target(n: int, max_batch: Optional[int]) -> int:
     """Templates per group: the bank's cache-resident sizing, or the caller's bound."""
     if max_batch is not None:
         return int(max_batch)
-    from . import _core
     l2 = int(_core.l2_bytes())
     cap = 1024 if l2 >= 1048576 else 512
     return min(cap, max(32, 1048576 // (max(64, int(n) // 8) * 8)))

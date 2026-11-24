@@ -18,7 +18,9 @@ import numpy as np
 
 from . import _config, _gputime, _kernels, _vulkan, gatechain
 from ._shared import empty_shared
-from ._gpuhost import MAX_BINS, MappedBuffer, Section, address
+from ._gpuhost import MAX_BINS, MappedBuffer, Section, address, hier_peaks_grouped
+from . import _peaks as _pk
+from ._coarse import candidates, coarse_stem
 
 _SPIRV = _kernels.folder("vulkan")
 
@@ -78,9 +80,6 @@ def _fit_workgroup(sg, invocations, rng, max_subgroups):
         if s > sg and rng[0] <= s <= rng[1] and -(-invocations // s) <= max_subgroups:
             return s
     return sg
-
-
-from ._coarse import coarse_stem   # noqa: E402
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
@@ -1892,7 +1891,6 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def hier_peaks_grouped(self, *args, **kwargs):
-        from ._gpuhost import hier_peaks_grouped
         return hier_peaks_grouped(self, *args, **kwargs)
 
     def _x_coarse_candidates(self, band):
@@ -1904,7 +1902,6 @@ class Context(Executor, InputUploads):
         split the group past maxComputeWorkgroupSubgroups (_build_pipeline would bump it
         to the next size anyway). MF_COARSE_LAYOUT forces one of them by name, on every
         backend."""
-        from ._coarse import candidates, coarse_stem
         rng = getattr(self, "subgroup_range", None)
         sizes = [0]
         if rng:
@@ -2104,7 +2101,6 @@ class Context(Executor, InputUploads):
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): API-queryable counts plus a stated formula."""
-        from . import _peaks as _pk
         m = _re.search(r"gfx\d+", out["name"] or "", _re.I)
         arch = m.group(0).lower() if m else ""
         core = self._shader_core()

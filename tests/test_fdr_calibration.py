@@ -28,7 +28,7 @@ import zlib
 import numpy as np
 import pytest
 
-from matchedfilter import gatechain as gc, gatemodel as gm
+from matchedfilter import gatemodel as gm
 from matchedfilter import _gatedraws as gd
 from spectral_profiles import binomtest
 from fdr_support import ALPHA, PROFILES, SNR, modelled, profile

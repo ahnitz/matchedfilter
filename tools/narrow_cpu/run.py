@@ -14,10 +14,8 @@ from pathlib import Path
 import platform
 import statistics
 import subprocess
-import time
 
 import numpy as np
-import matchedfilter as mf
 from matchedfilter import _core
 
 MODES = ['q15-radix2', 'q15-radix4', 'q15-swar', 'q15-madd',

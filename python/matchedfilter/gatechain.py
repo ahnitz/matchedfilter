@@ -60,6 +60,7 @@ from ._gatedraws import (
     local_window, _law_applies, _law_profile, _signal_table, _Beside, _column, _signal_records,
     noise_block_maxima,
 )
+from . import _core
 # Its public names, kept under gatechain as well.
 signal_draws = _gatedraws.signal_draws
 
@@ -611,7 +612,6 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
             cost, chain, prices_dir, dbase, dlag, R, dfrac, dmfrac if has_last_sparse else None)
         if tables is not None:
             # every candidate priced in C (_core.plan_best), as the loop below prices them
-            from . import _core
             found = _core.plan_best(cands, tuple(hws), *tables)
             if found is not None:
                 c, at, which = found
@@ -865,7 +865,6 @@ def _chain_candidates(S, noise, cols, K, prune, dead):
             marks[new] = 0
 
     if _C_SEARCH and all(len(o) == K + 1 for o in low) and len(last_order) == K + 1:
-        from . import _core
         shape = _shape_only(M, k) if isinstance(S, _Columns) else np.ascontiguousarray(S, np.float32)
         return _core.chain_candidates(shape, Nc, tuple(low),
                                       tuple(np.ascontiguousarray(v, np.float32) for v in low_val),

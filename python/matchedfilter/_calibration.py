@@ -8,6 +8,8 @@ import numpy as np
 from . import _choice
 from . import gatechain as _gc
 from . import _gatedraws as _gd
+from . import _core
+from .device import parse as _parse_device
 
 _ORIG_CHOOSE_CHAIN = _gc.choose_chain
 
@@ -67,7 +69,6 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
     only its refine and per-block work. About 0.05 s per n on dev2; once per process. Runs at _CAL_TEMPLATES
     templates whatever `ntemplates` is (kept for callers; see _CAL_TEMPLATES).
     """
-    from . import _core
     nt = _gc._CAL_TEMPLATES
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
@@ -637,7 +638,6 @@ def _gpu_cal_inputs(n, blocks, nt, seed):
 
 def device_costs(n, device=None, ntemplates=_gc._CAL_TEMPLATES, group=None):
     """The cost model of the device a plan runs on: CPU tick counters, or GPU device time."""
-    from .device import parse as _parse_device
     dev = _parse_device(device)
     if dev.kind == "gpu":
         return calibrate_costs_gpu(n, str(dev))

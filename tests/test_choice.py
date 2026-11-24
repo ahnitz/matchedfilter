@@ -2,7 +2,6 @@
 clock, so every branch is exact and none can flake."""
 import json
 
-import numpy as np
 import pytest
 
 from matchedfilter import _choice

@@ -458,7 +458,7 @@ def _profiles(n=N):
 def test_a_profile_per_channel_is_one_leaf_bank_holding_each(monkeypatch):
     """A root whose profile is a dict gives every leaf one bank, with a reference for each
     channel's profile under the channel's name, and each channel's call names its own."""
-    given, ran = [], []
+    given = []
     set_reference = TimeDomainFilterBank.set_reference
 
     def recording(self, reference, delta_f=None, **kw):

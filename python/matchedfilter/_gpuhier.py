@@ -40,6 +40,8 @@ from .gatechain import band_forward_wanted
 from ._shared import pack_half2, shared_view
 from . import gatechain
 from ._results import _SparsePeaks
+from ._coarse import coarse_launch, forced_layout, shortlist, layout_label, screen
+from ._settings import slot as kernel_slot
 
 #: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
 #: component in [2^C16_TEMPLATE_EXP, 2^(C16_TEMPLATE_EXP+1)), leaving fp16's lower 18 octaves
@@ -237,7 +239,6 @@ class HierOps:
         two on synthetic dispatches (_coarse.shortlist, kept in MF_COST_FILE). The device
         trial plays them on real batches (kernel slots, _settings.slot). MF_COARSE_LAYOUT
         forces a layout, unplayed. Made once per band and setting: every call asks."""
-        from ._coarse import forced_layout, shortlist
         holder = getattr(self, "_device_state", None) or self
         forced = forced_layout(band) if what == "coarse" else None
         made = holder.__dict__.setdefault("kernel_pairs", {})
@@ -264,7 +265,6 @@ class HierOps:
         first, second = self._kernel_pair(what, band)
         if second is None:
             return first
-        from ._settings import slot as kernel_slot
         a, b = self._slot_labels(what, band, (first, second))
         return second if kernel_slot(self._dev_name(), what, band, a, b) == b else first
 
@@ -305,7 +305,6 @@ class HierOps:
         """Device seconds of the one-bin tier at this band in each way, over a synthetic
         batch whose survivors are one pair in _GATE_SURVIVORS, dispatched for every pair
         (_coarse.screen)."""
-        from ._coarse import screen
         ntm, pairs = self._COARSE_NT, self._COARSE_PAIRS
         rng = np.random.default_rng(1)
         x = ((rng.standard_normal((pairs // ntm, band))
@@ -358,7 +357,6 @@ class HierOps:
     def time_direct_ratio(self, n, real_series=False, complex_taps=False):
         """Device time of one direct-refine (lag x tap) divided by one length-n FFT refine pair,
         measured on synthetic survivor dispatches in interleaved rounds (_coarse.screen)."""
-        from ._coarse import screen
         ntm, pairs = self._COARSE_NT, 4096
         nd = pairs // ntm
         tap_count = min(256, max(16, n // 4))
@@ -442,13 +440,11 @@ class HierOps:
 
     @staticmethod
     def _layout_label(band, c):
-        from ._coarse import layout_label
         return layout_label(band, c[1], c[2], c[3], c[0])
 
     def _time_coarse_layouts(self, band, cands):
         """Device seconds per pair of each coarse layout on synthetic data (screened, then
         timed in interleaved rounds, the fastest few again together: _coarse.screen)."""
-        from ._coarse import screen
         ntm = self._COARSE_NT
         rng = np.random.default_rng(0)
         x = ((rng.standard_normal((self._COARSE_PAIRS // ntm, band))
@@ -465,7 +461,6 @@ class HierOps:
         natives = []
 
         def time_at(layout, pairs):
-            from ._coarse import coarse_launch
             nd = pairs // ntm
             kernel = self._coarse_kernel(band, layout, stride=band if self.inplace_feed else 0,
                                          scale=0, rowwin=False)
@@ -773,7 +768,6 @@ class HierOps:
         Record
             The recording, with its buffers.
         """
-        from ._coarse import coarse_launch
         from ._gpuexec import Arg, Record
         n, nd, nt, nbins, layout = shape.n, shape.nd, shape.nt, shape.nbins, shape.layout
         tier0_fp16, tier1_fp16 = shape.tier0_fp16, shape.tier1_fp16
@@ -1015,7 +1009,6 @@ class HierOps:
         dict
             By the name a recording binds it under, the words or the buffer of this run.
         """
-        from ._coarse import coarse_launch
         n, tiers, nd, nt, nbins = shape.n, shape.tiers, shape.nd, shape.nt, shape.nbins
         tier0_fp16, tier1_fp16, layout = shape.tier0_fp16, shape.tier1_fp16, shape.layout
         data_exp, data_exp1 = shape.data_exp, shape.data_exp1
@@ -1084,7 +1077,6 @@ class HierOps:
         """How a sparse result is read -- its survivors' rows gathered on the host, or the hits
         compacted on the device: a kernel slot of the device trial (_gpuexec.SPARSE_WAYS)."""
         from ._gpuexec import SPARSE_WAYS
-        from ._settings import slot as kernel_slot
         return kernel_slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, slot, async_submit):
@@ -1193,7 +1185,6 @@ class HierOps:
         return tuple(out)
 
     def _slot_values(self, slots):
-        from ._settings import slot as kernel_slot
         name = self._dev_name()
         return tuple(kernel_slot(name, w, b, *pair) for w, b, pair in slots)
 

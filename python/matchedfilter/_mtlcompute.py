@@ -21,8 +21,8 @@ from functools import wraps
 import re as _re
 
 import numpy as np
-from ._shared import empty_shared
-from ._gpuhost import MAX_BINS, MappedBuffer, Section
+from ._shared import empty_shared, _Allocation, _containing
+from ._gpuhost import MAX_BINS, MappedBuffer, Section, hier_peaks_grouped
 from . import _kernels
 
 _METAL_DIR = _kernels.folder("metal")
@@ -46,6 +46,8 @@ from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from . import _gputime
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
+from . import _peaks as _pk
+from ._coarse import candidates, coarse_stem
 
 
 def _shipped(stem):
@@ -508,7 +510,6 @@ class Context(Executor, InputUploads):
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): the core count plus a stated formula."""
-        from . import _peaks as _pk
         chip = next((k for k in _pk._APPLE_GPU if k in (out["name"] or "")), "M2")
         ghz, cores, bus, mts = _pk._APPLE_GPU[chip]
         try:
@@ -970,7 +971,6 @@ class Context(Executor, InputUploads):
         recognises the array while the owner lives. Drop the owner when the
         dispatch has completed, and before the array.
         """
-        from ._shared import _Allocation, _containing
         if isinstance(array, np.ndarray) and array.nbytes:
             # Memory already inside a device allocation is bound by offset instead: a
             # second buffer over the same pages cost ~60 ms before the GPU started.
@@ -1031,7 +1031,6 @@ class Context(Executor, InputUploads):
         if name in ("peaks", "peaks1", "gate"):
             pso = self.pipeline(n, "fusedTierB", name == "peaks1", macros=macros)
         elif name == "coarse":
-            from ._coarse import coarse_stem
             entry = ("coarse16" + coarse_stem(n, c["ppg"], c["tile"])[len("tierb_%d_c16" % n):]
                      + ("w" if c.get("twt") else ""))
             pso = self.pipeline(n, entry, macros=macros)
@@ -1086,7 +1085,6 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def hier_peaks_grouped(self, *args, **kwargs):
-        from ._gpuhost import hier_peaks_grouped
         return hier_peaks_grouped(self, *args, **kwargs)
 
     def _x_coarse_candidates(self, band):
@@ -1094,7 +1092,6 @@ class Context(Executor, InputUploads):
         (_coarse.candidates): each shipped build Apple's threadgroup limits hold (1024
         threads on every Metal 3 GPU; maxThreadgroupMemoryLength), its twiddles computed or
         from the fp16 table (MF_COARSE_TWT, a library macro)."""
-        from ._coarse import candidates, coarse_stem
         return candidates(band, lambda ppg, tile, twt: _kernels.record(
                               "metal", coarse_stem(band, ppg, tile)),
                           lambda tile: (0, 1), _MAX_THREADS, self.max_shared_memory)

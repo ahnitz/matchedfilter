@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
-from matchedfilter import TimeDomainFilterBank, _core, gatechain
+from matchedfilter import TimeDomainFilterBank, _core
 from matchedfilter import _gatedraws
 from matchedfilter._gpuhier import CLAIMS
 from matchedfilter.time_domain import template_spectra

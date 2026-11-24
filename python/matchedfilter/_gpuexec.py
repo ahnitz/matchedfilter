@@ -126,9 +126,12 @@ import numpy as np
 
 from ._errors import UnsupportedSize
 from ._gpuhier import HierOps
-from ._gpuhost import MAX_BINS, bin_shift, plan_items, split_items
-from ._shared import shared_view
+from ._gpuhost import (
+    MAX_BINS, bin_shift, plan_items, split_items, FollowupUnsupported, assemble_followups,
+    followup_layout, ROWWIN_ON, grouped_row_windows, hier_peaks_grouped)
+from ._shared import shared_view, sparse_from_dense, sparsified
 from ._results import _SparsePeaks
+from ._settings import slot as kernel_slot
 
 
 #: Drivers whose devices batch submissions across contexts (register_fusion).
@@ -819,7 +822,6 @@ class Executor(HierOps):
             res = (np.concatenate([p[0] for p in parts], axis=2),
                    np.concatenate([p[1] for p in parts], axis=2))
             if sparse:
-                from ._shared import sparse_from_dense
                 res = sparse_from_dense(*res)
             return (lambda: res) if async_submit else res
         return self._flat(n, data, tmpl, ((lo, hi, 0, data.shape[0]),), nbins, binsize,
@@ -848,7 +850,6 @@ class Executor(HierOps):
             raise ValueError("grouped dispatch exceeds the kernel bin limit")
         rowtab = None
         if phase is not None:
-            from ._gpuhost import grouped_row_windows
             rowtab = grouped_row_windows(groups, n, nd, binsize, nbins=nbins, phase=phase)[2]
         return self._flat(n, data, tmpl, groups, nbins, binsize, threshold, True, upload_tmpl,
                           slot, async_submit, sparse, rowtab)
@@ -863,7 +864,6 @@ class Executor(HierOps):
         # how many bins clear the threshold and on what a byte of readback costs here (a
         # bus, or nothing on unified memory): measured per call shape.
         # A kernel slot of the device trial, played on whole batches (_settings.slot).
-        from ._settings import slot as kernel_slot
         holder = getattr(self, "_device_state", None) or self
         name = (getattr(holder, "device_name", "") or getattr(self, "device_name", "")
                 or getattr(self, "name", ""))
@@ -871,7 +871,6 @@ class Executor(HierOps):
         res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
                              upload_tmpl, slot, async_submit, way == "compact", rowtab)
         if way == "dense":
-            from ._shared import sparsified
             res = sparsified(res, True)
         return res
 
@@ -955,7 +954,6 @@ class Executor(HierOps):
         self._claim(rec.buffers["idx"])          # an earlier result still reading these
         self._exec_upload(rec, key, uploads, data, tmpl, slot)
         if rowtab is not None:
-            from ._gpuhost import ROWWIN_ON
             self._x_upload(rec.buffers["rowtab"], np.ascontiguousarray(rowtab, np.uint32), slot)
             groups = ((ROWWIN_ON, n, 0, nd),)        # every row's window from the table
         binds = {"w%d" % g: (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, t2bits)
@@ -1061,7 +1059,6 @@ class Executor(HierOps):
         bi, bv = out
         btab = None
         if tab is not None:
-            from ._gpuhost import ROWWIN_ON
             btab = self._x_alloc(tab.nbytes, upload=True)
             self._x_upload(btab, tab, None)
         lst = self._x_list("items", once=True)
@@ -1120,7 +1117,6 @@ class Executor(HierOps):
         return owner._submit_followups(jobs, holder)
 
     def _submit_followups(self, jobs, holder):
-        from ._gpuhost import FollowupUnsupported, assemble_followups, followup_layout
         groups, layout = followup_layout(jobs, self)
         if not groups:
             return lambda: assemble_followups(layout, lambda gw: None)
@@ -1256,7 +1252,6 @@ class Executor(HierOps):
         table on the device (_gpuhost.hier_peaks_grouped). groups holds (lo, hi, a, b): rows
         a..b searched over [lo, hi). Output bins follow the first group's bin count (or
         nbins)."""
-        from ._gpuhost import hier_peaks_grouped
         return hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
                                   threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,

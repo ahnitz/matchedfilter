@@ -10,7 +10,7 @@ from spectral_profiles import binomtest
 
 import matchedfilter as mf
 from matchedfilter import _screeners
-from matchedfilter import _calibration, _core, gatechain
+from matchedfilter import _core, gatechain
 from matchedfilter.time_domain import TimeDomainFilterBank
 
 

@@ -16,6 +16,7 @@ from . import _gatedraws
 from . import _chains, _choice, _prices, _settings, _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune
 from ._filter import MatchedFilter, _from_any
+from ._shared import shared_view
 
 
 def _detach(res):
@@ -1736,7 +1737,6 @@ class HierarchicalFilter(MatchedFilter):
                 packed[:, 4:4 + m] = masked.view(np.uint32)
             buf = self._gpu.empty_shared((self.ntemplates, row_words), dtype=np.uint32)
             buf[:] = packed
-            from ._shared import shared_view
             view = shared_view(buf, self._gpu)
             if self._gpu.stage_host_inputs and view is not None:
                 self._gpu._x_prefetch(view, 0, buf.nbytes, None)

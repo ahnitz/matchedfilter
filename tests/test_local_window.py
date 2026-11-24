@@ -320,7 +320,6 @@ def test_a_retentions_draws_pair_with_the_plain_ones_across_profiles_alike(empty
     n = 2048
     rng = np.random.default_rng(3)
     b = a * (1.0 + 1e-2 * rng.standard_normal(n))
-    bands = gd.usable_bands(a, n)
     lengths = []
     for p in (a, b):
         best, plans = gc.choose_chain(p, n, 6.0, 1e-3, window=_production(n),

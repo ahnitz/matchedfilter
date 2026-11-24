@@ -60,7 +60,6 @@ import sys
 import time
 
 import numpy as np
-from matchedfilter import _screeners
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _d in (os.path.join(ROOT, "tests"), ROOT):
@@ -126,7 +125,6 @@ def modelled(power, n, chain, thresholds, snr, window, count, seed=9770, alpha0=
     the plans' (seeds seed, seed + 1, ...: 2M detections each), those some tier of chain at
     these thresholds dismisses. alpha0 / alpha1: the signal's retention at the first / second
     tier (a tier-0 screener's / tier-1 sub-screener's member's)."""
-    from matchedfilter import gatechain as gc
     from matchedfilter import _gatedraws as gd
     bands = gd.usable_bands(power, n)
     b1 = chain[1] if len(chain) >= 2 else None

@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core
-from matchedfilter import _screeners
 
 
 def _reference(C, inv_sqrt_v, v, W, exp_all, shifts64, dls, s_step, cur, inv_sqrt_vc,
@@ -97,7 +96,7 @@ def _setting(seed, s_step, K=96, R=8, families=6):
 def _next_level(args, extra, groups, accepted, alphas):
     """The level after a pass, as the numpy code built it: an accepted merge where the smaller
     of its two clusters stood, every other cluster as it is."""
-    C, cur, cur_offsets, cur_members, ca, cb = args[0], args[8], args[10], args[11], args[12], args[13]
+    cur, cur_offsets, cur_members, ca, cb = args[8], args[10], args[11], args[12], args[13]
     cur_v, cur_dl = extra
     nc = cur.shape[0]
     gid, partner = np.full(nc, -1), np.full(nc, -1)

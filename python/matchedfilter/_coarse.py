@@ -3,7 +3,7 @@ Metal hosts (one launch rule, so hosts and harnesses that dispatch a coarse buil
 directly cannot disagree)."""
 from . import _config, _costfile
 import re
-from ._choice import _log_autotune
+from ._choice import _log_autotune, fastest_of_rounds
 
 
 def coarse_launch(nd, nt, ppg, tile, cspan):
@@ -112,7 +112,6 @@ def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
     for a driver to reset the device -- they never reach a real call. The RETIME fastest
     overall are then timed again together in interleaved rounds, so a burst that covered one
     stage cannot order them. None when a timer is (no timestamps)."""
-    from ._choice import fastest_of_rounds
     out = {}
     for st in stages:
         cs = list(st(out) if callable(st) else st)

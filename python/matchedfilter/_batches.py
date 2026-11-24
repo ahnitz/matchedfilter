@@ -22,22 +22,19 @@ import weakref
 from . import _core
 from . import _settings
 from . import _trial
-from ._choice import _AUTOTUNE_LOCK
-from ._choice import _autotune_enabled
-from ._choice import playing
-from ._filter import _from_any
-from ._results import FilterResults
-from ._results import _Deferred
-from ._results import _EMPTY_FILTER_RESULTS
-from ._results import _SparsePeaks
-from ._windows import _merge_window_bins
-from ._windows import _normalize_windows
-from ._windows import _window_bin_phases
+from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, playing
+from ._filter import _from_any, MatchedFilter
+from ._results import FilterResults, _Deferred, _EMPTY_FILTER_RESULTS, _SparsePeaks
+from ._windows import _merge_window_bins, _normalize_windows, _window_bin_phases
 from .time_domain import (
     TimeDomainFilterBank, _SAME_PROFILE, _aligned_zeros, _bin_phases, _blocks_by_bin_count,
     _consume_into, _host_copy, _intersect_runs, _interval_runs, _results_from,
     _settle_device_writes, _stored_bins, _trial_key,
 )
+from . import _gpuhost
+from ._gpuexec import fused
+from ._series import SeriesLayout
+from .device import parse as _parse_device
 
 
 #: Identifies one filter_series_many batch to the plans it defers.
@@ -49,11 +46,9 @@ def _fuse_close(jobs):
     close, or None. Always: pinned at production length, unfused batches were 3-17% slower on
     the 8060S, RENOIR and Iris Xe (2026-10-30; replays of a short run on an idle device had
     timed unfused faster, which the device trial that chose it locked)."""
-    from .device import parse as _parse_device
     if not any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs
                if getattr(b, "device", None) is not None):
         return None
-    from ._gpuexec import fused
     return fused()
 
 
@@ -1229,7 +1224,6 @@ def _run_batch(jobs, wait):
 
 def _items_batch(jobs, out):
     """Run eligible single-template GPU jobs of a batch together; returns their indices."""
-    from .device import parse as _parse_device
     cands = []
     side = device = None
     for j, (bank, series, kw) in enumerate(jobs):
@@ -1280,7 +1274,6 @@ def _items_batch(jobs, out):
     # Threshold-0 follow-ups: every group's items as listed entries, all in one
     # submission (_gpuhost.submit_followups). None (past what the device path takes):
     # the per-group path below.
-    from . import _gpuhost
     fast = [c[0] for c in cands if c[6] == 0.0]
     if fast:
         collect = _gpuhost.submit_followups([jobs[j] for j in fast])
@@ -1384,8 +1377,6 @@ def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
     set of int
         Indices of jobs whose ``FilterResults`` were written into ``out``.
     """
-    from .device import parse as _parse_device
-    from ._filter import MatchedFilter
     if getattr(MatchedFilter.run_series, "__qualname__", "") != "MatchedFilter.run_series":
         return set()
 
@@ -1550,8 +1541,6 @@ def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, pro
     """Prepare group sub-tasks for a CPU hierarchical sparse filter_series call, or None.
     Each entry ends with the name its plan holds the job's profile under: the plans are
     configured after every job of a batch is prepared, when the bank may be on another."""
-    from .device import parse as _parse_device
-    from ._filter import MatchedFilter
     if profile is not _SAME_PROFILE:
         bank.use_profile(profile)
     plan_profile = bank._plan_profile(bank.__dict__.get("_profile"))
@@ -1573,7 +1562,6 @@ def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, pro
                 or plan._plan_trial() is not None):
             return None
 
-    from ._series import SeriesLayout
     S = len(ser)
     aligned = binsize is not None or bank.binsize is not None
     merge_bs = []
@@ -1662,7 +1650,6 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
             eff_threshold = bank.threshold if thr_arg is None else float(thr_arg)
             if not np.isfinite(eff_threshold) or eff_threshold < bank.threshold or eff_threshold <= 0.0:
                 continue
-            from .device import parse as _parse_device
             if _parse_device(bank.device).kind != 'cpu':
                 continue
             ser = bank._input_series(series)
@@ -1841,7 +1828,6 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
                               tile_bytes=None, retain_radius=None,
                               retain_threshold=None):
     """TimeDomainFilterBank.correlate_and_filter_many, which documents it."""
-    from .device import parse as _parse_device
 
     eff_tile_bytes = (TimeDomainFilterBank._TILE_BYTES
                       if tile_bytes is None else int(tile_bytes))

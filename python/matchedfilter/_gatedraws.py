@@ -19,6 +19,8 @@ import numpy as np
 from . import gatemodel as _gm
 from . import _config
 from ._windows import coarse_lags
+from . import _core
+from . import _signal_law
 
 _SIG = _gm._SIG
 #: Sub-sample arrival fractions signal_draws spreads its signals over, 1/_NF apart, the sample
@@ -472,7 +474,6 @@ def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=
             return hit[0] if not lags_too else hit
     if not _exact and _law_applies(n, (lags[0], lags[1])):
         # the draws from the samples' joint law (_signal_law): no simulation
-        from . import _signal_law
         C, F, at = _signal_law.signal_table(
             p, n, bands, [_band_slice(n, b, k0) for b, k0 in zip(bands, k0s)], float(snr), ndet,
             int(seed), lags, alphas=al, nf=_NF)
@@ -794,7 +795,6 @@ def _last_within(rec, reach):
     """Per row of records (pos, val, off): the value of its last record at distance <= reach[r]
     (records rise with distance) and that distance, 0 and -1 where none is
     (_core.records_within)."""
-    from . import _core
     pos, val, off = rec
     out = np.empty(off.size - 1, np.float32)
     at = np.empty(off.size - 1, np.int32)
@@ -898,7 +898,6 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     call simulates it. Returns (signal records or None, noise records or None): per statistic
     and side (fine first, right then left), and per band, the records (pos, val, off); pos and
     val may be views of arrays a few percent longer."""
-    from . import _core
     k0s = (0,) * len(bands) if k0s is None else tuple(int(x) for x in k0s)
     al_arg = (tuple(float(a) for a in alphas)
               if (alphas is not None and any(float(a) < 1.0 for a in alphas)) else None)

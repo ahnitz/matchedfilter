@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core
-from matchedfilter import _screeners
 
 
 def _best_swap(scores, u, vs, w_arr, z_arr, floor):

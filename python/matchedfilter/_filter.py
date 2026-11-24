@@ -13,6 +13,10 @@ from . import _config
 from . import _core
 from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks
 from ._settings import fingerprint
+from ._execution_policy import select
+from ._series import SeriesLayout
+from ._shared import containing, containing_samples, shared_buffer
+from .device import parse as _parse_device
 
 
 #: Transform lengths the GPU kernel covers. One workgroup carries a whole
@@ -398,7 +402,6 @@ class MatchedFilter:
         transform length n, the valid lag window and the data and template counts. Raises
         ValueError for an invalid window, a count below one or, on the CPU, an n above this
         filter's limit. Returns nothing."""
-        from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
         self.valid = _valid_series_window(self.n, valid)
@@ -566,7 +569,6 @@ class MatchedFilter:
                     a = _unpack_half(a, self.n, getattr(self, "_hermitian", False))
                 else:
                     raise ValueError("expected shape %s, got %s" % (shape, a.shape))
-            from ._shared import shared_buffer
             attr = "_gdata" if what == "data" else "_gtmpl"
             if shared_buffer(a, self._gpu) is not None:
                 setattr(self, attr, a)
@@ -721,7 +723,6 @@ class MatchedFilter:
         return limit
 
     def _series_policy(self, operation, band, templates):
-        from ._execution_policy import select
         return select(self.device, operation, self.n, band, templates)
 
     def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
@@ -962,7 +963,6 @@ class MatchedFilter:
         if binsize < 1:
             raise ValueError("binsize must be >= 1")
         t0, nt = self._template_range(templates)
-        from ._series import SeriesLayout
         layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged,
                               phase=None if bin_phase is None else _from_any(bin_phase))
         return ser, layout, binsize, t0, nt
@@ -1030,7 +1030,6 @@ class MatchedFilter:
         wait=False: returns a callable giving that list once the submission completes, so a caller submits every template group's
         items before waiting on any (an idle GPU takes ~1 ms to start each small submission
         on an M2 or an APU)."""
-        from ._shared import containing
         gpu = self._gpu
         if (gpu is None or not hasattr(gpu, "peaks_items") or type(self) is not MatchedFilter
                 or self._gtmpl is None or not jobs):
@@ -1802,7 +1801,6 @@ class MatchedFilter:
         """Everything a series call decides before it dispatches: its batch size, whether it
         is deferred, pipelined, sparse or grouped, its slots, and where the blocks read the
         series from (in place, or a span uploaded to a slot's source buffer)."""
-        from ._shared import shared_buffer
         c = SimpleNamespace(ser=ser, layout=layout, binsize=binsize, threshold=threshold,
                             t0=t0, nt=nt, raw=raw)
         n, nb, nblk = self.n, layout.nbins, layout.starts.size
@@ -1884,7 +1882,6 @@ class MatchedFilter:
         # upload's zero padding is needed.
         contained = None
         if not source_shared and nblk:
-            from ._shared import containing, containing_samples
             contained = (containing_samples if real else containing)(ser, self._gpu)
             if contained is not None and int(layout.starts.max()) + n > ser.size:
                 contained = None
@@ -2232,7 +2229,6 @@ class CorrelationFilter(MatchedFilter):
 
         ``defer``: leave the last batch in flight (a backend with zero_columns finishes it
         in zero_columns_done), so the caller's zeroing overlaps the device's work."""
-        from ._shared import shared_buffer
         if ser.size > np.iinfo(np.uint32).max or nt * ser.size > np.iinfo(np.uint32).max:
             raise ValueError("GPU series exceeds the 32-bit sample address range")
         budget = getattr(self, '_series_batch_bytes', 64 * 1024 * 1024)
@@ -2267,7 +2263,6 @@ class CorrelationFilter(MatchedFilter):
         # takes its own copy of them; the output keeps the caller's), else copied as floats.
         real, shift = None, 0
         if ser.dtype == np.float32:
-            from ._shared import containing_samples
             c = containing_samples(ser, self._gpu)
             if c is not None and c[1] + c[2] * ser.size <= np.iinfo(np.uint32).max:
                 whole, off, stride = c
@@ -2440,7 +2435,6 @@ class CorrelationFilter(MatchedFilter):
         if self._gpu is None:
             self._execution_plan().correlate_series(ser, st, t0, nt, result)
         else:
-            from ._shared import shared_buffer
             source = ser if shared_buffer(ser, self._gpu) is not None else self.empty_shared(ser.shape)
             if source is not ser:
                 source[:] = ser

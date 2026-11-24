@@ -4,12 +4,11 @@ import math
 
 import numpy as np
 import pytest
-from conftest import fix_gpu_costs, kernel_dir, usable_gpu, usable_gpu_reason
+from conftest import fix_gpu_costs, usable_gpu, usable_gpu_reason
 from spectral_profiles import binomtest
 
 import matchedfilter as mf
-from matchedfilter import _cudacompute, _gpuhier, _hierarchical
-from matchedfilter import gatechain as gc
+from matchedfilter import _cudacompute, _gpuhier
 from matchedfilter._gpuexec import fused
 from test_shared_screeners import (
     _make_colored_correlated_bank,

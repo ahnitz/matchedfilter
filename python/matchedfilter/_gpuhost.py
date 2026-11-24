@@ -12,8 +12,11 @@ import ctypes
 import numpy as np
 
 from ._errors import UnsupportedSize
-from ._windows import coarse_lags, _merge_window_bins
+from ._windows import (
+    coarse_lags, _merge_window_bins, _normalize_windows, _window_bin_phases, _window_layout)
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS
+from ._shared import _same_device, containing, containing_samples, shared_buffer, sparsified
+from .device import parse as _parse_device
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).
 MAX_BINS = 2048
@@ -181,7 +184,6 @@ def split_bins(call, lo, hi, binsize, max_bins, upload_data, upload_tmpl, sparse
     call(window, upload_data, upload_tmpl) returns one sub-window's dense (idx, val); inputs
     upload with the first only. The result honours sparse and async_submit exactly as one
     call would (a collector when async_submit)."""
-    from ._shared import sparsified
     span = max_bins * binsize
     pi, pv = [], []
     for a in range(lo, hi, span):
@@ -189,7 +191,6 @@ def split_bins(call, lo, hi, binsize, max_bins, upload_data, upload_tmpl, sparse
         pi.append(i2)
         pv.append(v2)
         upload_data = upload_tmpl = False             # already on the device
-    import numpy as np
     res = sparsified((np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)), sparse)
     return (lambda: res) if async_submit else res
 
@@ -268,7 +269,6 @@ def band_windows(rowwin, n, band, lag_pad=0):
     made the band-256 coarse kernel 1.47x slower at SIMD16 on an Iris Xe. Memoised per table
     (grouped_row_windows' tables are memoised and read-only), as a call per segment maps the
     same few."""
-    import numpy as np
     lp = int(lag_pad)
     key = (id(rowwin), n, band, lp) if lp else (id(rowwin), n, band)
     hit = _BAND_WINDOWS.get(key)
@@ -306,7 +306,6 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
     groups holds (lo, hi, a, b): rows a..b of data searched over [lo, hi). Output bins
     follow the first group's bin count (or nbins). phase: the rows' bin phases (run_series'
     bin_phase), which the refine's row table carries."""
-    from ._shared import shared_buffer
     if shared_buffer(data, ctx) is None:
         raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
     groups, nb, win, window = grouped_row_windows(groups, n, data.shape[0], binsize,
@@ -371,7 +370,6 @@ def _gpu_ctx_of(bank, g):
     plan = g._plan
     if plan is not None:
         return getattr(plan, "_gpu", None)
-    from .device import parse as _parse_device
     if g.device is None or _parse_device(g.device).kind != "gpu":
         return None
     return getattr(g.get_single_plan(0), "_gpu", None)
@@ -390,7 +388,6 @@ def _followup_owner_ctx(bank, g):
             return owner
     ctx = bank.__dict__.get("_followup_gpu_ctx")
     if ctx is None:
-        from .device import parse as _parse_device
         ctx = type(pctx)(_parse_device(g.device).index)
         bank._followup_gpu_ctx = ctx
     return ctx
@@ -398,7 +395,6 @@ def _followup_owner_ctx(bank, g):
 
 def _followup_job_ok(bank, g, ser, bstarts):
     """Return True when ``(bank, g, ser, bstarts)`` is eligible for ``submit_followups``."""
-    from ._shared import containing, containing_samples
     if not isinstance(ser, np.ndarray):
         return False
     if bstarts.size and int(bstarts.max()) + g.n > ser.size:
@@ -424,8 +420,6 @@ def followup_layout(jobs, ctx, max_rows=None):
     local template, global template, windows, phases). Raises FollowupUnsupported when a job
     is not such a call, is not on ctx's device, has a series that is not device memory, has a
     block reading past its series (the host path pads with zeros), or a group passes max_rows."""
-    from ._shared import _same_device, containing, containing_samples
-    from ._windows import _normalize_windows, _window_bin_phases, _window_layout
     groups = {}
     cold_by_group = {}
     layout = []
