@@ -96,7 +96,6 @@ struct ap_hmf_plan {
   int taps_shared;
   /* Q15 screen as the first tier's gate (ap_hmf_set_q15) */
   int q15;
-  long first_gate_passed;         /* passes of the first tier */
   unsigned char *qpass;           /* [nd*nt] */
   int *qd,*qt;                    /* the screen's survivors */
   float *qstat;                   /* [nd*nt] the screen's maximum, for MF_HMF_DUMP/TRACE */
@@ -523,10 +522,6 @@ double ap_hmf_price_direct_mode(int x_real,int tap_cplx){
   return best;
 }
 
-double ap_hmf_price_direct(void){
-  return ap_hmf_price_direct_mode(0,0);
-}
-
 /* Price the direct correlation (ticks per lag x tap) and the whole-block refine (ticks per
    surviving pair: real-series mirror if active, split-layout data ingest, fused frequency
    product, inverse transform, and peak scan across L2-resident slots) on this core. */
@@ -663,7 +658,6 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
   p->q15=1;
   return 0;
 }
-long ap_hmf_first_gate_passed(const ap_hmf_plan *p){ return p ? p->first_gate_passed : 0; }
 int ap_hmf_tier_inputs(const ap_hmf_plan *p,long *checked){
   if(!p) return 0;
   if(checked) for(int i=0;i<p->ntiers;i++) checked[i]=p->tier[i].checked;
@@ -2583,7 +2577,6 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     }
     tr->checked += i==0 ? (long)nd*nt : nchecked;
     tr->passed += nnext;
-    if(i==0) p->first_gate_passed+=nnext;
     fire_d=tr->fire_d; fire_t=tr->fire_t; nfire=nnext;
     if(!nfire) return 0;
   }
@@ -2792,7 +2785,6 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
   p->pairs+=(long)nd*nt;
   tr->checked+=(long)nd*nc;
   tr->passed+=nnext;
-  p->first_gate_passed+=nnext;
   *out_fire_d=tr->fire_d;
   *out_fire_t=tr->fire_t;
   *out_nfire=nnext;

@@ -69,16 +69,6 @@ def test_gpu_forward_fused_matches_reference(gpu, n):
         expected = np.fft.fft(block) / n
         np.testing.assert_allclose(spectra[j], expected, atol=2e-6, rtol=2e-4)
 
-    # Validate _forward_fused produces identical results
-    spectra[:] = 0
-    plan._gpu._forward_fused(n, series, starts, spectra)
-    for j, start in enumerate(starts):
-        block = np.zeros(n, np.complex64)
-        chunk = series[int(start):int(start)+n]
-        block[:len(chunk)] = chunk
-        expected = np.fft.fft(block) / n
-        np.testing.assert_allclose(spectra[j], expected, atol=2e-6, rtol=2e-4)
-
 
 def test_gpu_forward_tierc_fused_matches_reference(gpu):
     n = 131072
@@ -91,16 +81,6 @@ def test_gpu_forward_tierc_fused_matches_reference(gpu):
     starts[:] = [0, 42, n]
     spectra = ctx.empty_shared((3, n))
     ctx.forward(n, series, starts, spectra, fused=True)
-    for j, start in enumerate(starts):
-        block = np.zeros(n, np.complex64)
-        chunk = series[int(start):int(start)+n]
-        block[:len(chunk)] = chunk
-        expected = np.fft.fft(block) / n
-        np.testing.assert_allclose(spectra[j], expected, atol=2e-6, rtol=2e-4)
-
-    # Validate _forward_fused on Tier C
-    spectra[:] = 0
-    ctx._forward_fused(n, series, starts, spectra)
     for j, start in enumerate(starts):
         block = np.zeros(n, np.complex64)
         chunk = series[int(start):int(start)+n]

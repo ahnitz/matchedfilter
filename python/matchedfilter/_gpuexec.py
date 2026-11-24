@@ -776,9 +776,6 @@ class Executor(HierOps):
         else:
             self._exec_run(rec.native, True, binds, slot, rec)
 
-    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
-        return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
-
     def forward_valid(self, h):
         """Whether a forward handle (forward(handle_out=)) still names its cached record."""
         return self._exec_table().get(h[0]) is h[1]

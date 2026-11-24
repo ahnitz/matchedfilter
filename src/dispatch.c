@@ -43,7 +43,6 @@ static ap_plan *create_on(const ap_backend *b,size_t N){
 ap_plan *ap_create(size_t N){ return create_on(pick(),N); }
 ap_plan *ap_create_like(const ap_plan *like,size_t N){ return create_on(be_of(like),N); }
 
-const char *ap_plan_backend(const ap_plan *p){ return p?p->be->name:"none"; }
 
 static ap_plan *create_pairbatch_on(const ap_backend *b,size_t N){
   if(!b || N<64 || N>2048 || !b->supported(N) || !b->create_pairbatch) return NULL;
@@ -119,9 +118,6 @@ void ap_fft_backward_padded(ap_plan *p,const float *in,size_t have_bins,float *o
 
 void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
   pick()->td_corr(x,taps,L,nlag,out);
-}
-void ap_td_corr_on(const ap_plan *p,const float *x,const float *taps,int L,int nlag,float *out){
-  be_of(p)->td_corr(x,taps,L,nlag,out);
 }
 void ap_td_corr_ex(const float *x,int x_real,const float *tr,const float *ti,int L,int nlag,
                    float *out){

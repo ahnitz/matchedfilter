@@ -134,6 +134,16 @@ def test_correlated_bank_halves_tier0_work_and_preserves_peaks(profile_name, use
     """Correlated pairs merge 2-to-1, halve Tier-0 work, and match flat peak reconstruction."""
     monkeypatch.setenv("MF_GATE16", "0")
     monkeypatch.setenv("MF_AUTOTUNE", "0")
+    # Whether the plan takes the shared screeners is the cost model's decision. On a recorded
+    # model it is the same on every machine and build: with this host's timing an
+    # instrumented build (coverage counters in the kernels) priced them out, and the test
+    # failed there every time (2026-11-24).
+    import json
+    from pathlib import Path
+    from matchedfilter import _calibration
+    recorded = mf.gatechain.CostModel.from_dict(json.loads(
+        (Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())["model"])
+    monkeypatch.setattr(_calibration, "calibrate_costs", lambda n, ntemplates, **kw: recorded)
     n, nd, nt = 2048, 6, 16
     chain = (128, 512)
     power, psd, templates = _make_colored_correlated_bank(

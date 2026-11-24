@@ -21,7 +21,6 @@ static inline int ap_range_ok(int lo, int cnt, int max){
 ap_plan *ap_create(size_t N);
 ap_plan *ap_create_pairbatch(size_t N);
 void     ap_destroy(ap_plan *p);
-const char *ap_plan_backend(const ap_plan *p);
 int      ap_lane_width(void);
 
 /* The same on a given plan's back end (the active one when like is NULL): a plan's
@@ -70,8 +69,6 @@ void ap_fft_backward_padded(ap_plan *p, const float *in, size_t have_bins, float
    (td-inl.h). x holds nlag + L - 1 samples (real when x_real != 0, else interleaved complex);
    ti is NULL for real taps. */
 void ap_td_corr(const float *x, const float *taps, int L, int nlag, float *out);
-void ap_td_corr_on(const ap_plan *p, const float *x, const float *taps, int L, int nlag,
-                   float *out);
 void ap_td_corr_ex(const float *x, int x_real, const float *tr, const float *ti, int L, int nlag,
                    float *out);
 void ap_td_corr_ex_on(const ap_plan *p, const float *x, int x_real, const float *tr,

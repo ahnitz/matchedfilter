@@ -1472,7 +1472,7 @@ typedef struct {
   const float *S, *Nc; const long long *low[3]; const float *lowv[3];
   const long long *lasto; const float *lastv; int nlast; const double *splits;
   int nsets; const long long **dset; const Py_ssize_t *dlen;
-  unsigned char *dead; int *alive[4]; int nalive[4]; PyObject *out; int err;
+  unsigned char *dead; int *alive[4]; PyObject *out; int err;
 } cc_state;
 
 /* Noise blocks of tier's column at or above g among alive (n of them; NULL: all R), written
@@ -1542,6 +1542,7 @@ static void cc_rec(cc_state *c, int i, double *prefix, double remaining, int nde
                    const int *alive, int nalive, double *fracs){
   if(c->err) return;
   if(i==c->k-1){ cc_consider(c,prefix,ndead,alive,nalive,fracs); return; }
+  if(i>2){ c->err=1; return; }                   /* k <= 4: levels 0..2 hold a split */
   const long long *low=c->low[i]; const float *lowv=c->lowv[i];
   for(int a=0;a<c->nsplit && !c->err;a++){
     const double share=c->splits[a]*remaining;
@@ -1616,14 +1617,15 @@ static PyObject *M_chain_candidates(PyObject *self,PyObject *args){
     c.K=K; c.Nn=Nn; c.prune=prune; c.useless=useless; c.S=(const float*)S.buf; c.Nc=(const float*)N.buf;
     c.splits=splits; c.nsplit=nsplit; c.nsets=nsets; c.dset=dptr; c.dlen=dlen;
     c.dead=(unsigned char*)calloc((size_t)c.M,1);
-    for(int i=1;i<=c.k;i++) c.alive[i]=(int*)malloc(((size_t)c.R+1)*sizeof(int));
+    /* level i filters into alive[i+1], i <= k-2: lists 1..k-1 (k <= 4, so at most alive[3]) */
+    for(int i=1;i<c.k;i++) c.alive[i]=(int*)malloc(((size_t)c.R+1)*sizeof(int));
     out=PyList_New(0); c.out=out;
-    int mem = c.dead && out; for(int i=1;i<=c.k;i++) mem = mem && c.alive[i];
+    int mem = c.dead && out; for(int i=1;i<c.k;i++) mem = mem && c.alive[i];
     if(mem){
       double prefix[4], fracs[4];
       cc_rec(&c,0,prefix,1.0,0,NULL,0,fracs);
     } else c.err=1;
-    free(c.dead); for(int i=1;i<=c.k;i++) free(c.alive[i]);
+    free(c.dead); for(int i=1;i<c.k;i++) free(c.alive[i]);
     if(c.err){ Py_XDECREF(out); out=NULL; if(!PyErr_Occurred()) PyErr_NoMemory(); }
   }
   for(int i=0;i<nlb;i++){ PyBuffer_Release(&lb[i]); PyBuffer_Release(&lvb[i]); }
