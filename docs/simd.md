@@ -17,19 +17,21 @@ pass is compiling for, and the kernel headers use Highway's `-inl.h`
 convention: a plain include guard would let only the first pass define
 anything.
 
-On a current x86-64 build that gives AVX3 (16 lanes), AVX2 (8) and SSE4 (4).
+On a current x86-64 build that gives AVX3_DL and AVX3 (16 lanes), AVX2 (8) and SSE4 (4).
+AVX3_DL is AVX-512 with the VNNI and VBMI extensions (Ice Lake and later, Zen 4 and
+later), which the int16 screen uses; AVX3 serves Skylake-X and Cascade Lake.
 One more x86 back end is built outside Highway's targets: `AVX`
 (`src/kernel_avx1.cc` with `src/simd-avx1.h`), SSE4's kernels with the float paths at
 8 lanes, which CPUs with AVX but not AVX2 (Sandy and Ivy Bridge) run instead of SSE4.
 `setup.py` disables the rest -- SVE and RVV because sizeless vectors cannot be
 array members and the kernel holds `vf TR[AP_W]`, SCALAR because one lane is
-below what the layout assumes, and the AVX-512 variants past AVX3 because
+below what the layout assumes, and the AVX-512 variants past AVX3_DL because
 nothing has measured a reason for them.
 
 ```python
 import matchedfilter as mf
-mf.targets()       # ('AVX3', 'AVX2', 'AVX', 'SSE4') -- in this build, on this CPU
-mf.backend()       # 'AVX3'
+mf.targets()       # ('AVX3_DL', 'AVX3', 'AVX2', 'AVX', 'SSE4') -- in this build, on this CPU
+mf.backend()       # 'AVX3_DL'
 mf.set_target('AVX2')   # for comparing; None restores the default
 ```
 
@@ -37,8 +39,8 @@ mf.set_target('AVX2')   # for comparing; None restores the default
 
 ## Measured
 
-One machine (Zen 5), one process, on the hierarchical workload pycbc's ratio
-filter drives: a 2^20 reference series in overlap-save blocks against 64
+One machine (Zen 5), one process, measured before the AVX3_DL target was added, on the
+hierarchical workload pycbc's ratio filter drives: a 2^20 reference series in overlap-save blocks against 64
 templates at n=4096.
 
 | target | lanes | ms/segment | relative |

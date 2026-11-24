@@ -21,7 +21,11 @@ By area, the tests check:
   inputs after each kind of change; empty and zero-padded series; ownership of arrays a
   filter is given; one filter object per thread.
 - **Boundaries.** Malformed shapes, ranges and dtypes are refused before native code runs;
-  native routines are checked against output overruns.
+  arguments a bank or filter cannot run are refused by name when it is built; native
+  routines are checked against output overruns.
+- **Edges and combinations.** The ends of a series, separate windows in one cascade, a
+  reference taken away, and randomly drawn banks, series and calls checked against the
+  bank's own ungated answer (`tests/test_edge_paths.py`).
 - **Transfer counts.** GPU uploads and submissions are counted with host doubles, so the
   checks run without GPU hardware. They are deterministic; no wall-clock limit is embedded
   in the default suite.
@@ -91,6 +95,10 @@ them only after reviewing a deliberate change. Unavailable GPU cases skip explic
 - Metal kernels execute only on macOS; on Linux the Metal host logic runs against
   submission doubles. The CI's paravirtual Apple GPU is not physical hardware
   ([testing Metal on physical Apple hardware](macos-test-machine.md)).
-- CUDA is tested where an NVIDIA GPU is present, which no CI runner has.
+- Vulkan and CUDA are tested where a GPU is present, which no CI runner has: on Linux CI
+  the three backends' host code is covered only through submission doubles.
+- Not every line runs. In a line-coverage run of the suite without a GPU (2026-11-24) the
+  C kernels executed 91% of their lines; what did not run was mostly allocation-failure
+  cleanup and fallbacks for plan layouts the test machine's targets do not use.
 - The ladder checks of the merge gate need a production-like bank and noise profiles,
   which are not in the repository.

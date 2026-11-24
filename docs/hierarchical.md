@@ -107,8 +107,8 @@ first) and shared by profiles that agree in shape and in each band's signal
 response (`_gatedraws._similar_get`). Tighter budgets need more signal draws:
 2 (round(j / fd) - 1) detections, j about 48 set by the per-plan tail bound
 (`gatemodel._nsamp_for`, `fit_order`): 9,398 at .01, 95,998 at .001, 959,998 at
-.0001. Requests below the available resolution (fd under 5.5e-5) refuse rather
-than falling back to an obsolete table. Kernel execution is unchanged.
+.0001. A budget below the available resolution (fd under 5.5e-5) is refused,
+and so is one outside (0, 1). Kernel execution is unchanged.
 
 Cost is approximately first-tier work, plus each later tier's work on its
 survivors, plus the refined fraction times full-filter work. `refine_rate`

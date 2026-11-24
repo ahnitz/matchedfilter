@@ -10,7 +10,7 @@ what the budget governs.
 maximum, with no margin and no FP32 run of the tier behind it, at the threshold the gate model
 sets for the tier. Its rounding (rms 0.46 sqrt(N) LSB, about 0.2% of the threshold at the
 production bands) is small beside the band's own loss. Measured against the flat filter by
-injection (`tools/chain_fdr_vs_flat.py`, since folded into `tools/fdr_audit.py`: n = 2048, chain 256/512/1024, SNR 6, fd 1e-3, 400k
+injection (`tools/fdr_audit.py`: n = 2048, chain 256/512/1024, SNR 6, fd 1e-3, 400k
 injections per profile), the
 chain dismisses 168 and 184 of ~228,600 flat detections with the gate, against 171 and 185
 with the FP32 first tier. On 221,607 captured production pairs the gate passes 1.00x as many

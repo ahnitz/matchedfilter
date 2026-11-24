@@ -4,7 +4,8 @@ Batched correlation with a choice of full or peak-only output, on CPU or GPU.
 
 `matchedfilter` correlates data segments against a template bank and returns
 the full complex correlation or the strongest sample in each output bin. It
-accepts `complex64` spectra or time-series blocks through `run_series()`.
+accepts `complex64` spectra, time-series blocks, or FIR templates over a long
+series.
 
 [Documentation](https://ahnitz.github.io/matchedfilter/) ·
 [Usage guide](https://ahnitz.github.io/matchedfilter/using-it.html) ·
@@ -123,6 +124,15 @@ Alternatively, pin a chain and set its coarse thresholds. See
 [the gate model](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md#the-gate-model)
 for how the gates are set, what `fd` means and when a plan is refused.
 
+## Filter banks and searches
+
+`TimeDomainFilterBank` takes FIR templates as taps, chooses block sizes and
+runs overlap-save filtering over a continuous series, flat or hierarchical,
+returning each peak's template, sample and complex SNR.
+`matchedfilter.search.HierarchicalSearch` runs a tree of such banks over input
+blocks. The [usage guide](https://ahnitz.github.io/matchedfilter/using-it.html)
+has a worked example.
+
 ## Performance
 
 The implementation fuses the frequency-domain product into the inverse
@@ -134,16 +144,17 @@ fraction of pairs requiring refinement.
 ![CPU and GPU matched-filter measurements at 4096 points](docs/assets/teaser.svg)
 
 Measured on a Ryzen AI MAX+ 395 / Radeon 8060S on 2026-10-20 at revision
-`4fd8b0d4` (each bar the median of three runs, each its own process): 512 data segments × 512 templates (262,144 pairs), 4,096 points,
-with the bank drawn from the captured PyCBC reference profile. The bars move from a general inverse FFT to
-fused full output, peak-only output and hierarchical screening. FFTW and
-rocFFT time only the inverse transform, so they do less work than the filter
-bars. Full output reuses a caller-supplied result array; GPU timings include
-synchronization. Hierarchical bars show requested FDR budgets 1e-2, 1e-3 and
-1e-4 at SNR threshold 5.5, with initial autotuning passes settled to empirical
-best configurations; these noise-only timings do not measure FDR. The
-two panels use separate scales; compare their printed values. This is a
-workload example, not a speed guarantee.
+`4fd8b0d4`. Each bar is the median of three runs, each in its own process:
+512 data segments × 512 templates (262,144 pairs) at 4,096 points, with the
+bank drawn from the captured PyCBC reference profile. The bars move from a
+general inverse FFT to fused full output, peak-only output and hierarchical
+screening. FFTW and rocFFT time only the inverse transform, so they do less
+work than the filter bars. Full output reuses a caller-supplied result array;
+GPU timings include synchronization. Hierarchical bars show requested
+false-dismissal budgets of 1e-2, 1e-3 and 1e-4 at SNR threshold 5.5, after the
+initial autotuning passes have settled. These noise-only timings do not
+measure the false-dismissal rate. The two panels use separate scales; compare
+their printed values. This is a workload example, not a speed guarantee.
 
 For CPU and GPU comparisons across eight machines at 16 × 512 and 512 × 512
 (including NVIDIA L40S, A100 and A40, AMD Radeon 8060S and Apple M2), with

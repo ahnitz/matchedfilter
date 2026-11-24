@@ -2,9 +2,8 @@
 
 Before a hierarchical filter runs, it settles everything that decides which pairs are
 refined. That settled set is the **resolved plan**. This note says what it holds, where it
-is resolved today, what it guarantees with and without a shared cost file, and what of it
-is public. Robustness-plan E6 (one `resolve()` per filter) implemented it on
-2026-10-22.
+is resolved, what it guarantees with and without a shared cost file, and what of it is
+public.
 
 ## What it holds
 
@@ -65,9 +64,8 @@ instance's `use_arm` and `lock_arm`, outside the `_Resolved` record.
 - `chain_thresholds` reuses a cached result for a profile that agrees with an earlier one
   in shape (cosine) and in every band's signal response (`_gatedraws._similar_get`). A
   process's thresholds can therefore depend on which profiles it saw first.
-- `_resolve` keys on the profile it is given. E6 added no persisted record of the resolved
-  plan, since no divergence remained to need one; one would be the fix if a divergence
-  appears.
+- `_resolve` keys on the profile it is given. The resolved plan is not persisted, since no
+  divergence remained to need a record; one would be the fix if a divergence appears.
 
 ## What is public
 

@@ -257,6 +257,50 @@ def hierarchical():
     print("never invent, and fd is the budget for how often it may omit one.")
 
 
+def filter_bank():
+    """A bank of FIR templates over one long series."""
+    import numpy as np
+    import matchedfilter as mf
+
+    rate, rng = 2048.0, np.random.default_rng(3)
+    # The expected output power: an inspiral-like spectrum over the noise spectrum,
+    # on a fine frequency grid. The gates are calibrated from it.
+    delta_f = 1.0 / 16
+    f = np.arange(int(rate / 2 / delta_f) + 1) * delta_f
+    profile = np.where((f > 20) & (f < 900), np.maximum(f, 1.0) ** (-7.0 / 3), 0.0)
+
+    # 32 unit-norm FIR templates of 300 to 600 taps whose spectra follow that profile.
+    taps = []
+    for count in rng.integers(300, 600, 32):
+        freqs = np.fft.rfftfreq(count, 1 / rate)
+        spectrum = np.sqrt(np.interp(freqs, f, profile)) * np.exp(2j * np.pi * rng.random(freqs.size))
+        h = np.fft.irfft(spectrum, count)
+        taps.append((h / np.linalg.norm(h)).astype(np.float32))
+
+    # A minute of unit-variance noise with template 7 at sample 50,000, made analytic
+    # (positive frequencies only), which is what the gates are calibrated for.
+    x = rng.standard_normal(1 << 17)
+    x[50000 - len(taps[7]) // 2:][:len(taps[7])] += 20 * np.sqrt(2) * taps[7]
+    spectrum = np.fft.fft(x)
+    spectrum[x.size // 2:] = 0
+    series = (np.fft.ifft(spectrum) * np.sqrt(2)).astype(np.complex64)
+
+    bank = mf.TimeDomainFilterBank(taps, engine="hier", threshold=6.5,
+                                   false_dismissal=1e-3, binsize=256)
+    bank.set_reference(profile, delta_f=delta_f)
+    peaks = bank.filter_series(series, windows=slice(4096, x.size - 4096))
+
+    loudest = np.argmax(np.abs(peaks.snr))
+    print("block sizes chosen:", sorted(set(int(n) for n in bank.block_lengths)))
+    print("loudest peak: template %d at sample %d, snr %.1f"
+          % (peaks.template_indices[loudest], peaks.sample_indices[loudest],
+             np.abs(peaks.snr[loudest])))
+    again = bank.filter_series(series, windows=slice(49000, 51000), template_index=7,
+                               threshold=0.0)
+    print("template 7 alone, every bin of a short window: %d peaks, largest at sample %d"
+          % (len(again.snr), again.sample_indices[np.argmax(np.abs(again.snr))]))
+
+
 def refuses():
     """Outside its measured tables it declines rather than guessing."""
     import numpy as np
@@ -329,6 +373,7 @@ EXAMPLES = [
     (reuse, "The output buffer is reused"),
     (hierarchical, "The hierarchical mode"),
     (refuses, "When it refuses"),
+    (filter_bank, "A bank of FIR templates"),
 ]
 
 

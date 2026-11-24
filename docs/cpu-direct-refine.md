@@ -1,10 +1,10 @@
 # The CPU direct refine
 
-A hierarchical plan refines each pair its last coarse tier passes. Until now that was a
-whole-block inverse transform per pair: an n-point FFT and a peak scan over every lag, to
-find a peak the coarse tiers had already placed within a few samples. The direct refine
-evaluates only the lags around that place, by direct correlation of the series with the
-template's real FIR taps.
+A hierarchical plan refines each pair its last coarse tier passes. The transform refine
+does that with a whole-block inverse transform per pair: an n-point FFT and a peak scan
+over every lag, to find a peak the coarse tiers have already placed within a few samples.
+The direct refine evaluates only the lags around that place, by direct correlation of the
+series with the template's FIR taps.
 
 ## What it computes
 
@@ -26,7 +26,9 @@ lag x tap on a Zen 5 core; a 33-lag window of a 215-tap filter is ~600 ticks aga
 With one bin per pair (the consumer's mode: `binsize = n`), direct refinement returns the
 largest |z| within its local refinement window. It does not establish the maximum over the
 whole requested output bin. The refine evaluates `halfwidth` coarse samples either side of
-the pair's largest last-tier coarse lag (the tier already reports it). `halfwidth` is part of
+the pair's largest last-tier coarse lag (the tier already reports it). A pair whose search window touches two to four output bins is refined the same way
+around each touched bin's last-tier coarse peak (`HMF_MAX_DIRECT_BINS`, `src/hmf.c`).
+`halfwidth` is part of
 the chain's plan (`gatechain.plan_chain`), chosen with its thresholds against one budget.
 The gate model's draws say, per detection, how far the fine peak lies from the last tier's
 coarse maximum (`signal_draws(..., lags_too=True)`); a window of half-width h misses those
@@ -61,14 +63,16 @@ and at most 4.5 coarse samples from the last tier's argmax.
 
 ## When it does not apply
 
-- Several bins per pair: one window cannot promise every bin's maximum; the transform runs.
+- More than four output bins per pair: the transform runs.
 - A window that would read outside the block (never, inside the valid range).
 - A maximum on a window edge that the search window did not put there: the peak may be
   outside, and the pair takes the transform.
 - Priced dearer than the transform (wide window x long filter): per pair, from both prices
   timed on the core when the plan turns it on.
-- Rate ratio != 1 (the spectra are then cut or padded; the taps are not the filter), GPU
-  plans, `ap_hmf_run` without a time series, and `MF_DIRECT_REFINE=0`.
+- Rate ratio != 1 (the spectra are then cut or padded; the taps are not the filter),
+  `ap_hmf_run` without a time series, and `MF_DIRECT_REFINE=0`.
+- GPU plans, which have their own time-domain refine for one output bin per pair (the
+  `refine_td` kernels), used where it is priced below the transform refine.
 
 **One documented difference.** With one bin per pair and two above-threshold excursions in
 one block (two signals, or two lobes of a glitch), the direct refine reports the excursion
@@ -99,10 +103,7 @@ alone goes from 8.6% to 3.6% of the call. Hosts whose transform is slower relati
 FMA rate (AVX2: dev1, Haswell, where the refine was ~20% of the call on 2026-10-04) should
 gain more; not yet measured.
 
-## Next
+## Open
 
-- Measure on Haswell and dev1 through the consumer.
-- The GPU refine has the same whole-block waste, and more (a survivor's full forward is
-  recomputed first): the same localisation, a direct kernel per backend.
-- Let the last tier report its above-threshold lags (removes the documented difference and
-  lets the window shrink to the excursion).
+- Letting the last tier report its above-threshold lags would remove the documented
+  difference and let the window shrink to the excursion.

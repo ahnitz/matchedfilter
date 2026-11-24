@@ -1,7 +1,7 @@
 # Using matchedfilter
 
-This guide covers inputs, full correlations, output bins, device selection and hierarchical
-calibration. The examples execute during the documentation build. Run them
+This guide covers inputs, full correlations, output bins, filter banks, device
+selection and hierarchical calibration. The examples execute during the documentation build. Run them
 locally with `python -m matchedfilter.tutorial`.
 
 ## Install
@@ -134,6 +134,49 @@ Templates must be set first. A later `run()` requires another `set_data()`
 call because series execution reuses the data slots. GPU execution is
 synchronous.
 
+## Filter banks of FIR templates
+
+`TimeDomainFilterBank` filters a long series with a bank of time-domain FIR
+templates. It takes the taps of each template (a list of 1-D arrays, or a 2-D
+array with `tap_counts=`), groups the templates by length, chooses a transform
+size per group and runs overlap-save filtering. A template's centre tap,
+`tap_counts[t] // 2`, is lag 0. Results are in the series' own sample
+coordinates.
+
+`engine=` selects what the bank does:
+
+| Engine | Result |
+|---|---|
+| `"hier"` (default) | peaks above `threshold`, with pairs screened by the hierarchical gates |
+| `"flat"` | peaks above `threshold`, every pair searched |
+| `"corr"` | every lag, through `correlate_series` |
+
+`filter_series(series)` returns a `FilterResults` with one entry per peak:
+`template_indices`, `sample_indices`, `snr` (complex), `block_starts` and
+`block_lengths`. `threshold=` on a call overrides the bank's;
+`template_index=k` filters one template without the gates, which is how a
+search follows up a candidate. A hierarchical bank needs a reference before it
+filters: `set_reference(profile, delta_f=...)` takes the expected output-power
+spectrum on a fine frequency grid and calibrates the gates for the bank's
+`threshold` and `false_dismissal`.
+
+[[example:A bank of FIR templates]]
+
+A hierarchical bank's gates are calibrated for an analytic series (positive
+frequencies only). Complex taps are quadrature filters and are applied to a
+real series. Arguments outside what the bank can run raise `ValueError` when
+the bank is built: a `false_dismissal` outside (0, 1), an unknown engine,
+sample rates that are not positive, and tap counts outside their templates.
+
+`filter_series_many(jobs)` runs several `(bank, series, kwargs)` calls as one
+batch, and `correlate_and_filter_many(corr_jobs, leaf_jobs)` runs a middle
+correlation and the leaf banks that read its output together, in cache-sized
+pieces. Each returns what the calls made one at a time return.
+
+A bank can hold several noise profiles over one set of templates:
+`set_reference(profile, delta_f=..., profile=name)` adds a calibration under a
+name, and `filter_series(..., profile=name)` filters with it.
+
 ## Analysis windows on a filter bank
 
 `TimeDomainFilterBank.filter_series` and `correlate_series` take `windows=`,
@@ -180,11 +223,14 @@ size per group. Pass `fft_lengths=` to pin the sizes; otherwise the bank decides
 * Other engines use the valid-fraction rule.
 
 `filter_series` uses the bank's `binsize` unless the call passes its own.
-Bins begin at the start of each block's intersection with an analysis window;
-the final bin there can be shorter than `binsize`. They are not aligned to a
-global sample grid. Changing block sizes can therefore change which nearby
-peaks share a bin, even with a fixed `binsize`, and can change the reported
-trigger set. Pin `fft_lengths=` when comparing trigger sets across runs.
+With a bin size, bins start at each analysis window's first sample and are
+`binsize` long, wherever the blocks fall; the last bin of a window can be
+shorter. A bin that a block edge cuts is searched in two parts and reported
+once. The bins therefore do not depend on the block sizes. Without a bin size
+there is one peak per block, and the peaks then depend on where the blocks
+fall. A hierarchical bank's gates can still dismiss different pairs at
+different block sizes, so pin `fft_lengths=` when comparing trigger sets across
+runs.
 
 ## Hierarchical filtering
 
@@ -238,7 +284,8 @@ The default is CPU unless `MF_DEVICE` is set. `device="cpu"`, `"gpu"`,
 `"gpu:1"`, `"cuda"` and `"auto"` are supported. `"cuda"` and `"cuda:<n>"` are
 aliases of `"gpu"` and `"gpu:<n>"`: they pick a GPU of any backend, not only a
 CUDA one. NVIDIA GPUs run through the CUDA driver where it is installed; other
-GPUs on Linux and Windows use Vulkan, and macOS uses Metal. GPU execution requires a compatible driver.
+GPUs on Linux and Windows use Vulkan, and macOS uses Metal. GPU execution
+requires a compatible driver.
 
 GPU execution is experimental. The CPU path is the one developed and measured
 for release; the GPU path passes the same tests but lags it. A
@@ -291,7 +338,6 @@ peaks use ordinary NumPy storage.
 Some choices are made by timing on the machine at hand, on the search's own calls:
 
 - a filter bank's block size and its plans' CPU narrow screen;
-- on a GPU, whether a batch's submissions are fused and how they interleave;
 - where a batch's follow-ups run (the GPU, or a CPU core);
 - the coarse kernel layout and gate way at each band, and how sparse results are read;
 - where a lone single-template call runs.
@@ -310,7 +356,7 @@ misjudges it).
 | `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |
 
 Other `MF_*` variables force a single candidate for measurement (for example
-`MF_CHAIN_FORCE`, `MF_GPU_FUSE_INTERLEAVE`, `MF_BAND_FORWARD`). They are not
+`MF_CHAIN_FORCE`, `MF_COARSE_LAYOUT`, `MF_BAND_FORWARD`). They are not
 needed in normal use, and forcing one bypasses the choice it would otherwise
 measure. [Environment variables](environment.md) lists every one.
 
@@ -318,12 +364,13 @@ measure. [Environment variables](environment.md) lists every one.
 
 Linux x86-64, Linux arm64 and macOS arm64 are exercised in CI. That coverage
 does not establish performance or compatibility on every physical GPU.
-Metal was also tested on an Apple M2; historical measurements are in the GPU
-design notes. macOS x86-64 is not currently tested.
+Metal was also tested on an Apple M2 (see
+[Testing Metal on physical Apple hardware](macos-test-machine.md)). macOS
+x86-64 is not currently tested.
 
 `matchedfilter.targets()` lists the available CPU targets,
 `matchedfilter.backend()` reports the selected target, and `set_target()` or
 `MF_ISA` selects a specific target for testing. On x86 the targets are Highway's
-(AVX3, AVX2, SSE4) plus `AVX`: the SSE4 back end with its float kernels at 8 lanes,
+(AVX3_DL, AVX3, AVX2, SSE4) plus `AVX`: the SSE4 back end with its float kernels at 8 lanes,
 chosen automatically on CPUs with AVX but not AVX2 (Sandy and Ivy Bridge).
 `MF_ISA=SSE4` keeps the 4-lane kernels there.

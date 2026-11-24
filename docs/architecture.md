@@ -236,7 +236,7 @@ Two readers take their statistics from the same simulation:
 The draw count is a function of fd and the per-plan tolerance only
 (`gatemodel._nsamp_for`): 2 (round(j / fd) - 1) detections, where j
 (`gatemodel.fit_order`) is the smallest order statistic whose plans exceed 1.25 fd with
-probability at most 5% (decision D1; `_TAIL_RATIO`, `_TAIL_SHARE`). j is 47 at fd 1e-2 and
+probability at most 5% (`_TAIL_RATIO`, `_TAIL_SHARE`). j is 47 at fd 1e-2 and
 48 at 1e-3 and 1e-4: 9,398 and 95,998 detections, a median of 16,500 and 167,000 draws at
 snr 5.5 over the `fdr_audit` profiles (200/fd drew 20,000 and 200,000). The noise blocks are
 the simulation's first 20,000 rows (`_NOISE_BLOCKS`). A budget whose tail bound needs more
@@ -362,8 +362,8 @@ among budget splits that all meet the budget, so different costs can move the th
   timestamps around each submission, each time taken relative to a fixed reference call
   (`_calibration._ClockRef`) so that clock changes cancel. A tier's cost is the difference
   between runs that differ in that tier. A second tier's price is the slope of device time
-  against first-tier survivors over the calibration densities (`_calibration._sparse_rows`,
-  `_GPU_SPARSE_FIT = "slope"`), so a per-call cost cannot be charged to the few survivors of
+  against first-tier survivors over the calibration densities (`_calibration._sparse_rows`),
+  so a per-call cost cannot be charged to the few survivors of
   one density point.
 - **Other prices** (`_prices.price_once`): the CPU platform forward, the direct refine's
   per-lag and per-pair prices, and the continuous correlation's block costs
@@ -458,9 +458,8 @@ print, its default and its scope:
 
 - **subject** dimensions are resolved by each instance: a bank's block size `n` and a plan's
   screen `q15`;
-- **batch** dimensions are read by the code they steer while a batch runs: a GPU batch's
-  fusion `fuse` and Vulkan interleave depth `interleave`, where a GPU batch's follow-ups run
-  (`single`), and where a lone single-template call runs (`side`);
+- **batch** dimensions are read by the code they steer while a batch runs: where a GPU
+  batch's follow-ups run (`single`), and where a lone single-template call runs (`side`);
 - **kernel slots** `kern:<what>:<band>` carry a call's default kernel and its alternative
   (`_settings.slot`): the coarse layout, the gate way and the sparse readback.
 
@@ -499,13 +498,14 @@ it repeatedly. Without one, each process measures afresh, and two processes can 
 differently on timing noise; every choice still meets the budget, but pairs near a gate can
 be refined in one process and not in another.
 
-A process without one also pays for the measuring. MEASURED 2026-11-14 on one
+A process without one also pays for the measuring. Measured on 2026-11-14 on one
 `pycbc_inspiral_fir` job of pycbc's FIR search example (11,988 templates, H1 and L1,
-2,048 s, SNR 5.5 / FDR 0.001, one core): 426 G instructions without a cost file against
-about 360 G with one reused from an earlier job. The difference is the block-size trial:
-its preparation calibrates both profiles at the second block size (39 G, of which 28 G
-are twenty simulations at n = 2048), and that arm is then played (32 of 100 trial calls;
-all eight banks locked the model's first choice). Nothing prepared at cost goes unplayed,
+2,048 s, SNR 5.5, false-dismissal budget 0.001, one core): 426 billion instructions
+without a cost file against about 360 billion with one reused from an earlier job. The
+difference is the block-size trial: its preparation calibrates both profiles at the second
+block size (39 billion instructions, of which 28 billion are twenty simulations at
+n = 2048), and that arm is then played (32 of 100 trial calls; all eight banks locked the
+model's first choice). Nothing prepared at cost goes unplayed,
 so the saving is the file's alone: a workflow whose jobs share one runs the trial once.
 
 ## Configuration
@@ -535,7 +535,7 @@ removes every `MF_*` variable from the environment before collection except `MF_
 the tool paths (`--keep-mf-env NAME` keeps another), probes for a usable GPU
 (`conftest.usable_gpu`) so GPU tests skip cleanly without one, and adds `--shard K/N`,
 `--reverse-modules` and the opt-in `--run-performance` checks. CI also runs the suite with
-`MF_ISA` forced to SSE4, AVX and AVX2, so a change to the CPU kernels should be tested under
+`MF_ISA` forced to SSE4, AVX, AVX2 and AVX3, so a change to the CPU kernels should be tested under
 those targets locally as well.
 
 Some suites pin contracts the rest of the code relies on:
@@ -547,6 +547,8 @@ Some suites pin contracts the rest of the code relies on:
 | `test_tier_conformance.py`, `test_coarse_conformance.py` | Every CPU tier kind and every GPU coarse layout refines exactly the pairs above thresholds placed in gaps of the exact maxima. |
 | `test_choice.py`, `test_paired_cpu_trials.py`, `test_joint_trials.py` | The measured-choice rule and the joint trial. |
 | `test_reproducible_choices.py` | Two processes sharing a cost file choose alike. |
+| `test_argument_validation.py`, `test_core_boundary.py` | Arguments a bank, a filter or a native routine cannot run are refused. |
+| `test_edge_paths.py` | Series ends, separate windows in a cascade, and random banks, series and calls against the ungated answer. |
 | `test_layers.py`, `test_config_registry.py`, `test_docs_index.py` | The import layers, the environment registry, and this directory's index. |
 
 `tools/gate.py` is the merge gate, one command for every check a change must pass. Its

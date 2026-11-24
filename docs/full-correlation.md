@@ -1,6 +1,6 @@
 # Full correlation and the cost of keeping lags
 
-The library now has three answers to the same spectral pair calculation. With
+The library has three answers to the same spectral pair calculation. With
 `CorrelationFilter`, the answer is every complex lag. With `MatchedFilter`, it
 is one complex value and its index per output bin. With `HierarchicalFilter`,
 a coarse gate first decides which pairs need the full peak transform. Each
