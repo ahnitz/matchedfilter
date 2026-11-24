@@ -122,6 +122,8 @@ Results that change are stated; everything else returns what it returned before.
   also refuses, by name, an unknown `engine` (it ran as the flat engine), sample rates
   that are not positive, a negative `binsize`, `coarse_band_hz` or `first_stage_snr` (they
   were ignored), a `max_batch_size` below 1, and tap counts outside their templates.
+- The chain search of a plan with four tiers (`max_tiers=4`) wrote one pointer past the end
+  of an array. Results were unchanged.
 - A bank refuses a reference that holds no power or is not finite when it is set, naming
   the profile. A detector with no data gave an all-zero reference and the job failed later
   with an unrelated message.
@@ -152,6 +154,10 @@ Results that change are stated; everything else returns what it returned before.
 
 - GPU execution is labelled experimental in the README and the usage guide: it passes the
   same tests as the CPU path but lags it in a search.
+- The usage guide introduces `TimeDomainFilterBank` with an executed example, and states
+  that a bank's peak bins are each analysis window's, whatever the block sizes.
+  `docs/hierarchical-search-design.md` describes `search.HierarchicalSearch` as it is,
+  with the unimplemented parts of the design listed as proposals.
 - `docs/architecture.md` is the reference for the library as it is: the public API, the
   layers, the C engine, the GPU host layer, the gate model, the cost models and the
   measured choices. `docs/README.md` lists every page.

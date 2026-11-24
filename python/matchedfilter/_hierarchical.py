@@ -1611,6 +1611,8 @@ class HierarchicalFilter(MatchedFilter):
 
     @property
     def hermitian(self):
+        """Whether half-length templates are Hermitian-packed real filters
+        (:meth:`set_hermitian`). Assigning to it calls :meth:`set_hermitian`."""
         return self._hermitian
 
     @hermitian.setter
