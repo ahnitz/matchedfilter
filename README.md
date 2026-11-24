@@ -11,6 +11,10 @@ series.
 [Usage guide](https://ahnitz.github.io/matchedfilter/using-it.html) ·
 [Benchmarks](https://ahnitz.github.io/matchedfilter/benchmarks.html)
 
+The methods and measurements are described in
+[Nitz, Kacanja and Capano, arXiv:2611.17229](https://arxiv.org/abs/2611.17229).
+The citation is given under Citing, below.
+
 **Alpha software:** the API may change. Pin a version for reproducible work.
 
 ## Quick start
@@ -195,6 +199,24 @@ matchedfilter timing also includes the product and peak scan.
 - [Examples](https://ahnitz.github.io/matchedfilter/demo.html): noise and injected signals.
 - [Numerical accuracy](https://ahnitz.github.io/matchedfilter/precision.html): comparison with a float64 reference.
 - [Design notes](https://ahnitz.github.io/matchedfilter/notes.html): implementation details and historical experiments.
+
+## Citing
+
+If you use matchedfilter in published work, please cite the paper,
+[arXiv:2611.17229](https://arxiv.org/abs/2611.17229)
+([INSPIRE record](https://inspirehep.net/arxiv/2611.17229)):
+
+```bibtex
+@article{Nitz:2026yol,
+    author = "Nitz, Alexander H. and Kacanja, Keisi and Capano, Collin D.",
+    title = "{Peak Performance in Matched Filtering: Fused Correlation and Statistically Controlled Screening on CPUs and GPUs}",
+    eprint = "2611.17229",
+    archivePrefix = "arXiv",
+    primaryClass = "astro-ph.IM",
+    month = "11",
+    year = "2026"
+}
+```
 
 ## Status
 

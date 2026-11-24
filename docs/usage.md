@@ -4,6 +4,9 @@ This guide covers inputs, full correlations, output bins, filter banks, device
 selection and hierarchical calibration. The examples execute during the documentation build. Run them
 locally with `python -m matchedfilter.tutorial`.
 
+The methods behind the library are described in
+[arXiv:2611.17229](https://arxiv.org/abs/2611.17229).
+
 ## Install
 
 ```bash

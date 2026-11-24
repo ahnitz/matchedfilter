@@ -152,6 +152,8 @@ Results that change are stated; everything else returns what it returned before.
 
 ### Documentation
 
+- The README, the site's front page and the usage guide link to the paper,
+  arXiv:2611.17229, and the README gives its BibTeX entry and INSPIRE record.
 - GPU execution is labelled experimental in the README and the usage guide: it passes the
   same tests as the CPU path but lags it in a search.
 - The usage guide introduces `TimeDomainFilterBank` with an executed example, and states

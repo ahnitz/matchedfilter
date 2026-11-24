@@ -1577,7 +1577,8 @@ def _snippet(src, out):
 def overview_page(readme):
     """Keep the landing page and README quick start in sync."""
     body = "<h1>matchedfilter</h1>" + md(readme.get("_intro", ""))
-    for title in ("Quick start", "Supported capabilities", "Performance", "Run the benchmarks", "Documentation"):
+    for title in ("Quick start", "Supported capabilities", "Performance", "Run the benchmarks", "Documentation",
+                  "Citing"):
         if readme.get(title):
             body += md("## " + title + "\n\n" + readme[title])
     return body
