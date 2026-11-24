@@ -206,6 +206,9 @@ If you use matchedfilter in published work, please cite the paper,
 [arXiv:2611.17229](https://arxiv.org/abs/2611.17229)
 ([INSPIRE record](https://inspirehep.net/arxiv/2611.17229)):
 
+The same reference is in [`CITATION.cff`](https://github.com/ahnitz/matchedfilter/blob/main/CITATION.cff),
+which GitHub shows as "Cite this repository".
+
 ```bibtex
 @article{Nitz:2026yol,
     author = "Nitz, Alexander H. and Kacanja, Keisi and Capano, Collin D.",

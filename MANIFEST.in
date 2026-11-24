@@ -1,7 +1,7 @@
 # setuptools only guesses at Python files, so every C source the build needs
 # has to be named here.  Without this the sdist builds fine and then fails to
 # install: the extension sources are simply absent.
-include README.md LICENSE CHANGELOG.md
+include README.md LICENSE CHANGELOG.md CITATION.cff
 recursive-include examples *.py
 recursive-include src *.c *.cc *.h *.py
 recursive-include python *.c *.h

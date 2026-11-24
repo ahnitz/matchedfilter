@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use matchedfilter in published work, please cite the paper below."
+title: matchedfilter
+abstract: "Batched CPU and GPU matched filtering with peak or full correlation output"
+type: software
+authors:
+  - family-names: Nitz
+    given-names: Alexander H.
+    orcid: "https://orcid.org/0000-0002-1850-4587"
+repository-code: "https://github.com/ahnitz/matchedfilter"
+url: "https://ahnitz.github.io/matchedfilter/"
+license: MIT
+preferred-citation:
+  type: article
+  title: "Peak Performance in Matched Filtering: Fused Correlation and Statistically Controlled Screening on CPUs and GPUs"
+  authors:
+    - family-names: Nitz
+      given-names: Alexander H.
+      orcid: "https://orcid.org/0000-0002-1850-4587"
+    - family-names: Kacanja
+      given-names: Keisi
+      orcid: "https://orcid.org/0009-0004-9167-7769"
+    - family-names: Capano
+      given-names: Collin D.
+  year: 2026
+  month: 11
+  url: "https://arxiv.org/abs/2611.17229"
+  identifiers:
+    - type: other
+      value: "arXiv:2611.17229"
+      description: "arXiv preprint"
