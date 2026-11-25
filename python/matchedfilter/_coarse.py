@@ -121,13 +121,19 @@ def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
         times = _choice.fastest_of_rounds(cs, time_screen, rounds) if time_screen else {}
         if times is None:
             return None
-        keep = [c for c in cs if not times or times[c] <= screen_cut * min(times.values())]
+        # A candidate whose timer recorded nothing has no time: it is neither the fastest the
+        # cut is taken from nor kept (it would rank first at 0.0).
+        timed = [t for t in times.values() if not _choice.no_time(t)]
+        if times and not timed:
+            continue
+        keep = [c for c in cs if not times
+                or (not _choice.no_time(times[c]) and times[c] <= screen_cut * min(timed))]
         full = _choice.fastest_of_rounds(keep, time_full, rounds)
         if full is None:
             return None
         times.update(full)
         out.update(times)
-    lead = sorted(out, key=out.get)[:RETIME]
+    lead = sorted((c for c in out if not _choice.no_time(out[c])), key=out.get)[:RETIME]
     if len(lead) > 1:
         again = _choice.fastest_of_rounds(lead, time_full, RETIME_ROUNDS)
         if again is None:
@@ -187,7 +193,8 @@ def shortlist(memo, kind, device, band, cands, label, kernel_id, measure, tiebre
         hit = memo[key] = (by_label[first], by_label.get(second))
         return hit
     times = measure(list(cands)) or {}
-    times = {c: t for c, t in times.items() if c in cands}     # only the candidates offered
+    # only the candidates offered, and only those with a time (_choice.no_time)
+    times = {c: t for c, t in times.items() if c in cands and not _choice.no_time(t)}
     if not times:
         return cands[0], None
     rank = {c: i for i, c in enumerate(cands)}

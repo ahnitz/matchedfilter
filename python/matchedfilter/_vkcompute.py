@@ -513,6 +513,10 @@ class _DeviceTimer:
         out = (ctypes.c_uint64 * 2)()
         _check(self.dev.vk.vkGetQueryPoolResults(self.dev.device, self.pool, 2 * i, 2, 16, out, 8,
                                                  0x3), "timer read")
+        # A pair the device did not write (zero) or wrote out of order is no interval: 0, which
+        # every timing reads as no sample (_choice.fastest_of_rounds, no_time).
+        if not out[0] or out[1] <= out[0]:
+            return 0.0
         return (out[1] - out[0]) * period
 
 
@@ -1970,7 +1974,8 @@ class Context(Executor, InputUploads):
         finally:
             if release is not None:
                 release()
-        return min(times)
+        valid = [t for t in times if t > 0]
+        return min(valid) if valid else 0.0             # 0.0: no run recorded a time
 
     def _x_tierc(self, n):
         split = _kernels.two_stage("vulkan", n)

@@ -165,10 +165,31 @@ def test_interleaved_rounds_take_each_candidates_best_round():
     hooks, seq = [], iter([0.0, 2.0, 1.5, 0.0, 0.0, 0.0])
     t = _choice.fastest_of_rounds(["a", "b"], lambda c: next(seq), 2, burst=1,
                                   each_round=lambda: hooks.append(1))
-    assert t == {"a": 0.0, "b": 1.5}              # a's two timers recorded nothing
+    # a's two timers recorded nothing, nor did its two re-timings: no time (0.0, no_time)
+    assert t == {"a": 0.0, "b": 1.5} and _choice.no_time(t["a"])
     assert hooks == [1, 1]
-    seq = iter([3.0, 1.0, 0.0, 0.0])
+    seq = iter([3.0, 1.0, 0.0, 0.0, 0.0, 0.0])
     assert _choice.fastest_of_rounds(["a", "b"], lambda c: next(seq), 1, burst=2) == {"a": 1.0, "b": 0.0}
+
+
+def test_a_timer_that_recorded_nothing_is_retimed_and_never_ranks_fastest():
+    """A candidate whose timer recorded nothing (0) is timed again; one that never records a
+    time has none, and neither the coarse screen nor its shortlist takes it as the fastest
+    -- where a 0.0 had ranked first and could lock a layout no measurement chose."""
+    from matchedfilter import _choice, _coarse
+    seq = iter([0.0, 2.0, 1.5, 0.0, 0.7])       # a: 0 and 0 in its rounds, then 0.7 re-timed
+    t = _choice.fastest_of_rounds(["a", "b"], lambda c: next(seq), 2)
+    assert t == {"a": 0.7, "b": 1.5}
+    # the screen: "dead" never records a time
+    times = {"dead": 0.0, "slow": 2.0, "fast": 1.0, "mid": 1.5}
+    out = _coarse.screen([list(times)], lambda c: times[c], time_screen=lambda c: times[c])
+    assert min((c for c in out if not _choice.no_time(out[c])), key=out.get) == "fast"
+    assert out.get("dead", 0.0) == 0.0
+    memo = {}
+    first, second = _coarse.shortlist(memo, "coarse", "test-device", 64, list(times), str, "k",
+                                      lambda cs: {c: times[c] for c in cs})
+    assert (first, second) == ("fast", "mid")
+
 
 
 def test_the_screen_offers_later_stages_the_earlier_times():

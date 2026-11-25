@@ -110,8 +110,10 @@ def fastest_of_rounds(cands, time_one, rounds, burst=1, each_round=None):
     every candidate `burst` times back to back, the order reversing between rounds, after
     each_round() (a clock reference, say): a burst of other work, or a slow spell on a
     shared device, then slows one round of every candidate rather than every repetition of a
-    few. A time <= 0 (a timer that recorded nothing) is no sample; a candidate with none
-    gets 0.0. None as soon as time_one returns None (no timer at all).
+    few. A time <= 0 (a timer that recorded nothing) is no sample: a candidate left without
+    one is timed again, up to `rounds` more times, and one that still has none gets 0.0,
+    which a ranking must not read as fastest (no_time). None as soon as time_one returns
+    None (no timer at all).
 
     The fastest, not the median: what moves a call only adds time. Timed back to back, the
     Iris Xe stored a tiled band-256 layout 4.3x slower than the untiled one."""
@@ -127,7 +129,23 @@ def fastest_of_rounds(cands, time_one, rounds, burst=1, each_round=None):
                     return None
                 if t > 0:
                     out[c] = min(out[c], float(t))
+    for _ in range(int(rounds)):
+        missing = [c for c in order if out[c] == float("inf")]
+        if not missing:
+            break
+        for c in missing:
+            for _ in range(int(burst)):
+                t = time_one(c)
+                if t is None:
+                    return None
+                if t > 0:
+                    out[c] = min(out[c], float(t))
     return {c: (t if t < float("inf") else 0.0) for c, t in out.items()}
+
+
+def no_time(t):
+    """Whether a fastest_of_rounds time is no measurement (every sample recorded nothing)."""
+    return not t > 0
 
 
 def paired_choice(samples, model, cap, minimum=5, tie=None):
