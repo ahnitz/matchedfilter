@@ -39,3 +39,21 @@ def test_every_driver_context_defines_every_primitive(driver):
     shared = _methods("_gpuexec.py", "Executor") | _methods("_gpu_cache.py", "InputUploads")
     missing = sorted(_primitives() - _methods(driver, "Context") - shared)
     assert not missing, "%s Context lacks %s" % (driver, missing)
+
+
+def test_pow2_scaling_is_ldexp_bit_for_bit():
+    """The fp16 tier's template and data scaling (a product with 2^e) gives np.ldexp's value
+    bit for bit at every exponent the tier uses, for normal, subnormal, overflowing,
+    infinite and NaN components."""
+    import numpy as np
+    from matchedfilter._gpuhier import pow2_scaled
+    rng = np.random.default_rng(5)
+    x = rng.standard_normal(4096).astype(np.float32) * np.float32(1e-3)
+    edge = np.array([1e-38, 1.4e-45, 6e-39, 1.17549435e-38, 3e38, -3e38, np.inf, -np.inf,
+                     np.nan, -0.0, 0.0, 65504.0], np.float32)
+    a = np.concatenate([x, edge, edge[::-1]]).view(np.complex64)
+    with np.errstate(over="ignore"):
+        for e in range(-140, 141):
+            want = np.ldexp(a.view(np.float32), e) if e else a.view(np.float32)
+            np.testing.assert_array_equal(pow2_scaled(a, e).view(np.uint32),
+                                          np.asarray(want, np.float32).view(np.uint32))
