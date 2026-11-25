@@ -436,6 +436,70 @@ def test_a_gpu_search_gives_the_cpu_search():
             _assert_same_peaks(gp, peaks)
 
 
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_a_search_on_the_environment_device_runs_as_on_an_explicit_one(monkeypatch):
+    """A leaf device None is MF_DEVICE's, as for every bank (device.parse): the search then
+    takes the same path as with the device named -- middle rows and root outputs in device
+    memory, leaf calls deferred and fused rather than run one by one -- and gives the same
+    peaks."""
+    from matchedfilter import time_domain as td
+    rng = np.random.default_rng(12)
+    root = _tree(rng)
+    inputs = _inputs(rng)
+    thr = 0.5 * _median_peak(root, inputs)
+    runs = {}
+    for name, device in (("explicit", "gpu:0"), ("environment", None)):
+        monkeypatch.setenv("MF_DEVICE", "gpu:0")
+        undeferred = []
+        real = td.TimeDomainFilterBank.correlate_and_filter_many
+        monkeypatch.setattr(td.TimeDomainFilterBank, "correlate_and_filter_many",
+                            staticmethod(lambda *a, **k: undeferred.append(1) or real(*a, **k)))
+        search = HierarchicalSearch([root], threshold=thr, context=300,
+                                    leaf_options=dict(LEAF, device=device, fft_lengths=GPU_NS))
+        got = {}
+
+        def on_peaks(ctx, got=got):
+            for ch in ctx.channels:
+                got[(ctx.leaf.node_id, ctx.chunk, ch)] = ctx.peaks[ch]
+        search.run(inputs, on_peaks=on_peaks)
+        runs[name] = got
+        assert not undeferred, name
+        assert search._inner and all(b._alloc is not None for b in search._inner.values()), name
+        assert search._root_outs, name
+        monkeypatch.undo()
+    assert runs["explicit"].keys() == runs["environment"].keys()
+    for key, peaks in runs["explicit"].items():
+        _assert_same_peaks(runs["environment"][key], peaks)
+
+
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_a_finished_gpu_search_leaves_no_context_alive():
+    """Once a GPU search is gone its plans' contexts (and their records and buffers) are
+    freed: the device's cache of fused recordings keeps a recording, not the contexts that
+    ran it. It kept them, and a pycbc job, which builds a search per top template, held the
+    last 64 fused recordings' plans -- 25 GB of device memory instead of 7."""
+    import gc
+    import weakref
+    import matchedfilter as mf
+    if next(d for d in mf.devices() if str(d) == "gpu:0").backend != "vulkan":
+        pytest.skip("the fused-recording cache is Vulkan's")
+    from matchedfilter import _vkcompute
+    root = _tree(np.random.default_rng(21), inner_counts=(301, 351))
+    root.profile = _profiles()
+    inputs = _inputs(np.random.default_rng(22), nblocks=1)
+    search = HierarchicalSearch([root], threshold=6.0,
+                                leaf_options=dict(engine="hier", binsize=512, device="gpu:0"))
+    for _ in range(2):               # the second run reuses the fused recordings
+        search.run(inputs)
+    # the contexts of the search's own plans (a calibration's live as long as the process)
+    mine = [weakref.ref(g._plan._gpu) for bank in search._leaf_banks.values()
+            for g in bank._groups if g._plan is not None and g._plan._gpu is not None]
+    assert mine and _vkcompute._DEVICES[0].__dict__.get("fused_cache")
+    del search
+    gc.collect()
+    assert [w for w in mine if w() is not None] == []
+
+
 def test_refilter_parses_windows_as_the_bank_does():
     """refilter checks its windows against the parent's support with the bank's own parser
     (time_domain._normalize_windows), so a form the bank refuses is refused up front and

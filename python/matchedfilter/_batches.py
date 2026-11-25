@@ -47,7 +47,7 @@ def _fuse_close(jobs):
     the 8060S, RENOIR and Iris Xe (2026-10-30; replays of a short run on an idle device had
     timed unfused faster, which the device trial that chose it locked)."""
     if not any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs
-               if getattr(b, "device", None) is not None):
+               if hasattr(b, "device")):
         return None
     return fused()
 

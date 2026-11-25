@@ -436,7 +436,8 @@ def _gpu_batch(jobs, run):
     differently runs it, waited, back to back), its lock then in force for every batch
     (_settings). One trial plays a batch; the others take their locks or defaults. Returns
     run()'s results."""
-    parsed = [_device.parse(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None]
+    # A bank's device None is MF_DEVICE's (device.parse), as everywhere in the library.
+    parsed = [_device.parse(b.device) for b, _, _ in jobs if hasattr(b, "device")]
     gpus = [d for d in parsed if d.kind == "gpu"]
     if not gpus:
         return run()

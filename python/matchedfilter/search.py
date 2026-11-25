@@ -687,10 +687,9 @@ class HierarchicalSearch:
         if inner and id(node) not in self._inner:
             t0 = time.perf_counter()
             bank = self.leaf_bank(root, next(self._leaves_below(node)))
-            on_gpu = (getattr(bank, "device", None) is not None
-                      and _parse_device(bank.device).kind == "gpu")
+            dev = _parse_device(bank.device)
             self._inner[id(node)] = _InnerBatch(inner, length, self._real_output(node),
-                                                device=bank.device if on_gpu else None)
+                                                device=dev if dev.kind == "gpu" else None)
             self.timings["setup"] += time.perf_counter() - t0
         for c in inner:
             self._batches(c, length, root)
@@ -711,8 +710,7 @@ class HierarchicalSearch:
         leaves -- ordered after everything that read it -- have been collected. Elsewhere a
         new host array."""
         bank = self.leaf_bank(root, next(self._leaves_below(root)))
-        on_gpu = (getattr(bank, "device", None) is not None
-                  and _parse_device(bank.device).kind == "gpu")
+        on_gpu = _parse_device(bank.device).kind == "gpu"
         key = (id(root), channel, n, chunk % 2)
         out = self._root_outs.get(key)
         if out is None:
@@ -917,9 +915,8 @@ class HierarchicalSearch:
                     where[(id(lf), c)] = len(jobs)
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w,
                                                     profile=self._call_profile(step.root, c))))
-        deferred = any(getattr(b, "device", None) is not None
-                       and _parse_device(b.device).kind == "gpu"
-                       for b, _, _ in jobs)
+        # A bank's device None is MF_DEVICE's (device.parse), as everywhere in the library.
+        deferred = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
         if step.corr_jobs and not deferred:
             cjobs = [jb for jb, _ in step.corr_jobs]
             t_info = {}
