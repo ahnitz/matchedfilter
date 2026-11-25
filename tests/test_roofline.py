@@ -323,3 +323,28 @@ def test_the_model_counts_an_fp16_tier_zero_on_its_screeners(monkeypatch):
     assert t0.precision == "fp16"
     assert (t0.flops, t0.bytes) == (1000 * 5632, (50 + 20) * 128 * 4 + 400 * 8)
     assert w.stages["forward"].bytes == 50 * 768 * 8
+
+
+def test_the_root_stage_counts_what_the_search_ran():
+    """A hierarchical search counts its root blocks and band bins (root_counts), and
+    root_work prices them: 6 flops a band bin and 2.5 n log2 n per block, 16 B a band bin
+    and 4 n B per block."""
+    from matchedfilter.search import BlockInput, HierarchicalSearch, Leaf, Root
+    n, band = 4096, (10, 1500)
+    rng = np.random.default_rng(3)
+
+    def spec():
+        return (rng.standard_normal(n // 2 + 1) + 1j * rng.standard_normal(n // 2 + 1)).astype(np.complex64)
+    taps = rng.standard_normal((2, 64)).astype(np.float32)
+    root = Root(spec(), band, children=[Leaf(taps, [64, 64])])
+    search = HierarchicalSearch([root], threshold=1e9, leaf_options=dict(engine="flat"))
+    inputs = {c: BlockInput([spec(), spec(), spec()], [(512, n - 512)] * 3,
+                            root_scale=lambda r, k: 1.0) for c in ("A", "B")}
+    search.run(inputs)
+    assert search.root_counts == {n: [6, 6 * (band[1] - band[0])]}
+    w = _roofline.Work()
+    s = _roofline.root_work(w, {n: [2, 2 * (band[1] - band[0])]}, search.root_counts)
+    bins = 4 * (band[1] - band[0])
+    assert s.count == 4
+    assert s.flops == pytest.approx(6 * bins + 4 * 2.5 * n * math.log2(n))
+    assert s.bytes == pytest.approx(16 * bins + 4 * 4 * n)

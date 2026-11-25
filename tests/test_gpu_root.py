@@ -93,6 +93,34 @@ def test_a_block_is_uploaded_once_and_freed_with_its_array():
         dev.give_output(N, i, 1, o)
 
 
+def test_a_block_rewritten_in_place_is_uploaded_again():
+    """A caller that writes new data into an array a search already read gets the root of
+    the new data, not of the device's old copy (the block is checked before each use)."""
+    rng = np.random.default_rng(8)
+    dev = _device_root()
+    h = N // 2
+    T = _spec(rng)
+    dev.set_template(N, T)
+    a = _spec(rng)
+    out = dev.take_output(N, 0, 0)
+    band = (5, h - 5)
+    dev.run(N, 0, [a], [out], band, [1.0])
+    _settle_device_writes()
+    built = dev.built
+    a[:] = _spec(rng)                         # the same array object, new contents
+    assert dev.run(N, 0, [a], [out], band, [1.0]) == 1
+    _settle_device_writes()
+    ref = _host(a, T, band, 1.0)
+    np.testing.assert_allclose(out, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
+    a[h // 2] += 1.0                          # one bin
+    dev.run(N, 0, [a], [out], band, [1.0])
+    _settle_device_writes()
+    ref = _host(a, T, band, 1.0)
+    np.testing.assert_allclose(out, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
+    assert dev.built == built + 2
+    dev.give_output(N, 0, 0, out)
+
+
 def _taps(rng, c):
     t = rng.standard_normal(c).astype(np.float32)
     return t / np.linalg.norm(t)
@@ -173,6 +201,14 @@ def test_a_gpu_search_computes_its_root_where_placed_and_gives_the_cpu_search(mo
                                        rtol=1e-4)
     assert len(taken[0]) == 4 and taken[1] == taken[0]   # 2 channels x 2 chunk parities
     assert dev.built == built[1]                         # the second search built nothing
+    # the caller rewrites its blocks in place: a new search gives the CPU's root of the new data
+    for inp in inputs.values():
+        for spec in inp.spectra:
+            spec[:] = _spec(rng)
+    _, cpu_series, _ = _run(root, inputs, "cpu", thr)
+    _, gpu_series, _ = _run(root, inputs, "gpu:0", thr)
+    for key, s in cpu_series.items():
+        np.testing.assert_allclose(gpu_series[key], s, rtol=0, atol=2e-5 * np.abs(s).max())
 
 
 def test_the_placement_trial_keeps_the_device_unless_the_host_is_clearly_faster(monkeypatch):

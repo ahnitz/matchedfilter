@@ -129,11 +129,11 @@ class BlockInput:
     Parameters
     ----------
     spectra : sequence of ndarray
-        One one-sided spectrum per block (n/2 + 1 bins, complex64). They are read, never
-        written, and must not be rewritten in place once a search has read them: a GPU
-        search keeps a device copy of each block's array for as long as the array object
+        One one-sided spectrum per block (n/2 + 1 bins, complex64), read, never written. A
+        GPU search keeps a device copy of each block's array for as long as the array object
         lives, so that searches over the same blocks (one per root, as PyCBC builds them)
-        upload each block once. A block with new contents is a new array.
+        upload each block once; it checks the array's contents before each use (one read of
+        the array) and uploads it again where a caller rewrote it in place.
     valid : sequence of tuple of int
         Per block, the (start, stop) samples of its output that are searched (pycbc: a
         segment's analysis range).
@@ -607,6 +607,8 @@ class HierarchicalSearch:
         self._root_placed = {}           # chunk -> where the current root's output was computed
         self._root_pooled = {}           # _root_outs keys taken from the device's pool -> pool
         self._root_tmpl = set()          # (root, n) whose spectrum the device holds this run
+        #: The root's work done so far, {n: [blocks, band bins]}: _roofline.root_work's count.
+        self.root_counts = {}
         for root in self.roots:
             if not isinstance(root, Root):
                 raise TypeError("roots must be Root nodes")
@@ -787,9 +789,13 @@ class HierarchicalSearch:
         if not self._root_pooled:
             return
         _settle_device_writes()
+        devs = set()
         for key, (dev, n, pos, parity) in self._root_pooled.items():
             dev.give_output(n, pos, parity, self._root_outs.pop(key))
+            devs.add(dev)
         self._root_pooled.clear()
+        for dev in devs:
+            dev.collect()                 # free the copies of blocks whose arrays died
 
     def _root_place(self, root, n):
         """Where root's next output of length n is computed: "device" or "host"
@@ -988,6 +994,10 @@ class HierarchicalSearch:
                 self._root_plan(len(out)).real(np.ascontiguousarray(spec, dtype=np.complex64),
                                                root.spectrum, k0, k1, scale, out)
         self._root_placed[k] = place
+        for out in outs:
+            cnt = self.root_counts.setdefault(len(out), [0, 0])
+            cnt[0] += 1
+            cnt[1] += max(0, min(k1, len(out) // 2 + 1) - k0)
         for c, out in zip(active, outs):
             held[c][id(root)] = out
             support[c][id(root)] = [(0, len(out))]

@@ -4,12 +4,6 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
-### Changed
-
-- `BlockInput` spectra must not be rewritten in place once a search has read them: a GPU
-  search keeps a device copy of each block's array for as long as the array object lives
-  (a block with new contents is a new array). CPU searches are unaffected.
-
 ### Fixed
 
 - The hierarchical gates no longer dismiss far more than their budget on a band that holds a
@@ -94,9 +88,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   that is already the bound can keep the host.
   Radeon 8060S: a root of 2^20 samples takes the device 88 us per block (45 us at its
   bandwidth bound) against 1.6 ms of a Zen 5 core; `tools/search_bench.py` on the three
-  captured tops runs 291 M templates in real time against 194 M (root host time 62 -> 2 ms a
-  pass), and the PyCBC job's root host time falls from 2.9 to 0.4 s (its triggers move only
-  by float rounding: 8 of 1.3 million swap places at SNR 3).
+  captured tops runs 257-304 M templates in real time against 170 M (root host time 70 -> 9 ms
+  a pass). In the PyCBC job the root's host time falls from 2.6 to 0.6 s but the job's wall
+  time does not change (52.2 against 52.5 s over three pairs): the host root was already
+  hidden under the device's leaf work, and the host now waits for it there. Its triggers
+  move only by float rounding (8 of 1.3 million swap places at SNR 3).
 - Shared-screener clustering, the largest part of a hierarchical search's setup, does the
   same work in less time and gives the same screeners bit for bit. The pair scores stop
   summing a pair once it can no longer reach the score the matching reads, and keep twice

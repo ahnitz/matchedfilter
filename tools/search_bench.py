@@ -135,6 +135,7 @@ def main():
         mids = [b.bank for b in search._inner.values()]
         fines = list(search._leaf_banks.values())
         before = rl.snapshot(mids, fines) if a.roofline else None
+        roots0 = {n: list(v) for n, v in getattr(search, "root_counts", {}).items()}
         t0, c0 = time.perf_counter(), time.process_time()
         for _ in range(a.repeats):
             search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
@@ -143,6 +144,7 @@ def main():
         if a.roofline:
             after = rl.snapshot(mids, fines)
             rl.middle_work(roof["work"], before, after, mids)
+            rl.root_work(roof["work"], roots0, getattr(search, "root_counts", {}))
             ticks = rl.fine_work(roof["work"], before, after, fines, a.device,
                                  problems=roof["problems"])
             for k, v in ticks.items():

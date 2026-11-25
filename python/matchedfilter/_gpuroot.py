@@ -11,8 +11,9 @@ What it keeps, so that its steady cost is the transform's and nothing else:
     one per top template), holding everything below;
   * each input block's spectrum in device memory, uploaded the first time a search reads
     it and kept while the caller's array object lives (a weak reference names it: a freed
-    array's id cannot alias a new one). A block is uploaded once, not once per search: the
-    caller must not rewrite a spectrum in place once a search has read it (BlockInput);
+    array's id cannot alias a new one). A block is uploaded once, not once per search; each
+    run checks the array's contents against the copy's (a one-pass signature, _signature)
+    and uploads it again if a caller rewrote it in place;
   * the root's spectrum in one buffer per length, written once per run;
   * the outputs, a pool of series buffers that searches take for a run and give back, so
     a search per root reuses the buffers -- and the middle stage's recordings, keyed on
@@ -51,13 +52,20 @@ def device_root(device):
     return _ROOTS[key]
 
 
+def _signature(arr):
+    """A block's contents in one word: the wrapping sum of its 8-byte words (one read of
+    the array, ~0.1 ms for 2^19 bins on a Zen 5 core). Any change of contents changes it,
+    except one that only permutes the words or whose changes cancel in the sum."""
+    return int(np.add.reduce(arr.view(np.uint64)))
+
+
 class _Block:
     """One input block's spectrum in device memory, named by a weak reference to the
-    caller's array object."""
-    __slots__ = ("ref", "buffer", "serial")
+    caller's array object, with the signature of the contents it was uploaded with."""
+    __slots__ = ("ref", "buffer", "serial", "sig")
 
-    def __init__(self, ref, buffer):
-        self.ref, self.buffer, self.serial = ref, buffer, next(BUFFER_SERIALS)
+    def __init__(self, ref, buffer, sig):
+        self.ref, self.buffer, self.serial, self.sig = ref, buffer, next(BUFFER_SERIALS), sig
 
 
 class DeviceRoot:
@@ -113,7 +121,7 @@ class DeviceRoot:
         self._free.setdefault((n, position, parity), []).append(out)
 
     # ---- device copies of the inputs -------------------------------------------------------
-    def _collect(self):
+    def collect(self):
         """Free the blocks whose arrays died, once no run still reads them."""
         if not self._dead:
             return
@@ -129,10 +137,21 @@ class DeviceRoot:
 
     def _block(self, spectrum, nbins):
         """The _Block holding `spectrum` (its first nbins bins) in device memory, uploaded on
-        first use, or None where the array cannot be named (no weak reference)."""
+        first use and again whenever its contents changed (a caller that rewrote the array in
+        place: its signature differs), or None where the array cannot be named (no weak
+        reference)."""
         key = id(spectrum)
         b = self._blocks.get(key)
+        arr = np.ascontiguousarray(np.asarray(spectrum)[:nbins], dtype=np.complex64)
+        sig = _signature(arr)
         if b is not None and b.ref() is spectrum:
+            if b.sig != sig:
+                for wait in list(self._last.values()):   # runs still reading the old copy
+                    wait()
+                self._last.clear()
+                b.buffer.write(arr)
+                b.sig = sig
+                self.built += 1
             return b
         try:
             def gone(_ref, key=key, roots=weakref.ref(self)):
@@ -144,10 +163,9 @@ class DeviceRoot:
             ref = weakref.ref(spectrum, gone)
         except TypeError:
             return None
-        arr = np.ascontiguousarray(np.asarray(spectrum)[:nbins], dtype=np.complex64)
         buf = self.ctx._x_alloc(arr.nbytes)
         buf.write(arr)
-        b = self._blocks[key] = _Block(ref, buf)
+        b = self._blocks[key] = _Block(ref, buf, sig)
         self.built += 1
         return b
 
@@ -175,7 +193,7 @@ class DeviceRoot:
         stage1, stage2, groups1, groups2 = self.kernels(n)
         h = n // 2
         built = self.built
-        self._collect()
+        self.collect()
         bufs = [self._block(s, h + 1) for s in blocks]
         if any(b is None for b in bufs):
             raise UnsupportedSize("a root input block that cannot be named")

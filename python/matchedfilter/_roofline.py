@@ -7,6 +7,8 @@
 
 The stages of one segment of the three-level search (tools/ladder.py):
 
+  root        (hierarchical search) the root's output per block and channel: the band
+              product and one real inverse of length n. fp32.
   middle      the middle bank's correlation (engine 'corr'): per block of length n a
               forward transform, per (block, template) pair a complex product and an
               inverse. fp32.
@@ -46,6 +48,11 @@ Work per stage, in samples and bins only (the library is unit-agnostic):
             refine    data rows (8 n B) and template rows (8 B x stored bins) bounded as
                       above, and 12 B per output bin (index + complex value).
             followups the window's input, one template row and 12 B per output bin.
+            root      the band of the block's spectrum and of the root's (8 B a bin each)
+                      and the n-sample real series it outputs (4 n B: a stage's result,
+                      charged as the middle's output windows are, not a transform's
+                      intermediate spectrum); flops 6 per band bin and
+                      2.5 n log2 n for the real inverse.
 
 Counts come from what the run did, not from a model of it:
   * middle: TimeDomainFilterBank counters (_corr_work, _corr_in_samples) incremented
@@ -327,6 +334,18 @@ def middle_work(work, before, after, middle_banks):
             d = _sub(v, b.get(n))
             s.add(d["blocks"] * fft_flops(n) + d["pairs"] * pair_flops(n, peak=False),
                   d["tmpl_values"] * 8 + d["out_samples"] * 8, d["pairs"])
+    return s
+
+
+def root_work(work, before, after):
+    """The root stage between two HierarchicalSearch.root_counts snapshots ({n: [blocks,
+    band bins]}): per block the band product (6 flops a bin) and one real inverse of length
+    n (2.5 n log2 n); bytes the band of both spectra (16 B a bin) and the real output (4 n)."""
+    s = work.stage("root", "fp32", unit="blocks")
+    for n, (calls, bins) in after.items():
+        c0, b0 = before.get(n, (0, 0))
+        dc, db = calls - c0, bins - b0
+        s.add(6.0 * db + dc * 2.5 * n * math.log2(n), 16.0 * db + dc * 4.0 * n, dc)
     return s
 
 

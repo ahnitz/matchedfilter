@@ -465,7 +465,8 @@ def test_a_search_on_the_environment_device_runs_as_on_an_explicit_one(monkeypat
         runs[name] = got
         assert not undeferred, name
         assert search._inner and all(b._alloc is not None for b in search._inner.values()), name
-        assert search._root_outs, name
+        # root outputs in device memory: taken from the device's pool for the run
+        assert search._root_pos and search._device_root(root) is not None, name
         monkeypatch.undo()
     assert runs["explicit"].keys() == runs["environment"].keys()
     for key, peaks in runs["explicit"].items():
