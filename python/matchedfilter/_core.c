@@ -2016,7 +2016,7 @@ PB_EXACT static double pb_cost(const pb_table *t, double f){
   return pb_interp(log(f>1e-12 ? f : 1e-12), t);
 }
 
-/* plan_best(cands, hws, first, later, refine, direct) -> (cost, candidate, last) or None
+/* plan_best(cands, hws, first, later, refine, direct[, feed]) -> (cost, candidate, last) or None
    cands: the list gatechain._chain_candidates returns, (earlier thresholds, earlier reach,
    lasts) each, lasts a (threshold, reach) or None per half-width. hws: the half-widths, an
    int or None each. first: (cost per pair of the dense first tier, None) or (that, (the
@@ -2024,14 +2024,17 @@ PB_EXACT static double pb_cost(const pb_table *t, double f){
    later: per later tier (its sparse table, its sparse table behind a screen). refine: the
    refine table. direct: None, or (base, per lag, lags per half-width step, fraction, None or
    (share, the last tier's sparse table)). A table is (log densities, values), tuples of
-   floats. Returns the cheapest plan's cost and where it is (the first of equal costs), or
-   None when no candidate has a last tier. */
+   floats. feed: None, or a GPU's feed (CostModel.feed_delta, as gatechain._costmodel.feed_rule
+   gives it): (mode, band, full, threshold), added to each candidate's cost -- mode 0 full,
+   1 band, 2 band where the refine fraction (0 where the direct refine prices the pair) is
+   below threshold, else full. Returns the cheapest plan's cost and where it is (the first of
+   equal costs), or None when no candidate has a last tier. */
 PB_EXACT static PyObject *M_plan_best(PyObject *self,PyObject *args){
   PB_EXACT_BODY
   (void)self;
-  PyObject *cands,*hws,*first,*later,*refine,*direct;
-  if(!PyArg_ParseTuple(args,"O!O!O!O!OO",&PyList_Type,&cands,&PyTuple_Type,&hws,
-                       &PyTuple_Type,&first,&PyTuple_Type,&later,&refine,&direct)) return NULL;
+  PyObject *cands,*hws,*first,*later,*refine,*direct,*feed=Py_None;
+  if(!PyArg_ParseTuple(args,"O!O!O!O!OO|O",&PyList_Type,&cands,&PyTuple_Type,&hws,
+                       &PyTuple_Type,&first,&PyTuple_Type,&later,&refine,&direct,&feed)) return NULL;
   pb_table t_refine, t_excess, t_last, t_plain[PB_TIERS], t_screened[PB_TIERS];
   const Py_ssize_t nl=PyTuple_GET_SIZE(later), nh=PyTuple_GET_SIZE(hws);
   int ok = nl>=1 && nl<=PB_TIERS && nh<=PB_ROWS && PyTuple_GET_SIZE(first)==2
@@ -2073,6 +2076,18 @@ PB_EXACT static PyObject *M_plan_best(PyObject *self,PyObject *args){
         ok = PyTuple_Check(ls) && PyTuple_GET_SIZE(ls)==2 && pb_read(PyTuple_GET_ITEM(ls,1),&t_last)==0;
         if(ok){ has_last=1; dmfrac=PyFloat_AsDouble(PyTuple_GET_ITEM(ls,0)); }
       }
+    }
+  }
+  int feed_mode=-1;
+  double feed_band=0.0, feed_full=0.0, feed_thr=0.0;
+  if(ok && feed!=Py_None){
+    ok = PyTuple_Check(feed) && PyTuple_GET_SIZE(feed)==4;
+    if(ok){
+      feed_mode=(int)PyLong_AsLong(PyTuple_GET_ITEM(feed,0));
+      feed_band=PyFloat_AsDouble(PyTuple_GET_ITEM(feed,1));
+      feed_full=PyFloat_AsDouble(PyTuple_GET_ITEM(feed,2));
+      feed_thr=PyFloat_AsDouble(PyTuple_GET_ITEM(feed,3));
+      ok = feed_mode>=0 && feed_mode<=2;
     }
   }
   /* a half-width's direct price does not depend on the candidate */
@@ -2126,7 +2141,12 @@ PB_EXACT static PyObject *M_plan_best(PyObject *self,PyObject *args){
         d_cost = d_cost<r_cost ? d_cost : r_cost;
         r_cost = (1.0-dfrac)*r_cost + dfrac*d_cost;
       }
-      const double c=c_prefix+f*r_cost;
+      double c=c_prefix+f*r_cost;
+      if(feed_mode>=0){
+        /* CostModel.feed_delta: the band forward's or the full one's, by the refine fraction */
+        const double r = (hw_set[h] && prices_dir) ? 0.0 : (f>1.0 ? 1.0 : (f>0.0 ? f : 0.0));
+        c += (feed_mode==1 || (feed_mode==2 && r<feed_thr)) ? feed_band : feed_full;
+      }
       if(!found || c<best){ found=1; best=c; best_c=ci; best_h=h; }
     }
   }
@@ -3055,7 +3075,7 @@ static PyMethodDef methods[]={
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, floor, out_rho2, out_s): single-core shifted pair coherence over a chunk, exact where it reaches floor"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
-  {"plan_best",M_plan_best,METH_VARARGS,"plan_best(cands, hws, first, later, refine, direct) -> (cost, candidate, last) or None: the cheapest of a chain's candidate plans on a CostModel"},
+  {"plan_best",M_plan_best,METH_VARARGS,"plan_best(cands, hws, first, later, refine, direct[, feed]) -> (cost, candidate, last) or None: the cheapest of a chain's candidate plans on a CostModel"},
   {"tier0_pairs_within",M_tier0_pairs_within,METH_VARARGS,"tier0_pairs_within(offsets, members, valid, U, v, Sr, Si, lags, floor, out_a, out_b, out_dl) -> count: the coherent pairs inside each cluster, best first"},
   {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},
   {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> (count, reach): one pass of the shared-screener merging, a level's clusters and candidate merges in, the next level out"},

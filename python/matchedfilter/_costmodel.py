@@ -76,11 +76,38 @@ def band_forward_wanted(n, band, f, forced=None):
     model prices a chain's feed by this same rule (CostModel.feed_delta)."""
     if forced is None:
         forced = _config.get("MF_BAND_FORWARD")
+    return _band_forward_given(n, band, f, forced)
+
+
+def _band_forward_given(n, band, f, forced):
+    """band_forward_wanted's rule with MF_BAND_FORWARD's value already read (`forced`: False,
+    True or None, the bytes rule)."""
     if forced is False or n > 65536 or band >= n:
         return False
     if forced:
         return True
     return f is None or f < (n - band) / (2.0 * n)
+
+
+#: feed_delta's default: read MF_BAND_FORWARD at the call.
+READ_ENV = object()
+
+
+def feed_rule(cost, chain, ntemplates, forced):
+    """How CostModel.feed_delta prices chain's feed, as numbers _core.plan_best takes:
+    (mode, band, full, threshold), each feed per pair. mode 0: always the full forward's;
+    1: always the band forward's; 2: the band forward's where the refine fraction (0 for a
+    pair the direct refine claims) is below threshold, else the full's. forced is
+    MF_BAND_FORWARD's value (band_forward_wanted)."""
+    top = int(max(chain))
+    nt = float(ntemplates)
+    full = cost.feed["full"] / nt
+    band = cost.feed["band"].get(top)
+    if forced is False or cost.n > 65536 or top >= cost.n or band is None:
+        return (0, full, full, 0.0)
+    if forced:
+        return (1, band / nt, full, 0.0)
+    return (2, band / nt, full, (cost.n - top) / (2.0 * cost.n))
 
 
 class CostModel:
@@ -254,18 +281,21 @@ class CostModel:
         cm._sig = None
         return cm
 
-    def feed_delta(self, chain, reach, ntemplates, hw=None):
+    def feed_delta(self, chain, reach, ntemplates, hw=None, forced=READ_ENV):
         """Per-pair change from `block` of the forward this chain's calls take: the band
         forward at its widest band, or the full forward, as the backend decides from the
         chain's modelled refine probability reach[len(chain)] (band_forward_wanted,
         the call's own rule; 0 when direct refine claims the band forward), each measured
-        per block and spread over the templates. 0 where the backend has one feed."""
+        per block and spread over the templates. 0 where the backend has one feed. forced:
+        MF_BAND_FORWARD's value when the caller has read it (a chain choice reads it once)."""
         if self.feed is None or not ntemplates:
             return 0.0
         top = int(max(chain))
         r = (0.0 if (hw is not None and self.prices_direct(chain))
              else min(max(float(reach[len(chain)]), 0.0), 1.0))
-        if band_forward_wanted(self.n, top, r) and top in self.feed["band"]:
+        if forced is READ_ENV:
+            forced = _config.get("MF_BAND_FORWARD")
+        if _band_forward_given(self.n, top, r, forced) and top in self.feed["band"]:
             per = self.feed["band"][top]
         else:
             per = self.feed["full"]

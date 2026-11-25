@@ -44,7 +44,7 @@ from collections import OrderedDict
 import numpy as np
 
 from . import gatemodel as _gm
-from . import _costfile, _costmodel, _gatedraws
+from . import _config, _costfile, _costmodel, _gatedraws
 # The decision rules live in _choice; gatechain's callers keep them by these names.
 from ._choice import TIE
 # The cost file lives in _costfile. The calibration, the bank's layout and the Vulkan back end
@@ -531,7 +531,8 @@ class _LazyPlan(dict):
 
 
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               memo=None, lags=None, lazy_fit=False, offsets=None, far=False):
+               memo=None, lags=None, lazy_fit=False, offsets=None, far=False,
+               band_forward=_costmodel.READ_ENV):
     """The thresholds and direct-refine half-width for `chain` that meet the false-dismissal
     budget fd at minimum modelled cost.
 
@@ -565,7 +566,9 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     on the few dismissed draws' indices, and carries noise passes down the split search, so
     candidates sharing a prefix share its work. memo, a key naming the draws (_choose_chain
     passes the profile, n, window and draw parameters), caches the candidates, so another
-    template group or cost model prices them without searching again.
+    template group or cost model prices them without searching again. band_forward:
+    MF_BAND_FORWARD's value where the caller has read it (a chain choice prices many chains
+    and reads it once), for the feed's price (CostModel.feed_delta).
     """
     cols = [bands.index(b) for b in chain]
     A, B = _kept_halves(sig, bands, cols, chain, snr)
@@ -596,6 +599,8 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
             _derived_put(_CAND_CACHE, key, (sig[0], noise), cands, _CAND_CACHE_MAX)
     best = None
     has_feed = bool(ntemplates and getattr(cost, "feed", None))
+    if has_feed and band_forward is _costmodel.READ_ENV:
+        band_forward = _config.get("MF_BAND_FORWARD")
     k = len(chain)
     # Hoist prefix tier costs across candidate half-widths when pricing on CostModel (k >= 2)
     if isinstance(cost, CostModel) and k >= 2:
@@ -608,11 +613,14 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
         b_last = int(chain[-1]) if prices_dir else 0
         has_last_sparse = bool(prices_dir and dmfrac > 0.0 and b_last in cost._sparse)
         R = n // b_last if prices_dir else 0
-        tables = None if has_feed or not _C_PRICING else _pricing_tables(
+        tables = None if not _C_PRICING else _pricing_tables(
             cost, chain, prices_dir, dbase, dlag, R, dfrac, dmfrac if has_last_sparse else None)
         if tables is not None:
-            # every candidate priced in C (_core.plan_best), as the loop below prices them
-            found = _core.plan_best(cands, tuple(hws), *tables)
+            # every candidate priced in C (_core.plan_best), as the loop below prices them,
+            # the feed by feed_delta's rule (feed_rule)
+            feed = (_costmodel.feed_rule(cost, chain, ntemplates, band_forward)
+                    if has_feed else None)
+            found = _core.plan_best(cands, tuple(hws), *tables, feed)
             if found is not None:
                 c, at, which = found
                 pth, preach, lasts = cands[at]
@@ -636,7 +644,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
                     r_cost = (1.0 - dfrac) * r_cost + dfrac * d_cost
                 c = c_prefix + f * r_cost
                 if has_feed:
-                    c += cost.feed_delta(chain, preach + (f,), ntemplates, hw)
+                    c += cost.feed_delta(chain, preach + (f,), ntemplates, hw, band_forward)
                 if best is None or c < best[0]:
                     best = (float(c), pth + (last[0],), preach + (f,), hw)
     else:
@@ -649,7 +657,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
                 if has_feed:
                     # the change from the feed `block` was measured with; pick_stable's tie window
                     # is absolute-valued, so a change that takes a total below zero still compares
-                    c += cost.feed_delta(chain, list(reach), ntemplates, hw)
+                    c += cost.feed_delta(chain, list(reach), ntemplates, hw, band_forward)
                 if best is None or c < best[0]:
                     best = (float(c), th, reach, hw)
     if best is None:
@@ -1041,6 +1049,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             t0_draws[b0] = (sig_b0, noise_b0, memo_b0, lags_b0)
 
     plans = []
+    band_forward = _config.get("MF_BAND_FORWARD")       # read once for every chain's feed
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         if first is not None and (len(chain) < min_t0_len or chain[0] != first):
             continue
@@ -1054,7 +1063,8 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             sig_use, noise_use, memo_use, lags_use = sig, noise, memo, lags
         pl = plan_chain(sig_use, noise_use, bands, list(chain), fd, cost, n, snr, prune=True,
                         ntemplates=ntemplates, memo=memo_use, lags=lags_use, lazy_fit=True, offsets=offs,
-                        far=sig_win != ((0, int(n)) if win is None else win))
+                        far=sig_win != ((0, int(n)) if win is None else win),
+                        band_forward=band_forward)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1287,6 +1297,7 @@ def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND,
 
     # Build piecewise-monotone knot grid for CostModel tables
     has_feed = bool(ntemplates and getattr(cost, "feed", None))
+    band_forward = _config.get("MF_BAND_FORWARD") if has_feed else None
     base_knots = {0.0, 1e-12, 1e-6, 0.05 - 1e-12, 0.05, float(_USELESS_PASS), 1.0}
     for f_k, _ in cost._refine:
         base_knots.add(float(f_k))
@@ -1330,10 +1341,11 @@ def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND,
     def _feed_min(chain):
         if not has_feed:
             return 0.0
-        vals = [cost.feed_delta(chain, [1.0] * len(chain) + [0.0], ntemplates, None),
-                cost.feed_delta(chain, [1.0] * len(chain) + [1.0], ntemplates, None)]
+        vals = [cost.feed_delta(chain, [1.0] * len(chain) + [0.0], ntemplates, None, band_forward),
+                cost.feed_delta(chain, [1.0] * len(chain) + [1.0], ntemplates, None, band_forward)]
         if cost.prices_direct(chain):
-            vals.append(cost.feed_delta(chain, [1.0] * len(chain) + [1.0], ntemplates, 1))
+            vals.append(cost.feed_delta(chain, [1.0] * len(chain) + [1.0], ntemplates, 1,
+                                        band_forward))
         return min(vals)
 
     # Zero-FFT tier-0 + feed floor across all candidate chains

@@ -16,7 +16,7 @@ N, SNR = 2048, 6.0
 BANDS = (64, 128, 256, 512, 1024)
 
 
-def _model(screen, ratios, direct):
+def _model(screen, ratios, direct, feed=False):
     sparse = {b: [(0.0098, 600.0 * b / 128), (0.05, 420.0 * b / 128), (0.104, 300.0 * b / 128)]
               for b in BANDS}
     screens = None
@@ -26,7 +26,10 @@ def _model(screen, ratios, direct):
                        "sparse": [(0.0098, 520.0 * b / 128), (0.104, 280.0 * b / 128)]}
                    for b, d in ((64, 30.7), (128, 57.5), (256, 140.1), (512, 378.3))}
     cost = gc.CostModel(N, {64: 30.7, 128: 57.5, 256: 140.1, 512: 378.3, 1024: 876.6}, sparse,
-                        [(0.0098, 3388.0), (0.104, 2889.0)], block=3306.0, screen=screens)
+                        [(0.0098, 3388.0), (0.104, 2889.0)], block=3306.0, screen=screens,
+                        # a GPU's feeds: the band forward at each widest band, the full one
+                        feed=({"band": {64: 0.0, 128: -500.0, 256: -380.0, 512: -410.0, 1024: 290.0},
+                               "full": 1390.0} if feed else None))
     if ratios:
         cost = cost.with_tier0_cluster({64: 0.55, 128: 0.7, 256: 0.6})
     if direct:
@@ -65,6 +68,46 @@ def test_the_plans_are_the_python_loops(screen, ratios, direct, empty_model, mon
         assert any(d[5] for d in multi)                  # some take the screen
     if direct:
         assert any(d[4] is not None for d in multi)      # some refine in a window
+
+
+@pytest.mark.parametrize("forced", ["", "0", "1"])
+@pytest.mark.parametrize("ratios, direct", [(False, False), (True, False), (False, True),
+                                            (True, True)])
+def test_a_gpus_feed_is_priced_as_the_python_loop_prices_it(forced, ratios, direct, empty_model,
+                                                           monkeypatch):
+    """A GPU's cost model prices each chain's feed (CostModel.feed_delta: the band forward or
+    the full one, by the chain's refine fraction, or as MF_BAND_FORWARD forces it). The C
+    routine prices it too (it, not the loop, priced the multi-tier chains), to the bit: the
+    same plans at the same costs as the Python loop."""
+    from matchedfilter import _core
+    monkeypatch.setenv("MF_BAND_FORWARD", forced)
+    p = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    cost = _model(False, ratios, direct, feed=True)
+    in_routine = []
+    plan_best = _core.plan_best
+
+    def counted(*args):
+        in_routine.append(args[-1])
+        return plan_best(*args)
+    monkeypatch.setattr(gc._core, "plan_best", counted)
+    plans = {}
+    for in_c in (True, False):
+        monkeypatch.setattr(gc, "_C_PRICING", in_c)
+        for c in (gc._CHOICE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE, gd._SIMILAR):
+            c.clear()
+        best, every = gc.choose_chain(p, N, SNR, 1e-3, cost=cost, max_tiers=3, ntemplates=96)
+        plans[in_c] = [(tuple(d["chain"]), d["cost"], tuple(d["search"]["thresholds"]),
+                        tuple(d["search"]["reach"]), d["search"]["halfwidth"])
+                       for d in every]
+    assert plans[True] == plans[False] and len(plans[True]) >= 5
+    assert in_routine and all(f is not None for f in in_routine)
+    # the feed is in the costs: the same choice without it prices the chains differently
+    monkeypatch.setattr(gc, "_C_PRICING", True)
+    for c in (gc._CHOICE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE, gd._SIMILAR):
+        c.clear()
+    _, bare = gc.choose_chain(p, N, SNR, 1e-3, cost=_model(False, ratios, direct), max_tiers=3,
+                              ntemplates=96)
+    assert {tuple(d["chain"]): d["cost"] for d in bare} != {c[0]: c[1] for c in plans[True]}
 
 
 def test_a_table_too_long_for_the_routine_is_priced_in_python(empty_model, monkeypatch):
