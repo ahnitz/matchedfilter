@@ -2670,15 +2670,23 @@ class TimeDomainFilterBank:
         st, bounds, keep, edges = self._windows_layout(g, S, W, support)
         if st.size:
             self._correlate_group(g, ser, st, t0, nt, dest, bounds)
-            # Work counters for matchedfilter._roofline: per block length, the
-            # blocks transformed, (block, template) products and inverses, the
-            # output samples the windows ask for, and template spectra read.
-            # (Stored bins per template without materialising a lazily planned
-            # group's spectra: that stacked every template's filter, ~1 ms a call.)
-            self._add_corr_work(g.n, dict(
-                blocks=int(st.size), pairs=int(st.size) * nt,
-                out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
-                tmpl_values=nt * _stored_bins(g)))
+            self._count_windows_work(g, st, keep, nt)
+        self._clear_outside(g, W, dest, edges, settle)
+
+    def _count_windows_work(self, g, st, keep, nt):
+        """Work counters for matchedfilter._roofline: per block length, the blocks
+        transformed, (block, template) products and inverses, the output samples the
+        windows ask for, and template spectra read. (Stored bins per template without
+        materialising a lazily planned group's spectra: that stacked every template's
+        filter, ~1 ms a call.)"""
+        self._add_corr_work(g.n, dict(
+            blocks=int(st.size), pairs=int(st.size) * nt,
+            out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
+            tmpl_values=nt * _stored_bins(g)))
+
+    def _clear_outside(self, g, W, dest, edges, settle):
+        """Zero dest's columns between the flat [a0, b0, a1, b1, ...] edges
+        (_windows_layout): on the device where dest lies in its memory, else on the host."""
         # Clear by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing along axis 1
         # thrashes one cache set once 17+ rows sit 2^20 samples apart (see _correlate_group);
         # 27 rows took ~400 ms against ~10 ms by runs.
@@ -2712,6 +2720,36 @@ class TimeDomainFilterBank:
                 settle.append(gpu)
             else:
                 gpu.zero_columns_done()
+
+    def _correlate_windows_channels(self, g, items, t0, nt, settle):
+        """_correlate_windows(g, ser, W, t0, nt, dest, settle, support) for every
+        (ser, W, dest, support) of items -- the channels of a middle stage -- with every
+        channel's blocks in one device submission (CorrelationFilter._continuous_gpu_parts)
+        where each series is real and read as such, each dest lies in this group's device
+        memory with contiguous rows, and the device does not write it through a host view;
+        else channel by channel."""
+        cplan = g.get_correlation_plan()
+        gpu = cplan._gpu
+        view = getattr(gpu, 'host_view', None) if gpu is not None else None
+        if gpu is None or not _gpu_reads_real(gpu, g.n) or any(
+                ser.dtype != np.float32 or not dest.flags.c_contiguous
+                or shared_view(dest, gpu) is None or (view is not None and view(dest) is not None)
+                for ser, _, dest, _ in items):
+            for ser, W, dest, support in items:
+                self._correlate_windows(g, ser, W, t0, nt, dest, settle, support=support)
+            return
+        layouts = [self._windows_layout(g, ser.size, W, support) for ser, W, _, support in items]
+        cplan._require_templates(t0, nt)
+        cplan._dataset = False
+        cplan._data_ready = set()
+        parts = [(ser, st, dest) for (ser, _, dest, _), (st, _, _, _) in zip(items, layouts)
+                 if st.size]
+        if parts:
+            cplan._continuous_gpu_parts(parts, t0, nt)
+        for (ser, W, dest, _), (st, _, keep, edges) in zip(items, layouts):
+            if st.size:
+                self._count_windows_work(g, st, keep, nt)
+            self._clear_outside(g, W, dest, edges, settle)
 
     def correlate_series(
         self,
@@ -2768,22 +2806,7 @@ class TimeDomainFilterBank:
             ``template_index`` ``(len(series),)``. It is ``out`` when that was given.
         """
 
-        a = _from_any(series)
-        # A real series stays real (a real-real-complex hierarchy's middle stage filtering
-        # the real top output) where every group reads one: on the CPU, half-size block
-        # transforms (correlate_series_continuous_real); on a GPU, a forward that reads
-        # the real samples in place. Elsewhere it is widened to complex.
-        if (isinstance(a, np.ndarray) and not np.iscomplexobj(a)
-                and self._correlation_reads_real()):
-            # A GPU forward reads one lane of a complex row (stride 2) in place; the CPU's
-            # half-size transforms take a contiguous series.
-            lane = (a.dtype == np.float32 and a.ndim == 1 and a.strides == (8,)
-                    and _device.parse(self.device).kind != 'cpu')
-            ser = a if lane else np.ascontiguousarray(a, np.float32)
-        else:
-            ser = _host_copy(a, np.complex64)
-        if ser.ndim != 1:
-            raise ValueError("series must be a 1D array")
+        ser = self._series_input(series)
         S = ser.size
         nt = self.n_templates
         W = _normalize_windows(windows, S)
@@ -2872,6 +2895,116 @@ class TimeDomainFilterBank:
                     gpu.settle_writes()
                     gpu._x_idle()
         return result
+
+    def _series_input(self, series):
+        """The series correlate_series correlates: 1-D, real where every group reads a real
+        series, else complex64."""
+        a = _from_any(series)
+        # A real series stays real (a real-real-complex hierarchy's middle stage filtering
+        # the real top output) where every group reads one: on the CPU, half-size block
+        # transforms (correlate_series_continuous_real); on a GPU, a forward that reads
+        # the real samples in place. Elsewhere it is widened to complex.
+        if (isinstance(a, np.ndarray) and not np.iscomplexobj(a)
+                and self._correlation_reads_real()):
+            # A GPU forward reads one lane of a complex row (stride 2) in place; the CPU's
+            # half-size transforms take a contiguous series.
+            lane = (a.dtype == np.float32 and a.ndim == 1 and a.strides == (8,)
+                    and _device.parse(self.device).kind != 'cpu')
+            ser = a if lane else np.ascontiguousarray(a, np.float32)
+        else:
+            ser = _host_copy(a, np.complex64)
+        if ser.ndim != 1:
+            raise ValueError("series must be a 1D array")
+        return ser
+
+    def correlate_series_channels(self, series, windows, out, out_support, templates=None,
+                                  wait=True):
+        """correlate_series(series[i], windows=windows[i], out=out[i],
+        out_support=out_support[i], templates=templates, wait=wait) for every i: the
+        channels (detectors) of one middle stage, which a search filters together.
+
+        On a GPU each group's correlation of every channel is one submission whose
+        dispatches the device runs together (_correlate_windows_channels): one channel's
+        call fills the device for a few rounds of workgroups and ends on a partly filled
+        one. The results are each call's.
+
+        Parameters
+        ----------
+        series : sequence of ndarray
+            One series per channel, as :meth:`correlate_series` takes it.
+        windows : sequence
+            One windows argument per channel.
+        out : sequence of ndarray
+            One output per channel: ``(n_templates, len(series[i]))``, or
+            ``(len(templates), len(series[i]))``, C-contiguous complex64.
+        out_support : sequence
+            One ``out_support`` per channel (None: all of that output is written).
+        templates : sequence of int, optional
+            As :meth:`correlate_series`; the same for every channel. Default None: all.
+        wait : bool, optional
+            As :meth:`correlate_series`. Default True.
+
+        Returns
+        -------
+        list of ndarray
+            ``out``.
+        """
+        series, windows, out, out_support = (list(series), list(windows), list(out),
+                                             list(out_support))
+        if not (len(series) == len(windows) == len(out) == len(out_support)):
+            raise ValueError("give one series, windows, out and out_support per channel")
+        self._groups
+        sel = (np.arange(self.n_templates) if templates is None
+               else np.asarray(templates, dtype=np.int64).ravel())
+        sers = [self._series_input(a) for a in series]
+        # runs of rows adjacent in the result and in one group: (group, first local, first row,
+        # count), as _correlate_selected forms them
+        runs = []
+        for j, t in enumerate(sel):
+            g, li = self._template_map[int(t)]
+            if runs and runs[-1][0] is g and runs[-1][1] + runs[-1][3] == li:
+                runs[-1][3] += 1
+            else:
+                runs.append([g, li, j, 1])
+        shape_ok = all(isinstance(o, np.ndarray) and o.dtype == np.complex64
+                       and o.shape == (sel.size, ser.size) and o.flags.c_contiguous
+                       and o.flags.writeable for o, ser in zip(out, sers))
+        if (len(sers) < 2 or not shape_ok or np.unique(sel).size != sel.size
+                or sel.min(initial=0) < 0 or sel.max(initial=0) >= self.n_templates
+                or any((containing_samples(ser, g.get_correlation_plan()._gpu)
+                        if ser.dtype == np.float32 else None) is None
+                       for ser in sers for g, _, _, _ in runs
+                       if getattr(g.get_correlation_plan(), '_gpu', None) is not None)
+                or any(getattr(g.get_correlation_plan(), '_gpu', None) is None
+                       for g, _, _, _ in runs)):
+            # Channel by channel (a CPU bank, a series outside device memory, one channel,
+            # or arguments correlate_series rejects with its own message).
+            for a, w, o, sup in zip(series, windows, out, out_support):
+                self.correlate_series(a, windows=w, out=o, out_support=sup, templates=templates,
+                                      wait=wait)
+            return out
+        Ws = [_normalize_windows(w, ser.size) for w, ser in zip(windows, sers)]
+        sups = [None if sup is None else _normalize_windows(sup, ser.size)
+                for sup, ser in zip(out_support, sers)]
+        for W in Ws:
+            self._add_corr_in(int((W[:, 1] - W[:, 0]).sum()))
+        settle = []
+        ok = False
+        try:
+            for g, li, j, cnt in runs:
+                self._correlate_windows_channels(
+                    g, [(ser, W, o[j:j + cnt], sup) for ser, W, o, sup in zip(sers, Ws, out, sups)],
+                    li, cnt, settle)
+            ok = True
+        finally:
+            gpus = list({id(x): x for x in settle}.values())
+            for gpu in gpus:
+                gpu.zero_columns_done(wait=False)
+            if not (ok and not wait):
+                for gpu in gpus:
+                    gpu.settle_writes()
+                    gpu._x_idle()
+        return out
 
     def wait(self) -> None:
         """Finish work this bank's devices left in flight (correlate_series(wait=False))."""

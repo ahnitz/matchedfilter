@@ -440,8 +440,33 @@ class _InnerBatch:
 
     def compute(self, channel, rows):
         """Rows (ascending) into channel's first len(rows) slots. Returns row -> slot."""
-        state = self._chan[channel]
+        return self.compute_channels([channel], rows)[channel]
+
+    def compute_channels(self, channels, rows):
+        """Rows (ascending) into each channel's first len(rows) slots, every channel in one
+        bank call (TimeDomainFilterBank.correlate_series_channels: on a device, one
+        submission per block-size group for all of them). Returns channel -> row -> slot."""
+        for channel in channels:
+            self._slots(channel, len(rows))
+        # On a device the rows are left in flight: the leaves' forwards are ordered after them
+        # on the GPU, and a host reader settles them first (HierarchicalSearch._settle).
+        on_device = self._alloc is not None
         k = len(rows)
+        sel = None if k == self.n_rows else rows
+        states = [self._chan[c] for c in channels]
+        supports = [_merge([w for j in range(k) for w in st["support"][j]]) for st in states]
+        self.bank.correlate_series_channels(
+            [st["series"] for st in states], [st["regions"] for st in states],
+            [st["slots"][:k] for st in states], supports, templates=sel, wait=not on_device)
+        self.in_flight = self.in_flight or on_device
+        for st in states:
+            for j in range(k):
+                st["support"][j] = st["regions"]
+        return {c: {r: j for j, r in enumerate(rows)} for c in channels}
+
+    def _slots(self, channel, k):
+        """Make channel's slots hold at least k rows."""
+        state = self._chan[channel]
         if state["slots"] is None or state["slots"].shape[0] < k:
             if self._alloc is None:
                 state["slots"] = _aligned_zeros((k, self.length), dtype=np.complex64)
@@ -453,18 +478,6 @@ class _InnerBatch:
                 # for each search, 0.67 s of a pycbc job's 64 top templates.
                 state["slots"] = self._alloc((k, self.length))
                 state["support"] = [[(0, self.length)] for _ in range(k)]
-        support = state["support"]
-        # On a device the rows are left in flight: the leaves' forwards are ordered after them
-        # on the GPU, and a host reader settles them first (HierarchicalSearch._settle).
-        on_device = self._alloc is not None
-        sel = None if k == self.n_rows else rows
-        self.bank.correlate_series(state["series"], windows=state["regions"], templates=sel,
-                                   out=state["slots"][:k], wait=not on_device,
-                                   out_support=_merge([w for j in range(k) for w in support[j]]))
-        self.in_flight = self.in_flight or on_device
-        for j in range(k):
-            support[j] = state["regions"]
-        return {r: j for j, r in enumerate(rows)}
 
     def prepare_job(self, channel, rows):
         """Prepare channel's first len(rows) slots and return (slot_of, (corr_job, commit))
@@ -875,8 +888,8 @@ class HierarchicalSearch:
             if couple_cpu:
                 slot_of[c], job = batch.prepare_job(c, rows)
                 step.corr_jobs.append(job)
-            else:
-                slot_of[c] = batch.compute(c, rows)
+        if not couple_cpu:
+            slot_of.update(batch.compute_channels(step.active, rows))
         members = sorted(wanted, key=lambda p: batch.row_of[p])
         for pos in members:
             child = batch.children[pos]

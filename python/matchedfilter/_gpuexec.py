@@ -191,7 +191,7 @@ class Arg:
         self.name, self.words = name, words
 
 
-_OUT, _STARTS, _SERIES, _SPECTRA = Arg("out"), Arg("starts"), Arg("series"), Arg("spectra")
+_STARTS, _SERIES, _SPECTRA = Arg("starts"), Arg("series"), Arg("spectra")
 
 
 #: How a sparse result can be read (flat peaks: compacted on the device or read dense and
@@ -525,21 +525,43 @@ class Executor(HierOps):
 
     # ---- continuous correlation ---------------------------------------------------------
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi, *, upload_data=True,
-                             upload_tmpl=True, async_submit=False):
+                             upload_tmpl=True, async_submit=False, rows=None):
         """Full correlation of each data block with every template, lags [lo, hi) written at
         the block's absolute series offset: out[t, starts[d] + lag] (template-major).
 
         out (templates, samples) and starts (one per data block) lie in device memory -- a
         shared allocation or a view inside one -- and are bound per call, so the record (and
         its uploaded templates) does not follow them. async_submit: left in flight, a pending
-        write (device consumers are ordered after it, a host reader settles first)."""
+        write (device consumers are ordered after it, a host reader settles first).
+
+        starts and out may also be sequences, one entry per part (the middle stage's
+        channels): part i's blocks are len(starts[i]) rows of data from row rows[i] (default:
+        each part's rows follow the last's), written into out[i] (templates, samples_i). The
+        parts are one submission whose dispatches the device runs together, so each part's
+        small grid does not wait for the last."""
         nd, nt = data.shape[0], tmpl.shape[0]
-        ov, sv = shared_view(out, self), shared_view(starts, self)
-        if ov is None or out.ndim != 2 or out.shape[0] != nt or starts.shape != (nd,):
-            raise ValueError('continuous output must be a shared GPU buffer of every template')
-        length = out.shape[1]
+        multi = isinstance(out, (list, tuple))
+        outs, startss = (list(out), list(starts)) if multi else ([out], [starts])
+        counts = [st.shape[0] for st in startss]
+        firsts = [int(f) for f in (rows if rows is not None else np.cumsum([0] + counts[:-1]))]
+        if len(outs) != len(startss) or len(firsts) != len(outs) or any(
+                f < 0 or f + c > nd for f, c in zip(firsts, counts)):
+            raise ValueError("continuous parts must lie in the data rows")
+        ovs, svs = [shared_view(o, self) for o in outs], [shared_view(s, self) for s in startss]
+        for o, ov, st in zip(outs, ovs, startss):
+            if ov is None or o.ndim != 2 or o.shape[0] != nt or st.ndim != 1:
+                raise ValueError('continuous output must be a shared GPU buffer of every template')
         limit = getattr(self, "max_binding_bytes", None)
-        if limit and out.nbytes > limit and nt > 1 and length * 8 <= limit:
+        split = self._x_tierc(n) if n > 65536 else None
+        if len(outs) > 1 and (split or (limit and any(o.nbytes > limit for o in outs))):
+            # Two-stage or past the binding limit: each part on its own (below).
+            for o, st, f in zip(outs, startss, firsts):
+                self.correlate_continuous(n, data[f:f + st.shape[0]], tmpl, st, o, lo, hi,
+                                          upload_data=upload_data, upload_tmpl=upload_tmpl,
+                                          async_submit=async_submit)
+            return out
+        length = outs[0].shape[1]
+        if limit and outs[0].nbytes > limit and nt > 1 and length * 8 <= limit:
             # One binding spans at most `limit` bytes: groups of whole templates, each a
             # contiguous run of `out`'s rows (see correlate).
             group = max(1, limit // (length * 8))
@@ -549,20 +571,24 @@ class Executor(HierOps):
                                           upload_data=upload_data, upload_tmpl=upload_tmpl,
                                           async_submit=False)
             return out
-        if limit and out.nbytes > limit:
+        if limit and outs[0].nbytes > limit:
             raise ValueError("continuous output of %d bytes per template exceeds this device's "
                              "%d-byte binding limit: correlate a shorter series" % (length * 8, limit))
-        split = self._x_tierc(n) if n > 65536 else None
         # The two-stage form needs per-pair scratch: runs of whole data rows bound it (a row
-        # past the budget is one run). Each run's starts are its own uploaded copy.
-        rows = max(1, min(nd, self._FULL_BUDGET // (nt * n * 8))) if split else nd
-        runs = [(d0, min(d0 + rows, nd)) for d0 in range(0, nd, rows)]
+        # past the budget is one run). Each run's starts are its own uploaded copy. Otherwise
+        # one run per part: (first data row, end row, part).
+        rows = max(1, min(nd, self._FULL_BUDGET // (nt * n * 8))) if split else max(nd, 1)
+        runs = []
+        for p, (f, c) in enumerate(zip(firsts, counts)):
+            runs.extend((d0, min(d0 + rows, f + c), p) for d0 in range(f, f + c, rows))
         # Block starts are uploaded where they lie outside device memory, where the device
-        # stages host-written inputs, or per run (each run's starts from its first row).
-        staged = self.stage_host_inputs or sv is None or len(runs) > 1
+        # stages host-written inputs, or per run of a part split in runs (each run's starts
+        # from its first row).
+        staged = self.stage_host_inputs or any(v is None for v in svs) or len(runs) > len(outs)
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
-        key = ("series", n, nd, nt, length, lo, hi, dv is not None and data.ctypes.data,
-               tv is not None and tmpl.ctypes.data, staged)
+        lengths = tuple(o.shape[1] for o in outs)
+        key = ("series", n, nd, nt, lengths, tuple(counts), tuple(firsts), lo, hi,
+               dv is not None and data.ctypes.data, tv is not None and tmpl.ctypes.data, staged)
         uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
         table = self._exec_table()
         rec = table.get(key)
@@ -575,21 +601,25 @@ class Executor(HierOps):
             bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
             scratch = (self._exec_buffer(rec, "scratch", nbytes=rows * nt * n * 8)
                        if split else None)
-            words = (nt, length, lo, hi)
             lst = self._x_list("continuous")
             lst.barrier()                 # earlier readers of `out` finish first
-            for i, (d0, d1) in enumerate(runs):
+            for i, (d0, d1, p) in enumerate(runs):
+                words = (nt, lengths[p], lo, hi)
+                bo = Arg("out%d" % p)
                 bs = (self._exec_buffer(rec, "starts%d" % i, nbytes=(d1 - d0) * 4, upload=True)
-                      if staged else _STARTS)
+                      if staged else Arg("starts%d" % p))
                 if split:
                     lst.dispatch(self._x_kernel("tc1", n), (d1 - d0) * nt * split[0],
                                  [bd, bt, scratch], (nt,), offsets=[d0 * n * 8, 0, 0])
                     lst.barrier()
                     lst.dispatch(self._x_kernel("tcs2", n), (d1 - d0) * nt * split[1],
-                                 [scratch, bs, _OUT], (words,))
+                                 [scratch, bs, bo], (words,))
+                    lst.barrier()
                 else:
-                    lst.dispatch(self._x_kernel("series", n), nd * nt, [bd, bt, bs, _OUT],
-                                 (words,))
+                    # The parts write disjoint outputs: no barrier between them.
+                    lst.dispatch(self._x_kernel("series", n), (d1 - d0) * nt, [bd, bt, bs, bo],
+                                 (words,), offsets=[d0 * n * 8, 0, 0, 0])
+            if not split:
                 lst.barrier()
             rec.native = lst.end()
             table[key] = rec
@@ -598,13 +628,16 @@ class Executor(HierOps):
         if staged or (uploads[0] and "data" in rec.owned) or (uploads[1] and "tmpl" in rec.owned):
             self.settle_writes()          # a call left in flight may still read these inputs
         self._write_uploads(key, uploads, rec.buffers["data"], data, rec.buffers["tmpl"], tmpl)
+        binds = {"out%d" % p: ov for p, ov in enumerate(ovs)}
         if staged:
-            for i, (d0, d1) in enumerate(runs):
-                self._x_upload(rec.buffers["starts%d" % i], starts[d0:d1], None)
+            for i, (d0, d1, p) in enumerate(runs):
+                self._x_upload(rec.buffers["starts%d" % i],
+                               startss[p][d0 - firsts[p]:d1 - firsts[p]], None)
+        else:
+            binds.update({"starts%d" % p: sv for p, sv in enumerate(svs)})
         if async_submit:
             self._x_after_readers()
-        self._exec_run(rec.native, not async_submit,
-                       {"out": ov} if staged else {"out": ov, "starts": sv}, None, rec)
+        self._exec_run(rec.native, not async_submit, binds, None, rec)
         return out
 
     # ---- device timers ------------------------------------------------------------------

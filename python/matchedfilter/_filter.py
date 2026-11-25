@@ -2309,6 +2309,69 @@ class CorrelationFilter(MatchedFilter):
             self._tdirty = False
         pool[k] = work[:4] + (self._gpu.write_token(),)
 
+    def _continuous_gpu_parts(self, parts, t0, nt):
+        """_continuous_gpu(ser, starts, t0, nt, out, defer=True) for every (ser, starts, out)
+        of `parts` -- the channels of a middle stage -- as one submission: each part's
+        forward, then every part's correlation dispatched together (correlate_continuous
+        with a part per channel), left in flight. A channel's call alone fills the device
+        for a few rounds of workgroups and ends on a partly filled one; together the
+        channels share those rounds and one barrier. Each series a real float32 series in
+        this device's memory, all the blocks one batch (else each part runs as its own call).
+        """
+        gpu = self._gpu
+        align = max(1, getattr(gpu, 'storage_offset_alignment', 256) // 4)
+        sources, total = [], 0
+        for ser, starts, out in parts:
+            c = (containing_samples(ser, gpu) if ser.dtype == np.float32 else None)
+            if (c is None or c[1] + c[2] * ser.size > np.iinfo(np.uint32).max
+                    or nt * ser.size > np.iinfo(np.uint32).max):
+                sources = None
+                break
+            sources.append((c, total))
+            total += -(-starts.size // align) * align   # each part's rows start aligned
+        budget = getattr(self, '_series_batch_bytes', 64 * 1024 * 1024)
+        if (sources is None or self.n > 65536 or total > self._gpu_pair_limit() // nt
+                or total * 8 * self.n > budget):
+            for ser, starts, out in parts:
+                self._continuous_gpu(ser, starts, t0, nt, out, defer=True)
+            return
+        pool = self.__dict__.setdefault('_continuous_workspaces', [])
+        k = self.__dict__.get('_continuous_next', 0) % 2
+        self._continuous_next = k + 1
+        while len(pool) <= k:
+            pool.append(None)
+        work = pool[k]
+        if work is not None:
+            gpu.settle_until(work[4])       # the call that used it has finished reading it
+        if work is None or work[2].shape[0] < total:
+            cap = max(total, work[2].shape[0]) if work else total
+            work = (None, work[1] if work else self.empty_shared((1,)),
+                    self.empty_shared((cap, self.n)), self.empty_shared(cap, np.uint32), None)
+        _, _, spec, offsets, _ = work
+        fo = self.__dict__.setdefault('_continuous_fwd_offsets', {})
+        fwd_offsets = fo.get(k)
+        if fwd_offsets is None or fwd_offsets.size < offsets.size:
+            fwd_offsets = fo[k] = self.empty_shared(offsets.size, np.uint32)
+        lo, hi = self.valid
+        starts_v, outs = [], []
+        try:
+            for (ser, starts, out), ((whole, off, stride), r0) in zip(parts, sources):
+                count = starts.size
+                offsets[r0:r0 + count] = np.minimum(starts, ser.size)
+                fwd_offsets[r0:r0 + count] = offsets[r0:r0 + count] + np.uint32(off // stride)
+                gpu.forward(self.n, whole, fwd_offsets, spec, defer=True, rows=(r0, count),
+                            real=(off % stride, stride, off // stride + ser.size))
+                starts_v.append(offsets[r0:r0 + count])
+                outs.append(out)
+            gpu.correlate_continuous(self.n, spec[:total], self._gtmpl[t0:t0 + nt], starts_v,
+                                     outs, lo, hi, upload_data=True,
+                                     upload_tmpl=self._tdirty, async_submit=True,
+                                     rows=[r0 for _, r0 in sources])
+        finally:
+            gpu.cancel_forward()
+        self._tdirty = False
+        pool[k] = work[:4] + (gpu.write_token(),)
+
     def _full_output(self, shape, out):
         nbytes = math.prod(shape) * np.dtype(np.complex64).itemsize
         if out is None:
