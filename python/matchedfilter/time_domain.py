@@ -635,6 +635,7 @@ class _TemplateGroup:
         self.device = device
         self.templates_loaded = False
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
+        self._cached_single_layout = None       # the same for single-template calls
         self._serial = next(_GROUP_SERIAL)       # this group's name in shared plans' records
         self._flat_plan: Optional[Any] = None
         self._corr_plan: Optional[Any] = None
@@ -2005,14 +2006,18 @@ class TimeDomainFilterBank:
             wmemo[wkey] = (W, cache_key)
         return W, cache_key
 
-    def _group_blocks(self, g, W, S, cache_key):
+    def _group_blocks(self, g, W, S, cache_key, single=False):
         """The blocks a template group filters for windows W of a series of S samples: each
         block's start and its searched lags (block starts, window starts, window ends), as
-        `_window_layout` lays them out. The group keeps its last layout under cache_key."""
-        layout = g._cached_layout
+        `_window_layout` lays them out. The group keeps its last layout under cache_key, one
+        for the bank's calls and one for single-template calls (single): a follow-up's
+        windows replaced the bank calls' layout, and half the leaf calls of a pycbc GPU job
+        (13,529 of 26,588) laid their blocks out again."""
+        name = "_cached_single_layout" if single else "_cached_layout"
+        layout = getattr(g, name, None)
         if layout is None or layout[0] != cache_key:
             bstarts, bws, bwe = self._window_layout(g, W, S)
-            g._cached_layout = (cache_key, bstarts, bws, bwe)
+            setattr(g, name, (cache_key, bstarts, bws, bwe))
             return bstarts, bws, bwe
         return layout[1:]
 
@@ -2095,7 +2100,7 @@ class TimeDomainFilterBank:
                 # play's CPU arm) takes the CPU banks' batched follow-up path, as a batch of
                 # one: 0.2 ms a call where the one-template plan below took 0.5-0.7.
                 g, _ = self._template_map[template_index]
-                if self._single_device(g, self._group_blocks(g, W, S, cache_key)[0].size)[0]:
+                if self._single_device(g, self._group_blocks(g, W, S, cache_key, True)[0].size)[0]:
                     single_out = [None]
                     if _batches._cpu_single_td_batch(
                             [(self, series, dict(windows=windows, binsize=binsize,
@@ -2138,7 +2143,7 @@ class TimeDomainFilterBank:
             if self.engine == 'hier' and tmpl_arg is not None:
                 # one template ungated: a plan holding just it, not the group's whole ungated
                 # bank -- on whichever device runs this call shape faster
-                nblocks = self._group_blocks(g, W, S, cache_key)[0].size
+                nblocks = self._group_blocks(g, W, S, cache_key, True)[0].size
                 on_cpu, timed = self._single_device(g, nblocks)
                 active_plan = g.get_single_plan(tmpl_arg[0], on_cpu=on_cpu)
                 plan_templates = None
@@ -2154,7 +2159,7 @@ class TimeDomainFilterBank:
                 _settle_device_writes()
 
             N = g.n
-            bstarts, bws, bwe = self._group_blocks(g, W, S, cache_key)
+            bstarts, bws, bwe = self._group_blocks(g, W, S, cache_key, tmpl_arg is not None)
             if bstarts.size == 0:
                 continue
 

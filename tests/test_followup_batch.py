@@ -177,3 +177,27 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     assert {"gpu", "cpu"} <= set(sides), sides                  # both played
     assert trial.winner in trial.candidates and "single=cpu" in trial.candidates
     assert len(trial.samples["default"]) >= trial.minimum or trial.winner == "default"
+
+
+@pytest.mark.parametrize("device", _device_followup_backends() or ["none"])
+def test_a_follow_up_leaves_the_bank_call_layout_kept(device, monkeypatch):
+    """A follow-up's windows are laid out without replacing the layout the group keeps for
+    the bank's own calls: the next bank call over the same windows lays nothing out again.
+    Through the kept layout, half the leaf calls of a pycbc GPU job laid their blocks out
+    again after each follow-up."""
+    if device == "none":
+        pytest.skip("no GPU backend")
+    rng, banks = _banks(monkeypatch, device, nbanks=1)
+    bank = banks[0]
+    x = (rng.standard_normal(40000) + 1j * rng.standard_normal(40000)).astype(np.complex64)
+    lay = []
+    real = TimeDomainFilterBank._window_layout
+    monkeypatch.setattr(TimeDomainFilterBank, "_window_layout",
+                        staticmethod(lambda g, W, S: lay.append(W.tobytes()) or real(g, W, S)))
+    W = slice(3000, 37000)
+    first = bank.filter_series(x, windows=W)
+    bank.filter_series(x, windows=slice(10000, 12000), template_index=3)
+    n = len(lay)
+    again = bank.filter_series(x, windows=W)
+    assert len(lay) == n
+    np.testing.assert_array_equal(again.sample_indices, first.sample_indices)
