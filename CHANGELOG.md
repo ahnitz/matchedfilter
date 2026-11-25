@@ -34,6 +34,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   171,828-template BNS search (64 top templates, H1 and L1, one Zen 5 core, a reused cost
   file) clustering took 16.1 s and now takes 13.2 s (182 to 149 billion instructions), and
   the library's setup 26.0 s and now 23.1 s; the triggers are identical.
+- The clustered tiers of the hierarchical engine list each data block's surviving templates
+  from a bitmap instead of sorting them. The lists and the output order are unchanged. In the
+  same PyCBC job the steady search time fell from 40.1 s to 37.7 s (5.9%), with identical
+  triggers.
 
 ### Documentation
 
