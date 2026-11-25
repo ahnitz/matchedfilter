@@ -2604,51 +2604,65 @@ static PyObject *M_tier0_pair_level(PyObject *self,PyObject *args){
 
 /* Each group's shared screener (src/tier0_mwu.cc): a group in each vector lane, and the plain
    routine it reproduces bit for bit. Both return 0, or -1 when out of memory. */
-int ap_tier0_mwu(const double *u, const double *ref, const double *w, long long nb, long long m,
-                 long long K, int steps, double *c_out, double *ov_out);
-int ap_tier0_mwu_plain(const double *u, const double *ref, const double *w, long long nb,
-                       long long m, long long K, int steps, double *c_out, double *ov_out);
+int ap_tier0_mwu(const double *u, const int64_t *counts, const double *ref, const double *w,
+                 long long nb, long long M, long long K, int steps, double *c_out,
+                 double *ov_out);
+int ap_tier0_mwu_plain(const double *u, const int64_t *counts, const double *ref,
+                       const double *w, long long nb, long long M, long long K, int steps,
+                       double *c_out, double *ov_out);
 
-/* tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): the shared screener of each of nb groups
-   of m members, and its members' overlaps. U (nb, m, K) complex128, ref (nb, K) complex128,
-   w (K) float64; c_out (nb, K) complex128 and ov_out (nb, m) float64 are written. plain=1 runs
-   the one-group routine group by group: the same bytes, for the test that says so. */
+/* tier0_mwu(U, counts, ref, w, steps, c_out, ov_out, plain=0): the shared screener of each of
+   nb groups, group g of counts[g] members (1 .. M), and its members' overlaps. U (nb, M, K)
+   complex128, a group's members its first counts[g] rows; counts (nb) int64; ref (nb, K)
+   complex128, w (K) float64; c_out (nb, K) complex128 and ov_out (nb, M) float64 (a group's
+   first counts[g] entries) are written. plain=1 runs the one-group routine group by group:
+   the same bytes, for the test that says so. */
 static PyObject *M_tier0_mwu(PyObject *self,PyObject *args){
   (void)self;
-  Py_buffer u={0}, rf={0}, w={0}, co={0}, ov={0};
-  PyObject *uo, *rfo, *wo, *coo, *ovo;
+  Py_buffer u={0}, cn={0}, rf={0}, w={0}, co={0}, ov={0};
+  PyObject *uo, *cno, *rfo, *wo, *coo, *ovo;
   int steps=0, plain=0, got=0, ok=1;
-  if(!PyArg_ParseTuple(args,"OOOiOO|i",&uo,&rfo,&wo,&steps,&coo,&ovo,&plain)) return NULL;
+  if(!PyArg_ParseTuple(args,"OOOOiOO|i",&uo,&cno,&rfo,&wo,&steps,&coo,&ovo,&plain)) return NULL;
   if(PyObject_GetBuffer(uo,&u,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=1;
-  if(ok){ if(PyObject_GetBuffer(rfo,&rf,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=2; }
-  if(ok){ if(PyObject_GetBuffer(wo,&w,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=3; }
-  if(ok){ if(PyObject_GetBuffer(coo,&co,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=4; }
-  if(ok){ if(PyObject_GetBuffer(ovo,&ov,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=5; }
-  Py_ssize_t nb=0, m=0, K=0;
+  if(ok){ if(PyObject_GetBuffer(cno,&cn,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=2; }
+  if(ok){ if(PyObject_GetBuffer(rfo,&rf,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=3; }
+  if(ok){ if(PyObject_GetBuffer(wo,&w,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=4; }
+  if(ok){ if(PyObject_GetBuffer(coo,&co,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=5; }
+  if(ok){ if(PyObject_GetBuffer(ovo,&ov,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) ok=0; else got=6; }
+  Py_ssize_t nb=0, M=0, K=0;
   if(ok){
-    ok = u.ndim==3 && rf.ndim==2 && w.ndim==1 && co.ndim==2 && ov.ndim==2 && steps>=0
+    /* int64 arrives as "l" or "q", by platform */
+    ok = u.ndim==3 && cn.ndim==1 && rf.ndim==2 && w.ndim==1 && co.ndim==2 && ov.ndim==2 && steps>=0
          && u.itemsize==16 && strcmp(u.format,"Zd")==0 && rf.itemsize==16 && strcmp(rf.format,"Zd")==0
+         && cn.itemsize==8 && (strcmp(cn.format,"q")==0 || strcmp(cn.format,"l")==0)
          && co.itemsize==16 && strcmp(co.format,"Zd")==0
          && w.itemsize==8 && strcmp(w.format,"d")==0 && ov.itemsize==8 && strcmp(ov.format,"d")==0;
     if(ok){
-      nb=u.shape[0]; m=u.shape[1]; K=u.shape[2];
-      ok = m>=1 && K>=1 && rf.shape[0]==nb && rf.shape[1]==K && w.shape[0]==K
-           && co.shape[0]==nb && co.shape[1]==K && ov.shape[0]==nb && ov.shape[1]==m;
+      nb=u.shape[0]; M=u.shape[1]; K=u.shape[2];
+      ok = M>=1 && K>=1 && cn.shape[0]==nb && rf.shape[0]==nb && rf.shape[1]==K && w.shape[0]==K
+           && co.shape[0]==nb && co.shape[1]==K && ov.shape[0]==nb && ov.shape[1]==M;
+      for(Py_ssize_t g=0;g<nb && ok;g++){
+        const int64_t c=((const int64_t*)cn.buf)[g];
+        ok = c>=1 && c<=M;
+      }
     }
   }
   if(ok && (plain ? ap_tier0_mwu_plain : ap_tier0_mwu)(
-       (const double*)u.buf,(const double*)rf.buf,(const double*)w.buf,(long long)nb,(long long)m,
-       (long long)K,steps,(double*)co.buf,(double*)ov.buf)!=0){ ok=0; PyErr_NoMemory(); }
+       (const double*)u.buf,(const int64_t*)cn.buf,(const double*)rf.buf,(const double*)w.buf,
+       (long long)nb,(long long)M,(long long)K,steps,(double*)co.buf,(double*)ov.buf)!=0){
+    ok=0; PyErr_NoMemory();
+  }
   if(!ok){
     if(got>=1) PyBuffer_Release(&u);
-    if(got>=2) PyBuffer_Release(&rf);
-    if(got>=3) PyBuffer_Release(&w);
-    if(got>=4) PyBuffer_Release(&co);
-    if(got>=5) PyBuffer_Release(&ov);
-    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_mwu: invalid buffer shapes or dtypes");
+    if(got>=2) PyBuffer_Release(&cn);
+    if(got>=3) PyBuffer_Release(&rf);
+    if(got>=4) PyBuffer_Release(&w);
+    if(got>=5) PyBuffer_Release(&co);
+    if(got>=6) PyBuffer_Release(&ov);
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_mwu: invalid buffer shapes, dtypes or counts");
     return NULL;
   }
-  PyBuffer_Release(&u); PyBuffer_Release(&rf); PyBuffer_Release(&w);
+  PyBuffer_Release(&u); PyBuffer_Release(&cn); PyBuffer_Release(&rf); PyBuffer_Release(&w);
   PyBuffer_Release(&co); PyBuffer_Release(&ov);
   Py_RETURN_NONE;
 }
@@ -3046,7 +3060,7 @@ static PyMethodDef methods[]={
   {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},
   {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> (count, reach): one pass of the shared-screener merging, a level's clusters and candidate merges in, the next level out"},
   {"tier0_pair_level",M_tier0_pair_level,METH_VARARGS,"tier0_pair_level(...) -> (nc, reach): the first level of the shared-screener merging, the templates' coherent pairs made clusters of two"},
-  {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
+  {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, counts, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},

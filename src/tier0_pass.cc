@@ -43,9 +43,9 @@ extern "C" void ap_tier0_refine_lags(const double *prod_ab, const double *exp_al
 extern "C" void ap_tier0_coarse_sums(const float *xr, const float *xi, const float *sr,
                                      const float *si, long long K, long long nshp, float *re,
                                      float *im);
-extern "C" int ap_tier0_mwu(const double *u, const double *ref, const double *w, long long nb,
-                            long long m, long long K, int steps, double *c_out,
-                            double *ov_out);
+extern "C" int ap_tier0_mwu(const double *u, const int64_t *counts, const double *ref,
+                            const double *w, long long nb, long long M, long long K, int steps,
+                            double *c_out, double *ov_out);
 
 namespace {
 
@@ -209,7 +209,8 @@ long long Groups(
                          half_span, fine.data(), nullptr);
     lag.swap(fine);
   }
-  // 4. the groups of one size are synthesised together
+  // 4. the screeners, every kept group's in one call: ordered by size, and within a size as
+  // kept, since a vector of the batched routine holds groups that follow one another
   long long largest = 0;
   for (const long long g : kept) largest = std::max<long long>(largest, offsets[g + 1] - offsets[g]);
   std::vector<long long> first((size_t)nk);            // a kept group's first row
@@ -217,59 +218,53 @@ long long Groups(
     first[q] = at;
     at += offsets[kept[q] + 1] - offsets[kept[q]];
   }
-  std::vector<Cx> turned, refs, made;
-  std::vector<double> overlap, vm;
-  std::vector<long long> bucket;
+  std::vector<long long> order((size_t)nk);
+  for (long long q = 0; q < nk; q++) order[q] = q;
+  std::stable_sort(order.begin(), order.end(), [&](long long x, long long y) {
+    return offsets[kept[x] + 1] - offsets[kept[x]] < offsets[kept[y] + 1] - offsets[kept[y]];
+  });
+  std::vector<Cx> turned((size_t)(nk * largest * K)), refs((size_t)(nk * K)), made((size_t)(nk * K));
+  std::vector<double> overlap((size_t)(nk * largest)), vm((size_t)largest);
+  std::vector<int64_t> sizes((size_t)nk);
+  for (long long x = 0; x < nk; x++) {
+    const long long q = order[x], m = offsets[kept[q] + 1] - offsets[kept[q]];
+    sizes[x] = m;
+    memcpy(refs.data() + x * K, frame.data() + q * K, (size_t)K * sizeof(Cx));
+    for (long long j = 0; j < m; j++) {
+      const Cx *un = unit.data() + (first[q] + j) * K;
+      const Cx *turn = ex + (lag[first[q] + j] + R) * K;
+      Cx *out = turned.data() + (x * largest + j) * K;
+      for (long long k = 0; k < K; k++) out[k] = mul(un[k], turn[k]);
+    }
+  }
+  if (ap_tier0_mwu((const double *)turned.data(), sizes.data(), (const double *)refs.data(), w,
+                   nk, largest, K, steps, (double *)made.data(), overlap.data()) != 0)
+    throw std::bad_alloc();
   long long count = 0;
-  for (long long m = 2; m <= largest; m++) {
-    bucket.clear();
-    for (long long q = 0; q < nk; q++)
-      if (offsets[kept[q] + 1] - offsets[kept[q]] == m) bucket.push_back(q);
-    if (bucket.empty()) continue;
-    const long long nb = (long long)bucket.size();
-    turned.resize((size_t)(nb * m * K));
-    refs.resize((size_t)(nb * K));
-    made.resize((size_t)(nb * K));
-    overlap.resize((size_t)(nb * m));
-    vm.resize((size_t)m);
-    for (long long x = 0; x < nb; x++) {
-      const long long q = bucket[x];
-      memcpy(refs.data() + x * K, frame.data() + q * K, (size_t)K * sizeof(Cx));
-      for (long long j = 0; j < m; j++) {
-        const Cx *un = unit.data() + (first[q] + j) * K;
-        const Cx *turn = ex + (lag[first[q] + j] + R) * K;
-        Cx *out = turned.data() + (x * m + j) * K;
-        for (long long k = 0; k < K; k++) out[k] = mul(un[k], turn[k]);
-      }
+  for (long long x = 0; x < nk; x++) {
+    const long long q = order[x], g = kept[q], m = sizes[x];
+    const int32_t *mem = members + offsets[g];
+    for (long long j = 0; j < m; j++) vm[j] = v[mem[j]];
+    const double mean = (0.0 + pairwise(vm.data(), m)) / (double)m;
+    double least = HUGE_VAL;
+    int64_t far = 0;
+    for (long long j = 0; j < m; j++) {
+      const double keep = sqrt(mean / vm[j]) * overlap[x * largest + j];
+      const double al = keep < 1.0 ? keep : 1.0;
+      alpha[offsets[g] + j] = al;
+      least = al < least ? al : least;
+      const int64_t dj = lag[first[q] + j] < 0 ? -lag[first[q] + j] : lag[first[q] + j];
+      far = dj > far ? dj : far;
     }
-    if (ap_tier0_mwu((const double *)turned.data(), (const double *)refs.data(), w, nb, m, K,
-                     steps, (double *)made.data(), overlap.data()) != 0)
-      throw std::bad_alloc();
-    for (long long x = 0; x < nb; x++) {
-      const long long q = bucket[x], g = kept[q];
-      const int32_t *mem = members + offsets[g];
-      for (long long j = 0; j < m; j++) vm[j] = v[mem[j]];
-      const double mean = (0.0 + pairwise(vm.data(), m)) / (double)m;
-      double least = HUGE_VAL;
-      int64_t far = 0;
-      for (long long j = 0; j < m; j++) {
-        const double keep = sqrt(mean / vm[j]) * overlap[x * m + j];
-        const double al = keep < 1.0 ? keep : 1.0;
-        alpha[offsets[g] + j] = al;
-        least = al < least ? al : least;
-        const int64_t dj = lag[first[q] + j] < 0 ? -lag[first[q] + j] : lag[first[q] + j];
-        far = dj > far ? dj : far;
-      }
-      if (!(least >= alpha_floor)) continue;
-      accepted[g] = 1;
-      count++;
-      v_bar[g] = mean;
-      reach[g] = far;
-      const double scale = sqrt(mean);
-      const Cx *c = made.data() + x * K;
-      Cx *out = (Cx *)screener + g * K;
-      for (long long k = 0; k < K; k++) out[k] = mul(real(scale), c[k]);
-    }
+    if (!(least >= alpha_floor)) continue;
+    accepted[g] = 1;
+    count++;
+    v_bar[g] = mean;
+    reach[g] = far;
+    const double scale = sqrt(mean);
+    const Cx *c = made.data() + x * K;
+    Cx *out = (Cx *)screener + g * K;
+    for (long long k = 0; k < K; k++) out[k] = mul(real(scale), c[k]);
   }
   return count;
 }

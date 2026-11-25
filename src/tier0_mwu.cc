@@ -17,12 +17,12 @@
  *   weights scaled to mean 1.
  * c_out: the kept vector (K complex128). ov_out: its overlap with each member as given (m).
  *
- * The groups of a call have one arity and one band, and nothing in a group's arithmetic depends
- * on another group: the batched routine puts a group in each vector lane and does, lane by
- * lane, exactly the operations of the plain routine in its order (sums run over the bins and
- * the members as they do there; hypot and exp are libm's, called per lane). A group's result is
- * therefore bit for bit the plain routine's, whatever the vector width and whichever groups
- * share its vector. That needs every product and sum to stay its own operation: this file is
+ * The groups of a call share a band, and nothing in a group's arithmetic depends on another
+ * group: the batched routine puts a group in each vector lane and does, lane by lane, exactly
+ * the operations of the plain routine in its order (sums run over the bins and the members as
+ * they do there, a lane's sums over members stopping at its own count; hypot and exp are
+ * libm's, called per lane). A group's result is therefore bit for bit the plain routine's,
+ * whatever the vector width and whichever groups, of whatever arity, share its vector. That needs every product and sum to stay its own operation: this file is
  * built with floating-point contraction off (setup.py), and uses no fused multiply-add. */
 #include <math.h>
 #include <stddef.h>
@@ -41,32 +41,38 @@ namespace ap_t0mwu {
 namespace HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/* nb groups of m members over K bins: u (nb, m, K) complex128, ref (nb, K) complex128,
-   w (K), c_out (nb, K) complex128, ov_out (nb, m). Returns 0, or -1 when out of memory. */
-int MwuBatch(const double *u, const double *ref, const double *w, long long nb, long long m,
-             long long K, int steps, double *c_out, double *ov_out) {
+/* nb groups of counts[g] members (at most M) over K bins: u (nb, M, K) complex128, a group's
+   members its first counts[g] rows; ref (nb, K) complex128, w (K), c_out (nb, K) complex128,
+   ov_out (nb, M), a group's first counts[g] entries written. A vector holds groups that
+   follow one another, each lane running to its own count: a member past a lane's count
+   changes nothing there (its sums keep their value, its libm calls are not made). Callers
+   order the groups by count, so that a vector's lanes run about as far. Returns 0, or -1 when
+   out of memory. */
+int MwuBatch(const double *u, const int64_t *counts, const double *ref, const double *w,
+             long long nb, long long M, long long K, int steps, double *c_out, double *ov_out) {
   const hn::ScalableTag<double> d;
   using V = hn::Vec<decltype(d)>;
   const long long N = (long long)hn::Lanes(d);
-  // per element one vector, a lane a group: members as given and as iterated (m K each, real
+  // per element one vector, a lane a group: members as given and as iterated (M K each, real
   // and imaginary), the frame / minimax candidate and the mean candidate (K each), the
-  // weights, the mean candidate's overlaps and the minimax one's (m each)
-  const size_t vecs = (size_t)(4 * m * K + 4 * K + 3 * m);
+  // weights, the mean candidate's overlaps and the minimax one's (M each)
+  const size_t vecs = (size_t)(4 * M * K + 4 * K + 3 * M);
   double *buf = ap_alloc64(vecs * (size_t)N * sizeof(double));
   if (!buf) return -1;
-  double *ur = buf, *ui = ur + m * K * N, *tr = ui + m * K * N, *ti = tr + m * K * N;
-  double *cr = ti + m * K * N, *ci = cr + K * N, *mr = ci + K * N, *mi = mr + K * N;
-  double *wt = mi + K * N, *om = wt + m * N, *ov = om + m * N;
+  double *ur = buf, *ui = ur + M * K * N, *tr = ui + M * K * N, *ti = tr + M * K * N;
+  double *cr = ti + M * K * N, *ci = cr + K * N, *mr = ci + K * N, *mi = mr + K * N;
+  double *wt = mi + K * N, *om = wt + M * N, *ov = om + M * N;
   HWY_ALIGN double a[HWY_MAX_LANES_D(hn::ScalableTag<double>)];
   HWY_ALIGN double b[HWY_MAX_LANES_D(hn::ScalableTag<double>)];
+  HWY_ALIGN double lane_m[HWY_MAX_LANES_D(hn::ScalableTag<double>)];
   const V one = hn::Set(d, 1.0), zero = hn::Zero(d), tiny = hn::Set(d, 1e-12);
-  const V floor_ = hn::Set(d, 1e-30), inf = hn::Set(d, HUGE_VAL), count = hn::Set(d, (double)m);
+  const V floor_ = hn::Set(d, 1e-30), inf = hn::Set(d, HUGE_VAL);
 
-  // hypot(x, y) of every lane, by libm
-  auto hyp = [&](V x, V y) {
+  // hypot(x, y) of every lane that has member j, by libm
+  auto hyp = [&](V x, V y, long long j) {
     hn::Store(x, d, a);
     hn::Store(y, d, b);
-    for (long long l = 0; l < N; l++) a[l] = hypot(a[l], b[l]);
+    for (long long l = 0; l < N; l++) a[l] = (double)j < lane_m[l] ? hypot(a[l], b[l]) : 0.0;
     return hn::Load(d, a);
   };
   // sum_k w[k] conj(c[k]) x[k] of every lane: the plain routine's sums, term by term
@@ -94,24 +100,35 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
   };
 
   for (long long g0 = 0; g0 < nb; g0 += N) {
-    // a group a lane; a short last batch repeats its last group (computed, not written)
+    // a group a lane; a short last batch repeats its last group (computed, not written).
+    // A lane's rows past its count are zero.
+    long long m = 0;                                   // the most members of a lane
+    for (long long l = 0; l < N; l++) {
+      const long long mg = counts[g0 + l < nb ? g0 + l : nb - 1];
+      lane_m[l] = (double)mg;
+      m = mg > m ? mg : m;
+    }
     for (long long l = 0; l < N; l++) {
       const long long g = g0 + l < nb ? g0 + l : nb - 1;
-      const double *ug = u + 2 * g * m * K, *rg = ref + 2 * g * K;
+      const long long mg = counts[g];
+      const double *ug = u + 2 * g * M * K, *rg = ref + 2 * g * K;
       for (long long e = 0; e < m * K; e++) {
-        ur[e * N + l] = ug[2 * e];
-        ui[e * N + l] = ug[2 * e + 1];
+        ur[e * N + l] = e < mg * K ? ug[2 * e] : 0.0;
+        ui[e * N + l] = e < mg * K ? ug[2 * e + 1] : 0.0;
       }
       for (long long k = 0; k < K; k++) {
         cr[k * N + l] = rg[2 * k];
         ci[k * N + l] = rg[2 * k + 1];
       }
     }
+    const V count = hn::Load(d, lane_m);
+    // the lanes that have member j
+    auto has = [&](long long j) { return hn::Lt(hn::Set(d, (double)j), count); };
     // phase every member to the reference frame
     for (long long j = 0; j < m; j++) {
       V gr, gi;
       dot(cr, ci, ur + j * K * N, ui + j * K * N, &gr, &gi);
-      const V ag = hyp(gr, gi);
+      const V ag = hyp(gr, gi, j);
       const auto ok = hn::Gt(ag, tiny);
       const V pr = hn::IfThenElse(ok, hn::Div(gr, ag), one);
       const V pi = hn::IfThenElse(ok, hn::Div(hn::Neg(gi), ag), zero);
@@ -126,8 +143,9 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
     for (long long k = 0; k < K; k++) {
       V sr = zero, si = zero;
       for (long long j = 0; j < m; j++) {
-        sr = hn::Add(sr, hn::Load(d, tr + (j * K + k) * N));
-        si = hn::Add(si, hn::Load(d, ti + (j * K + k) * N));
+        const auto in = has(j);
+        sr = hn::IfThenElse(in, hn::Add(sr, hn::Load(d, tr + (j * K + k) * N)), sr);
+        si = hn::IfThenElse(in, hn::Add(si, hn::Load(d, ti + (j * K + k) * N)), si);
       }
       sr = hn::Div(sr, count);
       si = hn::Div(si, count);
@@ -140,9 +158,9 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
     for (long long j = 0; j < m; j++) {
       V gr, gi;
       dot(mr, mi, ur + j * K * N, ui + j * K * N, &gr, &gi);
-      const V o = hyp(gr, gi);
+      const V o = hyp(gr, gi, j);
       hn::Store(o, d, om + j * N);
-      min_mean = hn::IfThenElse(hn::Lt(o, min_mean), o, min_mean);
+      min_mean = hn::IfThenElse(hn::And(has(j), hn::Lt(o, min_mean)), o, min_mean);
     }
     // the minimax candidate: steps rounds of multiplicative weights, then the final sum
     for (long long j = 0; j < m; j++) hn::Store(one, d, wt + j * N);
@@ -151,9 +169,10 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
       for (long long k = 0; k < K; k++) {
         V sr = zero, si = zero;
         for (long long j = 0; j < m; j++) {
+          const auto in = has(j);
           const V wj = hn::Load(d, wt + j * N);
-          sr = hn::Add(sr, hn::Mul(wj, hn::Load(d, tr + (j * K + k) * N)));
-          si = hn::Add(si, hn::Mul(wj, hn::Load(d, ti + (j * K + k) * N)));
+          sr = hn::IfThenElse(in, hn::Add(sr, hn::Mul(wj, hn::Load(d, tr + (j * K + k) * N))), sr);
+          si = hn::IfThenElse(in, hn::Add(si, hn::Mul(wj, hn::Load(d, ti + (j * K + k) * N))), si);
         }
         hn::Store(sr, d, cr + k * N);
         hn::Store(si, d, ci + k * N);
@@ -166,7 +185,7 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
         double *yr = tr + j * K * N, *yi = ti + j * K * N;
         V gr, gi;
         dot(cr, ci, yr, yi, &gr, &gi);
-        const V ag = hyp(gr, gi);
+        const V ag = hyp(gr, gi, j);
         const auto ok = hn::Gt(ag, tiny);
         const V pr = hn::IfThenElse(ok, hn::Div(gr, ag), one);
         const V pi = hn::IfThenElse(ok, hn::Div(hn::Neg(gi), ag), zero);
@@ -178,17 +197,17 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
         const V gap = hn::Sub(one, ag);
         const V def = hn::IfThenElse(hn::Gt(gap, zero), gap, zero);
         hn::Store(def, d, ov + j * N);                 // the deficit, for the weights below
-        dmin = hn::IfThenElse(hn::Lt(def, dmin), def, dmin);
+        dmin = hn::IfThenElse(hn::And(has(j), hn::Lt(def, dmin)), def, dmin);
       }
       V mean = zero;
       const V rate = hn::Set(d, 25.0), cap = hn::Set(d, 10.0);
       for (long long j = 0; j < m; j++) {
         const V e = hn::Mul(rate, hn::Sub(hn::Load(d, ov + j * N), dmin));
         hn::Store(hn::IfThenElse(hn::Lt(e, cap), e, cap), d, a);
-        for (long long l = 0; l < N; l++) a[l] = exp(a[l]);
+        for (long long l = 0; l < N; l++) a[l] = (double)j < lane_m[l] ? exp(a[l]) : 1.0;
         const V wj = hn::Mul(hn::Load(d, wt + j * N), hn::Load(d, a));
         hn::Store(wj, d, wt + j * N);
-        mean = hn::Add(mean, wj);
+        mean = hn::IfThenElse(has(j), hn::Add(mean, wj), mean);
       }
       mean = hn::Div(mean, count);
       for (long long j = 0; j < m; j++)
@@ -198,9 +217,9 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
     for (long long j = 0; j < m; j++) {
       V gr, gi;
       dot(cr, ci, ur + j * K * N, ui + j * K * N, &gr, &gi);
-      const V o = hyp(gr, gi);
+      const V o = hyp(gr, gi, j);
       hn::Store(o, d, ov + j * N);
-      min_mwu = hn::IfThenElse(hn::Lt(o, min_mwu), o, min_mwu);
+      min_mwu = hn::IfThenElse(hn::And(has(j), hn::Lt(o, min_mwu)), o, min_mwu);
     }
     // each group keeps the candidate whose worst member overlaps better
     hn::Store(hn::IfThenElse(hn::Ge(min_mwu, min_mean), one, zero), d, a);
@@ -212,7 +231,7 @@ int MwuBatch(const double *u, const double *ref, const double *w, long long nb, 
         c_out[2 * (g * K + k)] = xr[k * N + l];
         c_out[2 * (g * K + k) + 1] = xi[k * N + l];
       }
-      for (long long j = 0; j < m; j++) ov_out[g * m + j] = xo[j * N + l];
+      for (long long j = 0; j < counts[g]; j++) ov_out[g * M + j] = xo[j * N + l];
     }
   }
   free(buf);
@@ -367,12 +386,13 @@ static void MwuOne(const double *u, const double *ref, const double *w, long lon
 }
 }  // namespace ap_t0mwu
 
-/* Every group's shared screener, for the best target this CPU runs. Returns 0, or -1 when out
-   of memory. */
-extern "C" int ap_tier0_mwu(const double *u, const double *ref, const double *w, long long nb,
-                            long long m, long long K, int steps, double *c_out,
-                            double *ov_out) {
-  return HWY_DYNAMIC_DISPATCH(ap_t0mwu::MwuBatch)(u, ref, w, nb, m, K, steps, c_out, ov_out);
+/* Every group's shared screener (MwuBatch), for the best target this CPU runs. Returns 0, or
+   -1 when out of memory. */
+extern "C" int ap_tier0_mwu(const double *u, const int64_t *counts, const double *ref,
+                            const double *w, long long nb, long long M, long long K, int steps,
+                            double *c_out, double *ov_out) {
+  return HWY_DYNAMIC_DISPATCH(ap_t0mwu::MwuBatch)(u, counts, ref, w, nb, M, K, steps, c_out,
+                                                  ov_out);
 }
 /* A vector's float32 sums against every coarse shift (CoarseSums above). */
 extern "C" void ap_tier0_coarse_sums(const float *xr, const float *xi, const float *sr,
@@ -381,14 +401,14 @@ extern "C" void ap_tier0_coarse_sums(const float *xr, const float *xi, const flo
   HWY_DYNAMIC_DISPATCH(ap_t0mwu::CoarseSums)(xr, xi, sr, si, K, nshp, re, im);
 }
 /* The same by the plain routine, group by group. */
-extern "C" int ap_tier0_mwu_plain(const double *u, const double *ref, const double *w,
-                                  long long nb, long long m, long long K, int steps,
-                                  double *c_out, double *ov_out) {
-  double *work = (double *)malloc((size_t)(2 * m * K + 4 * K + 2 * m) * sizeof(double));
+extern "C" int ap_tier0_mwu_plain(const double *u, const int64_t *counts, const double *ref,
+                                  const double *w, long long nb, long long M, long long K,
+                                  int steps, double *c_out, double *ov_out) {
+  double *work = (double *)malloc((size_t)(2 * M * K + 4 * K + 2 * M) * sizeof(double));
   if (!work) return -1;
   for (long long g = 0; g < nb; g++)
-    ap_t0mwu::MwuOne(u + 2 * g * m * K, ref + 2 * g * K, w, m, K, steps, c_out + 2 * g * K,
-                         ov_out + g * m, work);
+    ap_t0mwu::MwuOne(u + 2 * g * M * K, ref + 2 * g * K, w, counts[g], K, steps,
+                     c_out + 2 * g * K, ov_out + g * M, work);
   free(work);
   return 0;
 }

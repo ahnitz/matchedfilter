@@ -49,7 +49,8 @@ def _reference(C, inv_sqrt_v, v, W, exp_all, shifts64, dls, s_step, cur, inv_sqr
         U_raw = np.ascontiguousarray((unit * exp_all[fine + R])[None])
         c_unit = np.empty((1, length), np.complex128)
         overlap = np.empty((1, grp.size))
-        _core.tier0_mwu(U_raw, np.ascontiguousarray(mid_u[row:row + 1]), W, steps, c_unit, overlap)
+        _core.tier0_mwu(U_raw, np.array([grp.size]), np.ascontiguousarray(mid_u[row:row + 1]), W,
+                        steps, c_unit, overlap)
         v_bar = float(np.mean(v[grp]))
         alphas = np.minimum(1.0, np.sqrt(v_bar / v[grp]) * overlap[0])
         if alphas.min() >= alpha_floor:

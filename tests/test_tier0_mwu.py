@@ -65,7 +65,7 @@ def test_matches_the_numpy_implementation(m, steps, spread):
     U, ref, W = _groups(rng, nb, m, K, spread)
     c = np.empty((nb, K), np.complex128)
     ov = np.empty((nb, m), np.float64)
-    _core.tier0_mwu(U, ref, W, steps, c, ov)
+    _core.tier0_mwu(U, np.full(nb, m), ref, W, steps, c, ov)
     c_ref, ov_ref, use_mwu = _reference(U, ref, W, steps)
     # Equal to rounding: the weights' exponentials grow a last-bit difference to ~1e-11.
     np.testing.assert_allclose(ov, ov_ref, rtol=0, atol=1e-9)
@@ -88,7 +88,7 @@ def test_a_member_orthogonal_to_the_frame_keeps_its_phase():
     ref[0, 0] = 1.0
     c = np.empty((1, K), np.complex128)
     ov = np.empty((1, 2))
-    _core.tier0_mwu(U, ref, W, 4, c, ov)
+    _core.tier0_mwu(U, np.array([2]), ref, W, 4, c, ov)
     c_ref, ov_ref, _ = _reference(U, ref, W, 4)
     assert np.isfinite(c).all() and np.isfinite(ov).all()
     np.testing.assert_allclose(ov, ov_ref, atol=1e-12)
@@ -98,12 +98,17 @@ def test_a_member_orthogonal_to_the_frame_keeps_its_phase():
 def test_rejects_mismatched_shapes():
     W = np.ones(8)
     U = np.zeros((2, 3, 8), np.complex128)
+    counts = np.full(2, 3)
     with pytest.raises(ValueError):
-        _core.tier0_mwu(U, np.zeros((2, 7), np.complex128), W, 4,
+        _core.tier0_mwu(U, counts, np.zeros((2, 7), np.complex128), W, 4,
                         np.empty((2, 8), np.complex128), np.empty((2, 3)))
     with pytest.raises(ValueError):
-        _core.tier0_mwu(U.astype(np.complex64), np.zeros((2, 8), np.complex128), W, 4,
+        _core.tier0_mwu(U.astype(np.complex64), counts, np.zeros((2, 8), np.complex128), W, 4,
                         np.empty((2, 8), np.complex128), np.empty((2, 3)))
+    for bad in (np.array([3, 4]), np.array([0, 3]), np.full(3, 3)):   # past M, empty, too many
+        with pytest.raises(ValueError):
+            _core.tier0_mwu(U, bad, np.zeros((2, 8), np.complex128), W, 4,
+                            np.empty((2, 8), np.complex128), np.empty((2, 3)))
 
 
 @pytest.mark.parametrize("m, nb", [(2, 1), (2, 37), (3, 8), (5, 19), (8, 64), (16, 5)])
@@ -119,12 +124,50 @@ def test_a_groups_result_does_not_depend_on_its_batch(m, nb):
     for plain in (0, 1):
         c = np.empty((nb, K), np.complex128)
         ov = np.empty((nb, m), np.float64)
-        _core.tier0_mwu(U, ref, W, 4, c, ov, plain)
+        _core.tier0_mwu(U, np.full(nb, m), ref, W, 4, c, ov, plain)
         out[plain] = (c, ov)
     assert out[0][0].tobytes() == out[1][0].tobytes()
     assert out[0][1].tobytes() == out[1][1].tobytes()
     last = nb - 1                                            # alone: a batch of its repeats
     c = np.empty((1, K), np.complex128)
     ov = np.empty((1, m), np.float64)
-    _core.tier0_mwu(U[last:], ref[last:], W, 4, c, ov)
+    _core.tier0_mwu(U[last:], np.array([m]), ref[last:], W, 4, c, ov)
     assert c.tobytes() == out[1][0][last:].tobytes() and ov.tobytes() == out[1][1][last:].tobytes()
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_groups_of_different_sizes_share_a_call(seed):
+    """Groups of 2 .. 16 members in one call, in runs of one size as the pass orders them and
+    shuffled: a lane runs to its own group's count, so each group's bytes are the one-group
+    routine's (plain=1) and those of a call that holds its group alone."""
+    rng = np.random.default_rng([seed, 99])
+    K, M = 64, 16
+    sizes = np.repeat(np.arange(2, M + 1), rng.integers(1, 6, M - 1))
+    if seed == 2:
+        sizes = rng.permutation(sizes)
+    nb = sizes.size
+    U = np.zeros((nb, M, K), np.complex128)
+    ref = np.empty((nb, K), np.complex128)
+    for g, m in enumerate(sizes):
+        Ug, rg, W = _groups(np.random.default_rng([seed, g]), 1, int(m), K, 0.3)
+        U[g, :m], ref[g] = Ug[0], rg[0]
+    W = np.random.default_rng(seed).uniform(0.2, 2.0, K)
+    U[:, :, :] /= np.sqrt(np.maximum(np.sum(np.abs(U) ** 2 * W, axis=2, keepdims=True), 1e-300))
+    out = {}
+    for plain in (0, 1):
+        c = np.empty((nb, K), np.complex128)
+        ov = np.full((nb, M), -5.0)
+        _core.tier0_mwu(U, sizes.astype(np.int64), ref, W, 6, c, ov, plain)
+        out[plain] = (c, ov)
+    assert out[0][0].tobytes() == out[1][0].tobytes()
+    for g, m in enumerate(sizes):
+        assert out[0][1][g, :m].tobytes() == out[1][1][g, :m].tobytes()
+        assert np.all(out[0][1][g, m:] == -5.0)                 # past a group's count: untouched
+    for g in (0, nb // 2, nb - 1):
+        m = int(sizes[g])
+        c = np.empty((1, K), np.complex128)
+        ov = np.empty((1, m))
+        _core.tier0_mwu(np.ascontiguousarray(U[g:g + 1, :m]), np.array([m]), ref[g:g + 1], W, 6,
+                        c, ov)
+        assert c.tobytes() == out[0][0][g:g + 1].tobytes()
+        assert ov.tobytes() == out[0][1][g:g + 1, :m].tobytes()
