@@ -99,9 +99,14 @@ def test_followup_counts_exact(setup):
 def test_cpu_peaks_sane():
     pk = _roofline.peaks("cpu", measure_bandwidth=False)
     f = pk["flops"]
-    assert 1e9 < f["fp32"] < 2e12                  # one core
-    assert f["fp16"] >= f["fp32"] and f["int16"] >= f["fp32"]
-    assert 0.5 < pk["clock_ghz"] < 7
+    if any("clock" in u for u in pk["unknown"]):
+        # A core whose clock or pipes cannot be derived (an ARM core that is not a listed
+        # Apple chip) has unknown peaks, and says so, rather than another chip's.
+        assert all(math.isnan(v) for v in f.values()) and "unknown" in pk["formula"]
+    else:
+        assert 1e9 < f["fp32"] < 2e12                  # one core
+        assert f["fp16"] >= f["fp32"] and f["int16"] >= f["fp32"]
+        assert 0.5 < pk["clock_ghz"] < 7
     bw = _roofline.cpu_bandwidth(1 << 25, reps=2)
     assert 1e9 < bw < 1e12
     assert _roofline.cpu_tick_rate() > 1e8
@@ -252,3 +257,13 @@ def test_apple_gpu_peaks_need_the_named_chip():
     assert math.isnan(pk["bandwidth"]) and pk["unknown"]
     pk = _peaks.apple_gpu_peaks(dict(name="Apple M9"), 12)
     assert math.isnan(pk["flops"]["fp32"]) and pk["unknown"]
+
+
+def test_an_unlisted_arm_core_has_unknown_peaks_and_a_formula(monkeypatch):
+    """cpu_peaks on an ARM core that is not a listed Apple chip (a Linux arm64 runner):
+    the peaks are NaN, the unknown terms are named, and the formula is still a string."""
+    monkeypatch.setattr(_roofline.platform, "machine", lambda: "aarch64")
+    pk = _roofline.cpu_peaks(measure_bandwidth=False)
+    assert all(math.isnan(v) for v in pk["flops"].values())
+    assert any("clock and FMA pipes" in u for u in pk["unknown"])
+    assert "unknown x 128-bit FMA pipes" in pk["formula"]

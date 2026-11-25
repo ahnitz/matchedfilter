@@ -453,8 +453,10 @@ def cpu_peaks(measure_bandwidth=True):
         width = 128
         out["name"] = brand or "arm64"
         lanes = dict(fp32=width // 32, fp16=width // 16, int16=width // 16)
-        out["formula"] = ("%d x 128-bit FMA pipes x lanes x 2 x %.2f GHz (fp16: 8 lanes, NEON "
-                          "FP16; int16: 8 lanes, multiply-accumulate)" % (pipes, ghz))
+        out["formula"] = ("%s x 128-bit FMA pipes x lanes x 2 x %s GHz (fp16: 8 lanes, NEON "
+                          "FP16; int16: 8 lanes, multiply-accumulate)" % (
+                              ("unknown", "unknown") if chip is None
+                              else ("%d" % pipes, "%.2f" % ghz)))
         out["measured"] = _MEASURED.get("Apple %s CPU" % chip)
     else:
         info = _cpuinfo()
