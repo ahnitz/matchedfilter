@@ -7,7 +7,15 @@ import pytest
 
 from conftest import usable_gpu, usable_gpu_reason
 from matchedfilter import TimeDomainFilterBank, _batches
+from matchedfilter import search as S
+from matchedfilter.search import BlockInput, HierarchicalSearch, Inner, Leaf, Root
 from matchedfilter.time_domain import _TemplateGroup
+
+N = 1 << 15
+VALID = (4096, N - 4096)
+BAND = (60, N // 2 - 200)
+LEAF = dict(engine="flat", binsize=512)
+
 
 def _taps(rng, counts, cplx=False):
     taps = np.zeros((len(counts), max(counts)), np.complex64 if cplx else np.float32)
@@ -15,6 +23,18 @@ def _taps(rng, counts, cplx=False):
         t = rng.standard_normal(c) + (1j * rng.standard_normal(c) if cplx else 0)
         taps[i, :c] = t / np.linalg.norm(t)
     return taps
+
+
+def _search(rng):
+    spec = lambda: (rng.standard_normal(N // 2 + 1)
+                    + 1j * rng.standard_normal(N // 2 + 1)).astype(np.complex64)
+    kids = [Inner(_taps(rng, [c])[0], children=[
+        Leaf(_taps(rng, [101, 151, 201], cplx=True), [101, 151, 201], node_id=("leaf", i))],
+        node_id=("inner", i)) for i, c in enumerate((301, 351))]
+    root = Root(spec(), BAND, children=kids, node_id="root")
+    inputs = {ch: BlockInput([spec()], [VALID], root_scale=lambda root, b: 1.0 / N, tags=[ch])
+              for ch in ("A", "B")}
+    return root, inputs, HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
 
 
 def _same(a, b):
@@ -71,6 +91,56 @@ def test_a_follow_up_call_runs_as_a_batch_of_one_without_building_a_batch(monkey
     monkeypatch.setattr(_batches, "_cpu_single_td_batch", no_batch)
     for kw, w in zip(calls, want):
         _same(bank.filter_series(x, **kw), w)
+
+
+def test_a_hook_settles_once_and_reads_a_slice_window_without_the_parser(monkeypatch):
+    """A hook's series reads settle the search's inner rows at the first read only, and a
+    follow-up's lone slice window is clipped as the parser would clip it: the same peaks as
+    the same window given as a pair."""
+    root, inputs, search = _search(np.random.default_rng(5))
+    settles, hooks = [], []
+    settle = HierarchicalSearch._settle
+    monkeypatch.setattr(HierarchicalSearch, "_settle",
+                        lambda self: settles.append(1) or settle(self))
+    parse = S._normalize_windows
+
+    def pairs_only(windows, n):
+        assert not isinstance(windows, slice), "a slice window went through the parser"
+        return parse(windows, n)
+    monkeypatch.setattr(S, "_normalize_windows", pairs_only)
+
+    def on_peaks(ctx):
+        hooks.append(1)
+        ctx.series("A")
+        ctx.series("B", node=root)
+        r = ctx.refilter("B", windows=slice(10000, 11000), binsize=64, threshold=0.0,
+                         template_index=1)
+        _same(r, ctx.refilter("B", windows=[(10000, 11000)], binsize=64, threshold=0.0,
+                              template_index=1))
+        assert len(ctx.refilter("B", windows=slice(11000, 10000), binsize=64, threshold=0.0,
+                                template_index=1).snr) == 0
+        with pytest.raises(ValueError, match="outside computed"):
+            ctx.refilter("B", windows=slice(0, 1000), binsize=64, threshold=0.0,
+                         template_index=1)
+    search.run(inputs, on_peaks=on_peaks)
+    assert len(hooks) == 2 and len(settles) == len(hooks)
+
+
+def test_a_leaf_bank_handed_out_is_looked_up_once(monkeypatch):
+    """Asked again for a leaf's bank in a channel (every hook call asks), the search hands
+    back the bank it built, without resolving the channel's profile again."""
+    root, inputs, search = _search(np.random.default_rng(6))
+    leaf = root.children[0].children[0]
+    bank = search.leaf_bank(root, leaf, "A")
+    resolved = []
+    which = HierarchicalSearch._channel_profile
+    monkeypatch.setattr(HierarchicalSearch, "_channel_profile",
+                        lambda self, r, c: resolved.append(c) or which(self, r, c))
+    assert search.leaf_bank(root, leaf, "A") is bank
+    assert search.leaf_bank(root, leaf, "A") is bank
+    assert resolved == []
+    assert search.leaf_bank(root, leaf, "B") is bank      # one bank, another channel: resolved
+    assert resolved and set(resolved) == {"B"}
 
 
 @pytest.mark.parametrize("window", [(0, 51000), (100, 900), (20000, 71000), (1, 1 << 17),

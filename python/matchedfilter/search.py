@@ -217,6 +217,9 @@ class PeaksContext:
         self.channels, self.tags, self.peaks = channels, tags, peaks
         self._search, self._held, self._scales = search, held, scales
         self._support = support or {}
+        # The search's inner rows are settled at the first read: nothing writes them again
+        # while the chunk's hooks run.
+        self._settled = False
 
     def envelope(self, channel):
         """The threshold envelope's values at a channel's peaks.
@@ -278,8 +281,11 @@ class PeaksContext:
         ValueError
             If ``span`` lies outside the node's computed support.
         """
-        node = self._search._parent[id(self.leaf)] if node is None else node
-        self._search._settle()
+        search = self._search
+        node = search._parent[id(self.leaf)] if node is None else node
+        if not self._settled:
+            search._settle()
+            self._settled = True
         ser = self._held[channel][id(node)]
         if span is not None:
             req = _clip([(int(span[0]), int(span[1]))], 0, len(ser))
@@ -319,18 +325,27 @@ class PeaksContext:
         """
         ser = self.series(channel)
         # The bank's parser (time_domain._normalize_windows): the windows filter_series takes,
-        # parsed as it parses them, so the support check and the call cannot disagree.
-        req = [(int(a), int(b)) for a, b in _normalize_windows(windows, len(ser))]
+        # parsed as it parses them, so the support check and the call cannot disagree. A
+        # lone slice with integer bounds (a search's follow-up) is what the parser makes of
+        # it: its clipped span, if not empty.
+        if (type(windows) is slice and (windows.step is None or windows.step == 1)
+                and (windows.start is None or type(windows.start) is int)
+                and (windows.stop is None or type(windows.stop) is int)):
+            a, b, _ = windows.indices(len(ser))
+            req = [(a, b)] if b > a else []
+        else:
+            req = [(int(a), int(b)) for a, b in _normalize_windows(windows, len(ser))]
         if not req and windows is not None:
             return _EMPTY_FILTER_RESULTS
         sup = self.support(channel)
         if not _spans_cover(sup, req):
             raise ValueError("refilter windows %r in channel %r lie outside computed "
                              "series support %r" % (windows, channel, sup))
-        bank = self._search.leaf_bank(self.root, self.leaf, channel)
+        search = self._search
+        bank = search.leaf_bank(self.root, self.leaf, channel)
         return bank.filter_series(ser, windows=windows, binsize=binsize,
                                   threshold=threshold, template_index=template_index,
-                                  profile=self._search._call_profile(self.root, channel))
+                                  profile=search._call_profile(self.root, channel))
 
 
 def _merge(spans):
@@ -567,6 +582,7 @@ class HierarchicalSearch:
         self._parent = {}
         self._kids = {}                  # node -> (inner children, leaf children)
         self._leaf_banks = {}
+        self._ready_banks = {}           # (leaf, channel) -> its bank, built and referenced
         self._inner = {}
         self._root_outs = {}             # (root, channel, n) -> output buffer, GPU searches
         for root in self.roots:
@@ -628,6 +644,10 @@ class HierarchicalSearch:
         TimeDomainFilterBank
             The leaf's bank.
         """
+        # Asked again for a bank it has handed out (every hook call asks): that bank.
+        bank = self._ready_banks.get((id(leaf), channel))
+        if bank is not None:
+            return bank
         prof = root.profile
         which = self._channel_profile(root, channel)
         if isinstance(prof, dict):
@@ -648,6 +668,7 @@ class HierarchicalSearch:
             w, df = prof
             bank.set_reference(w, delta_f=df, profile=name)
             self.timings["setup"] += time.perf_counter() - t0
+        self._ready_banks[(id(leaf), channel)] = bank
         return bank
 
     def _leaf_block_length(self, root, leaf):
