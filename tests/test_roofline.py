@@ -263,6 +263,7 @@ def test_an_unlisted_arm_core_has_unknown_peaks_and_a_formula(monkeypatch):
     """cpu_peaks on an ARM core that is not a listed Apple chip (a Linux arm64 runner):
     the peaks are NaN, the unknown terms are named, and the formula is still a string."""
     monkeypatch.setattr(_roofline.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(_roofline, "_APPLE_CPU", {})      # on a Mac the chip is a listed one
     pk = _roofline.cpu_peaks(measure_bandwidth=False)
     assert all(math.isnan(v) for v in pk["flops"].values())
     assert any("clock and FMA pipes" in u for u in pk["unknown"])
