@@ -591,10 +591,12 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
             t2, s1, _ = next(timed)
             if s1:
                 tier2.setdefault(b, []).append((s1, t2))
+    # A feed below the head's is the measurement's scatter (CostModel prices it as none):
+    # nor is it taken off the first tiers' dense costs below.
     feed_band = {b0: 0.0}
     for b in bands[1:]:
-        feed_band[b] = (next(timed)[0] - head) / blocks
-    feed = {"band": feed_band, "full": (next(timed)[0] - head) / blocks}
+        feed_band[b] = max(0.0, (next(timed)[0] - head) / blocks)
+    feed = {"band": feed_band, "full": max(0.0, (next(timed)[0] - head) / blocks)}
     # A first tier at band b was timed alone, its feed the band forward at b: that is the
     # feed's (feed_delta prices it by the chain's widest band), not the tier's.
     dense = {b: max(1e-3, v - feed_band.get(b, 0.0) / nt) for b, v in dense.items()}

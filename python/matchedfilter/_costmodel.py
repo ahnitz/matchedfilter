@@ -130,9 +130,12 @@ class CostModel:
         # there is one feed (the CPU). A call takes the band forward or the full one by the
         # backend's own rule (band_forward_wanted), and so does the model
         # (feed_delta).
+        # A feed costs at least the head's own band forward, which moves the fewest bytes: a
+        # change below zero is a measurement's scatter (-1.6 per block at band 512 in one
+        # pycbc job's calibration on the 8060S), priced as none, here and in a stored model.
         self.feed = None if not feed else {
-            "band": {int(b): float(v) for b, v in feed["band"].items()},
-            "full": float(feed["full"])}
+            "band": {int(b): max(0.0, float(v)) for b, v in feed["band"].items()},
+            "full": max(0.0, float(feed["full"]))}
         self.screen = {}
         for b, v in (screen or {}).items():
             ent = {"dense": float(v["dense"]), "recheck": float(v["recheck"]),

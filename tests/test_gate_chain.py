@@ -867,3 +867,23 @@ def test_lazy_fit_and_shared_candidate_cache(monkeypatch):
     m1 = gc.chain_thresholds(prof, 2048, 6.0, 1e-3, (256, 512), cost=cm.with_direct(0.05), window=(192, 1856))
     m2 = gc.chain_thresholds(prof, 2048, 6.0, 1e-3, (256, 512), cost=cm.with_direct(0.12), window=(192, 1856))
     assert m1 is not None and m2 is not None and len(searches) == 1
+
+
+def test_a_negative_feed_is_priced_as_none():
+    import json
+    """A GPU model's feed (the band forward at a chain's widest band, or the full forward,
+    against the head's) cannot cost less than the head's own forward: a negative measured
+    change is priced as zero, whether the model is made or read from a cost file."""
+    from matchedfilter.gatechain import CostModel
+    sparse = {b: [(0.01, 1.0), (0.1, 1.0)] for b in (256, 512)}
+    feed = {"band": {256: 0.0, 512: -160.0}, "full": -50.0}
+    for cm in (CostModel(2048, {256: 1.0, 512: 2.0}, sparse, [(0.01, 20.0), (0.1, 10.0)],
+                         block=30.0, feed=feed),):
+        again = CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
+        stored = CostModel.from_dict(dict(cm.to_dict(), feed={"band": {"512": -160.0, "256": 0.0},
+                                                              "full": -50.0}))
+        for m in (cm, again, stored):
+            assert m.feed["band"][512] == 0.0 and m.feed["full"] == 0.0
+            # band forward at 512 (refine fraction below the bytes rule) and the full forward
+            assert m.feed_delta((256, 512), [1.0, 0.01, 0.0005], 100) == 0.0
+            assert m.feed_delta((256, 512), [1.0, 0.5, 0.4], 100) == 0.0
