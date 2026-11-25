@@ -4,7 +4,6 @@ These arrays export CPU DLPack: a Vulkan/Metal allocation is not a CUDA or
 ROCm allocation. Consumers must finish writing before a synchronous filter call.
 """
 import bisect
-import ctypes
 import itertools
 import weakref
 import numpy as np
@@ -42,6 +41,25 @@ class _Allocation:
             del _starts[i]
         if getattr(buf.ctx, 'device', None):
             buf.destroy()
+
+
+class _Storage:
+    """Bytes [address, address + nbytes) of a device allocation as an array-interface owner:
+    every NumPy array or view over them holds it, and through `allocation` the allocation.
+
+    A ctypes byte array did the same, but each size of one is a new ctypes TYPE, and a type
+    is a reference cycle that only the collector frees: about 208,000 of them in a pycbc GPU
+    job (1.3 million objects of cyclic garbage), most of its collections."""
+    __slots__ = ("__array_interface__", "_allocation", "__weakref__")
+
+    def __init__(self, address, nbytes, allocation=None):
+        self._allocation = allocation
+        self.__array_interface__ = {"shape": (int(nbytes),), "typestr": "|u1",
+                                    "data": (int(address), False), "version": 3}
+
+    def array(self, dtype, shape):
+        """The bytes as a writable array of dtype and shape (whose items they hold)."""
+        return np.asarray(self).view(dtype).reshape(shape)
 
 
 def _caller_holds(allocation):
@@ -201,9 +219,8 @@ def _whole_view(start, allocation, dtype):
     whole = _whole.get(start)
     if whole is None or whole.dtype != dtype:
         nbytes, item = allocation.buffer.nbytes, dtype.itemsize
-        storage = (ctypes.c_ubyte * (nbytes - nbytes % item)).from_address(start)
-        storage._allocation = allocation
-        whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=dtype, buffer=storage)
+        storage = _Storage(start, nbytes - nbytes % item, allocation)
+        whole = storage.array(dtype, ((nbytes - nbytes % item) // item,))
         _whole[start] = whole
     return whole
 
@@ -226,11 +243,10 @@ def empty_shared(ctx, buffer_type, shape, dtype=np.complex64):
     buf = buffer_type(ctx, nbytes)
     owner = _Allocation(buf)
     address = buf.ptr.value if hasattr(buf.ptr, 'value') else buf.ptr
-    storage = (ctypes.c_ubyte * nbytes).from_address(address)
-    storage._allocation = owner
+    storage = _Storage(address, nbytes, owner)
     # Alive while any caller array or view of it is: see _Allocation.caller_holds.
     owner._storage = weakref.ref(storage)
-    return np.ndarray(shape, dtype=dtype, buffer=storage)
+    return storage.array(dtype, shape)
 
 
 def write_input(buffer, array):

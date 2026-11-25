@@ -51,8 +51,9 @@ class MappedBuffer:
         The bytes are wrapped once: a result reads several views per call."""
         raw = getattr(self, "_bytes", None)
         if raw is None:
-            raw = self._bytes = np.frombuffer(
-                (ctypes.c_ubyte * self.nbytes).from_address(address(self.ptr)), np.uint8)
+            from ._shared import _Storage
+            raw = self._bytes = _Storage(address(self.ptr), self.nbytes).array(np.uint8,
+                                                                              (self.nbytes,))
         return raw[:count * np.dtype(dtype).itemsize].view(dtype)
 
     def read_into(self, out):
@@ -60,6 +61,25 @@ class MappedBuffer:
         ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
         return out
 
+
+
+#: ctypes array types the backends build calls with, made once (carray).
+_CARRAYS = {}
+
+
+def carray(ctype, n):
+    """The ctypes array type ctype * n, made once for the process.
+
+    ctypes keeps an array type only while something holds it, and a type is a reference
+    cycle (it and its dict): each collection freed the call path's types, and the next calls
+    made them again -- about 3,600 array types per top template of a pycbc GPU job, 1.4
+    million objects of cyclic garbage over the job, which drove most of its collections.
+    The lengths a call path uses (bindings, push-constant words, command counts) are few;
+    a byte view of an allocation does not come here."""
+    t = _CARRAYS.get((ctype, n))
+    if t is None:
+        t = _CARRAYS[(ctype, n)] = ctype * n
+    return t
 
 
 class BufferPool:

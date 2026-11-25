@@ -438,3 +438,33 @@ def test_a_freed_plans_descriptor_sets_serve_the_next_plan():
     np.testing.assert_array_equal(got["index"], want["index"])
     np.testing.assert_allclose(np.abs(got["value"]), np.abs(want["value"]), rtol=1e-4,
                                atol=1e-4)
+
+
+def test_device_arrays_and_calls_leave_no_cyclic_garbage():
+    """Device-shared arrays of many sizes, and a plan's calls over them, are freed by
+    reference counting alone: nothing waits for the cycle collector. A ctypes byte array per
+    size made a new ctypes type per size, and a type is a reference cycle -- about 208,000
+    in a pycbc GPU job, most of its collections."""
+    import gc
+    d, h = spectra(7)
+    f = mf.MatchedFilter(N, ND, NT, device=DEVICE)
+    f.set_templates(h)
+    f.set_data(d)
+    f.run(binsize=N, threshold=0.0)
+    ctx = f._gpu
+    gc.collect()
+    gc.disable()
+    try:
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        for size in (1000, 1500, 2300, 4100, 7700, 12345):
+            a = ctx.empty_shared((size,), np.complex64)
+            a[:] = 1
+            del a
+        f.run(binsize=N, threshold=0.0)
+        gc.collect()
+        kinds = {type(o).__name__ for o in gc.garbage}
+    finally:
+        gc.garbage.clear()
+        gc.set_debug(0)
+        gc.enable()
+    assert "PyCArrayType" not in kinds, kinds

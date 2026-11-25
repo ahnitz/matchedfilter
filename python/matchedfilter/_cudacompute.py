@@ -28,8 +28,8 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, settle as _settle
-from ._shared import empty_shared, _Borrowed
-from ._gpuhost import MAX_BINS, Section, hier_peaks_grouped
+from ._shared import empty_shared, _Borrowed, _Storage
+from ._gpuhost import MAX_BINS, Section, carray, hier_peaks_grouped
 from . import _peaks as _pk
 from ._coarse import candidates
 
@@ -393,7 +393,9 @@ class _Pinned:
             ptr = p.value
         self.ptr = ptr
         self.handle = ptr
-        self._raw = np.frombuffer((ctypes.c_ubyte * self.nbytes).from_address(self.ptr), np.uint8)
+        # an array-interface view: a ctypes byte array per size is a new ctypes type each
+        # (_shared._Storage)
+        self._raw = _Storage(self.ptr, self.nbytes).array(np.uint8, (self.nbytes,))
 
     def view(self, dtype, count, offset=0):
         size = np.dtype(dtype).itemsize
@@ -614,7 +616,7 @@ class _CudaList:
             places.append(end)
             params += [end + i * (size // count) for i in range(count)]
             end += size
-        block = (ctypes.c_char * max(end, 8))()
+        block = carray(ctypes.c_char, max(end, 8))()
         base = ctypes.addressof(block)
         for (fmt, values, slot, _), at in zip(fields, places):
             struct.pack_into(fmt, block, at, *values)

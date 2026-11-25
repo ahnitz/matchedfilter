@@ -18,7 +18,7 @@ import numpy as np
 
 from . import _config, _gputime, _kernels, _vulkan, gatechain
 from ._shared import BUFFER_SERIALS, empty_shared
-from ._gpuhost import (MAX_BINS, BufferPool, MappedBuffer, Section, address,
+from ._gpuhost import (MAX_BINS, BufferPool, carray, MappedBuffer, Section, address,
                        hier_peaks_grouped)
 from . import _peaks as _pk
 from ._coarse import candidates, coarse_stem
@@ -333,10 +333,10 @@ class _Recording:
         (4 per word by default)."""
         vk, cmd = self.vk, self.cmd
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe[0])
-        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, pipe[1], 0, 1, (_vp * 1)(ds),
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, pipe[1], 0, 1, carray(_vp, 1)(ds),
                                    0, None)
         if words:
-            pc = (ctypes.c_uint32 * len(words))(*(int(w) & 0xFFFFFFFF for w in words))
+            pc = carray(ctypes.c_uint32, len(words))(*(int(w) & 0xFFFFFFFF for w in words))
             vk.vkCmdPushConstants(cmd, pipe[1], _STAGE_COMPUTE, 0, size or 4 * len(words),
                                   ctypes.byref(pc))
 
@@ -510,7 +510,7 @@ class _DeviceTimer:
         return i, _vp(self.cmds[2 * i]), _vp(self.cmds[2 * i + 1])
 
     def ns(self, i, period):
-        out = (ctypes.c_uint64 * 2)()
+        out = carray(ctypes.c_uint64, 2)()
         _check(self.dev.vk.vkGetQueryPoolResults(self.dev.device, self.pool, 2 * i, 2, 16, out, 8,
                                                  0x3), "timer read")
         # A pair the device did not write (zero) or wrote out of order is no interval: 0, which
@@ -622,7 +622,7 @@ class _FusedBatch:
     def _free(self, cmd):
         vk = self.dev.vk
         vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        vk.vkFreeCommandBuffers(self.dev.device, self.dev.command_pool, 1, (_vp * 1)(cmd))
+        vk.vkFreeCommandBuffers(self.dev.device, self.dev.command_pool, 1, carray(_vp, 1)(cmd))
 
     def _submit_fused(self, cmd):
         """Submit the fused command buffer cmd under a new fence (self.fence), between a timestamp
@@ -641,10 +641,10 @@ class _FusedBatch:
         timed = next((ctx for ctx, _ in self.items if ctx._timing), None)
         if timed is not None:
             begin, end = timed._timestamp_pair("fused")
-            cmds = (_vp * 3)(begin, cmd, end)
+            cmds = carray(_vp, 3)(begin, cmd, end)
             submit = _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)
         else:
-            cmds = (_vp * 1)(cmd)
+            cmds = carray(_vp, 1)(cmd)
             submit = _SubmitInfo(4, None, 0, None, None, 1, cmds, 0, None)
         _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), self.fence), "vkQueueSubmit")
 
@@ -655,7 +655,7 @@ class _FusedBatch:
             return
         self.state = "done"
         dev, vk = self.dev, self.dev.vk
-        fences = (_vp * 1)(self.fence)
+        fences = carray(_vp, 1)(self.fence)
         _check(vk.vkWaitForFences(dev.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         vk.vkDestroyFence(dev.device, self.fence, None)
         # A finished batch needs none of its contexts. The device's fused cache keeps the
@@ -718,7 +718,7 @@ class _Write:
         if batch is not None:
             batch.wait()
         else:
-            _check(self.vk.vkWaitForFences(self.device, 1, (_vp * 1)(self.fence), 1,
+            _check(self.vk.vkWaitForFences(self.device, 1, carray(_vp, 1)(self.fence), 1,
                                            0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         self.vk.vkDestroyFence(self.device, self.fence, None)
         self.fence = None
@@ -767,13 +767,13 @@ class _Device:
         vk.vkEnumeratePhysicalDevices(self.instance, ctypes.byref(count), None)
         if index >= count.value:
             raise VulkanError("no Vulkan device with index %d" % index)
-        handles = (_vp * count.value)()
+        handles = carray(_vp, count.value)()
         vk.vkEnumeratePhysicalDevices(self.instance, ctypes.byref(count), handles)
         self.physical = _vp(handles[index])
 
         self.queue_family, fam_qcount = self._compute_queue_family()
         q_count = max(1, min(int(fam_qcount), 4))
-        priorities = (ctypes.c_float * q_count)(*(1.0 for _ in range(q_count)))
+        priorities = carray(ctypes.c_float, q_count)(*(1.0 for _ in range(q_count)))
         qci = _QueueCreate(2, None, 0, self.queue_family, q_count, priorities)
         # Pin the subgroup size where the device lets us (VK_EXT_subgroup_size_control):
         # the kernels are specialized on it (constant 74), and RADV may otherwise pick
@@ -1009,7 +1009,7 @@ class _VkList:
     def update(self, buf, words):
         # vkCmdUpdateBuffer reads its data when recorded -- and again whenever a fused batch
         # re-records a captured call -- so the words live as long as the list.
-        data = (ctypes.c_uint32 * len(words))(*[int(w) & 0xFFFFFFFF for w in words])
+        data = carray(ctypes.c_uint32, len(words))(*[int(w) & 0xFFFFFFFF for w in words])
         self.ops.append(("update", buf, data))
 
     def readback(self, buf, nbytes):
@@ -1129,7 +1129,7 @@ class _VkNative:
         ctx = self.ctx
         getattr(ctx, "_phases", {}).pop(getattr(cmd, "value", cmd), None)
         ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
+        ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, carray(_vp, 1)(cmd))
         dead = {pool.value for pool in pools}
         # The recording's sets are no longer in use (its command buffer is freed): each goes
         # back to the device's shelf for its layout, for the next recording to rewrite
@@ -1282,7 +1282,7 @@ class Context(Executor, InputUploads):
         if batch is not None:
             batch.wait()
             return
-        fences = (_vp * 1)(fence)
+        fences = carray(_vp, 1)(fence)
         _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
                "vkWaitForFences")
         _check(self.vk.vkResetFences(self.device, 1, fences), "vkResetFences")
@@ -1426,7 +1426,7 @@ class Context(Executor, InputUploads):
         _check(vk.vkCreateShaderModule(self.device, ctypes.byref(sm_info), None,
                                        ctypes.byref(module)), "vkCreateShaderModule")
 
-        bindings = (_LayoutBinding * nbind)(
+        bindings = carray(_LayoutBinding, nbind)(
             *[_LayoutBinding(i, _DESC_STORAGE_BUFFER, 1, _STAGE_COMPUTE, None)
               for i in range(nbind)])
         sl_info = _SetLayoutCreate(32, None, 0, nbind, bindings)
@@ -1441,7 +1441,7 @@ class Context(Executor, InputUploads):
         # the source is the difference between working and binding a buffer
         # the shader never reads.
         push = _PushRange(_STAGE_COMPUTE, 0, push_bytes)
-        layouts = (_vp * 1)(set_layout)
+        layouts = carray(_vp, 1)(set_layout)
         pl_info = _PipelineLayoutCreate(30, None, 0, 1, ctypes.cast(layouts, _vp),
                                         1 if push_bytes else 0,
                                         ctypes.pointer(push) if push_bytes else None)
@@ -1483,8 +1483,8 @@ class Context(Executor, InputUploads):
             data_vals.append(1)
             offset += 4
 
-        c_entries = (_SpecializationEntry * len(entries))(*entries)
-        c_data = (_u32 * len(data_vals))(*data_vals)
+        c_entries = carray(_SpecializationEntry, len(entries))(*entries)
+        c_data = carray(_u32, len(data_vals))(*data_vals)
         spec_info = _SpecializationInfo(len(entries), c_entries,
                                         ctypes.sizeof(c_data),
                                         ctypes.cast(ctypes.pointer(c_data), _vp))
@@ -1546,13 +1546,13 @@ class Context(Executor, InputUploads):
         if shelf:
             pool, dset = shelf.pop()
         else:
-            sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, nbind))
+            sizes = carray(_PoolSize, 1)(_PoolSize(_DESC_STORAGE_BUFFER, nbind))
             dp = _DescPoolCreate(33, None, 0, 1, 1, sizes)
             pool = _vp()
             _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None,
                                              ctypes.byref(pool)),
                    "vkCreateDescriptorPool")
-            layouts = (_vp * 1)(set_layout)
+            layouts = carray(_vp, 1)(set_layout)
             da = _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))
             dset = _vp()
             try:
@@ -1567,11 +1567,11 @@ class Context(Executor, InputUploads):
         # A view's nbytes already excludes its own offset (_Borrowed): the range runs from
         # the descriptor offset to the end of the whole buffer, at most max_binding_bytes.
         limit = self.max_binding_bytes
-        infos = (_DescBufferInfo * nbind)(
+        infos = carray(_DescBufferInfo, nbind)(
             *[_DescBufferInfo(b.handle, offset,
                               min(b.nbytes + getattr(b, 'offset', 0) - offset, limit))
               for b, offset in zip(bufs, offsets or [0] * nbind)])
-        writes = (_WriteDescSet * nbind)(*[
+        writes = carray(_WriteDescSet, nbind)(*[
             _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,
                           ctypes.pointer(infos[i]), None) for i in range(nbind)])
         vk.vkUpdateDescriptorSets(self.device, nbind, writes, 0, None)
@@ -1610,7 +1610,7 @@ class Context(Executor, InputUploads):
     def _timestamp_slot(self, i):
         """Record ring slot i: a reset and top-of-pipe timestamp, and a bottom-of-pipe one."""
         vk, ts = self.vk, self._ts
-        pair = (_vp * 2)()
+        pair = carray(_vp, 2)()
         alloc = _CmdBufAlloc(40, None, self.command_pool, 0, 2)
         _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(alloc), pair),
                "allocate timestamp buffers")
@@ -1795,7 +1795,7 @@ class Context(Executor, InputUploads):
         ts = self._ts
         if ts is None:
             return
-        out = (ctypes.c_uint64 * 2)()
+        out = carray(ctypes.c_uint64, 2)()
         for i in ([only] if only is not None else sorted(ts["pending"])):
             label, t_host = ts["pending"].pop(i)
             _check(self.vk.vkGetQueryPoolResults(self.device, ts["pool"], 2 * i, 2, 16, out, 8, 0x3),
@@ -1830,7 +1830,7 @@ class Context(Executor, InputUploads):
             begin, end = self._timestamp_pair(label)
             self._profile_submitted(commands)
             commands = [begin] + commands + [end]
-        cmds = (_vp * len(commands))(*commands)
+        cmds = carray(_vp, len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
         # _queue_offset spreads concurrent plans over the compute queues (filter_series_many):
         # barriers order work only within a queue, so banks on different queues overlap.
@@ -1992,7 +1992,7 @@ class Context(Executor, InputUploads):
         try:
             for rep in range(reps + 1):
                 i, begin, end = timer.pair()
-                cmds = (_vp * 3)(begin, cmd, end)
+                cmds = carray(_vp, 3)(begin, cmd, end)
                 fence = _vp()
                 _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
                                         None, ctypes.byref(fence)), "vkCreateFence")
@@ -2000,7 +2000,7 @@ class Context(Executor, InputUploads):
                     _check(vk.vkQueueSubmit(self.queue, 1, ctypes.byref(
                         _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)), fence),
                         "vkQueueSubmit")
-                    _check(vk.vkWaitForFences(self.device, 1, (_vp * 1)(fence), 1,
+                    _check(vk.vkWaitForFences(self.device, 1, carray(_vp, 1)(fence), 1,
                                               0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
                 finally:
                     vk.vkDestroyFence(self.device, fence, None)
