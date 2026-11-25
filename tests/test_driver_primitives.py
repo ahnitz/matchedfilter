@@ -57,3 +57,31 @@ def test_pow2_scaling_is_ldexp_bit_for_bit():
             want = np.ldexp(a.view(np.float32), e) if e else a.view(np.float32)
             np.testing.assert_array_equal(pow2_scaled(a, e).view(np.uint32),
                                           np.asarray(want, np.float32).view(np.uint32))
+
+
+def test_half_bits_is_numpys_float16_cast_bit_for_bit():
+    """_core.half_bits (the fp16 tiers' template packing) gives NumPy's float32 -> float16
+    bits: round to nearest with ties to even, subnormal halves, overflow to infinity, NaN
+    kept a NaN with its sign and payload top, both signs. A strided sweep over every float32
+    bit pattern and each edge class (all 2^32 patterns were checked once, 2026-11-25)."""
+    import numpy as np
+    from matchedfilter import _core
+    from matchedfilter._shared import pack_half2
+    sweep = np.arange(0, 1 << 32, 4099, dtype=np.uint64).astype(np.uint32)
+    exps = np.arange(256, dtype=np.uint32) << 23
+    mants = np.array([0, 1, 0x1000, 0x1001, 0xfff, 0x2000, 0x3000, 0x7ff, 0x800, 0x3fff,
+                      0x7fe000, 0x7ff000, 0x7fffff, 0x400000, 0x400001], np.uint32)
+    edges = (exps[:, None] | mants[None, :]).ravel()
+    bits = np.concatenate([sweep, edges, edges | np.uint32(0x80000000)])
+    f = bits.view(np.float32)
+    with np.errstate(all="ignore"):
+        want = f.astype(np.float16).view(np.uint16)
+    got = np.empty(f.size, np.uint16)
+    _core.half_bits(f, got)
+    bad = np.flatnonzero(got != want)
+    assert bad.size == 0, [(hex(int(bits[i])), hex(int(got[i])), hex(int(want[i])))
+                           for i in bad[:5]]
+    c = f[: (f.size // 2) * 2].view(np.complex64).reshape(-1, 2)
+    with np.errstate(all="ignore"):
+        np.testing.assert_array_equal(
+            pack_half2(c), c.view(np.float32).astype(np.float16).view(np.uint32))

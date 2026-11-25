@@ -1208,6 +1208,63 @@ void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset);   /* s
 void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
                         uint64_t offset, uint64_t step, const float *scale,
                         const unsigned char *keep);
+/* One float32's bits as IEEE half bits, exactly as NumPy's float32 -> float16 cast
+   (npy_floatbits_to_halfbits, NumPy's halffloat.c): round to nearest, ties to even;
+   subnormal halves; overflow to a signed infinity; a NaN stays a NaN with its sign and the
+   top of its payload. Portable C, so every ISA gives these bits. */
+static inline uint16_t half_bits_of(uint32_t f){
+  const uint16_t h_sgn=(uint16_t)((f&0x80000000u)>>16);
+  uint32_t f_exp=f&0x7f800000u, f_sig;
+  if(f_exp>=0x47800000u){                      /* overflow, infinity or NaN */
+    if(f_exp==0x7f800000u){
+      f_sig=f&0x007fffffu;
+      if(f_sig!=0){
+        uint16_t ret=(uint16_t)(0x7c00u+(f_sig>>13));
+        if(ret==0x7c00u) ret++;                /* stays a NaN */
+        return (uint16_t)(h_sgn+ret);
+      }
+      return (uint16_t)(h_sgn+0x7c00u);
+    }
+    return (uint16_t)(h_sgn+0x7c00u);
+  }
+  if(f_exp<=0x38000000u){                      /* a subnormal half or a signed zero */
+    if(f_exp<0x33000000u) return h_sgn;
+    f_exp>>=23;
+    f_sig=0x00800000u+(f&0x007fffffu);
+    f_sig>>=(113-f_exp);
+    if(((f_sig&0x00003fffu)!=0x00001000u) || (f&0x000007ffu)) f_sig+=0x00001000u;
+    return (uint16_t)(h_sgn+(uint16_t)(f_sig>>13));
+  }
+  {
+    const uint16_t h_exp=(uint16_t)((f_exp-0x38000000u)>>13);
+    f_sig=f&0x007fffffu;
+    if((f_sig&0x00003fffu)!=0x00001000u) f_sig+=0x00001000u;
+    /* a carry out of the significand moves into the exponent, to infinity at the top */
+    return (uint16_t)(h_sgn+(uint16_t)((uint16_t)(f_sig>>13)+h_exp));
+  }
+}
+
+/* half_bits(src, dst): dst[i] = src[i] as IEEE half bits, NumPy's float32 -> float16 cast;
+   src a C-contiguous float32 buffer, dst a writable C-contiguous 16-bit buffer as long. */
+static PyObject *M_half_bits(PyObject *self,PyObject *args){
+  (void)self; PyObject *so, *dout;
+  if(!PyArg_ParseTuple(args,"OO",&so,&dout)) return NULL;
+  Py_buffer s, d;
+  if(PyObject_GetBuffer(so,&s,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  if(PyObject_GetBuffer(dout,&d,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS)<0){ PyBuffer_Release(&s); return NULL; }
+  if(!s.format || strcmp(s.format,"f")!=0 || s.itemsize!=4 || d.itemsize!=2 || d.len*2!=s.len){
+    PyBuffer_Release(&s); PyBuffer_Release(&d);
+    PyErr_SetString(PyExc_TypeError,"half_bits needs float32 src and a 16-bit dst of as many items");
+    return NULL;
+  }
+  const uint32_t *src=(const uint32_t*)s.buf; uint16_t *dst=(uint16_t*)d.buf;
+  const size_t n=(size_t)(s.len/4);
+  Py_BEGIN_ALLOW_THREADS
+  for(size_t i=0;i<n;i++) dst[i]=half_bits_of(src[i]);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&s); PyBuffer_Release(&d);
+  Py_RETURN_NONE;
+}
 static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyObject *o; unsigned long long seed, offset;
   if(!PyArg_ParseTuple(args,"OKK",&o,&seed,&offset)) return NULL;
@@ -3127,6 +3184,7 @@ static PyMethodDef methods[]={
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
+  {"half_bits",M_half_bits,METH_VARARGS,"half_bits(src float32, dst 16-bit): dst[i] = src[i] as IEEE half bits, NumPy's float32 -> float16 cast"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None, keep=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
