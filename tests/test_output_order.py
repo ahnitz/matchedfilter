@@ -123,11 +123,15 @@ def test_correlation_output_is_stored_in_natural_order_by_whole_lines(n):
         assert bank <= 8                     # 2 is conflict-free for 8-byte elements
 
 
-def test_the_correlation_kernels_store_through_the_natural_order():
-    """Both full-correlation entries end in storeNatural, not a per-register store."""
-    src = (_TOOLS.parent / "src" / "gpu" / "tierb.slang").read_text()
-    for entry in ("void fullCorrelation(", "void fullCorrelationSeries("):
-        body = src[src.index(entry):]
-        body = body[:body.index("\n}\n")]
-        assert "storeNatural(r, tid, output" in body
-        assert "slotToIndex" not in body
+@pytest.mark.parametrize("source,entry,dest", [
+    ("tierb.slang", "void fullCorrelation(", "output"),
+    ("tierb.slang", "void fullCorrelationSeries(", "output"),
+    ("series_forward.slang", "void seriesForward(", "spectra")])
+def test_the_correlation_kernels_store_through_the_natural_order(source, entry, dest):
+    """The full-correlation entries and the series forward (the middle stage's kernels) end
+    in storeNatural, not a per-register store."""
+    src = (_TOOLS.parent / "src" / "gpu" / source).read_text()
+    body = src[src.index(entry):]
+    body = body[:body.index("\n}\n")]
+    assert "storeNatural(r, tid, %s" % dest in body
+    assert "slotToIndex" not in body

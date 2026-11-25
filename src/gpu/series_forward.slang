@@ -43,8 +43,8 @@ void seriesForward(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         r[k] = C(x.x / float(N), -x.y / float(N));
     }
     forwardTransform(r, tid);
-    [unroll] for (uint k = 0; k < R; ++k) {
-        uint index = slotToIndex(tid * R + k);
-        spectra[gid.x*N + index] = float2(r[k].x, -r[k].y);
-    }
+    // Conjugated back, and stored in natural order a wave per two lines (storeNatural).
+    [unroll] for (uint k = 0; k < R; ++k)
+        r[k] = C(r[k].x, -r[k].y);
+    storeNatural(r, tid, spectra, gid.x*N, 0u, N);
 }
