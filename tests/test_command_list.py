@@ -187,3 +187,75 @@ def test_a_list_runs_on_this_hosts_backend():
     ctx._x_read(buf, out)
     np.testing.assert_array_equal(out, [1, 2, 3] + [0xFFFFFFFF] * 13)
     ctx._x_release(native, done=True)
+
+
+def test_bindings_are_named_by_serials_not_by_address():
+    """binding_key names a view by its allocation's serial and offset, a buffer by its serial,
+    a section by its base's serial, offset and size: a recycled allocation at the same
+    address or handle (a new serial) is a different binding."""
+    from types import SimpleNamespace as NS
+    from matchedfilter._gpuhost import binding_key
+    a1, a2 = NS(serial=11), NS(serial=12)
+    assert binding_key(NS(owner=a1, offset=64)) == ("view", 11, 64)
+    assert binding_key(NS(owner=a1, offset=64)) != binding_key(NS(owner=a2, offset=64))
+    assert binding_key(NS(serial=5)) == ("buffer", 5)
+    assert binding_key(NS(base=NS(serial=7), offset=16, nbytes=32)) == ("section", 7, 16, 32)
+    assert binding_key((3, 4)) == (3, 4)
+
+
+def test_the_binding_cache_keeps_the_most_recent_and_frees_the_rest():
+    """BindingCache: one instance per binding, the most recently used `limit` kept; a waited
+    run past the limit gets a one-off instance instead of an eviction; a `once` recording is
+    made for its run; evictions free without the done flag, one-offs and clear(done) with
+    it."""
+    from types import SimpleNamespace as NS
+    from matchedfilter._gpuhost import BindingCache
+    made, freed = [], []
+    cache = BindingCache(limit=2)
+    make = lambda b: made.append(b["x"]) or ("inst", b["x"])
+    free = lambda inst, done: freed.append((inst[1], done))
+    views = [NS(owner=NS(serial=i), offset=0) for i in range(4)]
+    assert cache.get(["x"], {"x": views[0]}, make, free)[1] is None
+    cache.get(["x"], {"x": views[1]}, make, free)
+    assert cache.get(["x"], {"x": NS(owner=views[0].owner, offset=0)}, make, free)[0] == ("inst", views[0])
+    assert len(made) == 2                       # the same allocation and offset: kept
+    inst, release = cache.get(["x"], {"x": views[2]}, make, free, transient=True)
+    assert release is not None and len(cache) == 2 and freed == []
+    release()
+    assert freed == [(views[2], True)]
+    cache.get(["x"], {"x": views[3]}, make, free)           # evicts the least recently used: views[1]
+    assert freed[-1] == (views[1], False) and len(cache) == 2
+    inst, release = cache.get(["x"], {"x": views[0]}, make, free, once=True)
+    assert release is not None and made[-1] is views[0]
+    cache.clear(free, done=True)
+    assert len(cache) == 0 and sorted(id(f[0]) for f in freed[-2:]) == sorted(
+        [id(views[0]), id(views[3])]) and all(f[1] for f in freed[-2:])
+
+
+def test_lists_and_caches_make_no_reference_cycle_with_their_owner():
+    """A finished list keeps no reference to the backend that recorded it, and a binding
+    cache none to its owner: a native that keeps its list, and a cache that kept its native's
+    methods, made every recording a cycle through its context, freed only by the collector
+    (device memory followed the collector's timing: 18 GB in a pycbc job)."""
+    import weakref
+
+    class Owner:
+        def __init__(self):
+            self.cache = __import__("matchedfilter._gpuhost", fromlist=["x"]).BindingCache(2)
+
+        def record(self, commands):
+            self.commands = commands             # a native keeps its list
+            return self
+
+    owner = Owner()
+    cl = CommandList("t", record=owner.record)
+    cl.barrier()
+    assert cl.end() is owner
+    owner.cache.get([], {}, lambda b: ("inst",), lambda inst, done: None)
+    ref = weakref.ref(owner)
+    gc.disable()
+    try:
+        del owner
+        assert ref() is None                    # reference counting alone frees it
+    finally:
+        gc.enable()

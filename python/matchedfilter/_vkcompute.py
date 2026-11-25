@@ -284,7 +284,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
-from ._gpuhost import CommandList
+from ._gpuhost import BindingCache, CommandList
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
@@ -1027,30 +1027,20 @@ class _VkNative:
         # vkCmdUpdateBuffer reads its data when recorded, and again when a fused batch
         # records the phase: each update's words live as long as the native.
         self._updates = {}
-        self.cmds = {}                       # binding key -> (cmd, pools, held values)
-
-    @staticmethod
-    def _key(value):
-        return (id(value.owner), value.offset) if hasattr(value, "owner") else value
+        # (command buffer, descriptor pools) per binding (the shared BindingCache)
+        self.cmds = BindingCache(self._BINDINGS)
 
     def command(self, binds, transient=False):
         """(command buffer, release): release() frees a one-off one once its run finished
         (None for a cached one)."""
-        values = tuple(binds[name] for name in self.args)
-        if self.once:
-            cmd, pools = self.record(dict(zip(self.args, values)))
-            return cmd, lambda: self.free(cmd, pools)
-        key = tuple(self._key(v) for v in values)
-        entry = self.cmds.pop(key, None)
-        if entry is None:
-            if transient and len(self.cmds) >= self._BINDINGS:
-                cmd, pools = self.record(dict(zip(self.args, values)))
-                return cmd, lambda: self.free(cmd, pools)
-            if len(self.cmds) >= self._BINDINGS:
-                self.release_one(next(iter(self.cmds)))
-            entry = self.record(dict(zip(self.args, values))) + (values,)
-        self.cmds[key] = entry               # most recently used last
-        return entry[0], None
+        inst, release = self.cmds.get(self.args, binds, self.record, self._free_instance,
+                                      once=self.once, transient=transient)
+        return inst[0], release
+
+    def _free_instance(self, inst, done):
+        if not done:
+            self.ctx._wait_queues()
+        self.free(*inst)
 
     def _update_data(self, words):
         """The update's words as a ctypes array the native keeps (one per distinct words)."""
@@ -1200,17 +1190,10 @@ class _VkNative:
                 ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
         ctx._pools = [pool for pool in getattr(ctx, "_pools", []) if pool.value not in dead]
 
-    def release_one(self, key, done=False):
-        cmd, pools, _ = self.cmds.pop(key)
-        if not done:
-            self.ctx._wait_queues()
-        self.free(cmd, pools)
-
     def release(self, done=False):
-        if self.cmds and not done:
+        if len(self.cmds) and not done:
             self.ctx._wait_queues()
-        for key in list(self.cmds):
-            self.release_one(key, done=True)
+        self.cmds.clear(self._free_instance, done=True)
 
 
 class Context(Executor, InputUploads):

@@ -191,9 +191,11 @@ class CommandList:
         self.ops.extend((self.READBACK, self._buffer(buf), int(nbytes)))
 
     def end(self):
-        """The backend's native recording of this list (its _x_record)."""
-        self._index = None
-        return self._record(self)
+        """The backend's native recording of this list (its _x_record). The list lets go of
+        it: a native that keeps its list would otherwise hold the context through it, a
+        cycle that only the collector frees."""
+        record, self._record, self._index = self._record, None, None
+        return record(self)
 
     def arg_names(self):
         """The names of the Args the list binds, sorted."""
@@ -269,6 +271,74 @@ class CommandList:
             else:
                 getattr(target, name)(*args)
         return target
+
+
+def binding_key(value):
+    """The identity of a value an Arg is bound to, for caching what a recording binds: an
+    allocation's serial and offset (a view of a shared array), a buffer's serial, a section's
+    base serial, offset and size, or the value itself (words). Serials are never reused, so
+    a key cannot name a later allocation at a freed one's address or handle."""
+    owner = getattr(value, "owner", None)
+    if owner is not None and getattr(owner, "serial", None) is not None:
+        return ("view", owner.serial, int(getattr(value, "offset", 0)))
+    serial = getattr(value, "serial", None)
+    if serial is not None:
+        return ("buffer", serial)
+    base = getattr(value, "base", None)
+    if base is not None and getattr(base, "serial", None) is not None:
+        return ("section", base.serial, int(value.offset), int(value.nbytes))
+    return value
+
+
+class BindingCache:
+    """A recording's instances per binding of its Args: what a backend made for one set of
+    bound values (a command buffer, a graph, an encode plan), the most recently used `limit`
+    kept, keyed by binding_key so a key never outlives what it names. Each entry holds the
+    values it binds, so nothing it names can be freed while it is kept.
+
+    The backend passes make(binds) -> instance and free(instance, done) to each call, so the
+    cache holds no reference to its owner (a bound method kept here made every recording a
+    reference cycle, freed only by the collector: 18 GB of device memory held in a pycbc
+    job). get() returns (instance, release): release() frees a one-off instance once its run
+    has finished (None for a kept one). A `once` recording is made for its one run; past
+    `limit` a transient run (one that is waited for) gets a one-off instance rather than
+    evicting a kept one, whose eviction would wait for every queue."""
+    __slots__ = ("limit", "entries")
+
+    def __init__(self, limit=8):
+        self.limit = limit
+        self.entries = OrderedDict()         # key -> (instance, held values)
+
+    def get(self, names, binds, make, free, once=False, transient=False):
+        values = tuple(binds[name] for name in names)
+        bound = dict(zip(names, values))
+        if once:
+            inst = make(bound)
+            return inst, lambda: free(inst, True)
+        key = tuple(binding_key(v) for v in values)
+        entry = self.entries.pop(key, None)
+        if entry is None:
+            if transient and len(self.entries) >= self.limit:
+                inst = make(bound)
+                return inst, lambda: free(inst, True)
+            if len(self.entries) >= self.limit:
+                self.evict(next(iter(self.entries)), free)
+            entry = (make(bound), values)
+        self.entries[key] = entry           # most recently used last
+        return entry[0], None
+
+    def evict(self, key, free, done=False):
+        """Free the instance kept under key (done: its runs are known to have finished)."""
+        inst, _ = self.entries.pop(key)
+        free(inst, done)
+
+    def clear(self, free, done=False):
+        """Free every kept instance."""
+        for key in list(self.entries):
+            self.evict(key, free, done)
+
+    def __len__(self):
+        return len(self.entries)
 
 
 #: ctypes array types the backends build calls with, made once (carray).
