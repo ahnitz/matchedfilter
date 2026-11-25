@@ -477,15 +477,39 @@ class _MtlList:
                          buf.nbytes - offset if nbytes is None else nbytes, rows, pitch))
 
     def update(self, buf, words):
-        # Shared storage: written by the host as the run is encoded. A record's earlier run
-        # has been collected by then (_claim), so nothing in flight still reads it.
-        self.ops.append(("update", buf, np.asarray(words, np.uint32)))
+        # In order with the work (_gpuexec): a host write as the run is encoded where no
+        # earlier op of the list can write the buffer, else a blit from a staging buffer made
+        # on first use (the op's last slot) -- Context._x_encode decides per run.
+        self.ops.append(("update", buf, np.asarray(words, np.uint32), [None]))
 
     def readback(self, buf, nbytes):
         pass                        # shared storage: the host reads it after the run
 
     def end(self):
         return self.label, self.ops
+
+
+def _handle(buf):
+    """The MTLBuffer a buffer or view lies in, as an int (its allocation's identity)."""
+    h = buf.handle
+    return getattr(h, "value", h)
+
+
+class _Staging:
+    """A list update's words in a shared buffer of their own, for a blit in stream order; the
+    MTLBuffer is released with the list (a command buffer in flight retains it)."""
+    __slots__ = ("o", "handle")
+
+    def __init__(self, ctx, words):
+        buf = _Buffer(ctx, words.nbytes)
+        buf.write(words)
+        self.o, self.handle = ctx.o, buf.handle
+        buf.handle = None                # owned here from now on
+
+    def __del__(self):
+        if self.handle:
+            self.o.call(self.handle, b"release", restype=None)
+            self.handle = None
 
 
 def _function(entry):
@@ -1124,17 +1148,42 @@ class Context(Executor, InputUploads):
 
     def _x_encode(self, cmd, ops, binds):
         """Encode a recorded list into a command buffer: serial compute encoders, a blit for
-        a fill. Returns the buffers it bound."""
+        a fill. Returns the buffers it bound.
+
+        An update is in order with the list's work (_gpuexec). Where no earlier op of the
+        list binds or fills the buffer's allocation -- decided from the list as encoded, its
+        Args resolved -- nothing the device runs before it can write those words, so the host
+        writes them now (shared storage). Otherwise it is a blit from a staging buffer, after
+        the ops before it. Earlier runs of the same list are collected before a rerun
+        (_claim), so no other command buffer still writes it."""
         enc, used = None, []
+        written = set()                  # allocations an op so far may write (MTLBuffer)
         for op in ops:
             if op[0] == "update":
-                op[1].write(op[2])
+                _, buf, words, staged = op
+                if _handle(buf) not in written:
+                    buf.write(words)
+                    continue
+                if enc is not None:
+                    self.o.call(enc, b'endEncoding', restype=None)
+                    enc = None
+                if staged[0] is None:
+                    staged[0] = _Staging(self, words)
+                blit = self.o.call(cmd, b'blitCommandEncoder')
+                self.o.call(blit, b"copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:",
+                            restype=None,
+                            args=(staged[0].handle, 0, buf.handle, getattr(buf, "offset", 0),
+                                  words.nbytes),
+                            argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                                      ctypes.c_ulong, ctypes.c_ulong))
+                self.o.call(blit, b'endEncoding', restype=None)
                 continue
             if op[0] == "fill":
                 if enc is not None:
                     self.o.call(enc, b'endEncoding', restype=None)
                     enc = None
                 _, buf, byte, offset, nbytes, rows, pitch = op
+                written.add(_handle(buf))
                 base = getattr(buf, "offset", 0) + offset
                 blit = self.o.call(cmd, b'blitCommandEncoder')
                 fill = self.o.send(None, (ctypes.c_void_p, _NSRange, ctypes.c_ubyte))
@@ -1148,6 +1197,7 @@ class Context(Executor, InputUploads):
             (pso, tg), groups, buffers, offsets, words = op
             bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
             used += bound
+            written.update(_handle(b) for b in bound)
             flat = []
             for w in words:
                 flat.extend(binds[w.name] if isinstance(w, Arg) else (w,))
