@@ -22,6 +22,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   than 1%, at most 8%) and none is higher. PyCBC's leaf plans (SNR 6, budget 0.001) are
   unchanged, except chains that start at band 64 at n = 2048, whose tiers pass at most 0.1
   percentage points more noise.
+- GPU and CPU runs of a PyCBC job no longer differ in their triggers beyond a few near
+  threshold. The GPU ran 2048-sample leaf blocks where the CPU runs 1024, and PyCBC's power
+  chisq is computed over one leaf block, so its values and the triggers a chisq cut keeps
+  differed.
 
 ### Performance
 
@@ -38,6 +42,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   from a bitmap instead of sorting them. The lists and the output order are unchanged. In the
   same PyCBC job the steady search time fell from 40.1 s to 37.7 s (5.9%), with identical
   triggers.
+- GPU (experimental): a PyCBC job on a Vulkan device now runs at about the speed of one CPU
+  core (the 171,828-template job on a Radeon 8060S: 112-128 s before, 78-80 s now, against
+  74-75 s on one Zen 5 core). A GPU leaf bank may now choose 1024-sample blocks, as the CPU
+  does; the trial that places single-template follow-up calls times each call's first run,
+  which is what a search makes; a GPU plan's chain choice is priced in C like the CPU's; and
+  Vulkan buffers reuse their allocations instead of creating about 76,000 in a job.
 
 ### Documentation
 
