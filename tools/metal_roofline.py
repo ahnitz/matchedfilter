@@ -152,7 +152,7 @@ def replay(records, reps):
                 M.Context._dispatch(ctx, e, r["pso"], r["params"], r["buffers"], r["tg"],
                                     r["groups"], r["indirect"], r["offsets"])
             best[i] = min(best[i], _timed(ctx, enc))
-            groups[i] = (int(r["indirect"].read(np.uint32, 1)[0]) if r["indirect"] is not None
+            groups[i] = (int(np.array(r["indirect"].view(np.uint32, 1))[0]) if r["indirect"] is not None
                          else r["groups"])
     return best, groups
 
@@ -181,10 +181,9 @@ def work(r, groups):
         nbins = p[5]
         # coarse16pK packs K pairs per threadgroup (padded to whole groups); a tiled
         # coarse16[pK]tT build runs T templates per slot over ragged rows (p[3] = rows).
-        from matchedfilter._mtlcompute import _ppg_of
-        ppg = _ppg_of(entry)
-        tile = (int(entry.rsplit("t", 1)[1])
-                if entry.startswith("coarse16") and "t" in entry[len("coarse16"):] else 1)
+        from matchedfilter import _kernels
+        rec = _kernels.record("metal", stem) or {}
+        ppg, tile = int(rec.get("ppg", 1)), int(rec.get("tile", 1))
         pairs = groups * ppg * tile if tile == 1 else min(groups * ppg * tile, p[3] * nt)
         listed = entry == "refineListed"
         total = r["groups"] if not listed else None
