@@ -12,11 +12,13 @@ The stages of one segment of the three-level search (tools/ladder.py):
               inverse. fp32.
   forward     the fine banks' forward transforms: one per (block) of each fine group.
               fp32.
-  q15         (CPU, when the int16 screen ran) the screen in front of tier 0, over every
-              pair, at tier 0's band. int16.
-  tier<i>     coarse gate tier i at band b: tier 0 over every (block, template) pair,
-              tier i > 0 over tier i-1's survivors. fp16 where the backend runs the
-              packed half-precision gate (GPU tier 0, ARM gate16), else fp32.
+  tier<i>     coarse gate tier i at band b, on what the engine ran it on: tier 0 over
+              every block against the templates -- or against the shared screeners where
+              the tier runs on them ((block, screener) pairs) -- and tier i > 0 over tier
+              i-1's survivors, or the (block, sub-screener) pairs they map to (the CPU's
+              tier-1 sub-screeners). Precision: int16 where the CPU's Q15 screen ran (the
+              screen IS tier 0: there is no float pass behind it), fp16 where the backend
+              runs the packed half-precision gate (GPU tier 0, ARM gate16), else fp32.
   refine      the full length-n correlation of every pair the last tier passed. fp32.
   followups   the single-template, threshold-0 follow-ups: per block a forward transform
               and one full pair. fp32.
@@ -29,26 +31,30 @@ Work per stage, in samples and bins only (the library is unit-agnostic):
           (|z|^2 and the running maximum; omitted for the middle stage, which writes the
           series rather than peaks). Twiddles, addressing and barriers are not counted.
   bytes   the minimum DRAM traffic, the unique data the stage must touch:
-            middle    input windows once (8 B/sample), each block's spectrum written
-                      (8 n B), template spectra once per call (8 B x stored bins), and
-                      the requested output window per template (8 B/sample).
-            forward   block inputs, non-overlapping (8 n_valid B), and the spectrum
-                      written (8 n B).
+            middle    input windows once (8 B/sample), template spectra once per call
+                      (8 B x stored bins), and the requested output window per template
+                      (8 B/sample).
+            forward   block inputs, non-overlapping (8 n_valid B).
+                      A transform's output spectrum is not charged in any stage (middle,
+                      forward, follow-ups): its consumers can read it where it is made (the
+                      CPU's fused path keeps it in cache), so writing it out is not minimum
+                      traffic. A device that writes it pays that as measured time.
             tier i    data band rows and template band rows at the tier's precision
                       (4 B per complex fp16/int16 value, 8 B fp32) and 8 B per survivor
                       (its pair id). For i > 0 and the refine the rows read are bounded
                       by min(input pairs, rows) per group over the measured span.
             refine    data rows (8 n B) and template rows (8 B x stored bins) bounded as
                       above, and 12 B per output bin (index + complex value).
-            followups the window's input, one template row, 8 n B spectrum per block,
-                      and 12 B per output bin.
+            followups the window's input, one template row and 12 B per output bin.
 
 Counts come from what the run did, not from a model of it:
   * middle: TimeDomainFilterBank counters (_corr_work, _corr_in_samples) incremented
     where the blocks are chosen (time_domain._correlate_windows);
-  * fine stage: each hierarchical plan's work_counts() -- the engine's own pair, tier-pass
-    and refine counters on the CPU (ap_hmf_stats/tier_stats/q15_stats), and the per-call
-    pair, last_tier1_survivors and last_refinements accumulators on the GPU;
+  * fine stage: each hierarchical plan's work_counts() -- the engine's own pair, tier-input
+    (checked: the pairs or screener pairs each tier ran on), tier-pass and refine counters
+    on the CPU (ap_hmf_stats/tier_inputs/tier_stats/q15_stats), and the per-call pair,
+    tier-0 input, last_tier1_survivors and last_refinements accumulators on the GPU
+    (group_work holds the arithmetic);
   * follow-ups: the ladder's job list, laid out with the bank's own _window_layout.
 Blocks of a fine group are pairs / templates in the group (every fine call takes the whole
 group; follow-ups use separate single-template plans and are not in these counters).
@@ -60,9 +66,11 @@ Judgement calls (stated so that nobody tunes them to flatter a platform):
      of the middle output outside the windows, padding pairs in ragged tiles, the pack
      of coarse bands, host-side work, fills -- is NOT roofline work. It shows up only as
      measured time.
-  2. The gate's work is counted as run: the chain and thresholds the autotuner chose, and
-     the survivors that chain produced, including the int16 screen when it ran. A chain
-     with more survivors has more roofline work; that is the algorithm as run.
+  2. The gate's work is counted as run: the chain and thresholds the autotuner chose, the
+     shared screeners it ran on, and the survivors that chain produced. A chain with more
+     survivors has more roofline work; that is the algorithm as run. Each transform is
+     charged 5 n log2 n whatever algorithm and precision computes it (the Q15 screen's
+     split-radix four-step does fewer operations): one convention on every device.
   3. The precision of a stage is the precision the backend executes it in. A packed fp16
      tier is compared with the fp16 peak.
   4. Peaks are THEORETICAL (data-sheet formula). The x86 int16 peak counts the vector
@@ -227,8 +235,68 @@ def tier_precision(device, tier, band):
     return "fp32"
 
 
+def group_work(work, d, n, n_valid, nt, kt, nbins, device, problems=None):
+    """Add one fine group's forward, tier and refine work from its counter deltas `d` (a
+    work_counts() dict, or the difference of two) and return its CPU engine ticks per stage
+    name (empty without ticks). n, n_valid: the block length and its valid samples; nt: the
+    group's templates; kt: stored bins per template; nbins: output bins per block.
+
+    The counts are the engine's own: `checked[i]` is what tier i ran on -- (block, screener)
+    pairs where it runs on shared screeners (tier 0's, and the CPU's tier-1 sub-screeners),
+    else the pairs it was handed -- and `passed[i]` the (block, template) pairs it passed.
+    Where the int16 screen ran (CPU, `q15_on` with screen ticks), the screen IS tier 0: one
+    int16 stage on tier 0's inputs, no float pass behind it (hmf.c)."""
+    problems = problems if problems is not None else []
+    ticks = {}
+    pairs = d["pairs"]
+    if not pairs:
+        return ticks
+    blocks = pairs / nt
+    if abs(blocks - round(blocks)) > 1e-9:
+        problems.append("group n=%d: pairs %d not a multiple of %d templates" % (n, pairs, nt))
+    chain = tuple(d["chain"])
+    if len(d["passed"]) != len(chain):
+        problems.append("group n=%d chain %s: %d tier counters" % (n, chain, len(d["passed"])))
+        return ticks
+    t = d.get("ticks")
+    # Forward: block input read, spectrum left where its consumers read it (minimum traffic;
+    # a fused consumer reads it from cache, so writing it out is not the floor).
+    s = work.stage("forward", "fp32", unit="blocks")
+    s.add(blocks * fft_flops(n), blocks * n_valid * 8, blocks)
+    if t:
+        ticks["forward"] = t["series"] - sum(t["tiers"]) - t["refine"]
+    screened = bool(d.get("q15") is not None and t and t["q15"] > 0)
+    inputs = pairs
+    for i, band in enumerate(chain):
+        if d.get("checked") is not None:
+            inputs = d["checked"][i]
+        prec = "int16" if (i == 0 and screened) else tier_precision(device, i, band)
+        surv = d["passed"][i]
+        if i == 0:
+            # tier 0 runs on every block: its template rows are the templates, or the shared
+            # screeners it ran on (checked = blocks x screeners)
+            rows_d, rows_t = blocks, min(nt, inputs / blocks if blocks else 0)
+        elif inputs == pairs:
+            rows_d, rows_t = blocks, nt
+        else:
+            rows_d, rows_t = min(inputs, blocks), min(inputs, nt)
+        s = work.stage("tier%d b%d" % (i, band), prec)
+        s.add(inputs * pair_flops(band), (rows_d + rows_t) * band * CBYTES[prec] + surv * 8,
+              inputs)
+        if t:
+            ticks[s.name] = ticks.get(s.name, 0) + t["tiers"][i]
+        inputs = surv
+    r = d["refined"]
+    s = work.stage("refine n%d" % n, "fp32")
+    s.add(r * pair_flops(n), min(r, blocks) * n * 8 + min(r, nt) * kt * 8 + r * nbins * 12, r)
+    if t:
+        ticks[s.name] = ticks.get(s.name, 0) + t["refine"]
+    return ticks
+
+
 def fine_work(work, before, after, fine_banks, device, binsize=None, problems=None):
-    """Add the fine stage's forward, tier and refine work between two snapshots."""
+    """Add the fine stage's forward, tier and refine work between two snapshots
+    (group_work per hierarchical group). Returns CPU engine ticks per stage name."""
     problems = problems if problems is not None else []
     ticks = {}             # CPU engine ticks per stage name (forward: the rest of run_series)
     for g in _hier_groups(fine_banks):
@@ -241,56 +309,11 @@ def fine_work(work, before, after, fine_banks, device, binsize=None, problems=No
                             % g.n)
             b = None
         d = _sub(a, b) if b is not None else a
-        pairs = d["pairs"]
-        if not pairs:
-            continue
-        n, nt = g.n, len(g.template_indices)
-        kt = _stored_bins(g)
-        blocks = pairs / nt
-        if abs(blocks - round(blocks)) > 1e-9:
-            problems.append("group n=%d: pairs %d not a multiple of %d templates" % (n, pairs, nt))
-        chain = tuple(a["chain"])
-        if len(d["passed"]) != len(chain):
-            problems.append("group n=%d chain %s: %d tier counters" % (n, chain, len(d["passed"])))
-            continue
         nbins = max(1, -(-g.n_valid // binsize)) if binsize else 1
-        s = work.stage("forward", "fp32", unit="blocks")
-        s.add(blocks * fft_flops(n), blocks * (g.n_valid + n) * 8, blocks)
-        inputs = pairs
-        screened = bool(d.get("q15") is not None and d["ticks"] and d["ticks"]["q15"] > 0)
-        if screened:
-            # The int16 screen ran on every pair; tier 0's float pass on what it passed.
-            b0 = chain[0]
-            s = work.stage("q15 b%d" % b0, "int16")
-            s.add(pairs * pair_flops(b0),
-                  (blocks + nt) * b0 * CBYTES["int16"] + d["q15"] * 8, pairs)
-            inputs = d["q15"]
-        for i, band in enumerate(chain):
-            # Explicit CPU counts also cover reordered gates and Q15 on/off trials.
-            if d.get("checked") is not None:
-                inputs = d["checked"][i]
-            # Behind the int16 screen the CPU's tier 0 is the pooled FP32 pass over the
-            # screen's survivors (hmf.c), not the FP16 gate.
-            prec = "fp32" if (i == 0 and screened) else tier_precision(device, i, band)
-            surv = d["passed"][i]
-            rows_d, rows_t = (blocks, nt) if inputs == pairs else (min(inputs, blocks), min(inputs, nt))
-            s = work.stage("tier%d b%d" % (i, band), prec)
-            s.add(inputs * pair_flops(band), (rows_d + rows_t) * band * CBYTES[prec] + surv * 8, inputs)
-            inputs = surv
-        r = d["refined"]
-        s = work.stage("refine n%d" % n, "fp32")
-        s.add(r * pair_flops(n), min(r, blocks) * n * 8 + min(r, nt) * kt * 8 + r * nbins * 12, r)
-        if d["ticks"]:
-            t = d["ticks"]
-            ticks["forward"] = ticks.get("forward", 0) + t["series"] - sum(t["tiers"]) - t["refine"]
-            if t["q15"] > 0:
-                k = "q15 b%d" % chain[0]
-                ticks[k] = ticks.get(k, 0) + t["q15"]
-            for i, band in enumerate(chain):
-                k = "tier%d b%d" % (i, band)
-                ticks[k] = ticks.get(k, 0) + t["tiers"][i] - (t["q15"] if i == 0 else 0)
-            k = "refine n%d" % n
-            ticks[k] = ticks.get(k, 0) + t["refine"]
+        got = group_work(work, d, g.n, g.n_valid, len(g.template_indices), _stored_bins(g),
+                         nbins, device, problems)
+        for k, v in got.items():
+            ticks[k] = ticks.get(k, 0) + v
     return ticks
 
 
@@ -303,7 +326,7 @@ def middle_work(work, before, after, middle_banks):
         for n, v in a.items():
             d = _sub(v, b.get(n))
             s.add(d["blocks"] * fft_flops(n) + d["pairs"] * pair_flops(n, peak=False),
-                  d["blocks"] * n * 8 + d["tmpl_values"] * 8 + d["out_samples"] * 8, d["pairs"])
+                  d["tmpl_values"] * 8 + d["out_samples"] * 8, d["pairs"])
     return s
 
 
@@ -324,7 +347,7 @@ def followup_work(work, jobs, series_len=None):
         nbins = int(((we.astype(np.int64) - ws.astype(np.int64) + bs - 1) // bs).sum())
         kt = _stored_bins(g)
         s.add(blocks * (fft_flops(g.n) + pair_flops(g.n)),
-              int((W[:, 1] - W[:, 0]).sum()) * 8 + kt * 8 + blocks * g.n * 8 + nbins * 12, blocks)
+              int((W[:, 1] - W[:, 0]).sum()) * 8 + kt * 8 + nbins * 12, blocks)
     return s
 
 

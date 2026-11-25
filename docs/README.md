@@ -36,6 +36,8 @@ the tree before the first release. They remain in the repository history at the 
   runtime dispatch.
 - [The hierarchical filter](hierarchical.md): gate chains, how the chain and thresholds are
   chosen, and their limits.
+- [Fraction of theoretical throughput](roofline.md): the roofline report's model, what it
+  counts and the assumptions behind it, the same on every device.
 - [The resolved plan](resolved-plan.md): what a hierarchical filter settles before it runs,
   and what it guarantees with and without a shared cost file.
 - [Reduced-precision gates](reduced-precision-gates.md): the Q15 and FP16 tiers' error

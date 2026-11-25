@@ -268,3 +268,58 @@ def test_an_unlisted_arm_core_has_unknown_peaks_and_a_formula(monkeypatch):
     assert all(math.isnan(v) for v in pk["flops"].values())
     assert any("clock and FMA pipes" in u for u in pk["unknown"])
     assert "unknown x 128-bit FMA pipes" in pk["formula"]
+
+
+# ---- the model's arithmetic on recorded counts (the project's yardstick) ---------------------
+
+def _screened_cpu_counts():
+    """A CPU group's counter deltas as work_counts() gives them: n = 1024, 100 templates, 50
+    blocks; tier 0 (band 128) is the Q15 screen on 20 shared screeners (checked = 50 x 20),
+    tier 1 (band 256) on 300 sub-screener pairs; 30 refines."""
+    return dict(backend="cpu", chain=(128, 256), pairs=5000, checked=[1000, 300],
+                passed=[400, 30], refined=30, q15=400, q15_on=True,
+                ticks=dict(tiers=[1000, 500], refine=200, q15=900, series=5000))
+
+
+def test_the_model_counts_the_screen_as_tier_zero_on_its_screeners():
+    """Pinned by hand: the forward reads only its input; the int16 screen is tier 0 on the
+    (block, screener) pairs it ran on, with no fp32 pass behind it and no stage over every
+    template pair; tier 1 on its sub-screener pairs; refines as counted."""
+    w = _roofline.Work()
+    ticks = _roofline.group_work(w, _screened_cpu_counts(), n=1024, n_valid=768, nt=100,
+                                 kt=600, nbins=1, device="cpu")
+    st = w.stages
+    assert sorted(st) == ["forward", "refine n1024", "tier0 b128", "tier1 b256"]
+    f = st["forward"]
+    assert (f.flops, f.bytes, f.count) == (50 * 5 * 1024 * 10, 50 * 768 * 8, 50)
+    t0 = st["tier0 b128"]
+    assert t0.precision == "int16"
+    assert (t0.flops, t0.bytes, t0.count) == (1000 * 5632, (50 + 20) * 128 * 4 + 400 * 8, 1000)
+    t1 = st["tier1 b256"]
+    assert t1.precision == "fp32"
+    assert (t1.flops, t1.bytes) == (300 * 12544, (50 + 100) * 256 * 8 + 30 * 8)
+    r = st["refine n1024"]
+    assert (r.flops, r.bytes) == (30 * 60416, 30 * 1024 * 8 + 30 * 600 * 8 + 30 * 12)
+    assert ticks == {"forward": 3300, "tier0 b128": 1000, "tier1 b256": 500,
+                     "refine n1024": 200}
+    pk = dict(flops=dict(fp32=1e12, fp16=2e12, int16=2e12), bandwidth=1e11)
+    rep = _roofline.report(w, pk, segments=1, wall_s=1e-3)
+    want = (max(f.flops / 1e12, f.bytes / 1e11) + max(t0.flops / 2e12, t0.bytes / 1e11)
+            + max(t1.flops / 1e12, t1.bytes / 1e11) + max(r.flops / 1e12, r.bytes / 1e11))
+    assert rep["roofline_s"] == pytest.approx(want)
+
+
+def test_the_model_counts_an_fp16_tier_zero_on_its_screeners(monkeypatch):
+    """A GPU-shaped group (packed fp16 tier 0 on 20 screeners, no screen): the same rule --
+    tier 0 on blocks x screeners, its rows the screeners."""
+    monkeypatch.setattr(_roofline, "tier_precision",
+                        lambda device, tier, band: "fp16" if tier == 0 else "fp32")
+    d = dict(backend="gpu", chain=(128, 256), pairs=5000, checked=[1000, 400],
+             passed=[400, 30], refined=30, q15=None, ticks=None)
+    w = _roofline.Work()
+    assert _roofline.group_work(w, d, n=1024, n_valid=768, nt=100, kt=600, nbins=1,
+                                device="gpu:0") == {}
+    t0 = w.stages["tier0 b128"]
+    assert t0.precision == "fp16"
+    assert (t0.flops, t0.bytes) == (1000 * 5632, (50 + 20) * 128 * 4 + 400 * 8)
+    assert w.stages["forward"].bytes == 50 * 768 * 8
