@@ -53,6 +53,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   arguments no longer create a ctypes array type per call (1.5 million objects in a PyCBC
   job that only the cycle collector could free); and the fp16 packing of coarse templates
   is done in C, bit for bit NumPy's cast.
+- GPU (experimental): the middle stage of a hierarchical search uses about a third less
+  device time (0.90 s against 1.30 s in the 171,828-template PyCBC job on a Radeon 8060S;
+  0.048 s against 0.088 s a pass in `search_bench`). The correlation kernels and the series
+  forward store their output in natural order, whole cache lines at a time, where each lane
+  had written to a line of its own; a chunk's channels are correlated in one submission;
+  and a GPU's correlation block-size prices are keyed on the kernels they timed, so a
+  rebuilt kernel is priced again. The middle rows are bit for bit what they were.
 
 ### Performance
 
