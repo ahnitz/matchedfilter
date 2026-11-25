@@ -41,6 +41,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   the driver's device name, which a driver update had stopped matching: the compute peak
   came out halved and the bandwidth bound was silently dropped. A peak that cannot be
   derived is now reported as unknown, with a warning, on every backend.
+- The roofline report counts the work the engines run: the int16 screen as the first tier
+  itself, on the shared screeners it runs on, with no float pass behind it; each tier on
+  its screener pairs; and a transform's input but not its output spectrum. The model had
+  charged a float first tier over every template pair behind the screen, which put a CPU
+  search at 117% of its roofline. The same rules apply to every device; `docs/roofline.md`
+  states them. Fractions reported before this change are not comparable with those after.
+- GPU (experimental): less host work per leaf call in a hierarchical search. A freed
+  recording's descriptor sets serve the next recording; single-template follow-up calls
+  keep their own block layout instead of replacing the bank's; device byte views and call
+  arguments no longer create a ctypes array type per call (1.5 million objects in a PyCBC
+  job that only the cycle collector could free); and the fp16 packing of coarse templates
+  is done in C, bit for bit NumPy's cast.
 
 ### Performance
 
