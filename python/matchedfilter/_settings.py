@@ -173,6 +173,20 @@ def slot(device, what, band, default, alternative):
     return setting(name, device, default)
 
 
+#: Submissions a fused batch collects into one command buffer before committing it (the device
+#: starts on a buffer while the host fills the next): the values the device trial chooses
+#: between. Each backend's default is the value it was tuned to by hand (Vulkan 16, Metal 2 on
+#: an M2 ladder, 2026-10); the other is its alternative, so every backend tries both.
+FUSE_CHUNKS = (2, 16)
+
+
+def fuse_chunk(device, default):
+    """The submissions per fused command buffer on device (its name): kernel slot
+    kern:fuse:chunk, default `default` (one of FUSE_CHUNKS), the other value its alternative."""
+    alternative = next(c for c in FUSE_CHUNKS if c != int(default))
+    return int(slot(device, "fuse", "chunk", str(int(default)), str(alternative)))
+
+
 @contextmanager
 def running(settings: Dict[str, object]):
     """Run with these batch settings in force (a trial's arm over the locks)."""

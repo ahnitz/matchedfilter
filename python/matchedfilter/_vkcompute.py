@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from . import _config, _gputime, _kernels, _vulkan, gatechain
+from . import _config, _gputime, _kernels, _settings, _vulkan, gatechain
 from ._shared import BUFFER_SERIALS, empty_shared
 from ._gpuhost import (MAX_BINS, BufferPool, carray, MappedBuffer, Section, address,
                        hier_peaks_grouped)
@@ -525,11 +525,13 @@ class _FusedBatch:
 
     def __init__(self, dev):
         self.dev, self.items, self.state = dev, [], "open"
+        self.chunk = _settings.fuse_chunk(dev.device_name, self.CHUNK)
 
-    #: Submissions per fused command buffer. The device starts on a chunk while the host
-    #: prepares the next: fusing a whole segment into one buffer left the GPU idle through
-    #: all the host's preparation.
-    chunk = 16
+    #: Submissions per fused command buffer, by default; the device trial measures it against
+    #: the other backends' value (_settings.fuse_chunk). The device starts on a chunk while
+    #: the host prepares the next: fusing a whole segment into one buffer left the GPU idle
+    #: through all the host's preparation.
+    CHUNK = 16
 
     def add(self, ctx, commands, fence):
         self.items.append((ctx, [getattr(c, "value", c) for c in commands]))

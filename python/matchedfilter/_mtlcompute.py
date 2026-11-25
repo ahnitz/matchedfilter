@@ -43,7 +43,7 @@ _MAX_THREADS = 1024
 
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
-from . import _gputime
+from . import _gputime, _settings
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 from . import _peaks as _pk
@@ -324,15 +324,16 @@ class _FusedBatch:
     a result from it is waited on, or at close. Encoders are always ended before the
     methods that open them return, so contexts never interleave inside one encoder."""
 
-    #: Submissions per command buffer.
-    #: Metal commits are cheap and the device sat idle while the host filled a chunk:
-    #: M2 ladder (bank3, H1) 100.8 ms per segment at 16, 95.8 at 4, 92.6 at 2, 93.6 at 1;
-    #: with --pipeline 110.0 at 16, 96.9 at 1. Committing on device idle (status) instead,
-    #: 95.7. So 2.
-    chunk = 2
+    #: Submissions per command buffer, by default; the device trial measures it against the
+    #: other backends' value (_settings.fuse_chunk). Metal commits are cheap and the device
+    #: sat idle while the host filled a chunk: M2 ladder (bank3, H1) 100.8 ms per segment at
+    #: 16, 95.8 at 4, 92.6 at 2, 93.6 at 1; with --pipeline 110.0 at 16, 96.9 at 1.
+    #: Committing on device idle (status) instead, 95.7.
+    CHUNK = 2
 
     def __init__(self, dev):
         self.dev, self.cmd, self.count = dev, None, 0
+        self.chunk = _settings.fuse_chunk(dev.name, self.CHUNK)
         self.holders = []           # contexts holding self.cmd uncommitted (deferred forward)
         self.waited = {}            # id(ctx) -> event value already waited on in self.cmd
         self.untimed = set()        # committed buffers whose device time is not yet recorded
