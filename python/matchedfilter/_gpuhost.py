@@ -16,8 +16,7 @@ from ._errors import UnsupportedSize
 from ._windows import (
     coarse_lags, _merge_window_bins, _normalize_windows, _window_bin_phases, _window_layout)
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS
-from ._shared import (BUFFER_SERIALS, _same_device, containing, containing_samples, shared_buffer,
-                      sparsified)
+from ._shared import _same_device, containing, containing_samples, shared_buffer, sparsified
 from .device import parse as _parse_device
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).

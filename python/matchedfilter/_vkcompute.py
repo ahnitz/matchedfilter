@@ -17,8 +17,8 @@ import time
 import numpy as np
 
 from . import _config, _gputime, _kernels, _vulkan, gatechain
-from ._shared import empty_shared
-from ._gpuhost import (MAX_BINS, BUFFER_SERIALS, BufferPool, MappedBuffer, Section, address,
+from ._shared import BUFFER_SERIALS, empty_shared
+from ._gpuhost import (MAX_BINS, BufferPool, MappedBuffer, Section, address,
                        hier_peaks_grouped)
 from . import _peaks as _pk
 from ._coarse import candidates, coarse_stem
