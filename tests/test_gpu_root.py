@@ -346,3 +346,16 @@ def test_a_backend_with_unverified_root_kernels_keeps_the_host_root(monkeypatch)
             return "gpu:0 (not verified)"
     monkeypatch.setattr(_gpuroot, "_ROOTS", {})
     assert _gpuroot.device_root(Other()) is None
+
+
+def test_every_backend_that_ships_root_kernels_runs_the_device_root():
+    """A GPU whose backend ships the root kernels gets a DeviceRoot: Vulkan, Metal and CUDA
+    have been run against the host root (VERIFIED_BACKENDS), so none of them silently keeps
+    the host root on a device that can run its own."""
+    from matchedfilter import _kernels
+    from matchedfilter.device import parse
+    dev = parse("gpu:0")
+    if (dev.backend not in ("vulkan", "metal", "cuda")
+            or _kernels.record(dev.backend, "tc_root1_%d" % (N // 2)) is None):
+        pytest.skip("this backend ships no root kernels")
+    assert _gpuroot.device_root(dev) is not None, dev.backend

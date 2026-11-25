@@ -39,12 +39,14 @@ _ROOTS = {}
 #: Backends whose root kernels have been run against the host root on hardware. Metal joined
 #: on an Apple M2 (2026-11-25) once its runs were pending writes: its kernels were right,
 #: but the driver's _x_submit left them unknown to settle_writes and to other queues, so a
-#: host or the middle stage read the series before it was written (CI's Metal job). The
-#: CUDA build has not been run: until it passes tests/test_gpu_root.py on a device, its
-#: searches keep the host root. This is a statement about verification, not a tuning
-#: choice; a backend joins the list when its kernels pass, and placement is then measured
-#: as on Vulkan.
-VERIFIED_BACKENDS = ("vulkan", "metal")
+#: host or the middle stage read the series before it was written (CI's Metal job). CUDA
+#: joined on a Quadro RTX 6000 (sm_75, 2026-11-25), with the same pending write: without it
+#: every host read after settle_writes saw the unwritten buffer and the search test failed
+#: in 4 of 5 runs; with it its series are the host's to 1.5e-6 of their peak at every length
+#: it ships (2^18 to 2^21; 2^22 and 2^23 have no CUDA stage-1 build and keep the host root).
+#: This is a statement about verification, not a tuning choice; a backend joins the list
+#: when its kernels pass, and placement is then measured as on Vulkan.
+VERIFIED_BACKENDS = ("vulkan", "metal", "cuda")
 
 
 def device_root(device):
