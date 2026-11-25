@@ -23,6 +23,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   unchanged, except chains that start at band 64 at n = 2048, whose tiers pass at most 0.1
   percentage points more noise.
 
+### Performance
+
+- Shared-screener clustering, the largest part of a hierarchical search's setup, does the
+  same work in less time and gives the same screeners bit for bit. The pair scores stop
+  summing a pair once it can no longer reach the score the matching reads, and keep twice
+  as many sums in flight on AVX-512; the matching selects each row's best candidates from
+  the scores that can be candidates; the screener synthesis fills its vector lanes with
+  groups of every size; the Tier-1 pairing runs in C++. In a PyCBC job of the
+  171,828-template BNS search (64 top templates, H1 and L1, one Zen 5 core, a reused cost
+  file) clustering took 16.1 s and now takes 13.2 s (182 to 149 billion instructions), and
+  the library's setup 26.0 s and now 23.1 s; the triggers are identical.
+
 ### Documentation
 
 - The `TimeDomainFilterBank` docstring and the usage guide no longer read as if complex taps
