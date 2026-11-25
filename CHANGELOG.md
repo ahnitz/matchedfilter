@@ -60,6 +60,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
   had written to a line of its own; a chunk's channels are correlated in one submission;
   and a GPU's correlation block-size prices are keyed on the kernels they timed, so a
   rebuilt kernel is priced again. The middle rows are bit for bit what they were.
+- GPU (experimental), Metal: every coarse packing and one-bin tier build that Vulkan
+  ships is now built for Metal too (a 256-thread cap and a table that stopped at 8192
+  samples had left 25 of them out; they were not Apple limits), and the root stages have
+  32 KB builds on every backend, so a device root exists at 2^22 and 2^23 samples where a
+  device's group memory is 32 KB. The Metal sources are rebuilt with the pinned compiler:
+  110 of them had differed from a fresh build in line directives only. A chunk's middle
+  channels are fused into one call also when the device writes caller arrays in place,
+  and the number of submissions a fused batch puts in one buffer is a measured device
+  choice on every backend instead of a constant per driver.
 
 ### Performance
 
