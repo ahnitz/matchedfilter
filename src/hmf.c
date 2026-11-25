@@ -141,6 +141,10 @@ struct ap_hmf_plan {
   int *tier0_off;                 /* [tier0_nt + 1] CSR offsets into tier0_members */
   int *tier0_members;             /* [nt] disjoint member template indices in [0, nt) */
   unsigned char *tier0_uncl_pend; /* [nd] deferred ingest into unclustered tier[0] */
+  /* [(nt + 63) / 64] one bit per template (or per Tier-1 screener): the clustered tiers mark
+     the members of a data row's firing screeners here and read them back in ascending order,
+     clearing each word as they go. */
+  uint64_t *cluster_marks;
   /* Tier-1 sub-screener clustering (ap_hmf_set_tier1_clusters): evaluates tier1_nt <= nt
      sub-screeners at tier 1 on survivors of tier 0 and expands firing Tier-1 screeners
      to their member template indices for tier 2 / refine. */
@@ -991,6 +995,7 @@ static void hmf_free_tier0_clusters(ap_hmf_plan *p){
   free(p->tier0_off); p->tier0_off=NULL;
   free(p->tier0_members); p->tier0_members=NULL;
   free(p->tier0_uncl_pend); p->tier0_uncl_pend=NULL;
+  free(p->cluster_marks); p->cluster_marks=NULL;
   p->tier0_clustered=0;
   p->tier0_nt=0;
   p->tier0_lag_pad=0;
@@ -1142,10 +1147,11 @@ int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
   int *coff=malloc((size_t)(nc+1)*sizeof(int));
   int *cmem=malloc((size_t)p->nt*sizeof(int));
   unsigned char *cpend=calloc((size_t)p->nd,1);
-  if(!coff || !cmem || !cpend){
+  uint64_t *cmarks=calloc(((size_t)p->nt+63)/64,sizeof(uint64_t));
+  if(!coff || !cmem || !cpend || !cmarks){
     ap_mf_destroy(cmf);
     if(cg16) ap_gate16_destroy(cg16);
-    free(coff); free(cmem); free(cpend);
+    free(coff); free(cmem); free(cpend); free(cmarks);
     return -1;
   }
   memcpy(coff,offsets,(size_t)(nc+1)*sizeof(int));
@@ -1155,6 +1161,7 @@ int ap_hmf_set_tier0_clusters(ap_hmf_plan *p,int nc,const float *specs,
   p->tier0_off=coff;
   p->tier0_members=cmem;
   p->tier0_uncl_pend=cpend;
+  p->cluster_marks=cmarks;
   p->tier0_nt=nc;
   p->tier0_lag_pad=lag_pad;
   p->tier0_clustered=1;
@@ -2588,18 +2595,35 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   return r;
 }
 
-static inline void hmf_sort_ints(int * restrict a,int n){
-  static const int gaps[5]={57,23,10,4,1};
-  for(int gi=(n>32 ? 0 : 4);gi<5;gi++){
-    const int gap=gaps[gi];
-    for(int i=gap;i<n;i++){
-      const int v=a[i];
-      if(v>=a[i-gap]) continue;
-      int j=i-gap;
-      do { a[j+gap]=a[j]; j-=gap; } while(j>=0 && a[j]>v);
-      a[j+gap]=v;
-    }
+/* Mark the members u0..u1-1 of one firing screener in a row's bitmap. A screener bank's
+   member lists partition the templates (hmf_valid_partition), so no bit is marked twice in a
+   row and the marked count is the row's survivor count. */
+static inline void hmf_mark_members(uint64_t * restrict marks,const int * restrict members,
+                                    int u0,int u1){
+  for(int u=u0;u<u1;u++){
+    const int t=members[u];
+    marks[t>>6]|=1ULL<<(t&63);
   }
+}
+
+/* Append the indices marked in the nwords words of marks to (dst_d, dst_t) from position k,
+   in ascending order and each with row d, and clear the words. The caller has room for them.
+   Returns the new length. */
+static inline int hmf_take_marked(uint64_t * restrict marks,int nwords,int d,
+                                  int * restrict dst_d,int * restrict dst_t,int k){
+  const int k0=k;
+  for(int w=0;w<nwords;w++){
+    uint64_t m=marks[w];
+    if(!m) continue;
+    marks[w]=0;
+    const int base=w*64;
+    do {
+      dst_t[k++]=base+__builtin_ctzll(m);
+      m&=m-1;
+    } while(m);
+  }
+  for(int j=k0;j<k;j++) dst_d[j]=d;
+  return k;
 }
 
 static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,size_t nb,
@@ -2641,6 +2665,12 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
   const int dump_or_trace=(p->dump || p->trace);
   const long first_pair=p->pairs;
   int nnext=0;
+  /* Each data row's survivors are the members of its firing screeners, listed in ascending
+     template order: they are marked in cluster_marks and read back in order. The marks are
+     cleared first in case an earlier call failed between marking and reading them. */
+  uint64_t * restrict marks=p->cluster_marks;
+  const int nwords=(nt+63)/64;
+  memset(marks,0,(size_t)nwords*sizeof(uint64_t));
 
   if(p->q15){
     unsigned long long q0=ap_ticks();
@@ -2650,8 +2680,8 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
     if(fast_sparse && !dump_or_trace){
       if(ns>0){
         for(int d=0;d<nd;d++){
-          const int d_start=nnext;
           const unsigned char *qp=p->qpass+(size_t)d*nc;
+          int nrow=0;
           int c=0;
           for(;c+8<=nc;c+=8){
             uint64_t w;
@@ -2661,42 +2691,29 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
                        & 0x8080808080808080ULL;
             while(m){
               const int ci=c+(__builtin_ctzll(m)>>3);
-              const int u0=off[ci], u1=off[ci+1];
-              if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
-              int * restrict dst_d=tr->fire_d;
-              int * restrict dst_t=tr->fire_t;
-              for(int u=u0;u<u1;u++){
-                dst_d[nnext]=d;
-                dst_t[nnext]=members[u];
-                nnext++;
-              }
+              hmf_mark_members(marks,members,off[ci],off[ci+1]);
+              nrow+=off[ci+1]-off[ci];
               m&=m-1;
             }
           }
           for(;c<nc;c++){
             if(qp[c]){
-              const int u0=off[c], u1=off[c+1];
-              if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
-              int * restrict dst_d=tr->fire_d;
-              int * restrict dst_t=tr->fire_t;
-              for(int u=u0;u<u1;u++){
-                dst_d[nnext]=d;
-                dst_t[nnext]=members[u];
-                nnext++;
-              }
+              hmf_mark_members(marks,members,off[c],off[c+1]);
+              nrow+=off[c+1]-off[c];
             }
           }
-          if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
+          if(!nrow) continue;
+          if(hmf_ensure_fire(tr,(size_t)(nnext+nrow))) return -1;
+          nnext=hmf_take_marked(marks,nwords,d,tr->fire_d,tr->fire_t,nnext);
         }
       }
     } else {
       for(int d=0;d<nd;d++){
-        const int d_start=nnext;
+        int nrow=0;
         for(int c=0;c<nc;c++){
           const size_t crow=(size_t)d*nc+c;
           const int fire=p->qpass[crow]!=0;
           const float mag=dump_or_trace ? p->qstat[crow] : 0.0f;
-          if(fire && hmf_ensure_fire(tr,(size_t)(nnext+(off[c+1]-off[c])))) return -1;
           for(int u=off[c];u<off[c+1];u++){
             const int t=members[u];
             const size_t row=(size_t)d*nt+t;
@@ -2708,15 +2725,18 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
               const long pair=first_pair+(long)row+1;
               if(p->trace && pair<6)
                 fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",pair,thr,mag);
-              tr->fire_d[nnext]=d;
-              tr->fire_t[nnext]=t;
-              nnext++;
             } else if(!fast_sparse){
               reject_row(p,peaks,counts,row,nb);
             }
           }
+          if(fire){
+            hmf_mark_members(marks,members,off[c],off[c+1]);
+            nrow+=off[c+1]-off[c];
+          }
         }
-        if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
+        if(!nrow) continue;
+        if(hmf_ensure_fire(tr,(size_t)(nnext+nrow))) return -1;
+        nnext=hmf_take_marked(marks,nwords,d,tr->fire_d,tr->fire_t,nnext);
       }
     }
     p->qpassed+=nnext;
@@ -2732,30 +2752,24 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
     tr->ticks+=ap_ticks()-t_0;
     if(fast_sparse && !dump_or_trace){
       for(int d=0;d<nd;d++){
-        const int d_start=nnext;
         const ap_peak *ce_row=tr->cebuf+(size_t)d*nc;
+        int nrow=0;
         for(int c=0;c<nc;c++){
           if(ce_row[c].index>=0 && ce_row[c].magnitude>=thr){
-            const int u0=off[c], u1=off[c+1];
-            if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
-            int * restrict dst_d=tr->fire_d;
-            int * restrict dst_t=tr->fire_t;
-            for(int u=u0;u<u1;u++){
-              dst_d[nnext]=d;
-              dst_t[nnext]=members[u];
-              nnext++;
-            }
+            hmf_mark_members(marks,members,off[c],off[c+1]);
+            nrow+=off[c+1]-off[c];
           }
         }
-        if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
+        if(!nrow) continue;
+        if(hmf_ensure_fire(tr,(size_t)(nnext+nrow))) return -1;
+        nnext=hmf_take_marked(marks,nwords,d,tr->fire_d,tr->fire_t,nnext);
       }
     } else {
       for(int d=0;d<nd;d++){
-        const int d_start=nnext;
+        int nrow=0;
         for(int c=0;c<nc;c++){
           const ap_peak ce=tr->cebuf[(size_t)d*nc+c];
           const int fire=(ce.index>=0 && ce.magnitude>=thr);
-          if(fire && hmf_ensure_fire(tr,(size_t)(nnext+(off[c+1]-off[c])))) return -1;
           for(int u=off[c];u<off[c+1];u++){
             const int t=members[u];
             const size_t row=(size_t)d*nt+t;
@@ -2769,15 +2783,18 @@ static int hmf_run_tier0_clustered(ap_hmf_plan *p,int d0,int nd,int fast_sparse,
               if(p->trace && pair<6)
                 fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",
                         pair,thr,ce.magnitude);
-              tr->fire_d[nnext]=d;
-              tr->fire_t[nnext]=t;
-              nnext++;
             } else if(!fast_sparse){
               reject_row(p,peaks,counts,row,nb);
             }
           }
+          if(fire){
+            hmf_mark_members(marks,members,off[c],off[c+1]);
+            nrow+=off[c+1]-off[c];
+          }
         }
-        if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
+        if(!nrow) continue;
+        if(hmf_ensure_fire(tr,(size_t)(nnext+nrow))) return -1;
+        nnext=hmf_take_marked(marks,nwords,d,tr->fire_d,tr->fire_t,nnext);
       }
     }
   }
@@ -2825,27 +2842,24 @@ static int hmf_run_tier1_clustered(ap_hmf_plan *p,int d0,int fast_sparse,size_t 
     if(!p->qt) p->qt=malloc(np*sizeof(int));
     if(!p->qpass || !p->qd || !p->qt) return -1;
   }
+  /* The incoming survivors arrive grouped by row (hmf_run_tier0_clustered); each row's Tier-1
+     screeners are marked in cluster_marks and read back once each, in ascending order. The
+     marks are cleared first in case an earlier call failed between marking and reading them. */
   int * restrict cd=p->qd;
   int * restrict ct=p->qt;
+  uint64_t * restrict marks=p->cluster_marks;
+  const int nwords1=(nc1+63)/64, nwords=(nt+63)/64;
+  memset(marks,0,(size_t)nwords*sizeof(uint64_t));
   int ncand=0;
   for(int j0=0;j0<nin;){
     const int d=in_d[j0];
     int j1=j0;
-    const int c_start=ncand;
     while(j1<nin && in_d[j1]==d){
-      ct[ncand++]=map1[in_t[j1]];
+      const int c1=map1[in_t[j1]];
+      marks[c1>>6]|=1ULL<<(c1&63);
       j1++;
     }
-    const int len=ncand-c_start;
-    if(len>1){
-      hmf_sort_ints(ct+c_start,len);
-      int w=c_start+1;
-      for(int r=c_start+1;r<ncand;r++){
-        if(ct[r]!=ct[w-1]) ct[w++]=ct[r];
-      }
-      ncand=w;
-    }
-    for(int r=c_start;r<ncand;r++) cd[r]=d;
+    ncand=hmf_take_marked(marks,nwords1,d,cd,ct,ncand);
     j0=j1;
   }
 
@@ -2901,35 +2915,32 @@ static int hmf_run_tier1_clustered(ap_hmf_plan *p,int d0,int fast_sparse,size_t 
   }
   tr->ticks+=ap_ticks()-t_0;
 
-  /* Expand firing Tier-1 screeners into sorted member template indices per block. Every member
-     of a firing screener came in as a Tier-0 survivor: Tier-1 clusters nest inside Tier-0
-     clusters (ap_hmf_set_tier1_clusters), and this path runs only after hmf_run_tier0_clustered
-     passed whole Tier-0 clusters on in the same call (ap_hmf_run's conditions match). */
+  /* Expand firing Tier-1 screeners into their member template indices per block, in ascending
+     order (marked and read back as at Tier 0). Every member of a firing screener came in as a
+     Tier-0 survivor: Tier-1 clusters nest inside Tier-0 clusters (ap_hmf_set_tier1_clusters),
+     and this path runs only after hmf_run_tier0_clustered passed whole Tier-0 clusters on in
+     the same call (ap_hmf_run's conditions match). */
   int nnext=0;
   for(int j0=0;j0<ncand;){
     const int d=cd[j0];
-    const int d_start=nnext;
+    int nrow=0;
     int j1=j0;
     while(j1<ncand && cd[j1]==d){
       const int c1=ct[j1];
-      const int fire=p->qpass[j1]!=0;
       const int u0=off1[c1], u1=off1[c1+1];
-      if(fire){
-        if(hmf_ensure_fire(tr,(size_t)(nnext+(u1-u0)))) return -1;
-        int * restrict dst_d=tr->fire_d;
-        int * restrict dst_t=tr->fire_t;
-        for(int u=u0;u<u1;u++){
-          dst_d[nnext]=d;
-          dst_t[nnext]=mem1[u];
-          nnext++;
-        }
+      if(p->qpass[j1]){
+        hmf_mark_members(marks,mem1,u0,u1);
+        nrow+=u1-u0;
       } else if(!fast_sparse){
         for(int u=u0;u<u1;u++)
           reject_row(p,peaks,counts,(size_t)d*nt+mem1[u],nb);
       }
       j1++;
     }
-    if(nnext-d_start>1) hmf_sort_ints(tr->fire_t+d_start,nnext-d_start);
+    if(nrow){
+      if(hmf_ensure_fire(tr,(size_t)(nnext+nrow))) return -1;
+      nnext=hmf_take_marked(marks,nwords,d,tr->fire_d,tr->fire_t,nnext);
+    }
     j0=j1;
   }
 

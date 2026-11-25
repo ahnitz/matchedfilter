@@ -1326,6 +1326,71 @@ def test_hmf_tier1_cluster_api_validates_and_nests():
     assert h.tier1_cluster_count() == 0 and h.tier0_cluster_count() == 4
 
 
+@pytest.mark.parametrize("with_tier1", [False, True])
+@pytest.mark.parametrize("use_q15", [False, True])
+def test_clustered_survivors_reach_the_refine_in_c_order(use_q15, with_tier1):
+    """With Tier-0 screeners (and, with_tier1, nested Tier-1 ones) whose member lists interleave
+    and are stored in descending order, run_series_sparse returns its peaks in strictly
+    increasing flat (block, template, bin) order. With every screener passing, the peaks equal
+    an unclustered plan's; with some passing, they equal the unclustered peaks of the surviving
+    templates, in the same order, and do not depend on the order members are listed in inside a
+    screener. Without Tier-1 screeners the Tier-0 survivor order reaches the output through the
+    unclustered Tier 1; with them, the Tier-1 survivor order does."""
+    n, nt, nblocks, b0, b1 = 1024, 12, 24, 64, 128
+    rng = np.random.default_rng(7)
+    tm = ((rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n)))
+          / np.sqrt(2.0 * n)).astype(np.complex64)
+    step = 768
+    ser = ((rng.standard_normal(nblocks * step + n) + 1j * rng.standard_normal(nblocks * step + n))
+           * np.sqrt(n)).astype(np.complex64)
+    starts = (np.arange(nblocks) * step).astype(np.uintp)
+    wstart = np.full(nblocks, 128, dtype=np.uintp)
+    wend = np.full(nblocks, n - 128, dtype=np.uintp)
+    i32 = lambda x: np.asarray(x, dtype=np.int32)
+    # Five Tier-0 screeners and ten nested Tier-1 ones over the same member list
+    off0 = i32([0, 3, 5, 8, 10, 12])
+    off1 = i32([0, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12])
+    descending = i32([11, 6, 0, 10, 1, 9, 7, 2, 8, 3, 5, 4])
+    ascending = np.concatenate([np.sort(descending[off1[c]:off1[c + 1]])
+                                for c in range(off1.size - 1)]).astype(np.int32)
+    s0 = ((rng.standard_normal((5, b0)) + 1j * rng.standard_normal((5, b0)))
+          / np.sqrt(2.0 * b0)).astype(np.complex64)
+    s1 = ((rng.standard_normal((10, b1)) + 1j * rng.standard_normal((10, b1)))
+          / np.sqrt(2.0 * b1)).astype(np.complex64)
+
+    def run(thresholds, members=None):
+        h = _core.HMF(n, 1, nt, [b0, b1], 8, n)
+        h.set_reference(np.ones(n, dtype=np.float32))
+        h.set_template_batch(0, tm)
+        if use_q15 and (not h.set_q15(True) or not h.q15_stats()[0]):
+            pytest.skip("no Q15 screen for this chain on this target")
+        h.set_q15(use_q15)
+        h.set_thresholds(thresholds)
+        if members is not None:
+            assert h.set_tier0_clusters(s0, off0, members, 0)
+            if with_tier1:
+                assert h.set_tier1_clusters(s1, off1, members, 0)
+        flat, index, value, _ = h.run_series_sparse(ser, starts, wstart, wend, 0, nt, 64, 3.2, None)
+        passed = [tier[1] for tier in h.tier_stats()[:2]]
+        return (np.frombuffer(flat, np.int64), np.frombuffer(index, np.int64),
+                np.frombuffer(value, np.complex64)), passed
+
+    ref, _ = run([0.0, 0.0])
+    every, _ = run([0.0, 0.0], descending)
+    for got, want in zip(every, ref):
+        np.testing.assert_array_equal(got, want)
+
+    some, passed = run([3.0, 3.0], descending)
+    assert 0 < passed[1] < passed[0] < nblocks * nt      # both tiers dismiss some pairs
+    assert some[0].size > 0 and np.all(np.diff(some[0]) > 0)
+    kept = np.isin(ref[0], some[0])
+    for got, want in zip(some, ref):
+        np.testing.assert_array_equal(got, want[kept])
+    other, _ = run([3.0, 3.0], ascending)
+    for got, want in zip(other, some):
+        np.testing.assert_array_equal(got, want)
+
+
 @pytest.mark.parametrize("chain", [(128, 512), (128, 512, 1024)])
 @pytest.mark.parametrize("use_q15", [False, True])
 def test_tier1_sub_screeners_cut_tier1_work_and_preserve_triggers(chain, use_q15, monkeypatch):
