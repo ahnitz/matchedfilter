@@ -269,7 +269,7 @@ def pack_half2(a):
     a = np.ascontiguousarray(a, np.complex64)
     if np.little_endian:
         # _core.half_bits is NumPy's float32 -> float16 cast bit for bit (every float32
-        # pattern, NaN payloads included) at about 0.7 of its time
+        # pattern that is not a NaN; a NaN stays a NaN of its sign) at about 0.7 of its time
         f = a.view(np.float32)
         out = np.empty(f.shape, np.uint16)
         _core.half_bits(f, out)

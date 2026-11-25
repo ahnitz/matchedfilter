@@ -22,7 +22,7 @@ import re as _re
 
 import numpy as np
 from ._shared import empty_shared, _Allocation, _containing
-from ._gpuhost import MAX_BINS, MappedBuffer, Section, hier_peaks_grouped
+from ._gpuhost import MAX_BINS, MappedBuffer, Section, carray, hier_peaks_grouped
 from . import _kernels
 
 _METAL_DIR = _kernels.folder("metal")
@@ -916,7 +916,7 @@ class Context(Executor, InputUploads):
                         argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
 
     def _set_params(self, enc, params):
-        blk = (ctypes.c_uint32 * len(params))(*params)
+        blk = carray(ctypes.c_uint32, len(params))(*params)
         self.o.call(enc, b"setBytes:length:atIndex:", restype=None,
                     args=(ctypes.byref(blk), ctypes.sizeof(blk), 0),
                     argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))

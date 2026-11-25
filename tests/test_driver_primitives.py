@@ -61,8 +61,8 @@ def test_pow2_scaling_is_ldexp_bit_for_bit():
 
 def test_half_bits_is_numpys_float16_cast_bit_for_bit():
     """_core.half_bits (the fp16 tiers' template packing) gives NumPy's float32 -> float16
-    bits: round to nearest with ties to even, subnormal halves, overflow to infinity, NaN
-    kept a NaN with its sign and payload top, both signs. A strided sweep over every float32
+    bits: round to nearest with ties to even, subnormal halves, overflow to infinity, a NaN
+    kept a NaN of its sign, both signs. A strided sweep over every float32
     bit pattern and each edge class (all 2^32 patterns were checked once, 2026-11-25)."""
     import numpy as np
     from matchedfilter import _core
@@ -78,10 +78,18 @@ def test_half_bits_is_numpys_float16_cast_bit_for_bit():
         want = f.astype(np.float16).view(np.uint16)
     got = np.empty(f.size, np.uint16)
     _core.half_bits(f, got)
-    bad = np.flatnonzero(got != want)
+    # A NaN stays a NaN of its sign; which payload bits survive is the platform's choice
+    # (NumPy's cast quiets a signalling NaN on ARM and keeps it one on x86).
+    nan = np.isnan(f)
+    bad = np.flatnonzero((got != want) & ~nan)
     assert bad.size == 0, [(hex(int(bits[i])), hex(int(got[i])), hex(int(want[i])))
                            for i in bad[:5]]
+    assert np.all(np.isnan(got.view(np.float16)[nan]))
+    assert np.array_equal(got[nan] >> 15, (bits[nan] >> 31).astype(np.uint16))
     c = f[: (f.size // 2) * 2].view(np.complex64).reshape(-1, 2)
     with np.errstate(all="ignore"):
-        np.testing.assert_array_equal(
-            pack_half2(c), c.view(np.float32).astype(np.float16).view(np.uint32))
+        ref = c.view(np.float32).astype(np.float16)
+    packed = np.asarray(pack_half2(c)).view(np.uint16).reshape(ref.shape)
+    keep = ~np.isnan(ref)
+    np.testing.assert_array_equal(packed[keep], ref.view(np.uint16)[keep])
+    assert np.all(np.isnan(packed.view(np.float16)[~keep]))
