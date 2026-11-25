@@ -126,9 +126,13 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     differently), through the same continuous path the bank uses there.
     """
     n = int(n)
-    dkey = "cpu" if _parse_device(device).kind == "cpu" else str(device)
-    # corr4: the fixed cost has a floor (_corr_measure); files with corr3 entries hold zeros
-    key = "corr4,%d" % n if dkey == "cpu" else "corr4,%d,%s" % (n, dkey)
+    dev = _parse_device(device)
+    dkey = "cpu" if dev.kind == "cpu" else str(device)
+    # corr4: the fixed cost has a floor (_corr_measure); files with corr3 entries hold zeros.
+    # A GPU's prices are keyed on the kernels they timed, so a rebuilt kernel is priced again
+    # rather than chosen by its predecessor's costs.
+    key = ("corr4,%d" % n if dkey == "cpu" else "corr4,%d,%s|k%s"
+           % (n, dkey, _corr_kernel_id(n, getattr(dev, "backend", None))))
     if (n, dkey) in _CORR_COSTS:
         return _CORR_COSTS[(n, dkey)]
 
@@ -147,6 +151,18 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     return price_once(_CORR_COSTS, (n, dkey), key, measure,
                       lambda r: tuple(float(v) for v in r[:3]) if isinstance(r, list)
                       and len(r) >= 3 else None)
+
+
+def _corr_kernel_id(n, backend):
+    """Identity of the kernels a GPU's continuous correlation at length n runs (the forward
+    and the series correlation, one- or two-stage, either staging build)."""
+    from ._kernel_id import BACKENDS, kernel_id
+    if backend not in BACKENDS:
+        return "-"
+    stems = [s % n + lds for s in ("forward_%d", "full_series_%d", "tc_fwd1_%d", "tc_fwd2_%d",
+                                   "tc_corr1_%d", "tc_corr_series2_%d")
+             for lds in ("", "_lds32")]
+    return kernel_id(backend, stems)
 
 
 def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
