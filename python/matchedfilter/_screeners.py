@@ -4,9 +4,9 @@ each template's own.
 A leaf bank's templates over a first band are paired, then merged into groups of up to 16,
 each with a screener every member overlaps well (cluster_tier0_candidates); a group's
 members can be paired again at the next band (cluster_tier1_from_tier0). The compiled
-routines do the work (_core.tier0_match, tier0_pair_level, tier0_pass; src/tier0_*.cc); this
-module prepares the band's vectors for them and packs what they return. The planner prices
-a chain with the screeners' retentions (gatechain.choose_chain)."""
+routines do the work (_core.tier0_match, tier0_pair_level, tier0_pass, tier0_pairs_within;
+src/tier0_*.cc); this module prepares the band's vectors for them and packs what they
+return. The planner prices a chain with the screeners' retentions (gatechain.choose_chain)."""
 import math
 from typing import NamedTuple, Optional
 
@@ -400,47 +400,6 @@ def _screener_retention(bvecs, offsets, members, alphas, lag_pad, W32, WC64, exp
     return out
 
 
-def _pairs_within_clusters(offsets, members, valid, U64, v, Sr, Si, dls_ord, floor2):
-    """Pair the valid members of each multi-member cluster greedily by coherence.
-
-    Every pair of a cluster's members is scored over the coarse shifts
-    (``_core.tier0_pair_scores``, exact where they reach ``floor2``); the pairs whose squared
-    coherence reaches ``floor2`` are taken best first, each member at most once.
-
-    Returns
-    -------
-    tuple of list
-        ``(first, second, lag)``: per pair the smaller template index, the larger, and the
-        coarse-shift lag of the larger against the smaller.
-    """
-    pa_l, pb_l, dl_l = [], [], []
-    for c0 in range(offsets.size - 1):
-        grp = members[offsets[c0]:offsets[c0 + 1]]
-        grp = grp[valid[grp]]
-        m_g = int(grp.size)
-        if m_g < 2:
-            continue
-        U_g = U64[grp]
-        r2 = np.empty((m_g, m_g), dtype=np.float32)
-        bs = np.empty((m_g, m_g), dtype=np.int32)
-        _core.tier0_pair_scores(np.ascontiguousarray(U_g.real), np.ascontiguousarray(U_g.imag),
-                                Sr, Si, np.ascontiguousarray(v[grp], dtype=np.float64), floor2,
-                                r2, bs)
-        ia, ib = np.nonzero(r2 >= floor2)
-        used = np.zeros(m_g, dtype=bool)
-        for e in np.argsort(-r2[ia, ib], kind="stable"):
-            a, b = int(ia[e]), int(ib[e])
-            if used[a] or used[b]:
-                continue
-            used[a] = used[b] = True
-            dl = int(dls_ord[bs[a, b]])
-            ta, tb = int(grp[a]), int(grp[b])
-            pa_l.append(min(ta, tb))
-            pb_l.append(max(ta, tb))
-            dl_l.append(dl if ta < tb else -dl)
-    return pa_l, pb_l, dl_l
-
-
 #: Smallest member retention a Tier-1 sub-screener may have (cluster_tier1_from_tier0).
 TIER1_ALPHA_MIN = 0.995
 
@@ -450,12 +409,12 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
     """Build a Tier-1 sub-screener bank by pairing members inside each Tier-0 cluster.
 
     Pairs are scored at band ``band1`` with the same C kernels Tier-0 clustering uses
-    (``_core.tier0_pair_scores`` over coarse shifts, ``_core.tier0_refine_lags`` for the exact
-    fine lag), matched greedily by coherence within each multi-member Tier-0 cluster, and
-    merged into unit-variance screeners. Each merged member's retention is then measured as the
-    engine meets it (:func:`_screener_retention`), and any pair with a member below
-    ``alpha_min`` is split again, so the threshold model's Tier-1 loss stays small and is
-    passed to :func:`chain_thresholds` (``tier1_cluster``) exactly.
+    (``_core.tier0_pairs_within``: each multi-member Tier-0 cluster's pairs over the coarse
+    shifts, matched greedily by coherence; ``_core.tier0_refine_lags`` for the exact fine
+    lag), and merged into unit-variance screeners. Each merged member's retention is then
+    measured as the engine meets it (:func:`_screener_retention`), and any pair with a member
+    below ``alpha_min`` is split again, so the threshold model's Tier-1 loss stays small and
+    is passed to :func:`chain_thresholds` (``tier1_cluster``) exactly.
 
     Parameters
     ----------
@@ -499,20 +458,25 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
     coarse_floor = float(rho_min) * (0.90 if s_step > 1 else 1.0)
     floor2 = coarse_floor * coarse_floor
 
-    pa_l, pb_l, dl_l = _pairs_within_clusters(off0, mem0, valid, U64, v, Sr, Si, dls_ord,
-                                              floor2)
-    if not pa_l:
+    # The valid members of each Tier-0 cluster paired greedily by their coherence over the
+    # coarse shifts, best first, each member at most once
+    pa = np.empty(nt // 2, dtype=np.int32)
+    pb = np.empty(nt // 2, dtype=np.int32)
+    dl0 = np.empty(nt // 2, dtype=np.int64)
+    count = _core.tier0_pairs_within(off0, mem0, valid.view(np.uint8), U64, v, Sr, Si,
+                                     np.ascontiguousarray(dls_ord, dtype=np.int64), floor2,
+                                     pa, pb, dl0)
+    if not count:
         return None
+    pa, pb, dl0 = pa[:count], pb[:count], dl0[:count]
 
     # Exact fine lag and coherence per pair, then keep pairs at rho_min
-    pa = np.asarray(pa_l, dtype=np.int32)
-    pb = np.asarray(pb_l, dtype=np.int32)
     Ca_u = C[pa] * inv_sqrt_v[pa, None]
     Cb_u = C[pb] * inv_sqrt_v[pb, None]
     prod_ab = np.ascontiguousarray((W[None, :] * Ca_u.conj()) * Cb_u, dtype=np.complex128)
     pdl = np.empty(pa.size, dtype=np.int64)
     g = np.empty(pa.size, dtype=np.complex128)
-    _core.tier0_refine_lags(prod_ab, exp_all, np.asarray(dl_l, dtype=np.int64), int(R1),
+    _core.tier0_refine_lags(prod_ab, exp_all, dl0, int(R1),
                             int(s_step - 1) if s_step > 1 else 0, pdl, g)
     rho = np.abs(g)
     keep = rho >= float(rho_min)
@@ -527,34 +491,34 @@ def cluster_tier1_from_tier0(spectra, power, n, tier0_cluster, band1, k0=0, rho_
                  * (Ca_u + (g.conj() / rho)[:, None] * (Cb_u * exp_all[pdl + R1]))
                  ).astype(np.complex64)
 
+    # each template's Tier-0 cluster, by its position in mem0
+    cluster_of = np.repeat(np.arange(off0.size - 1), np.diff(off0))
+
     def _assemble(sel):
-        # CSR layout in Tier-0 cluster order (so Tier-1 clusters nest), merged pairs first
+        # CSR layout in Tier-0 cluster order (so Tier-1 clusters nest): in each cluster its
+        # merged pairs first, each where its smaller template stands, then its single templates
         partner = np.full(nt, -1, dtype=np.int64)
         slot = np.full(nt, -1, dtype=np.int64)
         idx = np.flatnonzero(sel)
         partner[pa[idx]] = pb[idx]
         partner[pb[idx]] = pa[idx]
         slot[pa[idx]] = idx
-        vecs, offs, mems = [], [0], []
-        for c0 in range(off0.size - 1):
-            grp = mem0[off0[c0]:off0[c0 + 1]]
-            for t in grp:
-                t = int(t)
-                if slot[t] >= 0:
-                    vecs.append(pair_vecs[slot[t]])
-                    mems.extend((t, int(partner[t])))
-                    offs.append(len(mems))
-            for t in grp:
-                t = int(t)
-                if partner[t] < 0:
-                    vecs.append(C[t].astype(np.complex64))
-                    mems.append(t)
-                    offs.append(len(mems))
+        head = slot[mem0] >= 0
+        single = partner[mem0] < 0
+        place = np.flatnonzero(head | single)
+        order = place[np.argsort(2 * cluster_of[place] + single[place], kind="stable")]
+        first = mem0[order]
+        pair = head[order]
+        bvecs = np.empty((order.size, length), dtype=np.complex64)
+        bvecs[pair] = pair_vecs[slot[first[pair]]]
+        bvecs[~pair] = C[first[~pair]].astype(np.complex64)
+        offs_i32 = np.zeros(order.size + 1, dtype=np.int32)
+        np.cumsum(1 + pair, out=offs_i32[1:])
+        mems_i32 = np.empty(int(offs_i32[-1]), dtype=np.int32)
+        mems_i32[offs_i32[:-1]] = first
+        mems_i32[offs_i32[:-1][pair] + 1] = partner[first[pair]]
         max_dl = int(np.max(np.abs(pdl[idx]))) if idx.size else 0
         lpad = int((max_dl + R1 - 1) // R1) if max_dl > 0 else 0
-        bvecs = np.asarray(vecs, dtype=np.complex64)
-        offs_i32 = np.asarray(offs, dtype=np.int32)
-        mems_i32 = np.asarray(mems, dtype=np.int32)
         alphas = _screener_retention(bvecs, offs_i32, mems_i32, np.ones(nt), lpad,
                                      W32, WC64, exp_all64, R1, v)
         return bvecs, offs_i32, mems_i32, lpad, alphas

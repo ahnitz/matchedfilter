@@ -218,3 +218,71 @@ extern "C" long long ap_tier0_match(
 } catch (const std::bad_alloc &) {
   return -1;
 }
+
+/* The pairs inside each cluster of a partition (_screeners.cluster_tier1_from_tier0): the
+   valid members of cluster c, members[offsets[c] : offsets[c + 1]] where valid, are scored
+   against each other (ap_tier0_pair_scores over U's rows, complex64 (nodes, K), variances
+   v) and the pairs whose score reaches floor are taken from the largest down (equal scores
+   in the order of their first member, then their second, as listed in the cluster), each
+   member at most once. a, b, dl (room for the members' number / 2) get each pair's
+   smaller template, its larger and the lag of the larger against the smaller. This is the
+   numpy loop it replaced, its sort stable. Returns the number of pairs, or -1 when out of
+   memory. */
+extern "C" long long ap_tier0_pairs_within(
+    const int32_t *offsets, long long nclusters, const int32_t *members, const uint8_t *valid,
+    const float *U, const double *v, const float *sr, const float *si,
+    const int64_t *shift_lags, long long K, long long nsh, double floor, int32_t *a,
+    int32_t *b, int64_t *dl) try {
+  // the float floor at or below floor: every score that reaches floor is exact
+  float floor32 = (float)floor;
+  if ((double)floor32 > floor) floor32 = nextafterf(floor32, -HUGE_VALF);
+  std::vector<int32_t> grp, bs;
+  std::vector<float> ur, ui, r2;
+  std::vector<double> vg;
+  std::vector<Cand> cand;
+  std::vector<uint8_t> used;
+  long long n = 0;
+  for (long long c = 0; c < nclusters; c++) {
+    grp.clear();
+    for (int32_t p = offsets[c]; p < offsets[c + 1]; p++)
+      if (valid[members[p]]) grp.push_back(members[p]);
+    const long long m = (long long)grp.size();
+    if (m < 2) continue;
+    ur.resize((size_t)(m * K));
+    ui.resize((size_t)(m * K));
+    vg.resize((size_t)m);
+    r2.resize((size_t)(m * m));
+    bs.resize((size_t)(m * m));
+    for (long long i = 0; i < m; i++) {
+      const float *u = U + 2 * (long long)grp[i] * K;
+      for (long long k = 0; k < K; k++) {
+        ur[i * K + k] = u[2 * k];
+        ui[i * K + k] = u[2 * k + 1];
+      }
+      vg[i] = v[grp[i]];
+    }
+    if (ap_tier0_pair_scores(ur.data(), ui.data(), sr, si, vg.data(), m, K, nsh, floor32,
+                             r2.data(), bs.data()) != 0)
+      throw std::bad_alloc();
+    cand.clear();
+    for (long long i = 0; i < m; i++)
+      for (long long j = 0; j < m; j++)
+        if ((double)r2[i * m + j] >= floor) cand.push_back(Cand{r2[i * m + j], (int32_t)i, (int32_t)j});
+    std::stable_sort(cand.begin(), cand.end(),
+                     [](const Cand &x, const Cand &y) { return x.r > y.r; });
+    used.assign((size_t)m, 0);
+    for (const Cand &e : cand) {
+      if (used[e.a] || used[e.b]) continue;
+      used[e.a] = used[e.b] = 1;
+      const int32_t ta = grp[e.a], tb = grp[e.b];
+      const int64_t d = shift_lags[bs[(long long)e.a * m + e.b]];
+      a[n] = ta < tb ? ta : tb;
+      b[n] = ta < tb ? tb : ta;
+      dl[n] = ta < tb ? d : -d;
+      n++;
+    }
+  }
+  return n;
+} catch (const std::bad_alloc &) {
+  return -1;
+}

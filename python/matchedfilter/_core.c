@@ -2333,6 +2333,76 @@ static PyObject *M_tier0_match(PyObject *self,PyObject *args){
   return PyLong_FromLongLong(n);
 }
 
+long long ap_tier0_pairs_within(
+    const int32_t *offsets, long long nclusters, const int32_t *members, const uint8_t *valid,
+    const float *U, const double *v, const float *sr, const float *si,
+    const int64_t *shift_lags, long long K, long long nsh, double floor, int32_t *a,
+    int32_t *b, int64_t *dl);                                           /* src/tier0_match.cc */
+/* tier0_pairs_within(offsets, members, valid, U, v, Sr, Si, lags, floor, out_a, out_b, out_dl)
+   -> count: the coherent pairs inside each cluster, best first (src/tier0_match.cc). */
+static PyObject *M_tier0_pairs_within(PyObject *self,PyObject *args){
+  (void)self;
+  enum { iOF,iME,iVA,iU,iV,iSR,iSI,iSL,oA,oB,oDL, NUSED };
+  static const char *fmt[NUSED]={"i","i","B","Zf","d","f","f","q","i","i","q"};
+  static const int ndim[NUSED]={1,1,1,2,1,2,2,1,1,1,1};
+  PyObject *o[NUSED];
+  Py_buffer b[NUSED];
+  double floor=0.0;
+  int have[NUSED]={0}, ok=1;
+  if(!PyArg_ParseTuple(args,"OOOOOOOOdOOO",&o[iOF],&o[iME],&o[iVA],&o[iU],&o[iV],&o[iSR],
+       &o[iSI],&o[iSL],&floor,&o[oA],&o[oB],&o[oDL])) return NULL;
+  for(int i=0;i<NUSED && ok;i++){
+    const int flags = PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(i>=oA ? PyBUF_WRITABLE : 0);
+    if(PyObject_GetBuffer(o[i],&b[i],flags)<0){ ok=0; break; }
+    have[i]=1;
+    const char *f=b[i].format ? b[i].format : "B";
+    /* int64 arrives as "l" or "q", int32 as "i" or "l", by platform */
+    const int same = !strcmp(f,fmt[i])
+        || (fmt[i][0]=='q' && !strcmp(f,"l") && b[i].itemsize==8)
+        || (fmt[i][0]=='i' && !strcmp(f,"l") && b[i].itemsize==4);
+    if(!same || b[i].ndim!=ndim[i]) ok=0;
+  }
+  Py_ssize_t ncl=0, nm=0, nodes=0, K=0, nsh=0;
+  if(ok){
+    ncl=b[iOF].shape[0]-1; nm=b[iME].shape[0]; nodes=b[iU].shape[0]; K=b[iU].shape[1];
+    nsh=b[iSR].shape[0];
+    ok = ncl>=0 && K>=1 && nsh>=1 && b[iVA].shape[0]==nodes && b[iV].shape[0]==nodes
+         && b[iSR].shape[1]==K && b[iSI].shape[0]==nsh && b[iSI].shape[1]==K
+         && b[iSL].shape[0]==nsh && b[oA].shape[0]>=nm/2 && b[oB].shape[0]>=nm/2
+         && b[oDL].shape[0]>=nm/2;
+  }
+  if(ok){
+    /* the offsets run through the members in order, and the members are nodes, each once */
+    const int32_t *of=(const int32_t*)b[iOF].buf, *me=(const int32_t*)b[iME].buf;
+    ok = of[0]==0 && of[ncl]==nm;
+    for(Py_ssize_t c=0;c<ncl && ok;c++) ok = of[c]<=of[c+1];
+    char *seen=(char*)calloc((size_t)nodes+1,1);
+    if(!seen){ for(int i=0;i<NUSED;i++) if(have[i]) PyBuffer_Release(&b[i]); return PyErr_NoMemory(); }
+    for(Py_ssize_t i=0;i<nm && ok;i++){
+      ok = me[i]>=0 && me[i]<nodes && !seen[me[i]];
+      if(ok) seen[me[i]]=1;
+    }
+    free(seen);
+  }
+  long long n=0;
+  if(ok){
+    Py_BEGIN_ALLOW_THREADS
+    n=ap_tier0_pairs_within((const int32_t*)b[iOF].buf,(long long)ncl,(const int32_t*)b[iME].buf,
+        (const uint8_t*)b[iVA].buf,(const float*)b[iU].buf,(const double*)b[iV].buf,
+        (const float*)b[iSR].buf,(const float*)b[iSI].buf,(const int64_t*)b[iSL].buf,
+        (long long)K,(long long)nsh,floor,(int32_t*)b[oA].buf,(int32_t*)b[oB].buf,
+        (int64_t*)b[oDL].buf);
+    Py_END_ALLOW_THREADS
+  }
+  for(int i=0;i<NUSED;i++) if(have[i]) PyBuffer_Release(&b[i]);
+  if(!ok){
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"tier0_pairs_within: invalid buffer shapes, dtypes or indices");
+    return NULL;
+  }
+  if(n<0) return PyErr_NoMemory();
+  return PyLong_FromLongLong(n);
+}
+
 /* The buffers of a tier0_pass / tier0_pair_level call: n objects, formats fmt ("Zd"
    complex128, "d" float64, "q" int64, "i" int32) and dimensions ndim; those from index
    first_out on are written. Returns 1 with every buffer held, or 0 with none (an error is
@@ -2972,6 +3042,7 @@ static PyMethodDef methods[]={
   {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, floor, out_rho2, out_s): single-core shifted pair coherence over a chunk, exact where it reaches floor"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
   {"plan_best",M_plan_best,METH_VARARGS,"plan_best(cands, hws, first, later, refine, direct) -> (cost, candidate, last) or None: the cheapest of a chain's candidate plans on a CostModel"},
+  {"tier0_pairs_within",M_tier0_pairs_within,METH_VARARGS,"tier0_pairs_within(offsets, members, valid, U, v, Sr, Si, lags, floor, out_a, out_b, out_dl) -> count: the coherent pairs inside each cluster, best first"},
   {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},
   {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> (count, reach): one pass of the shared-screener merging, a level's clusters and candidate merges in, the next level out"},
   {"tier0_pair_level",M_tier0_pair_level,METH_VARARGS,"tier0_pair_level(...) -> (nc, reach): the first level of the shared-screener merging, the templates' coherent pairs made clusters of two"},
