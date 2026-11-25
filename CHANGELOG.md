@@ -48,6 +48,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   does; the trial that places single-template follow-up calls times each call's first run,
   which is what a search makes; a GPU plan's chain choice is priced in C like the CPU's; and
   Vulkan buffers reuse their allocations instead of creating about 76,000 in a job.
+  Chain choices that differ only in their prices share the part of the search that
+  depends on the draws alone, and a GPU bank's follow-up calls placed on the CPU take the
+  CPU banks' batched path; with these the warm GPU job measured 64 s against 65 s on the
+  CPU core in the same session. A job without a cost file is still about 8 s slower on the
+  GPU, which times its cost calibration in every such process.
 
 ### Documentation
 
