@@ -65,10 +65,16 @@ struct Matcher {
       float least = floor;
       long long room = mc;
       if (mc > 9) {
-        // the row's eighth largest score: a candidate is no smaller than it
-        memcpy(row.data(), ra, (size_t)mc * sizeof(float));
-        std::nth_element(row.begin(), row.begin() + 7, row.begin() + mc, std::greater<float>());
-        if (row[7] >= floor) least = row[7];
+        // the row's eighth largest score, where it reaches the floor: a candidate is no
+        // smaller than it. Only the scores at or above the floor can be it.
+        long long high = 0;
+        for (long long b = 0; b < mc; b++)
+          if (ra[b] >= floor) row[high++] = ra[b];
+        if (high >= 8) {
+          std::nth_element(row.begin(), row.begin() + 7, row.begin() + high,
+                           std::greater<float>());
+          least = row[7];
+        }
         room = 8;
       }
       for (long long b = 0; b < mc && room > 0; b++)
