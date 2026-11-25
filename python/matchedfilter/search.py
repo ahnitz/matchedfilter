@@ -797,13 +797,13 @@ class HierarchicalSearch:
         for dev in devs:
             dev.collect()                 # free the copies of blocks whose arrays died
 
-    def _root_place(self, root, n):
-        """Where root's next output of length n is computed: "device" or "host"
+    def _root_place(self, root, n, k):
+        """Where root's output of length n for chunk k is computed: "device" or "host"
         (_gpuroot.Placement), "host" on a CPU search or a length the device cannot run."""
         dev = self._device_root(root)
         if dev is None or dev.kernels(n) is None:
             return "host"
-        return _gpuroot.placement(dev, n).next()
+        return _gpuroot.placement(dev, n).next(k)
 
     def _real_output(self, node):
         """Whether node's output series is real: the root's is, and an inner node's is when
@@ -860,7 +860,7 @@ class HierarchicalSearch:
             ahead = None                        # (chunk, channels, held, support) computed early
             self._root_placed.clear()
             self._root_tmpl.clear()
-            trial = self._root_trial(root, inputs, channels)
+            trial = self._root_trial(root, inputs, channels, nchunks)
             started = False                     # a chunk ran: later ones may be samples
             for k in range(nchunks):
                 active = [c for c in channels if k < len(inputs[c].spectra)]
@@ -921,6 +921,8 @@ class HierarchicalSearch:
                     on_chunk(ChunkContext(k, active, tags))
                 if mark is not None:
                     self._root_sample(trial, root, mark, k, step)
+            if trial is not None:
+                trial.end_run()                 # the run's two halves are one round
 
     def _walk(self, node, step):
         """Queue node's leaves for the chunk's leaf search, then produce its live inner
@@ -978,7 +980,7 @@ class HierarchicalSearch:
                 for c, spec in zip(active, specs)]
         scales = [float(inputs[c].root_scale(root, k)) for c in active]
         k0, k1 = root.band
-        place = self._root_place(root, lengths.pop()) if len(lengths) == 1 else "host"
+        place = self._root_place(root, lengths.pop(), k) if len(lengths) == 1 else "host"
         if place == "device":
             n = len(outs[0])
             dev = self._device_root(root)
@@ -1004,9 +1006,10 @@ class HierarchicalSearch:
         self.timings["root"] += time.perf_counter() - t0
         return held, support
 
-    def _root_trial(self, root, inputs, channels):
-        """The open placement trial (_gpuroot.Placement) of root's outputs in this run, or
-        None: a CPU search, a length the device cannot run, or a placement already chosen."""
+    def _root_trial(self, root, inputs, channels, nchunks):
+        """The open placement trial (_gpuroot.Placement) of root's outputs in this run of
+        nchunks chunks, or None: a CPU search, a length the device cannot run, or a
+        placement already chosen."""
         spectra = [inputs[c].spectra[0] for c in channels if len(inputs[c].spectra)]
         if not spectra:
             return None
@@ -1017,7 +1020,7 @@ class HierarchicalSearch:
         trial = _gpuroot.placement(dev, n)
         if trial.winner() is not None:
             return None
-        trial.new_run()
+        trial.new_run(nchunks)
         return trial
 
     def _root_mark(self, root):
@@ -1027,8 +1030,8 @@ class HierarchicalSearch:
                 len(_ROOT_PLANS))
 
     def _root_sample(self, trial, root, mark, k, step):
-        """Chunk k's time as a placement sample (_gpuroot.Placement): when both roots it
-        used were computed at one place and no setup ran in it."""
+        """Chunk k's wall time and leaf work for the placement trial (_gpuroot.Placement):
+        when both roots it used were computed at one place and no setup ran in it."""
         place = self._root_placed.get(k)
         if place is None or self._root_placed.get(k + 1, place) != place:
             return
@@ -1038,7 +1041,7 @@ class HierarchicalSearch:
         work = sum(len(lf.counts) * sum(b - a for a, b in step.win[(id(lf), c)])
                    for lf in self._leaves_below(root) for c in step.active)
         if work:
-            trial.sample(place, (time.perf_counter() - mark[0]) / work)
+            trial.sample(place, time.perf_counter() - mark[0], work)
 
     def _submit_leaves(self, step):
         """Start the chunk's leaf searches, in every channel: (leaves, jobs, where, deferred,

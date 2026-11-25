@@ -15,6 +15,11 @@ a GPU fraction can be compared.
 
 The counts are what the run did, read from the engine's own counters, not modelled:
 
+- **root** (a hierarchical search): per block and channel, the band product and one real
+  inverse of length n (6 flops a band bin + 2.5 n log2 n); bytes are the band of the block's
+  spectrum and of the root's (its inputs) and the n-sample real series (4 n B). The series is
+  the stage's result, which the middle stage reads, charged as the middle's own output is;
+  the intermediate half-length spectrum is not (rule 2).
 - **middle**: one transform per block, one product and inverse per (block, template) pair;
   bytes are the input windows, template spectra and requested output.
 - **forward**: one transform per fine block; bytes are the block's input only.

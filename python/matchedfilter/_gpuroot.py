@@ -12,7 +12,7 @@ What it keeps, so that its steady cost is the transform's and nothing else:
   * each input block's spectrum in device memory, uploaded the first time a search reads
     it and kept while the caller's array object lives (a weak reference names it: a freed
     array's id cannot alias a new one). A block is uploaded once, not once per search; each
-    run checks the array's contents against the copy's (a one-pass signature, _signature)
+    run checks the array's contents against the copy's (its XXH64, _signature)
     and uploads it again if a caller rewrote it in place;
   * the root's spectrum in one buffer per length, written once per run;
   * the outputs, a pool of series buffers that searches take for a run and give back, so
@@ -29,7 +29,7 @@ import weakref
 
 import numpy as np
 
-from . import _kernels
+from . import _core, _kernels
 from ._errors import UnsupportedSize
 from ._shared import BUFFER_SERIALS, shared_view
 
@@ -53,10 +53,10 @@ def device_root(device):
 
 
 def _signature(arr):
-    """A block's contents in one word: the wrapping sum of its 8-byte words (one read of
-    the array, ~0.1 ms for 2^19 bins on a Zen 5 core). Any change of contents changes it,
-    except one that only permutes the words or whose changes cancel in the sum."""
-    return int(np.add.reduce(arr.view(np.uint64)))
+    """A block's contents in one word: XXH64 of its bytes (_core.xxh64, one read of the
+    array at memory speed). Every word is mixed at its position, so a rewrite that permutes
+    words or whose changes cancel changes it too."""
+    return _core.xxh64(arr)
 
 
 class _Block:
@@ -244,53 +244,50 @@ class DeviceRoot:
         return self.built - built
 
 
-#: The placements of a GPU search's roots: the preference first (it stands unless the host is
-#: clearly faster).
+#: The placements of a GPU search's roots: the preference first. It stands unless the host is
+#: clearly faster -- on a tie too: a device root moves work off the host, which is the
+#: direction a GPU search wants (the host's time is what its hooks and the next chunk need).
 PLACES = ("device", "host")
 
 
 class Placement:
     """Where a GPU search computes its roots at one series length on one device: "device"
-    (DeviceRoot) or "host" (_core.Root, overlapped with the device's leaf work where the
-    walk allows), one measured choice (_choice) for the process and, through MF_COST_FILE,
-    later ones.
+    (DeviceRoot) or "host" (_core.Root, computed ahead while the device runs the leaves),
+    one measured choice (_choice) for the process and, through MF_COST_FILE, later ones.
 
-    Which is faster depends on which side bounds the search: a host that runs the hooks and
-    feeds the device gains the root's host time from the device; a device that is already
-    the bound (a slow GPU beside a fast core, sharing its memory bandwidth) loses the root's
-    device time, while the host's root hides under the device's leaves. So it is measured on
-    the search's own chunks, as it runs:
+    Which is faster depends on which side bounds the search, and the time a choice moves
+    lands away from the root: a host root computed ahead hides under the device's leaves, and
+    a device root's host time saved can come back as a longer wait for those leaves. A sample
+    must therefore hold everything the choice changes, end to end. So the trial compares the
+    two halves of one run (one root: the same templates, comparable chunks):
 
-      * placement holds for two consecutive roots at a time, in the order host, device,
-        device, host (a block each), so that the rounds alternate which arm goes first;
-      * a chunk's time -- from its start to the next chunk's, with the root computed ahead
-        during it -- is a sample of its placement when both roots it used (its own and the
-        next one) had that placement, normalised by the chunk's leaf work (templates x
-        searched samples);
-      * a chunk in which any setup ran -- a bank built or calibrated (the search's setup
-        timer), a root recording built or a block uploaded (DeviceRoot.built), the host's
-        transform plan made -- is no sample: neither arm pays setup in its timed runs. Both
-        placements write the same output buffers, so moving between them rebuilds nothing
-        downstream (the October trial measured those re-recordings);
-      * consecutive samples of the two arms within one run are a round (_choice.Choice.round:
-        the device stands unless the host is faster by the tie in three quarters of rounds).
+      * a run's roots before its middle chunk go to one arm, the rest to the other, the
+        first arm alternating from run to run (host first, then device first, ...);
+      * each half's sample is its chunks' wall time summed -- every chunk from its start to
+        the next one's, the next root computed ahead in it, the leaves waited for and the
+        hooks run -- per unit of leaf work (templates x searched samples), over the chunks
+        whose own root and next root were both of that half: the chunk at the switch, the
+        run's first chunk (its banks' first calls record their device work) and any chunk in
+        which setup ran -- a bank built or calibrated, a root recording built or a block
+        uploaded (DeviceRoot.built), the host's transform plan made -- are left out, so
+        neither arm pays setup in its timed time;
+      * the two halves of a run are a round (_choice.Choice.round): the device stands unless
+        the host is faster by the tie in three quarters of rounds, and on a tie (see PLACES).
 
-    A run's first chunk is no sample either (its banks' first calls record their device
-    work). A contest that gets no rounds (runs of one chunk) ends on its budget of roots
-    placed (BUDGET, _choice.Choice.tick), the device standing. Without autotuning the device
-    stands."""
+    Both placements write the same output buffers, so moving between them rebuilds nothing
+    downstream (the October trial measured those re-recordings). A contest that gets no
+    rounds (runs too short to split) ends on its budget of roots placed (BUDGET,
+    _choice.Choice.tick), the device standing. Without autotuning the device stands."""
 
     #: (per arm, slack) roots placed before an open contest ends (Choice's budget).
-    BUDGET = (40, 20)
+    BUDGET = (80, 40)
 
     def __init__(self, key, store_key):
         from . import _choice
         self.choice = _choice.choice("root-place", key, PLACES, store_key=store_key,
                                      what="root placement %s" % (key,), budget=self.BUDGET)
-        self._blocks = 0             # placement blocks started (the schedule's position)
-        self._left = 0               # roots left in the current block
-        self._arm = None
-        self._half = None            # a sample awaiting its round: (arm, seconds per work)
+        self._runs = 0               # runs started while the contest is open
+        self._run = None             # this run's (arm order, split chunk, {arm: [s, work]})
 
     def winner(self):
         from ._choice import _autotune_enabled
@@ -300,35 +297,41 @@ class Placement:
             return self.choice.preference
         return None
 
-    def next(self):
-        """Where the next root is computed."""
+    def new_run(self, nchunks):
+        """A run of nchunks chunks starts: its halves' arms."""
+        order = (PLACES[1], PLACES[0]) if self._runs % 2 == 0 else (PLACES[0], PLACES[1])
+        self._runs += 1
+        self._run = (order, int(nchunks) // 2, {a: [0.0, 0] for a in PLACES})
+
+    def next(self, k):
+        """Where the root of chunk k is computed."""
         w = self.winner()
         if w is None:
             w = self.choice.tick()
         if w is not None:
             return w
-        if self._left <= 0:
-            self._arm = PLACES[1] if self._blocks % 4 in (0, 3) else PLACES[0]
-            self._blocks += 1
-            self._left = 2
-        self._left -= 1
-        return self._arm
+        if self._run is None:
+            return self.choice.preference
+        order, split, _ = self._run
+        return order[0] if k < split else order[1]
 
-    def new_run(self):
-        """A run starts: a sample left from the one before has no partner."""
-        self._half = None
+    def sample(self, arm, seconds, work):
+        """A clean chunk of this run: its wall time and leaf work, its roots at `arm`."""
+        if self._run is not None:
+            acc = self._run[2][arm]
+            acc[0] += seconds
+            acc[1] += work
 
-    def sample(self, arm, seconds_per_work):
-        """A clean chunk's time per unit of leaf work, its roots computed at `arm`."""
-        if self.winner() is not None:
+    def end_run(self):
+        """The run is over: its two halves are a round, when both have samples."""
+        run, self._run = self._run, None
+        if run is None or self.winner() is not None:
             return
-        if self._half is None or self._half[0] == arm:
-            self._half = (arm, seconds_per_work)
-            return
-        prev, self._half = self._half, None
-        from ._choice import _AUTOTUNE_LOCK
-        with _AUTOTUNE_LOCK:
-            self.choice.round({prev[0]: prev[1], arm: seconds_per_work})
+        acc = run[2]
+        if all(a[1] > 0 and a[0] > 0 for a in acc.values()):
+            from ._choice import _AUTOTUNE_LOCK
+            with _AUTOTUNE_LOCK:
+                self.choice.round({arm: a[0] / a[1] for arm, a in acc.items()})
 
 
 #: (device, series length) -> Placement, for the process.

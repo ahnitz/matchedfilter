@@ -117,8 +117,53 @@ def test_a_block_rewritten_in_place_is_uploaded_again():
     _settle_device_writes()
     ref = _host(a, T, band, 1.0)
     np.testing.assert_allclose(out, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
-    assert dev.built == built + 2
+    a[:] = a[::-1].copy()                     # the same values, permuted
+    dev.run(N, 0, [a], [out], band, [1.0])
+    _settle_device_writes()
+    ref = _host(a, T, band, 1.0)
+    np.testing.assert_allclose(out, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
+    w = a.view(np.uint64)                     # two changes that cancel in a sum of words
+    w[10] += np.uint64(12345)
+    w[20] -= np.uint64(12345)
+    dev.run(N, 0, [a], [out], band, [1.0])
+    _settle_device_writes()
+    ref = _host(a, T, band, 1.0)
+    np.testing.assert_allclose(out, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
+    assert dev.built == built + 4
     dev.give_output(N, 0, 0, out)
+
+
+def test_steady_device_roots_leave_no_cyclic_garbage():
+    """The device root's steady calls -- outputs taken and given back, recorded runs --
+    are freed by reference counting alone (no ctypes types made per call)."""
+    import gc
+    rng = np.random.default_rng(9)
+    dev = _device_root()
+    dev.set_template(N, _spec(rng))
+    blocks = [_spec(rng), _spec(rng)]
+    band = (3, N // 2 - 3)
+
+    def chunk(parity):
+        outs = [dev.take_output(N, c, parity) for c in range(2)]
+        dev.run(N, parity, blocks, outs, band, [1.0, 2.0])
+        _settle_device_writes()
+        for c, o in enumerate(outs):
+            dev.give_output(N, c, parity, o)
+    chunk(0)
+    chunk(1)
+    gc.collect()
+    gc.disable()
+    try:
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        for k in range(6):
+            chunk(k % 2)
+        gc.collect()
+        kinds = {type(o).__name__ for o in gc.garbage}
+    finally:
+        gc.garbage.clear()
+        gc.set_debug(0)
+        gc.enable()
+    assert "PyCArrayType" not in kinds, kinds
 
 
 def _taps(rng, c):
@@ -212,30 +257,35 @@ def test_a_gpu_search_computes_its_root_where_placed_and_gives_the_cpu_search(mo
 
 
 def test_the_placement_trial_keeps_the_device_unless_the_host_is_clearly_faster(monkeypatch):
-    """The schedule alternates which arm runs first (host, device, device, host blocks of
-    two roots); rounds pair samples of the two arms; the device stands on a tie, and the
+    """A run's halves go to the two arms, the first arm alternating from run to run; a run's
+    halves (wall time per unit of work) are a round; the device stands on a tie and the
     host is chosen where it is faster by more than the tie in most rounds."""
     from matchedfilter import _choice
     monkeypatch.setenv("MF_AUTOTUNE", "1")
-    order = []
     p = _gpuroot.Placement(("test", 1), None)
-    for _ in range(8):
-        order.append(p.next())
-    assert order == ["host", "host", "device", "device", "device", "device", "host", "host"]
-    for host_cost, want in ((0.7, "host"), (1.0, "device"), (1.3, "device")):
+    orders = []
+    for _ in range(2):
+        p.new_run(10)
+        orders.append([p.next(k) for k in range(10)])
+        p.end_run()
+    assert orders[0] == ["host"] * 5 + ["device"] * 5
+    assert orders[1] == ["device"] * 5 + ["host"] * 5
+    for host_cost, want in ((0.7, "host"), (0.98, "device"), (1.0, "device"), (1.3, "device")):
         _choice.reset("root-place")
         p = _gpuroot.Placement(("test", host_cost), None)
         rounds = 0
         while p.winner() is None:
-            p.sample("host", host_cost)
-            p.sample("device", 1.0)
+            p.new_run(10)
+            p.sample("host", 3 * host_cost, 3)
+            p.sample("device", 4.0, 4)
+            p.end_run()
             rounds += 1
             assert rounds <= p.choice.cap
         assert p.winner() == want, host_cost
-    # a sample left over from another run pairs with nothing
+    # a run with one arm only (too short to split, or setup in a half) is no round
     _choice.reset("root-place")
     p = _gpuroot.Placement(("test", 2), None)
-    p.sample("host", 0.5)
-    p.new_run()
-    p.sample("device", 1.0)
+    p.new_run(10)
+    p.sample("host", 0.5, 1)
+    p.end_run()
     assert not p.choice.samples["host"]

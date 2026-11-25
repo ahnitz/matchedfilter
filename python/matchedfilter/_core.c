@@ -1265,6 +1265,57 @@ static PyObject *M_half_bits(PyObject *self,PyObject *args){
   PyBuffer_Release(&s); PyBuffer_Release(&d);
   Py_RETURN_NONE;
 }
+/* xxh64(buffer, seed=0) -> int: XXH64 (Yann Collet's xxHash, 64-bit, as specified) of a
+   C-contiguous buffer's bytes, at memory speed; the device root's check that a block's
+   array still holds what its device copy was made from (_gpuroot). Every word is mixed at
+   its position, so permuted or cancelling changes change it. */
+#define XXP1 11400714785074694791ULL
+#define XXP2 14029467366897019727ULL
+#define XXP3 1609587929392839161ULL
+#define XXP4 9650029242287828579ULL
+#define XXP5 2870177450012600261ULL
+static inline uint64_t xx_rotl(uint64_t x,int r){ return (x<<r)|(x>>(64-r)); }
+static inline uint64_t xx_rd64(const unsigned char *p){ uint64_t v; memcpy(&v,p,8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  v=__builtin_bswap64(v);
+#endif
+  return v; }
+static inline uint32_t xx_rd32(const unsigned char *p){ uint32_t v; memcpy(&v,p,4);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  v=__builtin_bswap32(v);
+#endif
+  return v; }
+static inline uint64_t xx_round(uint64_t acc,uint64_t in){ acc+=in*XXP2; acc=xx_rotl(acc,31); return acc*XXP1; }
+static inline uint64_t xx_merge(uint64_t acc,uint64_t v){ acc^=xx_round(0,v); return acc*XXP1+XXP4; }
+static uint64_t xxh64(const unsigned char *p,size_t len,uint64_t seed){
+  const unsigned char *end=p+len; uint64_t h;
+  if(len>=32){
+    const unsigned char *lim=end-32;
+    uint64_t v1=seed+XXP1+XXP2, v2=seed+XXP2, v3=seed, v4=seed-XXP1;
+    do{ v1=xx_round(v1,xx_rd64(p)); v2=xx_round(v2,xx_rd64(p+8));
+        v3=xx_round(v3,xx_rd64(p+16)); v4=xx_round(v4,xx_rd64(p+24)); p+=32; }while(p<=lim);
+    h=xx_rotl(v1,1)+xx_rotl(v2,7)+xx_rotl(v3,12)+xx_rotl(v4,18);
+    h=xx_merge(h,v1); h=xx_merge(h,v2); h=xx_merge(h,v3); h=xx_merge(h,v4);
+  } else h=seed+XXP5;
+  h+=(uint64_t)len;
+  while(p+8<=end){ h^=xx_round(0,xx_rd64(p)); h=xx_rotl(h,27)*XXP1+XXP4; p+=8; }
+  if(p+4<=end){ h^=(uint64_t)xx_rd32(p)*XXP1; h=xx_rotl(h,23)*XXP2+XXP3; p+=4; }
+  while(p<end){ h^=(*p)*XXP5; h=xx_rotl(h,11)*XXP1; p++; }
+  h^=h>>33; h*=XXP2; h^=h>>29; h*=XXP3; h^=h>>32;
+  return h;
+}
+static PyObject *M_xxh64(PyObject *self,PyObject *args){
+  (void)self; PyObject *o; unsigned long long seed=0;
+  if(!PyArg_ParseTuple(args,"O|K",&o,&seed)) return NULL;
+  Py_buffer b;
+  if(PyObject_GetBuffer(o,&b,PyBUF_C_CONTIGUOUS)<0) return NULL;
+  uint64_t h;
+  Py_BEGIN_ALLOW_THREADS
+  h=xxh64((const unsigned char*)b.buf,(size_t)b.len,(uint64_t)seed);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&b);
+  return PyLong_FromUnsignedLongLong((unsigned long long)h);
+}
 static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyObject *o; unsigned long long seed, offset;
   if(!PyArg_ParseTuple(args,"OKK",&o,&seed,&offset)) return NULL;
@@ -3184,6 +3235,7 @@ static PyMethodDef methods[]={
   {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
+  {"xxh64",M_xxh64,METH_VARARGS,"xxh64(buffer, seed=0) -> int: XXH64 of a C-contiguous buffer's bytes"},
   {"half_bits",M_half_bits,METH_VARARGS,"half_bits(src float32, dst 16-bit): dst[i] = src[i] as IEEE half bits, NumPy's float32 -> float16 cast"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None, keep=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},

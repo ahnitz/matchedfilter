@@ -670,3 +670,14 @@ def test_refilter_runs_the_channels_own_profile():
         assert used[-1] == (search.leaf_bank(root, ctx.leaf, "B"), "B")
     search.run(inputs, on_peaks=on_peaks)
     assert used
+
+
+def test_xxh64_is_the_reference_hash():
+    """_core.xxh64 (the device root's block check) gives XXH64's published values, and a
+    permutation of a block's words changes it."""
+    assert _core.xxh64(b"") == 0xEF46DB3751D8E999
+    assert _core.xxh64(b"a") == 0xD24EC4F1A98C6E5B
+    assert _core.xxh64(b"abc") == 0x44BC2CF5AD770999
+    assert _core.xxh64(b"Nobody inspects the spammish repetition") == 0xFBCEA83C8A378BF1
+    a = np.arange(1000, dtype=np.uint64)
+    assert _core.xxh64(a) != _core.xxh64(a[::-1].copy())
