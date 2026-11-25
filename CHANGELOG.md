@@ -26,6 +26,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   threshold. The GPU ran 2048-sample leaf blocks where the CPU runs 1024, and PyCBC's power
   chisq is computed over one leaf block, so its values and the triggers a chisq cut keeps
   differed.
+- GPU (experimental): the screen that chooses a coarse kernel layout times the tiled
+  variants of every untiled layout within 5% of the fastest, not of the two fastest alone,
+  so a reshuffle of nearly equal untiled layouts no longer leaves the best tiled one
+  untimed; and a feed cost that a calibration measured as negative is priced as zero.
 
 ### Performance
 
