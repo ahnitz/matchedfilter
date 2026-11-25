@@ -405,6 +405,57 @@ def _signal_law_enabled():
     return bool(_config.get("MF_SIGNAL_LAW"))
 
 
+def _far_maxima(p, n, bands, k0s, seed):
+    """The law's far noise (_signal_law.signal_table's far_maxima): far_maxima(i, lags, u)
+    gives, per draw j, the u[j] quantile of the maximum of band i's noise over lags[j]
+    contiguous lags, from the running-maximum records of the model's noise blocks that its
+    noise pass rates come from (_noise_records): the same blocks and, once simulated for
+    either, no new simulation. A band's noise is circularly stationary over its lags, so any
+    lags[j] contiguous lags have the same law, and u uniform draws it.
+
+    The largest of as many independent noise samples bounds it: each lag's |z| <= x is a
+    symmetric convex set, so by the Gaussian correlation inequality correlation only raises
+    the chance that all of them hold. The simulated quantile passes the bound by its sampling
+    error alone, where the lags are independent, and is held to the bound at the lower end of
+    its quantile's bin, so that it is never above what the independent-noise law drew."""
+    held = {}
+
+    def far_maxima(i, lags, u):
+        lags = np.asarray(lags, np.int64)
+        lo, hi = int(lags.min()), int(lags.max())
+        table = held.get(i)
+        if table is None or lo < table[0] or hi >= table[0] + table[1].shape[0]:
+            if "recs" not in held:
+                held["recs"] = _noise_records(p, n, bands, _NOISE_BLOCKS, seed,
+                                              **({"k0s": k0s} if any(k0s) else {}))
+            pos, val, off = held["recs"][i]
+            if table is not None:
+                lo, hi = min(lo, table[0]), max(hi, table[0] + table[1].shape[0] - 1)
+            rows = off.size - 1
+            # each block's maximum over lags [0, m) for m in [lo, hi]: its last record below
+            # m (records rise in lag), the few records at lo and beyond counted off its end
+            late = np.flatnonzero(pos >= lo)
+            block_of = np.searchsorted(off, late, side="right") - 1
+            late_pos = pos[late]
+            maxima = np.empty((hi - lo + 1, rows), np.float32)
+            for m in range(lo, hi + 1):
+                beyond = np.bincount(block_of[late_pos >= m], minlength=rows)
+                maxima[m - lo] = val[off[1:] - 1 - beyond]
+            # sorted per lag count, so that u reads the quantile (rising with u, as the
+            # independent-noise law's did), and held to the independent bound
+            maxima.sort(axis=1)
+            at = np.arange(rows) / rows
+            for m in range(lo, hi + 1):
+                bound = np.sqrt(-2.0 * np.log1p(-np.minimum(at ** (1.0 / m), 1.0 - 1e-12)))
+                np.minimum(maxima[m - lo], bound, out=maxima[m - lo])
+            table = held[i] = (lo, maxima)
+        rows = table[1].shape[1]
+        at = np.minimum((np.asarray(u) * rows).astype(np.int64), rows - 1)
+        return table[1][lags - table[0], at]
+
+    return far_maxima
+
+
 def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=False,
                   alphas=None, _exact=False):
     """Joint draws of every band's coarse window maximum and the fine window maximum under a
@@ -476,7 +527,7 @@ def _signal_table(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=
         # the draws from the samples' joint law (_signal_law): no simulation
         C, F, at = _signal_law.signal_table(
             p, n, bands, [_band_slice(n, b, k0) for b, k0 in zip(bands, k0s)], float(snr), ndet,
-            int(seed), lags, alphas=al, nf=_NF)
+            int(seed), lags, _far_maxima(p, n, bands, k0s, int(seed)), alphas=al, nf=_NF)
         hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
         if al is not None:
             hit = _beside_plain(hit, _signal_table(p, n, bands, snr, ndet, seed=seed, window=window,

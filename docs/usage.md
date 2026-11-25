@@ -165,9 +165,21 @@ spectrum on a fine frequency grid and calibrates the gates for the bank's
 
 [[example:A bank of FIR templates]]
 
-A hierarchical bank's gates are calibrated for an analytic series (positive
-frequencies only). Complex taps are quadrature filters and are applied to a
-real series. Arguments outside what the bank can run raise `ValueError` when
+Real and complex taps both work on real and complex series with the engines
+`flat`, `dif` and `corr`; complex taps that are quadrature filters (the
+analytic version of a real filter) turn a real series into the complex SNR.
+The hierarchical engine's gates place their bands in the lower half of each
+block's spectrum (bins 0 to n/2 - 1, the positive frequencies). A real filter
+has about half its power there, and a quadrature filter or a filter of an
+analytic series all of it. A signal with most of its power in the upper half,
+as complex taps at negative frequencies give, is gated on the little of its
+power that is left: the gates pass most pairs, so the bank stays within its
+false-dismissal budget (when the reference describes every template) but runs
+slowly. For such a band `engine="flat"` is the better engine, or the series and
+the taps can be multiplied by the same complex exponential to move the band
+into the positive frequencies.
+
+Arguments outside what the bank can run raise `ValueError` when
 the bank is built: a `false_dismissal` outside (0, 1), an unknown engine,
 sample rates that are not positive, and tap counts outside their templates.
 

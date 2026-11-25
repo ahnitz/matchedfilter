@@ -962,8 +962,14 @@ class TimeDomainFilterBank:
     ----------
     taps : ndarray or sequence of ndarray
         The templates' taps: a (T, m) float32 or complex64 array, or a sequence of 1-D
-        arrays. Row t's centre tap, ``tap_counts[t] // 2``, is lag 0. Complex taps are
-        quadrature filters applied to a real series.
+        arrays. Row t's centre tap, ``tap_counts[t] // 2``, is lag 0. Real and complex taps
+        both work on real and complex series with the engines ``"flat"``, ``"dif"`` and
+        ``"corr"``. The ``"hier"`` engine's gates place their bands in the lower half of each
+        block's spectrum (bins 0 to n / 2 - 1, the positive frequencies). A signal with most
+        of its power in the upper half, as complex taps at negative frequencies give, is gated
+        on the little of its power there: the gates pass most pairs, so the bank stays within
+        its false-dismissal budget (when the reference describes every template) but runs
+        slowly, and ``"flat"`` is the better engine.
     tap_counts : sequence of int, optional
         Taps used per row. Defaults to every column of the array, or each array's length.
     tap_sample_rate : float, optional
@@ -1082,10 +1088,11 @@ class TimeDomainFilterBank:
                              "'correlation')" % (engine,))
         self.engine = mode
 
-        # Parse inputs. Complex taps are quadrature filters (complex_taps): the analytic
-        # version of a real filter, applied to a REAL series to give the complex SNR -- the
-        # same correlation (series against the conjugate tap spectrum) as real taps on an
-        # analytic series, without the analytic series.
+        # Parse inputs. Complex taps (complex_taps) are correlated with a real or complex
+        # series as real taps are, the series against the conjugate tap spectrum. A common
+        # use is quadrature filters, the analytic version of a real filter, which turn a real
+        # series into the complex SNR without an analytic series. The hierarchical gates use
+        # the lower half of the spectrum only.
         self._raw_taps = None
         tdt = _tap_dtype(taps)
         self.complex_taps = tdt is np.complex64

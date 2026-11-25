@@ -2,6 +2,37 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## Unreleased
+
+### Fixed
+
+- The hierarchical gates no longer dismiss far more than their budget on a band that holds a
+  small share of the signal. The gate model's signal law took the coarse lags it does not draw
+  next to the signal as independent noise. A band whose power does not fill its bins has
+  correlated lags, and the largest of their noise is much smaller (2.5 against 3.4 over 258
+  lags of a band whose power fills 17 of its 512 bins), so where the band's noise rather than
+  the signal sets the coarse maximum the thresholds came out too high. The law now reads that
+  maximum from the gate model's noise simulation, the blocks its noise pass rates come from,
+  and never takes it above the independent maximum, which bounds it. In a complex bank of
+  two-lobe taps at n = 1024 (budget 0.01, signals at the calibration strength 5.5), the share
+  of signals missed went from 1.8%, 17% and 38% to 0.4%, 0% and 0% with half, three quarters
+  and nine tenths of the power at negative frequencies; such a bank now passes most pairs to
+  the refine. Ordinary plans move little: of the single-tier thresholds of the 70 references
+  the test suite plans with the signal law, 230 of 340 are unchanged, 110 are lower (16 by more
+  than 1%, at most 8%) and none is higher. PyCBC's leaf plans (SNR 6, budget 0.001) are
+  unchanged, except chains that start at band 64 at n = 2048, whose tiers pass at most 0.1
+  percentage points more noise.
+
+### Documentation
+
+- The `TimeDomainFilterBank` docstring and the usage guide no longer read as if complex taps
+  had to be quadrature filters on a real series. They state that every combination of real
+  and complex series and taps works with the flat, dif and corr engines, and that the
+  hierarchical gates place their bands in the lower half of the spectrum, so a signal with
+  most of its power in the upper half is gated on little of it and runs slowly.
+- The README points to the hierarchical search design notes for `HierarchicalSearch`,
+  in place of a worked example the usage guide does not have.
+
 ## 0.1.0a10
 
 Changes since 0.1.0a9, by what a user of the library sees. The development record behind

@@ -151,17 +151,21 @@ def test_the_plan_is_the_simulations(setting, monkeypatch):
 
 
 def test_a_window_too_wide_for_the_law_is_simulated(setting, monkeypatch):
-    """The law takes the samples away from the signal as independent noise, so it stands in
+    """The law takes the samples away from the signal as noise apart from it, so it stands in
     only for a window of at most half the block (the planner's own window, where a profile's
     correlations die out inside the block). A wider window is simulated: the whole block,
-    which is also what the planner asks for under a profile whose correlations span it."""
+    which is also what the planner asks for under a profile whose correlations span it. (The
+    law reads its far noise from the noise simulation's records, so only a simulation with a
+    signal counts as simulating the table.)"""
     from matchedfilter import _signal_law
     p, bands, window = setting
     drawn, simulated = [], []
     law, simulate = _signal_law.signal_table, gd._simulate
     monkeypatch.setattr(_signal_law, "signal_table",
                         lambda *a, **k: drawn.append(a[7][:2]) or law(*a, **k))
-    monkeypatch.setattr(gd, "_simulate", lambda *a, **k: simulated.append(a[1]) or simulate(*a, **k))
+    monkeypatch.setattr(gd, "_simulate", lambda *a, **k: (
+        simulated.append(a[1]) if (a[6] if len(a) > 6 else k.get("signal")) is not None else None)
+        or simulate(*a, **k))
     monkeypatch.setenv("MF_SIGNAL_LAW", "1")
     assert gd._law_applies(N, window) and not gd._law_applies(N, (0, N))
     assert not gd._law_applies(N, (N // 4 - 1, 3 * N // 4))            # just over half

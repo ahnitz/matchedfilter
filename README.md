@@ -134,8 +134,8 @@ for how the gates are set, what `fd` means and when a plan is refused.
 runs overlap-save filtering over a continuous series, flat or hierarchical,
 returning each peak's template, sample and complex SNR.
 `matchedfilter.search.HierarchicalSearch` runs a tree of such banks over input
-blocks. The [usage guide](https://ahnitz.github.io/matchedfilter/using-it.html)
-has a worked example.
+blocks. Its design is described in
+[the hierarchical search design notes](https://github.com/ahnitz/matchedfilter/blob/main/docs/hierarchical-search-design.md).
 
 ## Performance
 

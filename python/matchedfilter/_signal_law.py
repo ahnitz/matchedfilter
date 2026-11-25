@@ -11,12 +11,18 @@ the samples' joint law is known in closed form:
 * the covariance of two samples is the sum over the bins they share of
   ``p_k exp(2 pi i k (x_i - x_j) / n)``, x their block lags, over the two statistics'
   norms; the signal's mean is the same sum against its arrival, times its strength;
-* a coarse sample far from the signal is noise alone, and the largest of N independent
-  noise moduli has the distribution ``(1 - exp(-x^2 / 2))^N``.
+* a coarse sample far from the signal is noise alone, and the largest of the band's noise
+  over N lags is what the gate model's noise simulation records (_gatedraws._noise_records):
+  its running maximum over the band's lags, from which the maximum over any N contiguous
+  lags is read.
 
 So a draw here is the fine samples at the lags around the arrival and each band's nearest
 coarse samples, drawn from that joint Gaussian, with the coarse samples further away
-replaced by the largest of as many independent noise samples. Chains of bands, a band's
+replaced by the largest of the band's noise over as many contiguous lags. Neighbouring lags
+of a band are correlated wherever its power does not fill its bins evenly; the largest of N
+of them is then much smaller than the largest of N independent noise samples (2.5 against
+3.4 over 258 lags of a band whose power fills 17 of its 512 bins), which the gates' thresholds
+rest on when the band holds a small share of the signal. Chains of bands, a band's
 retention under a shared screener and the lags of the maxima are all read from the one
 vector: nothing is drawn again for them.
 
@@ -58,7 +64,7 @@ def _sums(q, n):
     return np.fft.ifft(q) * n
 
 
-def signal_table(p, n, bands, slices, snr, ndet, seed, lags, alphas=None, nf=16):
+def signal_table(p, n, bands, slices, snr, ndet, seed, lags, far_maxima, alphas=None, nf=16):
     """Draws of the fine and coarse window maxima under a signal of strength ``snr``.
 
     Parameters
@@ -80,6 +86,12 @@ def signal_table(p, n, bands, slices, snr, ndet, seed, lags, alphas=None, nf=16)
     lags : tuple
         ``(w0, w1, c0, c1)``: the fine window and each band's coarse lags
         (_gatedraws._engine_lags).
+    far_maxima : callable
+        ``far_maxima(i, lags, u)``: per draw, the quantile ``u`` (uniform in [0, 1)) of the
+        maximum of band i's noise over ``lags`` contiguous lags in the simulated noise
+        blocks, for the coarse lags not drawn, at most the largest of as many independent
+        noise samples (_gatedraws._far_maxima). It depends only on the profile, the bands'
+        bin ranges and the seed, as the draws do.
     alphas : sequence of float, optional
         Each band's retention; a band with one below 1 keeps that share of the signal and
         of the noise it has in common with the other statistics.
@@ -102,7 +114,7 @@ def signal_table(p, n, bands, slices, snr, ndet, seed, lags, alphas=None, nf=16)
            (int(lags[0]), int(lags[1]), tuple(map(int, lags[2])), tuple(map(int, lags[3]))), int(nf))
     draws = _DRAWS.get(key)
     if draws is None:
-        draws = _DRAWS[key] = _draw(p, n, bands, slices, snr, ndet, seed, lags, nf)
+        draws = _DRAWS[key] = _draw(p, n, bands, slices, snr, ndet, seed, lags, nf, far_maxima)
         while len(_DRAWS) > _DRAWS_MAX:
             _DRAWS.popitem(last=False)
     else:
@@ -127,10 +139,10 @@ def signal_table(p, n, bands, slices, snr, ndet, seed, lags, alphas=None, nf=16)
     return C, F, (fat, cat)
 
 
-def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
+def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf, far_maxima):
     """The draws a profile's tables are read from (signal_table): per kept draw the fine
     maximum and its lag, and per band its drawn samples, their lags, and its undrawn lags'
-    largest noise."""
+    largest noise (far_maxima)."""
     nb = len(bands)
     w0, w1, c0, c1 = lags
     span = w1 - w0
@@ -185,7 +197,8 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
 
     whole = span >= n
     cols = classes[0][1]
-    # per pass and class: (F, fine lag, top, spot, samples, inside, first lag, class)
+    # per pass and class: (F, fine lag, undrawn lags, spot, samples, inside, first lag, class,
+    # the undrawn lags' noise quantile)
     kept = []
     have, part = 0, 0
     while have < ndet:
@@ -217,7 +230,8 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
                 continue
             base = (w0 + a[rows[keep]] - tc)[:, None]
             xs, ins = [], []
-            top, spot = np.empty((keep.size, nb), np.float32), np.empty((keep.size, nb), np.int32)
+            others = np.empty((keep.size, nb), np.int64)
+            spot, quant = np.empty((keep.size, nb), np.int32), np.empty((keep.size, nb))
             for i, (c, near, count) in enumerate(cols):
                 lag = (base + pos[None, c:c + near]).astype(np.int32)
                 if whole:
@@ -227,15 +241,13 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
                     inside = (j >= c0[i]) & (j < c1[i])
                 xs.append(np.where(inside, x[keep, c:c + near], 0))
                 ins.append(inside)
-                # the band's lags that were not drawn: the largest of that many independent
-                # noise samples, at one of the band's lags
-                others = np.maximum(count - inside.sum(axis=1), 0)
-                u = rng.random(keep.size)
+                # the band's lags that were not drawn, and the quantile of their largest noise
+                # (read below), at one of the band's lags
+                others[:, i] = np.maximum(count - inside.sum(axis=1), 0)
+                quant[:, i] = rng.random(keep.size)
                 spot[:, i] = (c0[i] + rng.integers(0, int(c1[i] - c0[i]), keep.size)) * steps[i]
-                far = np.sqrt(-2.0 * np.log1p(-np.minimum(u ** (1.0 / np.maximum(others, 1)), 1.0 - 1e-12)))
-                top[:, i] = np.where(others > 0, far, -1.0)
-            kept.append((F[keep], fine_lag[keep, best[keep]].astype(np.int32), top, spot, xs, ins,
-                         base[:, 0].astype(np.int32), np.full(keep.size, tc, np.int16)))
+            kept.append((F[keep], fine_lag[keep, best[keep]].astype(np.int32), others, spot, xs,
+                         ins, base[:, 0].astype(np.int32), np.full(keep.size, tc, np.int16), quant))
             have += keep.size
         part += 1
     # the draws in an order that does not follow the classes (the last pass is cut short)
@@ -244,7 +256,16 @@ def _draw(p, n, bands, slices, snr, ndet, seed, lags, nf):
     band_of = lambda j, i: np.concatenate([q[j][i] for q in kept])[order]
     # a sample's block lag is its draw's first lag plus the sample's place in its class
     places = [np.array([pos[c:c + near] for pos, _, _, _ in classes]) for c, near, _ in cols]
-    return dict(F=rows_of(0), fat=rows_of(1), top=rows_of(2), spot=rows_of(3),
+    # The undrawn lags' largest noise: that of the band's noise over as many contiguous lags,
+    # at the draw's quantile among the simulated noise blocks (far_maxima). The undrawn lags lie
+    # on both sides of the drawn ones and next to them, and are taken as one run of noise apart
+    # from them: correlated with neither the drawn samples nor the signal's response there.
+    others, quant = rows_of(2), rows_of(8)
+    top = np.full(others.shape, -1.0, np.float32)
+    for i in range(nb):
+        far = far_maxima(i, np.maximum(others[:, i], 1), quant[:, i])
+        top[:, i] = np.where(others[:, i] > 0, far, -1.0)
+    return dict(F=rows_of(0), fat=rows_of(1), top=top, spot=rows_of(3),
                 x=[band_of(4, i) for i in range(nb)], inside=[band_of(5, i) for i in range(nb)],
                 first=rows_of(6), cls=rows_of(7), places=places, own=own, whole=whole)
 
