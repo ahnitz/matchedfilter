@@ -2288,7 +2288,14 @@ class TimeDomainFilterBank:
         a CPU plan (Choice.play), synchronously, and its lock holds for every bank, and for
         later processes through MF_COST_FILE. A batch's single-template jobs follow the device
         trial instead (_settings "single", _items_batch): batched, the GPU call is another
-        dispatch. MF_AUTOTUNE=0 or MF_SINGLE_DEVICE=bank keeps the bank's device."""
+        dispatch. MF_AUTOTUNE=0 or MF_SINGLE_DEVICE=bank keeps the bank's device.
+
+        Each side's timed run is its first run of the call, with no untimed run before it
+        (Choice.play's warm): production never repeats a follow-up -- each is another
+        template over another window -- so what it pays is a first run (the template's
+        upload, the window's recording, the wake from idle). A warmed repeat timed the 8060S
+        at 0.31 ms a call against the CPU's 0.32 and kept the GPU, where its calls in the
+        171,828-template pycbc job cost about 2 ms against the CPU's 0.22 (2026-11-25)."""
         if (self.engine != 'hier' or _device.parse(self.device).kind != 'gpu'
                 or not _autotune_enabled() or _config.get("MF_SINGLE_DEVICE") == "bank"
                 or "_single_force" in self.__dict__ or playing()):
@@ -2307,7 +2314,7 @@ class TimeDomainFilterBank:
             finally:
                 del self._single_force, self._single_timed
         ran = self.__dict__.setdefault("_single_ran", {}).setdefault(ch.store_key, set())
-        return ch.play(run, ran)
+        return ch.play(run, ran, warm=lambda label: None)
 
     def _single_device(self, g, nblocks):
         """(on_cpu, timed) for a single-template call on group g: the side a play runs

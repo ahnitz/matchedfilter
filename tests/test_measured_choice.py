@@ -71,6 +71,52 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
     assert state.winner == "default"
 
 
+def test_single_template_play_times_each_sides_first_run(monkeypatch, tmp_path):
+    """A follow-up is a first run in production (another template, another window), so the
+    play times exactly that: each side runs the call once, timed, with no untimed repeat
+    before it. A side whose first run is slow (the GPU's upload and recording, here 1.0 s
+    against a 0.1 s repeat) loses to a side that is faster first time (0.4 s)."""
+    import time
+    from types import SimpleNamespace
+    import numpy as np
+    from matchedfilter import _choice
+    from matchedfilter import device as _device
+    from matchedfilter import time_domain as td
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.delenv("MF_SINGLE_DEVICE", raising=False)
+    monkeypatch.setattr(_device, "parse", lambda spec: SimpleNamespace(kind="gpu"))
+    monkeypatch.setattr(_choice, "_CHOICES", {})
+    clock = [0.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    g = SimpleNamespace(n=2048)
+    runs = []
+
+    class Bank:
+        engine, device = "hier", "gpu:0"
+        _template_map = {k: (g, k) for k in range(100)}
+
+        def _window_layout(self, g, W, size):
+            return (np.zeros(24),)
+
+        def filter_series(self, series, template_index=None, **kw):
+            side = self._single_force
+            first = (side, template_index) not in {(s, t) for s, t in runs}
+            runs.append((side, template_index))
+            clock[0] += {"gpu": 1.0 if first else 0.1, "cpu": 0.4 if first else 0.35}[side]
+            return side
+
+    bank = Bank()
+    ch = td._single_choice(bank.device, g.n, 24)
+    for t in range(60):
+        if ch.winner is not None:
+            break
+        before = len(runs)
+        assert td.TimeDomainFilterBank._single_play(bank, np.zeros(8), None, None, 0.0, t, None) == "gpu"
+        assert sorted(s for s, _ in runs[before:]) == ["cpu", "gpu"]    # one run a side
+    assert ch.winner == "side=cpu"
+
+
 def test_gpu_kernel_choices_carry_their_backend_artifacts():
     """CUDA-only kernels and compiled Metal libraries have their own build identity, for
     each backend this install carries (_kernel_dirs: no PTX on macOS, no Metal elsewhere):
