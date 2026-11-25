@@ -1065,7 +1065,7 @@ def test_gpu_workspace_growth_settles_calls_in_flight(monkeypatch):
 
 def test_a_gpu_banks_cpu_side_calls_take_the_batched_follow_up_path(monkeypatch):
     """A GPU bank's single-template call whose shape runs on the CPU (its lock, here forced)
-    takes the CPU banks' batched follow-up path (_batches._cpu_single_td_batch, a batch of
+    takes the CPU banks' batched follow-up path (_batches._cpu_single_td_one, a batch of
     one), not a one-template plan: the same peaks, to the bit, as a CPU bank's call."""
     from types import SimpleNamespace
     from conftest import usable_gpu
@@ -1090,10 +1090,11 @@ def test_a_gpu_banks_cpu_side_calls_take_the_batched_follow_up_path(monkeypatch)
     locked = SimpleNamespace(winner=_settings.arm("side", "cpu"))
     monkeypatch.setattr(td, "_single_choice", lambda *a: locked)
     forced = []
-    real = _batches._cpu_single_td_batch
-    monkeypatch.setattr(_batches, "_cpu_single_td_batch",
-                        lambda jobs, out, skip=None, force_cpu=False:
-                        forced.append(force_cpu) or real(jobs, out, skip=skip, force_cpu=force_cpu))
+    real = _batches._cpu_single_td_one
+    monkeypatch.setattr(_batches, "_cpu_single_td_one",
+                        lambda bank, series, windows, binsize, threshold, ti, force_cpu=False:
+                        forced.append(force_cpu)
+                        or real(bank, series, windows, binsize, threshold, ti, force_cpu))
     for k, c in enumerate(range(20000, 110000, 7000)):
         kw = dict(windows=slice(c - 9000, c + 9000), binsize=61, threshold=0.0, template_index=k % 5)
         r_g, r_c = gpu.filter_series(x, **kw), cpu.filter_series(x, **kw)

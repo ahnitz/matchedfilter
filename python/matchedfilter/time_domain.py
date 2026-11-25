@@ -775,8 +775,22 @@ class _Filters(_abc.Sequence):
     def __getitem__(self, i):
         if isinstance(i, slice):
             return [self[j] for j in range(*i.indices(len(self)))]
+        # The last spectrum made, of any bank's filters, is kept: a consumer's signal-
+        # consistency test asks for one template's filter twice in a row (pycbc's power chisq:
+        # the trigger's correlation, then its template), and each is 18 us of Python and
+        # transform in the 171,828-template pycbc job. A copy is returned, as a fresh spectrum
+        # would be, so a caller that writes into its array leaves the kept one alone.
+        last = _LAST_FILTER[0]
+        if last is not None and last[1] == i and last[0]() is self:
+            return last[2].copy()
         g, ti = self._map[i]
-        return np.conj(g.full_spectra(slice(ti, ti + 1))[0])
+        spec = np.conj(g.full_spectra(slice(ti, ti + 1))[0])
+        _LAST_FILTER[0] = (weakref.ref(self), i, spec.copy())
+        return spec
+
+
+#: (weak reference to a _Filters, template index, its spectrum): the last one _Filters made.
+_LAST_FILTER = [None]
 
 
 def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float,
@@ -2052,11 +2066,13 @@ class TimeDomainFilterBank:
         # tools/bench_refilter.py). It remains for what the batch declines (a resampled
         # bank, a GPU group, a wrapped plan).
         if template_index is not None and not getattr(self, '_defer', False):
-            single_out = [None]
-            if _batches._cpu_single_td_batch(
-                    [(self, series, dict(windows=windows, binsize=binsize, threshold=threshold,
-                                         template_index=template_index))], single_out):
-                return single_out[0]
+            res = _batches._cpu_single_td_one(self, series, windows, binsize, threshold,
+                                              template_index)
+            if res is not None:
+                return res
+            res = self._single_locked_cpu(series, windows, binsize, threshold, template_index)
+            if res is not None:
+                return res
 
         ser = self._input_series(series)
         if ser.ndim != 1:
@@ -2330,6 +2346,45 @@ class TimeDomainFilterBank:
                 del self._single_force, self._single_timed
         ran = self.__dict__.setdefault("_single_ran", {}).setdefault(ch.store_key, set())
         return ch.play(run, ran, warm=lambda label: None)
+
+    def _single_locked_cpu(self, series, windows, binsize, threshold, template_index):
+        """A GPU bank's single-template call whose call shape is locked to the CPU side, run
+        there at once (the batched follow-up path), or None for every other call.
+
+        The general path reaches the same run after laying out the window twice (for
+        _single_play, which finds the lock and steps aside, and for _single_device) and
+        trying the CPU batch twice: about 70 us a call of Python in the 171,828-template pycbc
+        job on the 8060S (instrumented), against 170 us for the follow-up's filtering. Here a
+        lone slice window's block count comes from its bounds; the choice, the lock and the
+        run are the general path's."""
+        if (self.engine != 'hier' or type(windows) is not slice
+                or not (windows.step is None or windows.step == 1)
+                or not (windows.start is None or type(windows.start) is int)
+                or not (windows.stop is None or type(windows.stop) is int)
+                or not isinstance(series, np.ndarray) or series.ndim != 1
+                or "_single_force" in self.__dict__
+                or _device.parse(self.device).kind != 'gpu' or not _autotune_enabled()
+                or _config.get("MF_SINGLE_DEVICE") == "bank" or playing()):
+            return None
+        ti = int(template_index)
+        if ti < 0 or ti >= self.n_templates:
+            return None
+        S = len(series)
+        v0, v1, _ = windows.indices(S)
+        if v1 <= v0:
+            return None
+        self._groups
+        g, _ = self._template_map[ti]
+        # the blocks _window_layout lays out for the one window [v0, v1)
+        step, c_bad = g.n_valid, g.c_bad
+        first = max(0, (v0 - c_bad) // step) * step
+        lim = min(S, v1 - c_bad)
+        nblocks = (lim - first + step - 1) // step if lim > first else 0
+        w = _single_choice(self.device, g.n, nblocks).winner
+        if w is None or _side_of(w) != "cpu":
+            return None
+        return _batches._cpu_single_td_one(self, series, windows, binsize, threshold, ti,
+                                           force_cpu=True)
 
     def _single_device(self, g, nblocks):
         """(on_cpu, timed) for a single-template call on group g: the side a play runs

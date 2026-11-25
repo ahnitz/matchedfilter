@@ -1358,6 +1358,128 @@ def _items_batch(jobs, out):
     return done
 
 
+def _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu):
+    """One single-template follow-up as the C batch (_core.td_followup_batch) takes it.
+
+    Parameters
+    ----------
+    bank : TimeDomainFilterBank
+        The bank.
+    series : ndarray
+        The series, as the caller passed it.
+    windows, binsize, threshold
+        As :meth:`TimeDomainFilterBank.filter_series` takes them.
+    ti : int
+        The template, as indexed in the bank's input.
+    force_cpu : bool
+        True runs a GPU bank's job too (its call shape's lock chose the CPU side).
+
+    Returns
+    -------
+    tuple or FilterResults or None
+        ``(c_job, entry)``: the job's tuple for the C batch and its template's cache entry
+        (whose spectrum-ready flag the batch's result updates); the empty result when the
+        window holds no sample; None when the batch does not run this job.
+    """
+    if bank.engine not in ("hier", "flat"):
+        return None
+    if not force_cpu and _parse_device(bank.device).kind != "cpu":
+        return None
+    ti = int(ti)
+    if ti < 0 or ti >= bank.n_templates:
+        return None
+    thr = float(bank.threshold if threshold is None else threshold)
+    if not np.isfinite(thr):
+        return None
+
+    bank._groups
+    g, ti_local = bank._template_map[ti]
+    if bank.engine == "flat":
+        p_flat = g._plan
+        if p_flat is not None and (
+            "run_series" in p_flat.__dict__
+            or getattr(type(p_flat).run_series, "__qualname__", "") != "MatchedFilter.run_series"
+        ):
+            return None
+    aligned = binsize is not None or bank.binsize is not None
+    bs = int(binsize) if binsize is not None else (bank.binsize or g.n)
+    if bs < 1:
+        return None
+
+    # Preserve 1-D float32 and contiguous complex64 series without full-segment widening.
+    if (isinstance(series, np.ndarray) and series.ndim == 1
+            and series.dtype == np.float32 and series.strides in ((4,), (8,))):
+        ser = series
+        s_kind = 1 if ser.strides == (4,) else 2
+    elif (isinstance(series, np.ndarray) and series.ndim == 1
+          and series.dtype == np.complex64 and series.flags.c_contiguous):
+        ser = series
+        s_kind = 0
+    else:
+        ser = bank._input_series(series)
+        if ser.ndim != 1:
+            return None
+        if ser.dtype == np.float32:
+            s_kind = 2 if ser.strides == (8,) else 1
+        else:
+            s_kind = 0
+
+    S = int(ser.size)
+    if windows is None:
+        if S <= 0:
+            return _EMPTY_FILTER_RESULTS
+        W = (0, S)
+    elif (type(windows) is slice and (windows.step is None or windows.step == 1)
+          and (windows.start is None or type(windows.start) is int)
+          and (windows.stop is None or type(windows.stop) is int)):
+        v0, v1, _ = windows.indices(S)
+        if v1 <= v0:
+            return _EMPTY_FILTER_RESULTS
+        W = (v0, v1)
+    else:
+        W = _normalize_windows(windows, S)
+        if W.shape[0] == 0:
+            return _EMPTY_FILTER_RESULTS
+
+    cser = (ser if (s_kind == 2 or ser.flags.c_contiguous)
+            else np.ascontiguousarray(ser))
+
+    # Fetch or populate per-template tap/spectrum cache on the group.
+    tcache = g.__dict__.get("_td_single_cache")
+    if tcache is None:
+        tcache = g._td_single_cache = OrderedDict()
+    entry = tcache.get(ti_local)
+    if entry is not None:
+        tcache.move_to_end(ti_local)
+    else:
+        src = (g._row_source.__defaults__[0]
+               if getattr(g._row_source, "__defaults__", None) else None)
+        L = int(src["counts"][ti_local]) if (
+            bank.rate_ratio == 1.0 and isinstance(src, dict)
+            and "taps" in src and "counts" in src
+        ) else 0
+        if 1 <= L <= g.n:
+            raw = src["taps"][ti_local, :L]
+            if raw.dtype not in (np.float32, np.complex64) or not raw.flags.c_contiguous:
+                raw = np.ascontiguousarray(
+                    raw, dtype=np.complex64 if np.iscomplexobj(raw) else np.float32)
+            spec_buf = np.empty(g.n, dtype=np.complex64)
+            entry = [True, L, raw, None, spec_buf, False]
+        else:
+            spec_buf = np.array(
+                g.full_spectra(slice(ti_local, ti_local + 1))[0],
+                dtype=np.complex64, copy=True, order="C",
+            )
+            entry = [False, 0, None, None, spec_buf, True]
+        tcache[ti_local] = entry
+        while len(tcache) > 256:
+            tcache.popitem(last=False)
+
+    return (cser, s_kind, S, W, g.n, g.n_valid, g.c_bad, bs,
+            aligned, thr, entry[0], entry[1], entry[2], entry[3],
+            entry[4], entry[5], ti), entry
+
+
 def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
     """Execute eligible single-template CPU follow-up jobs in one C batch call.
 
@@ -1391,115 +1513,18 @@ def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
             continue
         kw = kw or {}
         ti = kw.get("template_index")
-        if (ti is None or bank.engine not in ("hier", "flat")
-                or (set(kw) - {"windows", "binsize", "threshold", "template_index", "profile"})):
+        if ti is None or (set(kw) - {"windows", "binsize", "threshold", "template_index", "profile"}):
             continue
-        if not force_cpu and _parse_device(bank.device).kind != "cpu":
+        job = _single_td_job(bank, series, kw.get("windows"), kw.get("binsize"),
+                             kw.get("threshold"), ti, force_cpu)
+        if job is None:
             continue
-        ti = int(ti)
-        if ti < 0 or ti >= bank.n_templates:
+        if job is _EMPTY_FILTER_RESULTS:
+            out[j] = job
+            done.add(j)
             continue
-        thr_arg = kw.get("threshold")
-        thr = float(bank.threshold if thr_arg is None else thr_arg)
-        if not np.isfinite(thr):
-            continue
-
-        bank._groups
-        g, ti_local = bank._template_map[ti]
-        if bank.engine == "flat":
-            p_flat = g._plan
-            if p_flat is not None and (
-                "run_series" in p_flat.__dict__
-                or getattr(type(p_flat).run_series, "__qualname__", "") != "MatchedFilter.run_series"
-            ):
-                continue
-        aligned = kw.get("binsize") is not None or bank.binsize is not None
-        bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
-        if bs < 1:
-            continue
-
-        # Preserve 1-D float32 and contiguous complex64 series without full-segment widening.
-        if (isinstance(series, np.ndarray) and series.ndim == 1
-                and series.dtype == np.float32 and series.strides in ((4,), (8,))):
-            ser = series
-            s_kind = 1 if ser.strides == (4,) else 2
-        elif (isinstance(series, np.ndarray) and series.ndim == 1
-              and series.dtype == np.complex64 and series.flags.c_contiguous):
-            ser = series
-            s_kind = 0
-        else:
-            ser = bank._input_series(series)
-            if ser.ndim != 1:
-                continue
-            if ser.dtype == np.float32:
-                s_kind = 2 if ser.strides == (8,) else 1
-            else:
-                s_kind = 0
-
-        S = int(ser.size)
-        windows = kw.get("windows")
-        if windows is None:
-            if S <= 0:
-                out[j] = _EMPTY_FILTER_RESULTS
-                done.add(j)
-                continue
-            W = (0, S)
-        elif (type(windows) is slice and (windows.step is None or windows.step == 1)
-              and (windows.start is None or type(windows.start) is int)
-              and (windows.stop is None or type(windows.stop) is int)):
-            v0, v1, _ = windows.indices(S)
-            if v1 <= v0:
-                out[j] = _EMPTY_FILTER_RESULTS
-                done.add(j)
-                continue
-            W = (v0, v1)
-        else:
-            W = _normalize_windows(windows, S)
-            if W.shape[0] == 0:
-                out[j] = _EMPTY_FILTER_RESULTS
-                done.add(j)
-                continue
-
-        cser = (ser if (s_kind == 2 or ser.flags.c_contiguous)
-                else np.ascontiguousarray(ser))
-
-        # Fetch or populate per-template tap/spectrum cache on the group.
-        tcache = g.__dict__.get("_td_single_cache")
-        if tcache is None:
-            tcache = g._td_single_cache = OrderedDict()
-        entry = tcache.get(ti_local)
-        if entry is not None:
-            tcache.move_to_end(ti_local)
-        else:
-            src = (g._row_source.__defaults__[0]
-                   if getattr(g._row_source, "__defaults__", None) else None)
-            L = int(src["counts"][ti_local]) if (
-                bank.rate_ratio == 1.0 and isinstance(src, dict)
-                and "taps" in src and "counts" in src
-            ) else 0
-            if 1 <= L <= g.n:
-                raw = src["taps"][ti_local, :L]
-                if raw.dtype not in (np.float32, np.complex64) or not raw.flags.c_contiguous:
-                    raw = np.ascontiguousarray(
-                        raw, dtype=np.complex64 if np.iscomplexobj(raw) else np.float32)
-                spec_buf = np.empty(g.n, dtype=np.complex64)
-                entry = [True, L, raw, None, spec_buf, False]
-            else:
-                spec_buf = np.array(
-                    g.full_spectra(slice(ti_local, ti_local + 1))[0],
-                    dtype=np.complex64, copy=True, order="C",
-                )
-                entry = [False, 0, None, None, spec_buf, True]
-            tcache[ti_local] = entry
-            while len(tcache) > 256:
-                tcache.popitem(last=False)
-
-        c_jobs.append((
-            cser, s_kind, S, W, g.n, g.n_valid, g.c_bad, bs,
-            aligned, thr, entry[0], entry[1], entry[2], entry[3],
-            entry[4], entry[5], ti,
-        ))
-        job_meta.append((j, entry))
+        c_jobs.append(job[0])
+        job_meta.append((j, job[1]))
 
     # One eligible job is still a batch: a call at a time takes this path too
     # (filter_series), so a job gives the same peaks alone, among other kinds of job, or
@@ -1535,6 +1560,47 @@ def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
         done.add(j)
 
     return done
+
+
+def _cpu_single_td_one(bank, series, windows, binsize, threshold, ti, force_cpu=False):
+    """One single-template follow-up through the C batch, as a batch of one: what
+    :func:`_cpu_single_td_batch` gives for the one job, without building a batch around it
+    (a search's follow-ups come one call at a time: PeaksContext.refilter).
+
+    Parameters
+    ----------
+    bank : TimeDomainFilterBank
+        The bank.
+    series : ndarray
+        The series.
+    windows, binsize, threshold
+        As :meth:`TimeDomainFilterBank.filter_series` takes them.
+    ti : int
+        The template, as indexed in the bank's input.
+    force_cpu : bool, optional
+        True runs a GPU bank's job too (its call shape's lock chose the CPU side). Default
+        False.
+
+    Returns
+    -------
+    FilterResults or None
+        The peaks, or None when the batch does not run this job.
+    """
+    if getattr(MatchedFilter.run_series, "__qualname__", "") != "MatchedFilter.run_series":
+        return None
+    job = _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu)
+    if job is None or job is _EMPTY_FILTER_RESULTS:
+        return job
+    c_job, entry = job
+    _settle_device_writes()
+    offs_ba, ti_ba, si_ba, snr_ba, bs_ba, bl_ba, rdy_ba = _core.td_followup_batch([c_job])
+    if rdy_ba[0]:
+        entry[5] = True
+    if not len(si_ba):
+        return _EMPTY_FILTER_RESULTS
+    return FilterResults(np.frombuffer(ti_ba, dtype=np.int64), np.frombuffer(si_ba, dtype=np.int64),
+                         np.frombuffer(snr_ba, dtype=np.complex64),
+                         np.frombuffer(bs_ba, dtype=np.int64), np.frombuffer(bl_ba, dtype=np.int64))
 
 
 def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, profile=_SAME_PROFILE):
