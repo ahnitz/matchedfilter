@@ -511,12 +511,20 @@ def test_fresh_device_rows_are_cleared_on_the_device(monkeypatch):
     monkeypatch.setattr(_gpuhost.BufferPool, "poison", True)
     first = {}                  # a device middle bank's first call: its out_support
     real = TimeDomainFilterBank.correlate_series
+    real_channels = TimeDomainFilterBank.correlate_series_channels
 
     def spy(self, series, **kw):
         if S._parse_device(self.device).kind == "gpu" and kw.get("out") is not None:
             first.setdefault(id(self), (kw["out"].shape[-1], kw.get("out_support")))
         return real(self, series, **kw)
+
+    def spy_channels(self, series, windows, out, out_support, **kw):
+        # the search hands a batch's channels to the bank together: the first channel's
+        if S._parse_device(self.device).kind == "gpu":
+            first.setdefault(id(self), (out[0].shape[-1], out_support[0]))
+        return real_channels(self, series, windows, out, out_support, **kw)
     monkeypatch.setattr(TimeDomainFilterBank, "correlate_series", spy)
+    monkeypatch.setattr(TimeDomainFilterBank, "correlate_series_channels", spy_channels)
     for _ in range(2):          # the second search's rows come from the pool, poisoned
         test_a_gpu_search_gives_the_cpu_search()
     assert first
