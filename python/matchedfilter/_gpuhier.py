@@ -576,7 +576,9 @@ class HierOps:
                     raise ValueError("invalid tier0_cluster partition or lag_pad")
                 if np.any(raw_off[:-1] >= raw_off[1:]) or np.any((raw_mem < 0) | (raw_mem >= nt)):
                     raise ValueError("invalid tier0_cluster CSR offsets or member indices")
-                if np.unique(raw_mem).size != nt:
+                # nt members in [0, nt): a partition exactly when each appears once (O(nt);
+                # np.unique sorted them, 0.2 ms a plan)
+                if not np.all(np.bincount(raw_mem, minlength=nt) == 1):
                     raise ValueError("tier0_cluster members must partition [0, nt)")
                 cl_off = np.ascontiguousarray(raw_off, dtype=np.uint32)
                 cl_mem = np.ascontiguousarray(raw_mem, dtype=np.uint32)

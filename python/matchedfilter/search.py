@@ -430,10 +430,14 @@ class _InnerBatch:
         if state["slots"] is None or state["slots"].shape[0] < k:
             if self._alloc is None:
                 state["slots"] = _aligned_zeros((k, self.length), dtype=np.complex64)
+                state["support"] = [[] for _ in range(k)]  # where each slot may be nonzero
             else:
+                # Device rows may hold anything (a recycled allocation): every sample is
+                # support, so the bank clears what its windows do not write on the device.
+                # A host fill of the rows wrote ~80 MB of device-visible memory per channel
+                # for each search, 0.67 s of a pycbc job's 64 top templates.
                 state["slots"] = self._alloc((k, self.length))
-                state["slots"][:] = 0
-            state["support"] = [[] for _ in range(k)]      # where each slot may be nonzero
+                state["support"] = [[(0, self.length)] for _ in range(k)]
         support = state["support"]
         # On a device the rows are left in flight: the leaves' forwards are ordered after them
         # on the GPU, and a host reader settles them first (HierarchicalSearch._settle).

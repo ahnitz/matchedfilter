@@ -500,6 +500,30 @@ def test_a_finished_gpu_search_leaves_no_context_alive():
     assert [w for w in mine if w() is not None] == []
 
 
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_fresh_device_rows_are_cleared_on_the_device(monkeypatch):
+    """A device batch's new rows (a recycled allocation, poisoned here) are support from end
+    to end: the bank clears what the windows do not write, on the device, and the host never
+    fills them. Every series still reads as fresh -- exact zero outside what was computed --
+    and the peaks are the CPU search's."""
+    from matchedfilter import _gpuhost
+    from matchedfilter import search as S
+    monkeypatch.setattr(_gpuhost.BufferPool, "poison", True)
+    first = {}                  # a device middle bank's first call: its out_support
+    real = TimeDomainFilterBank.correlate_series
+
+    def spy(self, series, **kw):
+        if S._parse_device(self.device).kind == "gpu" and kw.get("out") is not None:
+            first.setdefault(id(self), (kw["out"].shape[-1], kw.get("out_support")))
+        return real(self, series, **kw)
+    monkeypatch.setattr(TimeDomainFilterBank, "correlate_series", spy)
+    for _ in range(2):          # the second search's rows come from the pool, poisoned
+        test_a_gpu_search_gives_the_cpu_search()
+    assert first
+    for length, support in first.values():
+        assert [tuple(w) for w in support] == [(0, length)]
+
+
 def test_refilter_parses_windows_as_the_bank_does():
     """refilter checks its windows against the parent's support with the bank's own parser
     (time_domain._normalize_windows), so a form the bank refuses is refused up front and
