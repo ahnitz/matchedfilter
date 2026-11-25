@@ -40,7 +40,7 @@ from .gatechain import band_forward_wanted
 from ._shared import pack_half2, shared_view
 from . import gatechain
 from ._results import _SparsePeaks
-from ._coarse import coarse_launch, forced_layout, shortlist, layout_label, screen
+from ._coarse import coarse_launch, forced_layout, shortlist, layout_label, screen, tile_offer
 from . import _settings
 
 #: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
@@ -474,11 +474,9 @@ class HierOps:
             return self._x_time(native, {}, 2) / pairs
 
         def tiles(times):
-            # Tiled layouts at the two fastest untiled (subgroup, ppg), and wherever no untiled
-            # sibling was timed: a tile is skipped only when its untiled sibling lost.
-            lead = {c[:2] for c in sorted(times, key=times.get)[:2]}
-            timed = {c[:2] for c in times}
-            return [c for c in cands if c[2] > 1 and (c[:2] in lead or c[:2] not in timed)]
+            # Tiled layouts at every untiled (subgroup, ppg) timed within the tie window of the
+            # fastest (_coarse.tile_offer), and wherever no untiled sibling was timed.
+            return tile_offer(cands, times, gatechain.TIE)
         try:
             untiled = [c for c in cands if c[2] == 1]
             out = screen([untiled or cands] + ([tiles] if untiled and len(untiled) < len(cands)

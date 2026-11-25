@@ -136,6 +136,28 @@ def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
     return out
 
 
+def tile_offer(cands, times, scatter):
+    """The tiled layouts of cands the screen times after the untiled ones (times: the untiled
+    stage's): those at every untiled (subgroup, pairs per group) timed within `scatter` of the
+    fastest untiled time, at the two fastest whatever the scatter, and wherever no untiled
+    sibling was timed. A time of 0 (a timer that recorded nothing) leads no tiles.
+
+    The untiled layouts lie within a few percent of each other and their tiled siblings much
+    further apart (band 256 on the 8060S: untiled 1.00-1.07 of the fastest, the best tiled
+    0.73, the tiles of the third-ranked untiled pair). Offered at the two fastest untiled
+    alone, a reshuffle of the untiled ranking inside its scatter left the best tiled layout
+    untimed; with scatter=0 this is that rule."""
+    timed_ok = {c: t for c, t in times.items() if c[2] == 1 and t > 0}
+    lead = set()
+    if timed_ok:
+        best = min(timed_ok.values())
+        ranked = sorted(timed_ok, key=timed_ok.get)
+        lead = {c[:2] for c in ranked[:2]} | {c[:2] for c in ranked
+                                               if timed_ok[c] <= best * (1.0 + scatter)}
+    timed = {c[:2] for c in times}
+    return [c for c in cands if c[2] > 1 and (c[:2] in lead or c[:2] not in timed)]
+
+
 def shortlist(memo, kind, device, band, cands, label, kernel_id, measure, tiebreak=None,
               forced=None):
     """(first, second or None) of cands: the screen's fastest two (measure(cands) -> {candidate:
