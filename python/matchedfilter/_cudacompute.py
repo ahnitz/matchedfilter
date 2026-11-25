@@ -173,7 +173,7 @@ def _u32(x):
 def _param_ptrs(params):
     """cuLaunchKernel's argument array: the address of each parameter (kept alive by the
     caller with params)."""
-    return (ctypes.c_void_p * len(params))(*[ctypes.addressof(p) for p in params])
+    return carray(ctypes.c_void_p, len(params))(*[ctypes.addressof(p) for p in params])
 
 
 _PACK_U64 = struct.Struct("Q").pack_into
@@ -622,7 +622,7 @@ class _CudaList:
             struct.pack_into(fmt, block, at, *values)
             if slot is not None:            # (block, offset, name, byte offset or -words)
                 self.args.append((block, at, slot[0], slot[1]))
-        ptrs = (ctypes.c_void_p * len(params))(*[base + at for at in params])
+        ptrs = carray(ctypes.c_void_p, len(params))(*[base + at for at in params])
         return ("launch", fn, wg, int(groups), block, ptrs)
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
@@ -645,7 +645,7 @@ class _CudaList:
 
     def update(self, buf, words):
         ptr, size = self.ctx._word_slots().take(4 * len(words))
-        vals = (ctypes.c_uint32 * len(words))(*[int(w) & 0xFFFFFFFF for w in words])
+        vals = carray(ctypes.c_uint32, len(words))(*[int(w) & 0xFFFFFFFF for w in words])
         ctypes.memmove(ptr, vals, 4 * len(words))
         self.ops.append(("update", buf, ptr, 4 * len(words), size))
 

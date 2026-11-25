@@ -169,6 +169,41 @@ def test_destroy_handles_nested_pending_timing_regions():
     assert not ctx.ctx.value
 
 
+def test_launch_parameter_arrays_make_no_ctypes_array_types():
+    """The ctypes arrays a launch passes (its parameter pointers, direct or recorded) and a
+    recorded word update copies from are made from carray's types, made once: a ctypes array
+    type is a reference cycle, so a type made per call left cyclic garbage for the collector
+    on every call of a pycbc GPU job. Host-only: no device is touched."""
+    import ctypes
+    import gc
+    from types import SimpleNamespace
+    from matchedfilter import _cudacompute as C
+
+    host = ctypes.create_string_buffer(4 * 41)
+    slots = SimpleNamespace(take=lambda nbytes: (ctypes.addressof(host), nbytes))
+    ctx = SimpleNamespace(_word_slots=lambda: slots)
+    buf = SimpleNamespace(dptr=ctypes.c_void_p(0x10000), nbytes=4096)
+    # lengths no other call path uses, so any array type of them is this test's
+    params = [ctypes.c_uint32(i) for i in range(37)]
+    gc.collect()
+    gc.disable()
+    try:
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        for _ in range(3):
+            C._param_ptrs(params)
+            lst = C._CudaList(ctx, "test")
+            lst.dispatch((ctypes.c_void_p(0x1), 64), 1, [buf] * 3, words=list(range(26)))
+            lst.update(buf, list(range(41)))
+            del lst
+        gc.collect()
+        kinds = {type(o).__name__ for o in gc.garbage}
+    finally:
+        gc.garbage.clear()
+        gc.set_debug(0)
+        gc.enable()
+    assert "PyCArrayType" not in kinds, kinds
+
+
 @pytest.mark.skipif(not _cuda.enumerate_devices()[0], reason="No NVIDIA CUDA GPU available on host")
 def test_cuda_flat_filter_agrees_with_cpu():
     dev = Device.parse("cuda:0")
