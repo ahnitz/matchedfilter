@@ -65,7 +65,15 @@ def test_a_gpu_bank_runs_each_group_at_its_measured_cheapest_size(monkeypatch):
     sizes, priced = _layout_of(monkeypatch, "gpu", [5720] * 18,
                                {16384: 0.80, 32768: 0.87, 65536: 2.0})
     assert sizes == [16384]
-    assert sorted(priced) == [(16384, 18, 5720), (32768, 18, 5720), (65536, 18, 5720)]
+    # priced at the taps rounded up to a sixteenth of the shortest candidate (1024)
+    assert sorted(priced) == [(16384, 18, 6144), (32768, 18, 6144), (65536, 18, 6144)]
+
+
+def test_banks_of_nearby_taps_share_a_price(monkeypatch):
+    """Taps within one sixteenth of the shortest candidate are priced as one shape."""
+    _, a = _layout_of(monkeypatch, "gpu", [5200] * 18, {16384: 0.8, 32768: 0.9, 65536: 2.0})
+    _, b = _layout_of(monkeypatch, "gpu", [6100] * 18, {16384: 0.8, 32768: 0.9, 65536: 2.0})
+    assert a == b
 
 
 def test_a_gpu_bank_keeps_the_model_choice_within_the_tie(monkeypatch):

@@ -314,7 +314,15 @@ def _corr_group_size(ns, n_model, rows, taps, device):
     cands = [m for m in (n_model // 2, n_model, 2 * n_model) if m in ns and m - taps >= 1]
     if len(cands) < 2:
         return n_model
-    prices = _corr_group_prices(cands, rows, taps, device)
+    # Priced at the taps rounded up to a sixteenth of the shortest candidate: a pycbc job's
+    # middle banks (one per top template) then share prices -- 62 tops priced 62 shapes at
+    # about 46 ms each, 2.9 s of setup -- and a sixteenth moves a size's valid span, and so
+    # its price, by at most 1/15.
+    q = max(1, min(cands) // 16)
+    shape_taps = -(-int(taps) // q) * q
+    if min(cands) - shape_taps < 1:
+        shape_taps = int(taps)
+    prices = _corr_group_prices(cands, rows, shape_taps, device)
     if not all(prices.get(m, 0) > 0 for m in cands):
         return n_model
     best = min(cands, key=prices.get)
