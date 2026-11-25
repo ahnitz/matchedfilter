@@ -40,12 +40,56 @@ def test_a_device_batch_correlates_its_channels_in_one_submission(monkeypatch):
     assert calls == [1, 1]
     both.compute_channels(list(regions), rows)
     both.bank.wait()
-    # A device that writes these rows through a host view (Metal's unified memory) keeps
-    # its own per-channel path; elsewhere the channels are one call.
-    ctx = both.bank._groups[0].get_correlation_plan()._gpu
-    view = getattr(ctx, "host_view", None)
-    hosted = view is not None and view(both._chan["A"]["slots"][:2]) is not None
-    assert calls[2:] == ([1, 1] if hosted else [2])
+    assert calls[2:] == [2]
     for ch in regions:
         np.testing.assert_array_equal(np.asarray(both._chan[ch]["slots"][:2]),
                                       np.asarray(one._chan[ch]["slots"][:2]))
+
+
+def _page_aligned(shape, dtype, page):
+    """A C-contiguous host array starting on a page boundary (not device memory)."""
+    nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+    raw = np.empty(nbytes + page, np.uint8)
+    off = (-raw.ctypes.data) % page
+    return raw[off:off + nbytes].view(dtype).reshape(shape)
+
+
+def test_host_outputs_on_unified_memory_are_one_submission(monkeypatch):
+    """correlate_series_channels into caller (host) arrays on a device that writes host
+    memory in place (host_view: unified memory) correlates every channel in one call, as
+    into device memory, and each output is its own channel's correlate_series."""
+    from matchedfilter import _gpuexec
+    from matchedfilter.time_domain import TimeDomainFilterBank
+    device = usable_gpu()
+    if device is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(8)
+    length = 1 << 17
+    counts = np.array([301, 451])
+    taps = np.zeros((2, counts.max()), np.float32)
+    for r, c in enumerate(counts):
+        taps[r, :c] = rng.standard_normal(c)
+    bank = TimeDomainFilterBank(taps, counts, engine="corr", device=device)
+    ctx = bank._groups[0].get_correlation_plan()._gpu
+    page = getattr(ctx, "page_bytes", None)
+    if getattr(ctx, "host_view", None) is None or page is None:
+        pytest.skip("the device does not write host memory in place")
+    series, windows = [], [[(20000, 70000)], [(5000, 9000), (60000, 120000)]]
+    for _ in windows:
+        s = bank.empty_shared((length,), np.float32)
+        s[:] = rng.standard_normal(length)
+        series.append(s)
+    outs = [_page_aligned((len(taps), length), np.complex64, page) for _ in windows]
+    assert all(ctx.host_view(o) is not None for o in outs)
+    calls = []
+    real = _gpuexec.Executor.correlate_continuous
+
+    def spy(self, n, data, tmpl, starts, out, *a, **k):
+        calls.append(len(out) if isinstance(out, (list, tuple)) else 1)
+        return real(self, n, data, tmpl, starts, out, *a, **k)
+    monkeypatch.setattr(_gpuexec.Executor, "correlate_continuous", spy)
+    bank.correlate_series_channels(series, windows, outs, [None, None])
+    assert calls == [2] * len(bank._groups)
+    for s, w, o in zip(series, windows, outs):
+        ref = bank.correlate_series(s, windows=w)
+        np.testing.assert_array_equal(o, ref)

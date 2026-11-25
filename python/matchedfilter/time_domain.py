@@ -2725,19 +2725,32 @@ class TimeDomainFilterBank:
         """_correlate_windows(g, ser, W, t0, nt, dest, settle, support) for every
         (ser, W, dest, support) of items -- the channels of a middle stage -- with every
         channel's blocks in one device submission (CorrelationFilter._continuous_gpu_parts)
-        where each series is real and read as such, each dest lies in this group's device
-        memory with contiguous rows, and the device does not write it through a host view;
-        else channel by channel."""
+        where each series is real and read as such and each dest has contiguous rows in this
+        group's device memory, or in host memory the device writes in place (unified memory:
+        host_view, its owner kept until the work is settled); else channel by channel."""
         cplan = g.get_correlation_plan()
         gpu = cplan._gpu
         view = getattr(gpu, 'host_view', None) if gpu is not None else None
+        # Host destinations the device can write where they are (Metal): their views live
+        # with the context's in-flight work (_keep_until_done, released when it is settled).
+        owners = []
+        if view is not None and hasattr(gpu, '_keep_until_done'):
+            for _, _, dest, _ in items:
+                if dest.flags.c_contiguous and shared_view(dest, gpu) is None:
+                    owner = view(dest)
+                    if owner is not None:
+                        owners.append(owner)
         if gpu is None or not _gpu_reads_real(gpu, g.n) or any(
                 ser.dtype != np.float32 or not dest.flags.c_contiguous
-                or shared_view(dest, gpu) is None or (view is not None and view(dest) is not None)
+                or shared_view(dest, gpu) is None
                 for ser, _, dest, _ in items):
+            owners.clear()
             for ser, W, dest, support in items:
                 self._correlate_windows(g, ser, W, t0, nt, dest, settle, support=support)
             return
+        if owners:
+            gpu._keep_until_done.extend(owners)
+            owners.clear()
         layouts = [self._windows_layout(g, ser.size, W, support) for ser, W, _, support in items]
         cplan._require_templates(t0, nt)
         cplan._dataset = False
