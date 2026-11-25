@@ -36,12 +36,15 @@ from ._shared import BUFFER_SERIALS, shared_view
 #: Per device (its str): the DeviceRoot, or None where the device cannot run the root.
 _ROOTS = {}
 
-#: Backends whose root kernels have been run against the host root on hardware. The Metal
-#: build gave wrong series on an Apple GPU (CI, 2026-11-25) and the CUDA build has not been
-#: run: until each passes tests/test_gpu_root.py on a device, its searches keep the host
-#: root. This is a statement about verification, not a tuning choice; a backend joins the
-#: list when its kernels pass, and placement is then measured as on Vulkan.
-VERIFIED_BACKENDS = ("vulkan",)
+#: Backends whose root kernels have been run against the host root on hardware. Metal joined
+#: on an Apple M2 (2026-11-25) once its runs were pending writes: its kernels were right,
+#: but the driver's _x_submit left them unknown to settle_writes and to other queues, so a
+#: host or the middle stage read the series before it was written (CI's Metal job). The
+#: CUDA build has not been run: until it passes tests/test_gpu_root.py on a device, its
+#: searches keep the host root. This is a statement about verification, not a tuning
+#: choice; a backend joins the list when its kernels pass, and placement is then measured
+#: as on Vulkan.
+VERIFIED_BACKENDS = ("vulkan", "metal")
 
 
 def device_root(device):

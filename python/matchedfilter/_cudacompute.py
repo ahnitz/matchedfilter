@@ -1214,7 +1214,11 @@ class Context(Executor, InputUploads):
             self._pend_write(stream)
 
     def _x_submit(self, native, binds, slot, pre=()):
+        """_x_run left in flight, returning wait(); like a run with wait=False it is a pending
+        write, so another stream is ordered after it and a host reader settles it (a device
+        root's series is read by the middle stage and, after settle_writes, by the host)."""
         stream = self._x_launch(native, binds, slot, pre)
+        self._pend_write(stream)
         return lambda: self._sync(stream)
 
     def _x_launch(self, native, binds, slot, pre=()):

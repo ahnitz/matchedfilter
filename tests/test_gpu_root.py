@@ -67,10 +67,35 @@ def test_the_device_root_gives_the_host_root():
         dev.give_output(N, c, 0, out)
 
 
+def test_a_run_left_in_flight_is_a_pending_write():
+    """A run is a write left in flight, which settle_writes waits for: the series a host
+    reads right after settling is the root's, not what the buffer held before (here NaN),
+    and other queues' work is ordered after it the same way (the middle stage's)."""
+    rng = np.random.default_rng(7)
+    dev = _device_root()
+    h = N // 2
+    T = _spec(rng)
+    dev.set_template(N, T)
+    D = _spec(rng)
+    out = dev.take_output(N, 0, 0)
+    band = (2, h - 2)
+    for scale in (1.0, 3.0):
+        _settle_device_writes()
+        np.asarray(out)[:] = np.nan
+        dev.run(N, 0, [D], [out], band, [scale])
+        assert dev.ctx.write_token() is not None
+        _settle_device_writes()
+        got = np.array(out)
+        ref = _host(D, T, band, scale)
+        np.testing.assert_allclose(got, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
+    dev.give_output(N, 0, 0, out)
+
+
 def test_a_block_is_uploaded_once_and_freed_with_its_array():
     """A chunk's second run uploads and records nothing; a new array (equal contents, a
     new object) is uploaded; a block whose array died is freed at the next run, with its
     recording."""
+    gc.collect()          # arrays earlier tests left to the collector die here, not mid-count
     rng = np.random.default_rng(6)
     dev = _device_root()
     h = N // 2

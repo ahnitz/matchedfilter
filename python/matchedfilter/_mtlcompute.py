@@ -1180,8 +1180,14 @@ class Context(Executor, InputUploads):
         if wait:
             self._commit(cmd, label)
             return
-        # Left in flight: it signals this context's event, which other contexts' command
-        # buffers wait on (_new_cmd), and settle_writes() waits on the host.
+        self._signal_write(cmd)
+        self._commit(cmd, label, async_submit=True)
+        self._pend_write()
+
+    def _signal_write(self, cmd):
+        """Make a command buffer left in flight a pending write: it signals this context's
+        event, which other contexts' command buffers wait on (_new_cmd), and settle_writes()
+        waits for it on the host (with _pend_write after the commit)."""
         if getattr(self, "_signal_event", None) is None:
             self._signal_event = self.o.call(self.device, b"newSharedEvent")
             self._signal_value = 0
@@ -1189,8 +1195,6 @@ class Context(Executor, InputUploads):
         self.o.call(cmd, b"encodeSignalEvent:value:", restype=None,
                     args=(self._signal_event, self._signal_value),
                     argtypes=(ctypes.c_void_p, ctypes.c_uint64))
-        self._commit(cmd, label, async_submit=True)
-        self._pend_write()
 
     def _pend_write(self):
         """This context's write token moved to the newest place on the device's list. One
@@ -1208,12 +1212,20 @@ class Context(Executor, InputUploads):
 
     @_autoreleased
     def _x_submit(self, native, binds, slot, pre=()):
+        """Run a recording and leave it in flight: the driver primitive `_x_submit` (_gpuexec).
+        Returns wait(). The run is also a pending write, as on Vulkan: another context's
+        command buffer waits for it on the GPU and a host reader settles it (a device root's
+        series, which the middle stage reads on its own queue and a test reads after
+        settle_writes, was read before it was written)."""
         label, ops = native
         cmd = self._command_buffer()
         for nat, b in pre:
             self._x_encode(cmd, nat[1], b or {})
         self._x_encode(cmd, ops, binds or {})
-        return self._commit(cmd, label, async_submit=True)
+        self._signal_write(cmd)
+        wait = self._commit(cmd, label, async_submit=True)
+        self._pend_write()
+        return wait
 
     @staticmethod
     def _x_upload(buf, array, slot):
