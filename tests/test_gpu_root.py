@@ -289,3 +289,15 @@ def test_the_placement_trial_keeps_the_device_unless_the_host_is_clearly_faster(
     p.sample("host", 0.5, 1)
     p.end_run()
     assert not p.choice.samples["host"]
+
+
+def test_a_backend_with_unverified_root_kernels_keeps_the_host_root(monkeypatch):
+    """device_root gives no DeviceRoot for a backend outside VERIFIED_BACKENDS, whatever
+    the host: its searches compute their roots on the host."""
+    class Other:
+        backend, index = "not-verified", 0
+
+        def __str__(self):
+            return "gpu:0 (not verified)"
+    monkeypatch.setattr(_gpuroot, "_ROOTS", {})
+    assert _gpuroot.device_root(Other()) is None

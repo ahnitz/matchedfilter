@@ -36,15 +36,24 @@ from ._shared import BUFFER_SERIALS, shared_view
 #: Per device (its str): the DeviceRoot, or None where the device cannot run the root.
 _ROOTS = {}
 
+#: Backends whose root kernels have been run against the host root on hardware. The Metal
+#: build gave wrong series on an Apple GPU (CI, 2026-11-25) and the CUDA build has not been
+#: run: until each passes tests/test_gpu_root.py on a device, its searches keep the host
+#: root. This is a statement about verification, not a tuning choice; a backend joins the
+#: list when its kernels pass, and placement is then measured as on Vulkan.
+VERIFIED_BACKENDS = ("vulkan",)
+
 
 def device_root(device):
     """The DeviceRoot of a parsed GPU device, made on first use, or None when its backend
-    cannot run one (no context)."""
+    cannot run one (no context) or its root kernels are not verified (VERIFIED_BACKENDS)."""
     key = str(device)
     if key not in _ROOTS:
         from ._filter import _compute_module
+        ctx = None
         try:
-            ctx = _compute_module(device).Context(device.index)
+            if device.backend in VERIFIED_BACKENDS:
+                ctx = _compute_module(device).Context(device.index)
         except Exception:          # no driver for it: the host computes every root
             ctx = None
         _ROOTS[key] = (DeviceRoot(ctx, getattr(ctx, "device_name", None) or key)
