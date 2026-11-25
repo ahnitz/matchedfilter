@@ -1214,11 +1214,18 @@ class Context(Executor, InputUploads):
             self._pend_write(stream)
 
     def _x_submit(self, native, binds, slot, pre=()):
-        """_x_run left in flight, returning wait(); like a run with wait=False it is a pending
-        write, so another stream is ordered after it and a host reader settles it (a device
-        root's series is read by the middle stage and, after settle_writes, by the host)."""
+        """_x_run left in flight, returning wait(). Without a slot, as on Vulkan, it is a
+        pending write like a run with wait=False: another stream is ordered after it and a
+        host reader settles it (a device root's series is read by the middle stage and, after
+        settle_writes, by the host; without it a host read after settle_writes saw the
+        unwritten series every time on an RTX 6000). A slot's run is read through its wait()
+        only, as Vulkan's slot fence is: pending, it ordered every later launch on the
+        device's other streams after the leaf calls in flight: search_bench's steady pass
+        took 1.55 s against 1.28 s (means of four runs each on the RTX 6000, alternated;
+        three of the pairs 19-31% apart, one tied)."""
         stream = self._x_launch(native, binds, slot, pre)
-        self._pend_write(stream)
+        if slot is None:
+            self._pend_write(stream)
         return lambda: self._sync(stream)
 
     def _x_launch(self, native, binds, slot, pre=()):

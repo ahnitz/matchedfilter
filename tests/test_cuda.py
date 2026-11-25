@@ -169,6 +169,26 @@ def test_destroy_handles_nested_pending_timing_regions():
     assert not ctx.ctx.value
 
 
+def test_a_run_left_in_flight_without_a_slot_is_a_pending_write_and_a_slots_is_not():
+    """_x_submit without a slot (a device root, a follow-up batch) registers a pending write,
+    which settle_writes and other streams wait for; a slot's run (a leaf call) is waited for
+    through the wait() it returns, as Vulkan's slot fence, and orders nothing else after
+    it. Host-only: the launch is stubbed."""
+    from matchedfilter import _cudacompute as C
+    ctx = C.Context.__new__(C.Context)
+    launched, pended, synced = [], [], []
+    ctx._x_launch = lambda native, binds, slot, pre=(): launched.append(slot) or ("stream", slot)
+    ctx._pend_write = lambda stream: pended.append(stream)
+    ctx._sync = lambda stream=None: synced.append(stream)
+    wait = ctx._x_submit(object(), {}, None)
+    assert pended == [("stream", None)] and not synced
+    wait()
+    assert synced == [("stream", None)]
+    ctx._x_submit(object(), {}, 2)()
+    assert launched == [None, 2] and pended == [("stream", None)]
+    assert synced[-1] == ("stream", 2)
+
+
 def test_launch_parameter_arrays_make_no_ctypes_array_types():
     """The ctypes arrays a launch passes (its parameter pointers, direct or recorded) and a
     recorded word update copies from are made from carray's types, made once: a ctypes array
