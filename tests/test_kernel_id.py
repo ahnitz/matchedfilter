@@ -108,3 +108,19 @@ def test_shipped_digests_match_every_compiled_program():
                  != {k: v for k, v in _kernel_id.record_ids(root, rec["file"]).items() if k in fields}]
         assert not stale, ("GPU artifacts changed without their manifest: rebuild with "
                            "tools/kernel_variants.py or run tools/kernel_build_id.py: %s" % stale[:5])
+
+
+def test_the_backend_identity_is_computed_once_until_cleared(monkeypatch):
+    """gpu_kernel_id is read like the manifest it digests: once, until clear(). Every GPU
+    plan's price lookups name it; hashing every program's name each time was 0.55 s of a
+    pycbc GPU job."""
+    from matchedfilter import _kernel_id
+    _kernel_id.clear()
+    made = []
+    real = _kernel_id._digest
+    monkeypatch.setattr(_kernel_id, "_digest", lambda b, n: made.append(b) or real(b, n))
+    first = _kernel_id.gpu_kernel_id("vulkan")
+    assert _kernel_id.gpu_kernel_id("vulkan") == first and made == ["vulkan"]
+    _kernel_id.clear()
+    assert _kernel_id.gpu_kernel_id("vulkan") == first and made == ["vulkan", "vulkan"]
+    _kernel_id.clear()

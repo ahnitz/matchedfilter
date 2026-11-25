@@ -126,13 +126,17 @@ def kernel_id(backend, stems):
     return _digest(backend, names)
 
 
+@lru_cache(maxsize=8)
 def gpu_kernel_id(backend="vulkan"):
     """Identity of every shipped program of a backend (for a choice that times all of them,
     and for reports): the digest of each program's name and digest, in name order -- the same
-    value whether read from the manifest or hashed from the programs."""
+    value whether read from the manifest or hashed from the programs. Kept like the
+    manifest it is read from (clear()): every GPU plan's price lookups name it, and hashing
+    every program's name on each one was 70 us, 0.55 s of a pycbc GPU job."""
     return _digest(backend, _ids(backend))
 
 
 def clear():
     """Forget the identities read (a test that rebuilds an install)."""
     _ids.cache_clear()
+    gpu_kernel_id.cache_clear()
