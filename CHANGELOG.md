@@ -4,6 +4,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+### Changed
+
+- `BlockInput` spectra must not be rewritten in place once a search has read them: a GPU
+  search keeps a device copy of each block's array for as long as the array object lives
+  (a block with new contents is a new array). CPU searches are unaffected.
+
 ### Fixed
 
 - The hierarchical gates no longer dismiss far more than their budget on a band that holds a
@@ -75,6 +81,22 @@ Alpha releases may change the API. Pin a version for reproducible work.
   with the leaves on the Radeon 8060S 4.94 s and now 4.46 s (33.8 to 29.9 billion); the
   triggers are identical. The rest of the hooks is PyCBC's own work (about 3 s) and the
   follow-up's filtering (1.1 s, its transforms).
+- GPU (experimental): the root of a GPU hierarchical search runs on the device. Its
+  transform (the band product merged for a half-length inverse, as the host's) is two
+  dispatches that take adjacent columns of the decomposition per workgroup and read the
+  products a merge needs once; its output stays in device memory, where the middle stage
+  reads it. A block's spectrum is uploaded once, the first time a search reads it, and kept
+  while the caller's array lives; the outputs, the template's buffer and one recording per
+  chunk are kept for the process, so the search a caller builds per root (PyCBC) uploads
+  and records nothing. Where a search computes its roots is a measured choice
+  (`root-place`): chunks alternate between the host and the device, a chunk in which setup
+  ran is no sample, and the device stands unless the host is clearly faster, so a device
+  that is already the bound can keep the host.
+  Radeon 8060S: a root of 2^20 samples takes the device 88 us per block (45 us at its
+  bandwidth bound) against 1.6 ms of a Zen 5 core; `tools/search_bench.py` on the three
+  captured tops runs 291 M templates in real time against 194 M (root host time 62 -> 2 ms a
+  pass), and the PyCBC job's root host time falls from 2.9 to 0.4 s (its triggers move only
+  by float rounding: 8 of 1.3 million swap places at SNR 3).
 - Shared-screener clustering, the largest part of a hierarchical search's setup, does the
   same work in less time and gives the same screeners bit for bit. The pair scores stop
   summing a pair once it can no longer reach the score the matching reads, and keep twice

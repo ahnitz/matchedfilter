@@ -671,7 +671,8 @@ class Context(Executor, InputUploads):
             return "tierb_%d_c16%s" % (n, entry[len("coarse16"):])
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
                  "tcFullSeriesStage3": "corr_series2",
-                 "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
+                 "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2",
+                 "tcRootStage1": "root1", "tcRootStage2": "root2"}
         if entry in tierc:
             return "tc_%s_%d" % (tierc[entry], n)
         if entry in ("compactPairs", "compactPairsClustered", "compactListed"):
@@ -1035,7 +1036,8 @@ class Context(Executor, InputUploads):
         elif name == "refine_td":
             pso = self.pipeline(n, "refineDirect", macros=macros)
         else:
-            if name in ("tc1", "tc2", "tcs2", "tf1", "tf2") and _kernels.two_stage("metal", n) is None:
+            if (name in ("tc1", "tc2", "tcs2", "tf1", "tf2", "root1", "root2")
+                    and _kernels.two_stage("metal", n) is None):
                 raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
             entry = {"compact_peaks": "compactPeaks", "compact": "compactPairs",
                      "compactc": "compactPairsClustered", "compactl": "compactListed",
@@ -1045,7 +1047,8 @@ class Context(Executor, InputUploads):
                      "items": "refineItems", "full": "fullCorrelation",
                      "series": "fullCorrelationSeries", "tc1": "tcStage1", "tc2": "tcFullStage3",
                      "tcs2": "tcFullSeriesStage3", "tf1": "tcForwardStage1",
-                     "tf2": "tcForwardStage3"}[name]
+                     "tf2": "tcForwardStage3", "root1": "tcRootStage1",
+                     "root2": "tcRootStage2"}[name]
             pso = self.pipeline(n, entry)
         # The threadgroup each pipeline is dispatched at: its kernel's, as it was built.
         return pso, _threads(self.pipeline_names[pso][0])

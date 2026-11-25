@@ -1014,8 +1014,8 @@ class Context(Executor, InputUploads):
         return hfunc
 
     def _tierc(self, n, role):
-        """A two-stage (Tier C) kernel past 65536 (role corr1, corr2, corr_series2, fwd1 or
-        fwd2): (function, threads, n1, n2)."""
+        """A two-stage (Tier C) kernel past 65536 (role corr1, corr2, corr_series2, fwd1, fwd2,
+        root1 or root2): (function, threads, n1, n2)."""
         key = ("tierc", n, role)
         if key not in self._pipelines:
             rec, split = _shipped(f"tc_{role}_{n}"), _kernels.two_stage("cuda", n)
@@ -1130,7 +1130,8 @@ class Context(Executor, InputUploads):
         if name in entries:
             return self.pipeline(n, entries[name])
         role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2",
-                "tf1": "fwd1", "tf2": "fwd2"}[name]
+                "tf1": "fwd1", "tf2": "fwd2", "root1": "root1",
+                "root2": "root2"}[name]
         fn, wg, _, _ = self._tierc(n, role)
         return fn, wg
 

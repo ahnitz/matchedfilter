@@ -112,7 +112,7 @@ def test_production_shader_sources_match_built_manifest(backend):
                              'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
                              'pack_coarse.slang',
                              'twiddle.slang', 'refine_bounded.slang', 'compact_peaks.slang',
-                             'refine_td.slang'}
+                             'refine_td.slang', 'root_transform.slang'}
     for name, digest in recorded.items():
         assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, (
             '%s changed: rebuild the kernels with tools/kernel_variants.py build' % name)

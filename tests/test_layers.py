@@ -25,7 +25,7 @@ LAYERS = (
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),
     ("backends", {"_vkcompute", "_cudacompute", "_mtlcompute"}),
     ("workloads", {"time_domain", "_batches", "search", "_roofline", "__init__", "_layout", "_filter",
-                   "_hierarchical", "_calibration"}),
+                   "_hierarchical", "_calibration", "_gpuroot"}),
     ("applications", {"benchmark", "tutorial", "demo", "precision"}),
 )
 LEVEL = {m: i for i, (_, mods) in enumerate(LAYERS) for m in mods}

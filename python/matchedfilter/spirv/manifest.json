@@ -7631,6 +7631,534 @@
    "tc_n": 524288,
    "tile": 1
   },
+  "tc_root1_1048576": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_1048576.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    512,
+    1,
+    1
+   ],
+   "n": 1024,
+   "n1": 1024,
+   "n2": 1024,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "8eed84ef36cf80a783461fb4e4f33acbaeb504eec4db87ea38dad5a8c9b35770",
+   "single_bin": 0,
+   "tc_n": 1048576,
+   "tile": 1
+  },
+  "tc_root1_131072": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_131072.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    256,
+    1,
+    1
+   ],
+   "n": 512,
+   "n1": 256,
+   "n2": 512,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "1207b0b69e8ceb2d71bf8bf507747eebf541f9758f38f20b4b56bee7a19510ac",
+   "single_bin": 0,
+   "tc_n": 131072,
+   "tile": 1
+  },
+  "tc_root1_2097152": {
+   "cap": 1024,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_2097152.spv",
+   "gate_only": 0,
+   "lds_bytes": 65536,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 1024,
+   "n2": 2048,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "edc7674bc1b46c2d08649b0b3e6243029edec4c638e03f0109209caa2b724778",
+   "single_bin": 0,
+   "tc_n": 2097152,
+   "tile": 1
+  },
+  "tc_root1_262144": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_262144.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    256,
+    1,
+    1
+   ],
+   "n": 512,
+   "n1": 512,
+   "n2": 512,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "e73014543a2230f7dca0f2cb8c353ef4f52e889cd6a27442292d7f345501de33",
+   "single_bin": 0,
+   "tc_n": 262144,
+   "tile": 1
+  },
+  "tc_root1_4194304": {
+   "cap": 1024,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_4194304.spv",
+   "gate_only": 0,
+   "lds_bytes": 65536,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 2048,
+   "n2": 2048,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "f11f1d7f872d384c397d3203ccc4ec85e58d4d2ef57adf02d14e92019dc17fcd",
+   "single_bin": 0,
+   "tc_n": 4194304,
+   "tile": 1
+  },
+  "tc_root1_524288": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_524288.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    512,
+    1,
+    1
+   ],
+   "n": 1024,
+   "n1": 512,
+   "n2": 1024,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "95f672753d833f5291bdeac01e6064c6da56fafef7dbb47ab460a99d3634405c",
+   "single_bin": 0,
+   "tc_n": 524288,
+   "tile": 1
+  },
+  "tc_root2_1048576": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_1048576.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    512,
+    1,
+    1
+   ],
+   "n": 1024,
+   "n1": 1024,
+   "n2": 1024,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "39c8df3c625c7c9e8ab80fb231276a9093e4084ed21f7613ca922c6bb7a46ee4",
+   "single_bin": 0,
+   "tc_n": 1048576,
+   "tile": 1
+  },
+  "tc_root2_131072": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_131072.spv",
+   "gate_only": 0,
+   "lds_bytes": 16384,
+   "local_size": [
+    128,
+    1,
+    1
+   ],
+   "n": 256,
+   "n1": 256,
+   "n2": 512,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "c77d29175045773ab5501866aefb3b1efa91ac9f298dbd49459abbcdf017d8c4",
+   "single_bin": 0,
+   "tc_n": 131072,
+   "tile": 1
+  },
+  "tc_root2_2097152": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_2097152.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    512,
+    1,
+    1
+   ],
+   "n": 1024,
+   "n1": 1024,
+   "n2": 2048,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "d3d3ded41aee05e8b169cb782eb9b608715bf2f4d89bf20c781174c7fdd605ff",
+   "single_bin": 0,
+   "tc_n": 2097152,
+   "tile": 1
+  },
+  "tc_root2_262144": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_262144.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    256,
+    1,
+    1
+   ],
+   "n": 512,
+   "n1": 512,
+   "n2": 512,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "86765cd08e668e369007280cac8594098385bf4f3829c6fe88b83a7428fb84ea",
+   "single_bin": 0,
+   "tc_n": 262144,
+   "tile": 1
+  },
+  "tc_root2_4194304": {
+   "cap": 1024,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_4194304.spv",
+   "gate_only": 0,
+   "lds_bytes": 65536,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 2048,
+   "n2": 2048,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "d7ed64dab541fcb9c64e572875071c961f83b883f6e204c60034c5588d1f8999",
+   "single_bin": 0,
+   "tc_n": 4194304,
+   "tile": 1
+  },
+  "tc_root2_524288": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_524288.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    256,
+    1,
+    1
+   ],
+   "n": 512,
+   "n1": 512,
+   "n2": 1024,
+   "portable": 0,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "eb3a486bed27d42763153aa9e48f00b761061e57acc9356e7648e14949c52083",
+   "single_bin": 0,
+   "tc_n": 524288,
+   "tile": 1
+  },
   "tierb_1024": {
    "cap": 512,
    "coarse16": 0,
@@ -14297,6 +14825,7 @@
   "pack_coarse.slang": "6031ff122320a278eb17708f4a0e6add666e351413fe2c87b33ca24828ef844f",
   "refine_bounded.slang": "22e24434c5a9b5ead9e3e4e22a400586494dd42f6bf611b98238767a9eef6239",
   "refine_td.slang": "51a985b8148f49b08079cf2782429cb29bddc7fda538b65930d08b434ac38bd2",
+  "root_transform.slang": "e725dd6b1117614d9a79497ce3568ac2f74c74dd653e896f60f689acf0c31813",
   "series_bands.slang": "3a73e4936a174feda042fb3572bd4c2266e7bc786b7cf3a30648ca597cffa727",
   "series_forward.slang": "2462b0a33037aca47250e49a957426f60eb932b006a7a7cf0d8b97b307403247",
   "tierb.slang": "146b89f6fddffe9bc100203c1808444101616d88666497b658e88db40b237db0",

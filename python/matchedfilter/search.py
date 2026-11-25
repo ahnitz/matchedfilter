@@ -6,15 +6,16 @@ input blocks per channel and, through hooks, sees each node's series while it is
 in memory. The library chooses how the work is laid out.
 
 Phase 1 of the design: one chunk per input block, each block filtered on its own (its
-valid span padded by the filters' reach, as a caller filtering block by block would),
-the root on the host.
+valid span padded by the filters' reach, as a caller filtering block by block would).
+On a GPU search the root runs on the device or the host, as measured (_gpuroot).
 """
 from typing import Callable, Dict, List, NamedTuple, Optional
 import time
 
 import numpy as np
 
-from . import _core
+from . import _core, _gpuroot
+from ._errors import UnsupportedSize
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
                           _aligned_zeros, _normalize_windows, _page_aligned_empty,
                           _settle_device_writes)
@@ -128,7 +129,11 @@ class BlockInput:
     Parameters
     ----------
     spectra : sequence of ndarray
-        One one-sided spectrum per block (n/2 + 1 bins, complex64).
+        One one-sided spectrum per block (n/2 + 1 bins, complex64). They are read, never
+        written, and must not be rewritten in place once a search has read them: a GPU
+        search keeps a device copy of each block's array for as long as the array object
+        lives, so that searches over the same blocks (one per root, as PyCBC builds them)
+        upload each block once. A block with new contents is a new array.
     valid : sequence of tuple of int
         Per block, the (start, stop) samples of its output that are searched (pycbc: a
         segment's analysis range).
@@ -597,7 +602,11 @@ class HierarchicalSearch:
         self._leaf_banks = {}
         self._ready_banks = {}           # (leaf, channel) -> its bank, built and referenced
         self._inner = {}
-        self._root_outs = {}             # (root, channel, n) -> output buffer, GPU searches
+        self._root_outs = {}             # (root, channel, n, parity) -> output buffer
+        self._root_pos = {}              # channel -> its position (a GPU search's root buffers)
+        self._root_placed = {}           # chunk -> where the current root's output was computed
+        self._root_pooled = {}           # _root_outs keys taken from the device's pool -> pool
+        self._root_tmpl = set()          # (root, n) whose spectrum the device holds this run
         for root in self.roots:
             if not isinstance(root, Root):
                 raise TypeError("roots must be Root nodes")
@@ -745,16 +754,50 @@ class HierarchicalSearch:
         (and leaves directly below the root) read in place -- a hook reads it during its
         chunk, as it does the inner series. The next chunk's output is written while this
         chunk's leaves run (run); the buffer it reuses was read by the chunk before, whose
-        leaves -- ordered after everything that read it -- have been collected. Elsewhere a
-        new host array."""
-        bank = self.leaf_bank(root, next(self._leaves_below(root)))
-        on_gpu = _parse_device(bank.device).kind == "gpu"
+        leaves -- ordered after everything that read it -- have been collected. They are
+        taken from the device's pool for the run (_gpuroot.DeviceRoot.take_output), so the
+        search a caller builds for its next root writes the same ones, and whether the host
+        or the device computes a root changes no buffer the middle stage reads. Elsewhere a
+        host array of the search's own."""
         key = (id(root), channel, n, chunk % 2)
         out = self._root_outs.get(key)
         if out is None:
-            out = self._root_outs[key] = (bank.empty_shared((n,), np.float32) if on_gpu
-                                          else _page_aligned_empty((n,), np.float32))
+            dev = self._device_root(root)
+            if dev is not None:
+                pos = self._root_pos.setdefault(channel, len(self._root_pos))
+                out = dev.take_output(n, pos, chunk % 2)
+                self._root_pooled[key] = (dev, n, pos, chunk % 2)
+            else:
+                bank = self.leaf_bank(root, next(self._leaves_below(root)))
+                on_gpu = _parse_device(bank.device).kind == "gpu"
+                out = (bank.empty_shared((n,), np.float32) if on_gpu
+                       else _page_aligned_empty((n,), np.float32))
+            self._root_outs[key] = out
         return out
+
+    def _device_root(self, root):
+        """The root stage's device state (_gpuroot.DeviceRoot) on a GPU search, else None."""
+        bank = self.leaf_bank(root, next(self._leaves_below(root)))
+        dev = _parse_device(bank.device)
+        return _gpuroot.device_root(dev) if dev.kind == "gpu" else None
+
+    def _give_root_outputs(self):
+        """Return the pooled root buffers this run took (see _root_output), once nothing
+        reads or writes them (after a normal run nothing does: this waits on finished work)."""
+        if not self._root_pooled:
+            return
+        _settle_device_writes()
+        for key, (dev, n, pos, parity) in self._root_pooled.items():
+            dev.give_output(n, pos, parity, self._root_outs.pop(key))
+        self._root_pooled.clear()
+
+    def _root_place(self, root, n):
+        """Where root's next output of length n is computed: "device" or "host"
+        (_gpuroot.Placement), "host" on a CPU search or a length the device cannot run."""
+        dev = self._device_root(root)
+        if dev is None or dev.kernels(n) is None:
+            return "host"
+        return _gpuroot.placement(dev, n).next()
 
     def _real_output(self, node):
         """Whether node's output series is real: the root's is, and an inner node's is when
@@ -796,6 +839,12 @@ class HierarchicalSearch:
         on_chunk : callable, optional
             ``on_chunk(ChunkContext)`` runs after a chunk.
         """
+        try:
+            self._run(inputs, windows, on_series, on_peaks, on_chunk)
+        finally:
+            self._give_root_outputs()
+
+    def _run(self, inputs, windows, on_series, on_peaks, on_chunk):
         channels = list(inputs)
         nchunks = max(len(inputs[c].spectra) for c in channels) if channels else 0
         for root in self.roots:
@@ -803,6 +852,10 @@ class HierarchicalSearch:
             pads = {id(lf): max(self.min_pad, self._leaf_block_length(root, lf))
                     for lf in leaves}
             ahead = None                        # (chunk, channels, held, support) computed early
+            self._root_placed.clear()
+            self._root_tmpl.clear()
+            trial = self._root_trial(root, inputs, channels)
+            started = False                     # a chunk ran: later ones may be samples
             for k in range(nchunks):
                 active = [c for c in channels if k < len(inputs[c].spectra)]
                 if not active:
@@ -822,6 +875,8 @@ class HierarchicalSearch:
                             need[(id(lf), c)] = wx
                 if not any(win.values()):
                     continue
+                mark = self._root_mark(root) if trial is not None and started else None
+                started = True
                 if ahead is not None and ahead[:2] == (k, active):
                     held, support = ahead[2], ahead[3]
                 else:
@@ -830,6 +885,8 @@ class HierarchicalSearch:
                 self._batches(root, len(held[active[0]][id(root)]))
                 envelopes = {}
                 if on_series is not None:
+                    if self._root_placed.get(k) == "device":
+                        _settle_device_writes()     # the hook reads the root's output
                     t0 = time.perf_counter()
                     envelopes = on_series(SeriesContext(
                         root, k, active, tags, {c: held[c][id(root)] for c in active})) or {}
@@ -856,6 +913,8 @@ class HierarchicalSearch:
                 self._finish_leaves(step, submitted)
                 if on_chunk is not None:
                     on_chunk(ChunkContext(k, active, tags))
+                if mark is not None:
+                    self._root_sample(trial, root, mark, k, step)
 
     def _walk(self, node, step):
         """Queue node's leaves for the chunk's leaf search, then produce its live inner
@@ -901,22 +960,75 @@ class HierarchicalSearch:
             self._walk(batch.children[pos], step)
 
     def _roots(self, root, inputs, k, active):
-        """Root's output for chunk k in every active channel: (held, support)."""
+        """Root's output for chunk k in every active channel: (held, support). Computed on
+        the device or the host as _root_place says (the same buffers either way); a device
+        root is left in flight, ordered before the device's readers of it."""
         held = {c: {} for c in active}
         support = {c: {} for c in active}
         t0 = time.perf_counter()
-        for c in active:
-            spec = inputs[c].spectra[k]
-            n = 2 * (len(spec) - 1)
-            out = self._root_output(root, c, n, k)
-            k0, k1 = root.band
-            self._root_plan(n).real(np.ascontiguousarray(spec, dtype=np.complex64),
-                                    root.spectrum, k0, k1,
-                                    float(inputs[c].root_scale(root, k)), out)
+        specs = [inputs[c].spectra[k] for c in active]
+        lengths = {2 * (len(spec) - 1) for spec in specs}
+        outs = [self._root_output(root, c, 2 * (len(spec) - 1), k)
+                for c, spec in zip(active, specs)]
+        scales = [float(inputs[c].root_scale(root, k)) for c in active]
+        k0, k1 = root.band
+        place = self._root_place(root, lengths.pop()) if len(lengths) == 1 else "host"
+        if place == "device":
+            n = len(outs[0])
+            dev = self._device_root(root)
+            try:
+                if (id(root), n) not in self._root_tmpl:
+                    dev.set_template(n, root.spectrum)
+                    self._root_tmpl.add((id(root), n))
+                dev.run(n, k % 2, specs, outs, (k0, k1), scales)
+            except UnsupportedSize:        # an input the device cannot hold: on the host
+                place = "host"
+        if place == "host":
+            for spec, out, scale in zip(specs, outs, scales):
+                self._root_plan(len(out)).real(np.ascontiguousarray(spec, dtype=np.complex64),
+                                               root.spectrum, k0, k1, scale, out)
+        self._root_placed[k] = place
+        for c, out in zip(active, outs):
             held[c][id(root)] = out
-            support[c][id(root)] = [(0, n)]
+            support[c][id(root)] = [(0, len(out))]
         self.timings["root"] += time.perf_counter() - t0
         return held, support
+
+    def _root_trial(self, root, inputs, channels):
+        """The open placement trial (_gpuroot.Placement) of root's outputs in this run, or
+        None: a CPU search, a length the device cannot run, or a placement already chosen."""
+        spectra = [inputs[c].spectra[0] for c in channels if len(inputs[c].spectra)]
+        if not spectra:
+            return None
+        n = 2 * (len(spectra[0]) - 1)
+        dev = self._device_root(root)
+        if dev is None or dev.kernels(n) is None:
+            return None
+        trial = _gpuroot.placement(dev, n)
+        if trial.winner() is not None:
+            return None
+        trial.new_run()
+        return trial
+
+    def _root_mark(self, root):
+        """What a chunk's placement sample starts from: (time, setup time, device root
+        setup count, host root plans)."""
+        return (time.perf_counter(), self.timings["setup"], self._device_root(root).built,
+                len(_ROOT_PLANS))
+
+    def _root_sample(self, trial, root, mark, k, step):
+        """Chunk k's time as a placement sample (_gpuroot.Placement): when both roots it
+        used were computed at one place and no setup ran in it."""
+        place = self._root_placed.get(k)
+        if place is None or self._root_placed.get(k + 1, place) != place:
+            return
+        if (self.timings["setup"] != mark[1] or self._device_root(root).built != mark[2]
+                or len(_ROOT_PLANS) != mark[3]):
+            return
+        work = sum(len(lf.counts) * sum(b - a for a, b in step.win[(id(lf), c)])
+                   for lf in self._leaves_below(root) for c in step.active)
+        if work:
+            trial.sample(place, (time.perf_counter() - mark[0]) / work)
 
     def _submit_leaves(self, step):
         """Start the chunk's leaf searches, in every channel: (leaves, jobs, where, deferred,

@@ -1920,7 +1920,8 @@ class Context(Executor, InputUploads):
                  "fwd_listed": "forward_listed_%d" % n, "forward": "forward_%d" % n,
                  "full": "full_%d" % n, "series": "full_series_%d" % n,
                  "tc1": "tc_corr1_%d" % n, "tf1": "tc_fwd1_%d" % n, "tf2": "tc_fwd2_%d" % n,
-                 "tcs2": "tc_corr_series2_%d" % n, "tc2": "tc_corr2_%d" % n}
+                 "tcs2": "tc_corr_series2_%d" % n, "tc2": "tc_corr2_%d" % n,
+                 "root1": "tc_root1_%d" % n, "root2": "tc_root2_%d" % n}
         if name not in stems:
             raise ValueError("no GPU kernel %r" % (name,))
         rec = _kernels.runnable("vulkan", stems[name], self.max_shared_memory)

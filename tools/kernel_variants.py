@@ -219,12 +219,17 @@ STEMS = {"fusedTierB": "tierb", "compactPairs": "compact",
 FULL_TIER_C = tuple(1 << k for k in range(17, 23))
 TIER_C_ENTRIES = (("corr1", "tcStage1"), ("corr2", "tcFullStage3"),
                   ("corr_series2", "tcFullSeriesStage3"),
-                  ("fwd1", "tcForwardStage1"), ("fwd2", "tcForwardStage3"))
+                  ("fwd1", "tcForwardStage1"), ("fwd2", "tcForwardStage3"),
+                  ("root1", "tcRootStage1"), ("root2", "tcRootStage2"))
+#: Tier C roles whose stage is appended to tierb.slang from another source, and the columns
+#: of the decomposition one of their workgroups takes (PPG; the others take one).
+TIER_C_EXTRA = {"root1": "root_transform.slang", "root2": "root_transform.slang"}
+TIER_C_PPG = {"root1": 8, "root2": 8}
 
 #: Every production shader source, fingerprinted in each manifest (test_kernels_ship).
 SOURCES = ("tierb.slang", "fft_transform.slang", "series_forward.slang", "series_bands.slang",
            "forward_tier0.slang", "pack_coarse.slang", "twiddle.slang", "refine_bounded.slang",
-           "compact_peaks.slang", "refine_td.slang")
+           "compact_peaks.slang", "refine_td.slang", "root_transform.slang")
 
 
 def radix(n):
@@ -647,6 +652,7 @@ def _tierc_family(backend, n, add):
     for role, entry in TIER_C_ENTRIES:
         sub = n2 if role.endswith("1") else n1
         r = radix(sub)
+        ppg = TIER_C_PPG.get(role, 1)
         if backend == "cuda":
             cap = min(LDS_CAP[sub], PORTABLE_CAP)
             defines = ("#define NLEN %d\n#define TC_N %d\n#define LDS_CAP %d\n#define RADIX %d\n"
@@ -656,11 +662,15 @@ def _tierc_family(backend, n, add):
             cap = LDS_CAP[sub]
             defines = "#define NLEN %d\n#define TC_N %d\n#define LDS_CAP %d\n" % (sub, n, cap)
             src = "tc_%s_%d.slang" % (role, n)
+        if ppg != 1:
+            defines += "#define PPG %d\n" % ppg
         flags = (CUDA_WIDE_BLOCK_FLAGS if backend == "cuda" and sub // r >= MAX_INVOCATIONS
                  else ())
+        extra = TIER_C_EXTRA.get(role)
         add(Variant(backend, "tc_%s_%d" % (role, n), entry,
-                    text=(lambda d=defines: d + source("tierb.slang")), src=src, flags=flags,
-                    facts=dict(n=sub, tc_n=n, cap=cap, ppg=1, tile=1, coarse16=0, single_bin=0,
+                    text=(lambda d=defines, x=extra: d + source("tierb.slang")
+                          + ("\n" + source(x) if x else "")), src=src, flags=flags,
+                    facts=dict(n=sub, tc_n=n, cap=cap, ppg=ppg, tile=1, coarse16=0, single_bin=0,
                                gate_only=0, portable=0, role=role, n1=n1, n2=n2)))
 
 
