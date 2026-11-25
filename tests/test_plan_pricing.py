@@ -115,3 +115,36 @@ def test_a_table_too_long_for_the_routine_is_priced_in_python(empty_model, monke
     assert gc._pricing_tables(cost, (64, 256), False, 0.0, 0.0, 0, 1.0, None) is not None
     cost._refine = sorted((0.001 * (i + 1), 3000.0 - i) for i in range(70))
     assert gc._pricing_tables(cost, (64, 256), False, 0.0, 0.0, 0, 1.0, None) is None
+
+
+def test_banks_that_price_apart_share_one_search(empty_model, monkeypatch):
+    """Two GPU banks whose models differ only in what prices a pair -- the template count
+    the feed is spread over, a group's direct-refine fraction -- search the same draws: the
+    second choice prepares no chain's search again (_prepare_chain, the halves and distances
+    of the draws), and both choose what they choose with nothing kept."""
+    p = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    a = _model(False, True, True, feed=True)
+    b = a.with_direct(9.0, fraction=0.55, base=40.0, multi_frac=0.3)
+
+    def choose(cost, nt):
+        best, every = gc.choose_chain(p, N, SNR, 1e-3, cost=cost, max_tiers=3, ntemplates=nt)
+        return [(tuple(d["chain"]), d["cost"], tuple(d["search"]["thresholds"]),
+                 tuple(d["search"]["reach"]), d["search"]["halfwidth"],
+                 tuple(d["thresholds"])) for d in every]
+
+    prepared = []
+    real = gc._prepare_chain
+    monkeypatch.setattr(gc, "_prepare_chain", lambda *a, **k: prepared.append(1) or real(*a, **k))
+    kept = [choose(a, 96)]
+    first = len(prepared)
+    kept += [choose(a, 97), choose(b, 96)]
+    assert first > 0 and len(prepared) == first          # the later choices prepared nothing
+
+    class Never(OrderedDict):
+        def __setitem__(self, key, value):
+            pass
+    monkeypatch.setattr(gc, "_PREP_CACHE", Never())
+    for c in (gc._CHOICE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE, gd._SIMILAR):
+        c.clear()
+    alone = [choose(a, 96), choose(a, 97), choose(b, 96)]
+    assert kept == alone and kept[0] != kept[1] and kept[0] != kept[2]

@@ -570,24 +570,28 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     MF_BAND_FORWARD's value where the caller has read it (a chain choice prices many chains
     and reads it once), for the feed's price (CostModel.feed_delta).
     """
-    cols = [bands.index(b) for b in chain]
-    A, B = _kept_halves(sig, bands, cols, chain, snr)
-    K = int(round(float(fd) * (A.shape[0] + 1))) - 1      # the search half's budget, as the fit's
-    fit_j = int(round(float(fd) * (B.shape[0] + 1)))
-    if K < 0 or fit_j < 1 or fit_j > B.shape[0]:
-        return None
-    dA = dB = dA_all = None
-    allow = -1
-    if lags is not None:
-        # far: the signal draws are a narrower window's than the noise's (local_window), so
-        # the refine's coarse maximum may be noise the draws do not hold (_distances)
-        dA_all, dB_all = _distance_halves(sig, lags, bands, chain, snr, n, noise if far else None)
-        allow = _gm.window_allowance(float(fd), A.shape[0], B.shape[0])
-        if cost is not None and cost.prices_direct(chain):
-            dA, dB = dA_all, dB_all
-    all_hws = _all_halfwidths(dA_all, allow)
-    hws = _halfwidths(dA, allow, cost, chain, n, all_hws=all_hws)
+    # The search's structure -- the draws' halves, the budget, the detections' distances,
+    # the candidate half-widths -- does not depend on the cost model or the template count,
+    # only on the draws: kept per draws and chain (_PREP_CACHE), so the template groups and
+    # banks that share draws but price apart (a GPU's feed per template, a group's
+    # direct-refine fraction) price one search's structure.
     eff_prune = bool(prune) and len(chain) > 1
+    pkey = None if memo is None else (("prep",) + tuple(memo)
+                                      + (tuple(int(b) for b in chain), eff_prune, bool(far),
+                                         lags is not None))
+    found, prep = (_derived_get(_PREP_CACHE, pkey, sig[0], sig[1], noise) if pkey is not None
+                   else (False, None))
+    if not found:
+        prep = _prepare_chain(sig, noise, bands, chain, fd, n, snr, lags, far)
+        if pkey is not None:
+            _derived_put(_PREP_CACHE, pkey, (sig[0], sig[1], noise), prep, _CAND_CACHE_MAX)
+    if prep is None:
+        return None
+    cols, A, B, K, dA_all, dB_all, allow, all_hws = prep
+    dA = dB = None
+    if lags is not None and cost is not None and cost.prices_direct(chain):
+        dA, dB = dA_all, dB_all
+    hws = _halfwidths(dA, allow, cost, chain, n, all_hws=all_hws)
     key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), eff_prune, all_hws)
     found, cands = _derived_get(_CAND_CACHE, key, sig[0], noise) if key is not None else (False, None)
     if not found:
@@ -684,6 +688,31 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     return dict(chain=tuple(chain), offsets=offs, thresholds=thresholds,
                 reach=tuple(_reach(noise, cols, thresholds)), halfwidth=halfwidth, cost=c,
                 q15=q15, search=search_info)
+
+
+#: plan_chain's searches by draws and chain (_prepare_chain), as long as the draws live.
+_PREP_CACHE = OrderedDict()
+
+
+def _prepare_chain(sig, noise, bands, chain, fd, n, snr, lags, far):
+    """What plan_chain searches `chain` on before any price, from the draws alone: (cols, the
+    search half, the fit half, the search budget K, the detections' distances (search half,
+    fit half), the window allowance, the candidate half-widths), or None where fd cannot be
+    resolved on these draws."""
+    cols = [bands.index(b) for b in chain]
+    A, B = _kept_halves(sig, bands, cols, chain, snr)
+    K = int(round(float(fd) * (A.shape[0] + 1))) - 1      # the search half's budget, as the fit's
+    fit_j = int(round(float(fd) * (B.shape[0] + 1)))
+    if K < 0 or fit_j < 1 or fit_j > B.shape[0]:
+        return None
+    dA_all = dB_all = None
+    allow = -1
+    if lags is not None:
+        # far: the signal draws are a narrower window's than the noise's (local_window), so
+        # the refine's coarse maximum may be noise the draws do not hold (_distances)
+        dA_all, dB_all = _distance_halves(sig, lags, bands, chain, snr, n, noise if far else None)
+        allow = _gm.window_allowance(float(fd), A.shape[0], B.shape[0])
+    return cols, A, B, K, dA_all, dB_all, allow, _all_halfwidths(dA_all, allow)
 
 
 #: plan_chain prices a chain's candidates on a CostModel in C (_core.plan_best; the Python
