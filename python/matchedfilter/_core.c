@@ -2140,14 +2140,16 @@ bad:
 
 int ap_tier0_pair_scores(const float *ur, const float *ui, const float *sr, const float *si,
                          const double *v, long long mc, long long len, long long nsh,
-                         float *r2, int32_t *bs);                       /* src/tier0.cc */
-/* tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence
-   over an m_c-template chunk without multi-threaded BLAS wakeup overhead (src/tier0.cc). */
+                         float floor, float *r2, int32_t *bs);          /* src/tier0.cc */
+/* tier0_pair_scores(Ur, Ui, Sr, Si, v_c, floor, out_rho2, out_s): single-core shifted pair
+   coherence over an m_c-template chunk without multi-threaded BLAS wakeup overhead
+   (src/tier0.cc); a score below floor is only known to be below it. */
 static PyObject *M_tier0_pair_scores(PyObject *self,PyObject *args){
   (void)self;
   Py_buffer ur={0},ui={0},sr={0},si={0},vc={0},r2={0},bs={0};
   PyObject *uro,*uio,*sro,*sio,*vco,*r2o,*bso;
-  if(!PyArg_ParseTuple(args,"OOOOOOO",&uro,&uio,&sro,&sio,&vco,&r2o,&bso)) return NULL;
+  double floor;
+  if(!PyArg_ParseTuple(args,"OOOOOdOO",&uro,&uio,&sro,&sio,&vco,&floor,&r2o,&bso)) return NULL;
   Py_buffer *bufs[7]={&ur,&ui,&sr,&si,&vc,&r2,&bs};
   PyObject *objs[7]={uro,uio,sro,sio,vco,r2o,bso};
   int got=0, ok=1;
@@ -2186,10 +2188,13 @@ static PyObject *M_tier0_pair_scores(PyObject *self,PyObject *args){
   const float *Urp=(const float*)ur.buf, *Uip=(const float*)ui.buf;
   const float *Srp=(const float*)sr.buf, *Sip=(const float*)si.buf;
   const double *Vcp=(const double*)vc.buf;
+  /* the float floor at or below the double one: every score at or above floor is exact */
+  float floorf=(float)floor;
+  if((double)floorf>floor) floorf=nextafterf(floorf,-HUGE_VALF);
   int rc;
   Py_BEGIN_ALLOW_THREADS
   rc=ap_tier0_pair_scores(Urp,Uip,Srp,Sip,Vcp,(long long)mc,(long long)len,(long long)nsh,
-                          (float*)r2.buf,(int32_t*)bs.buf);
+                          floorf,(float*)r2.buf,(int32_t*)bs.buf);
   Py_END_ALLOW_THREADS
   for(int i=0;i<got;i++) PyBuffer_Release(bufs[i]);
   if(rc) return PyErr_NoMemory();
@@ -2964,7 +2969,7 @@ static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless, dsets) -> [(earlier thresholds, earlier reach, lasts)]: gatechain._chain_candidates's search"},
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts, rows done): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal, to the first row whose records do not fit"},
-  {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, out_rho2, out_s): single-core shifted pair coherence over a chunk"},
+  {"tier0_pair_scores",M_tier0_pair_scores,METH_VARARGS,"tier0_pair_scores(Ur, Ui, Sr, Si, v_c, floor, out_rho2, out_s): single-core shifted pair coherence over a chunk, exact where it reaches floor"},
   {"tier0_refine_lags",M_tier0_refine_lags,METH_VARARGS,"tier0_refine_lags(prod_ab, exp_all, pdl, R, half_span, out_dl, out_g): exact complex128 fine-lag refinement"},
   {"plan_best",M_plan_best,METH_VARARGS,"plan_best(cands, hws, first, later, refine, direct) -> (cost, candidate, last) or None: the cheapest of a chain's candidate plans on a CostModel"},
   {"tier0_match",M_tier0_match,METH_VARARGS,"tier0_match(...) -> count: the matching of a level's vectors into pairs, chunk by chunk"},

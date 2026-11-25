@@ -3,7 +3,8 @@
  * The vectors U (nodes, K) complex64 are taken a chunk at a time in the given order (alike
  * ones are neighbours in it), and in a chunk:
  *
- *   1. Every pair is scored (ap_tier0_pair_scores: its coherence at the best coarse shift).
+ *   1. Every pair is scored (ap_tier0_pair_scores: its coherence at the best coarse shift,
+ *      exact where it reaches the floor, only known to be below it elsewhere).
  *      With sizes, a pair whose two sizes sum to more than size_cap gets -1.
  *   2. Greedy: the candidates are, in a chunk of more than 9, each row's 8 largest scores
  *      that reach the floor, and in a smaller one every score that does; they are taken
@@ -32,7 +33,8 @@
 
 extern "C" int ap_tier0_pair_scores(const float *ur, const float *ui, const float *sr,
                                     const float *si, const double *v, long long mc,
-                                    long long len, long long nsh, float *r2, int32_t *bs);
+                                    long long len, long long nsh, float floor, float *r2,
+                                    int32_t *bs);
 
 namespace {
 
@@ -164,8 +166,8 @@ struct Matcher {
       }
       vc[i] = v[idx[i]];
     }
-    if (ap_tier0_pair_scores(ur.data(), ui.data(), sr, si, vc.data(), mc, K, nsh, r2.data(),
-                             bs.data()) != 0)
+    if (ap_tier0_pair_scores(ur.data(), ui.data(), sr, si, vc.data(), mc, K, nsh, floor,
+                             r2.data(), bs.data()) != 0)
       throw std::bad_alloc();
     if (sizes)
       for (long long i = 0; i < mc; i++)

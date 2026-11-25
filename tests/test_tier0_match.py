@@ -71,7 +71,7 @@ def _match_chunk(sub_idx, U, v, Sr, Si, lags, floor, sizes, size_cap, swaps):
     best_rho2 = np.empty((m_c, m_c), dtype=np.float32)
     best_s = np.empty((m_c, m_c), dtype=np.int32)
     _core.tier0_pair_scores(np.ascontiguousarray(U_c.real), np.ascontiguousarray(U_c.imag), Sr, Si,
-                            np.ascontiguousarray(v[sub_idx]), best_rho2, best_s)
+                            np.ascontiguousarray(v[sub_idx]), 0.0, best_rho2, best_s)
     if sizes is not None:
         sz_c = sizes[sub_idx]
         best_rho2[sz_c[:, None] + sz_c[None, :] > size_cap] = -1.0

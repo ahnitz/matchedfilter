@@ -404,8 +404,8 @@ def _pairs_within_clusters(offsets, members, valid, U64, v, Sr, Si, dls_ord, flo
     """Pair the valid members of each multi-member cluster greedily by coherence.
 
     Every pair of a cluster's members is scored over the coarse shifts
-    (``_core.tier0_pair_scores``); the pairs whose squared coherence reaches ``floor2`` are
-    taken best first, each member at most once.
+    (``_core.tier0_pair_scores``, exact where they reach ``floor2``); the pairs whose squared
+    coherence reaches ``floor2`` are taken best first, each member at most once.
 
     Returns
     -------
@@ -424,7 +424,8 @@ def _pairs_within_clusters(offsets, members, valid, U64, v, Sr, Si, dls_ord, flo
         r2 = np.empty((m_g, m_g), dtype=np.float32)
         bs = np.empty((m_g, m_g), dtype=np.int32)
         _core.tier0_pair_scores(np.ascontiguousarray(U_g.real), np.ascontiguousarray(U_g.imag),
-                                Sr, Si, np.ascontiguousarray(v[grp], dtype=np.float64), r2, bs)
+                                Sr, Si, np.ascontiguousarray(v[grp], dtype=np.float64), floor2,
+                                r2, bs)
         ia, ib = np.nonzero(r2 >= floor2)
         used = np.zeros(m_g, dtype=bool)
         for e in np.argsort(-r2[ia, ib], kind="stable"):

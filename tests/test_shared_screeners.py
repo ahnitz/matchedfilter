@@ -692,8 +692,9 @@ def test_k4_quad_bank_empirical_fdr_respects_budget(monkeypatch):
 def test_pair_scores_match_a_direct_evaluation(target_isa):
     """_core.tier0_pair_scores (src/tier0.cc) returns, for every pair a < b of a chunk whose
     variances agree within 15%, the largest |sum_k conj(U_a) U_b S_s|^2 over the shifts and the
-    first shift reaching it; every other entry is 0. A chunk of 21 templates is not a whole
-    number of vectors on any target, so the padding is exercised too."""
+    first shift reaching it; every other entry is 0. With a floor of 0 every score is exact. A
+    chunk of 21 templates is not a whole number of vectors on any target, so the padding is
+    exercised too."""
     mf.set_target(target_isa)
     try:
         rng = np.random.default_rng(77)
@@ -709,7 +710,7 @@ def test_pair_scores_match_a_direct_evaluation(target_isa):
         Sr, Si = (np.ascontiguousarray(x, np.float32) for x in (S.real, S.imag))
         r2 = np.full((mc, mc), -7.0, np.float32)
         bs = np.full((mc, mc), -7, np.int32)
-        _core.tier0_pair_scores(Ur, Ui, Sr, Si, v.astype(np.float64), r2, bs)
+        _core.tier0_pair_scores(Ur, Ui, Sr, Si, v.astype(np.float64), 0.0, r2, bs)
     finally:
         mf.set_target(None)
 
@@ -728,6 +729,44 @@ def test_pair_scores_match_a_direct_evaluation(target_isa):
             top = np.sort(g)[-2:]
             if top[1] - top[0] > 1e-4 * top[1]:
                 assert bs[a, b] == int(np.argmax(g)), (a, b)
+
+
+@pytest.mark.parametrize("target_isa", mf.targets())
+def test_pair_scores_that_reach_the_floor_are_exact(target_isa):
+    """With a floor, tier0_pair_scores may stop summing a pair that can no longer reach it nor
+    beat its best shift so far: every score at or above the floor, and its shift, is bit for bit
+    the one computed with no floor, and every score below it stays below it. The chunk mixes
+    coherent pairs (near copies at a lag) with unrelated templates, over a band whose energy
+    falls off towards its top, as the templates' do."""
+    rng = np.random.default_rng(78)
+    mc, L, R = 70, 128, 8
+    taper = np.exp(-np.arange(L) / 40.0)
+    U = (rng.standard_normal((mc, L)) + 1j * rng.standard_normal((mc, L))) * taper
+    lag = np.exp(-2j * np.pi * np.arange(L) * 3 / (L * R))
+    U[1::4] = U[0::4][:U[1::4].shape[0]] * lag + 0.2 * U[1::4]
+    U /= np.linalg.norm(U, axis=1, keepdims=True)
+    dls = np.arange(-R, R + 1)
+    order = np.argsort(np.abs(dls), kind="stable")
+    S = np.exp(-2j * np.pi * dls[order, None] * np.arange(L)[None, :] / (L * R))
+    v = np.ones(mc)
+    Ur, Ui = (np.ascontiguousarray(x, np.float32) for x in (U.real, U.imag))
+    Sr, Si = (np.ascontiguousarray(x, np.float32) for x in (S.real, S.imag))
+    floor = 0.81
+    out = {}
+    mf.set_target(target_isa)
+    try:
+        for f in (0.0, floor):
+            r2 = np.empty((mc, mc), np.float32)
+            bs = np.empty((mc, mc), np.int32)
+            _core.tier0_pair_scores(Ur, Ui, Sr, Si, v, f, r2, bs)
+            out[f] = (r2, bs)
+    finally:
+        mf.set_target(None)
+    (r2_all, bs_all), (r2_f, bs_f) = out[0.0], out[floor]
+    high = r2_all >= np.float32(floor)
+    assert np.count_nonzero(high) >= 10 and np.count_nonzero(~high) > 1000
+    assert np.array_equal(r2_f[high], r2_all[high]) and np.array_equal(bs_f[high], bs_all[high])
+    assert np.all(r2_f[~high] < np.float32(floor))
 
 
 def test_pass2_runs_only_when_asked_and_a_skipped_one_is_built_later(monkeypatch):

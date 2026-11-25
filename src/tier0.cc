@@ -4,7 +4,10 @@
  * imaginary) and nsh candidate lag shifts S (nsh x len, unit-modulus phases), the coherence
  * of templates a < b at shift s is |sum_k conj(U_a[k]) U_b[k] S_s[k]|^2; the score of the pair
  * is its largest over the shifts and the shift is the first (in S's order) that reaches it.
- * Pairs whose variances v differ by more than 15% are not scored (0).
+ * Pairs whose variances v differ by more than 15% are not scored (0). The caller's floor is
+ * the least score it reads: a pair is summed only as far as it can still reach the floor or
+ * beat its best shift so far (ScoreBlocks), so a score below the floor is only known to be
+ * below it, and every score at or above it is the one summing the whole band gives.
  *
  * The templates are laid out transposed once (len x mcp, mc padded to a multiple of the
  * vector width with zeros) and each shift's B = U S_s is a vector multiply by a broadcast
@@ -34,18 +37,109 @@ namespace ap_tier0 {
 namespace HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/* Scores of every pair a < b of the chunk into r2[a mc + b] and the winning shift's index
-   into bs[a mc + b]; every other entry 0. Returns 0, or -1 when out of memory. Four rows of
-   a share each load of B (eight independent multiply-add chains: a row's two alone were
-   bound by their latency). */
-int PairScores(const float *ur, const float *ui, const float *sr, const float *si,
-               const double *v, long long mc, long long len, long long nsh, float *r2,
-               int32_t *bs) {
+/* Column blocks of B scored together against four rows of a: 2 where the target has 32
+   vector registers (the 4 NB re and im sums, NB of B's real and imaginary vectors, the
+   broadcasts), 1 on x86 below AVX-512, which has 16. Each pair's sums are the same
+   operations in the same order either way. */
+#if HWY_ARCH_X86 && HWY_TARGET > HWY_AVX3
+constexpr int kBlocks = 1;
+#else
+constexpr int kBlocks = 2;
+#endif
+
+/* The band is summed in four stretches; after each of the first three a column block
+   whose pairs can no longer matter stops (ScoreBlocks). */
+constexpr int kStretches = 4;
+
+/* Shift s's scores of rows a0 .. a0 + 3 (u0, w0: their real and imaginary parts, len apart)
+   against the NB column blocks of B (tr, ti; len x mcp) from b0, folded into best and bidx
+   (the first shift to reach a pair's largest score keeps it).
+
+   A block stops early when none of its pairs can reach max(floor, its best so far). After
+   the first k bins of the band a pair's sum is p; the rest is at most sqrt(T_a T_b) in
+   modulus (Cauchy-Schwarz, T the energy of a row's bins k and up; B's column b is U_b's
+   bins times unit phases), and the float sums the kernel goes on to form differ from the
+   exact ones by less than eps sqrt(N_a N_b), N a row's whole energy and eps = (8 len + 64)
+   2^-24: the 2 len rounded multiply-adds of each of the two parts, B's own rounding and the
+   bound's arithmetic, each at most 2^-24 relative. So a pair whose
+   (|p| + sqrt(T_a T_b) + eps sqrt(N_a N_b))^2 is below max(floor, best) cannot be the
+   largest of its shifts, nor reach floor. ta, tb (kStretches - 1 rows of mca and of mcp)
+   hold sqrt(T) at the three stops, ea, eb sqrt(eps N); a pair not to be scored has
+   best = +inf and so never holds a block back. */
+template <int NB>
+void ScoreBlocks(const float *u0, const float *w0, const float *tr, const float *ti,
+                 long long len, long long mca, long long mcp, long long b0, int32_t s,
+                 float floor, const float *ta, const float *ea, const float *tb,
+                 const float *eb, float *best, int32_t *bidx) {
   const hn::ScalableTag<float> df;
   const hn::RebindToSigned<decltype(df)> di;
   using V = hn::Vec<decltype(df)>;
   const long long N = (long long)hn::Lanes(df);
+  constexpr long long A = 4;
+  // re_j += ur_j br + ui_j bi, im_j += ui_j br - ur_j bi for rows a0 .. a0 + 3, per block
+  V re[NB][A], im[NB][A];
+  for (int c = 0; c < NB; c++)
+    for (long long j = 0; j < A; j++) re[c][j] = im[c][j] = hn::Zero(df);
+  const V lowest = hn::Set(df, floor);
+  for (int q = 0; q < kStretches; q++) {
+    for (long long k = len * q / kStretches; k < len * (q + 1) / kStretches; k++) {
+      V br[NB], bi[NB];
+      for (int c = 0; c < NB; c++) {
+        br[c] = hn::Load(df, tr + k * mcp + b0 + c * N);
+        bi[c] = hn::Load(df, ti + k * mcp + b0 + c * N);
+      }
+      for (long long j = 0; j < A; j++) {
+        const V x = hn::Set(df, u0[j * len + k]), y = hn::Set(df, w0[j * len + k]);
+        for (int c = 0; c < NB; c++) {
+          re[c][j] = hn::MulAdd(x, br[c], hn::MulAdd(y, bi[c], re[c][j]));
+          im[c][j] = hn::MulAdd(y, br[c], hn::NegMulAdd(x, bi[c], im[c][j]));
+        }
+      }
+    }
+    if (q + 1 == kStretches) break;
+    // can any pair of the blocks still matter?
+    bool live = false;
+    for (int c = 0; c < NB && !live; c++) {
+      const V tcol = hn::Load(df, tb + q * mcp + b0 + c * N);
+      const V ecol = hn::Load(df, eb + b0 + c * N);
+      for (long long j = 0; j < A && !live; j++) {
+        const V p = hn::Sqrt(hn::MulAdd(re[c][j], re[c][j], hn::Mul(im[c][j], im[c][j])));
+        const V most = hn::MulAdd(hn::Set(df, ta[q * mca + j]), tcol,
+                                  hn::MulAdd(hn::Set(df, ea[j]), ecol, p));
+        const V need = hn::Max(lowest, hn::Load(df, best + j * mcp + b0 + c * N));
+        live = !hn::AllTrue(df, hn::Lt(hn::Mul(most, most), need));
+      }
+    }
+    if (!live) return;
+  }
+  const auto vs = hn::Set(di, s);
+  for (int c = 0; c < NB; c++)
+    for (long long j = 0; j < A; j++) {
+      const V val = hn::MulAdd(re[c][j], re[c][j], hn::Mul(im[c][j], im[c][j]));
+      float *bp = best + j * mcp + b0 + c * N;
+      int32_t *ip = bidx + j * mcp + b0 + c * N;
+      const V old = hn::Load(df, bp);
+      const auto gt = hn::Gt(val, old);              // strictly greater: first wins
+      hn::Store(hn::IfThenElse(gt, val, old), df, bp);
+      hn::Store(hn::IfThenElse(hn::RebindMask(di, gt), vs, hn::Load(di, ip)), di, ip);
+    }
+}
+
+/* Scores of every pair a < b of the chunk into r2[a mc + b] and the winning shift's index
+   into bs[a mc + b]; every other entry 0. A score below floor need not be exact: it is
+   some value below floor, its shift any (a pair at or above floor has its exact score and
+   shift, whatever floor is). Returns 0, or -1 when out of memory. Four rows of a share each
+   load of B and each broadcast of a's values serves kBlocks blocks of B (the independent
+   multiply-add chains, eight a block, keep the multiply-add units busy: a row's two alone
+   were bound by their latency). */
+int PairScores(const float *ur, const float *ui, const float *sr, const float *si,
+               const double *v, long long mc, long long len, long long nsh, float floor,
+               float *r2, int32_t *bs) {
+  const hn::ScalableTag<float> df;
+  using V = hn::Vec<decltype(df)>;
+  const long long N = (long long)hn::Lanes(df);
   constexpr long long A = 4;                         // rows of a sharing each load of B
+  constexpr long long Q = kStretches - 1;            // the stops in the band
   memset(r2, 0, (size_t)(mc * mc) * sizeof(float));
   memset(bs, 0, (size_t)(mc * mc) * sizeof(int32_t));
   if (mc < 2) return 0;
@@ -53,7 +147,9 @@ int PairScores(const float *ur, const float *ui, const float *sr, const float *s
   const long long mca = (mc + A - 1) / A * A;
   // U transposed (len x mcp), one shift's B = U S_s transposed, and per pair the best score
   // and shift; 64-byte aligned: a row of mcp floats is whole vectors on every target. a's
-  // rows are padded to a multiple of A with zeros (their scores are never read).
+  // rows are padded to a multiple of A with zeros (their scores are never read). The rows'
+  // tail moduli at the stops and error terms (ScoreBlocks), as rows (ta, ea) and as
+  // columns (tb, eb).
   float *utr = ap_alloc64((size_t)(len * mcp) * sizeof(float));
   float *uti = ap_alloc64((size_t)(len * mcp) * sizeof(float));
   float *tr = ap_alloc64((size_t)(len * mcp) * sizeof(float));
@@ -62,8 +158,10 @@ int PairScores(const float *ur, const float *ui, const float *sr, const float *s
   float *ai = ap_alloc64((size_t)(mca * len) * sizeof(float));
   float *best = ap_alloc64((size_t)(mca * mcp) * sizeof(float));
   int32_t *bidx = ap_alloc64((size_t)(mca * mcp) * sizeof(int32_t));
+  float *ta = ap_alloc64((size_t)(Q * mca + mca) * sizeof(float)), *ea = ta + Q * mca;
+  float *tb = ap_alloc64((size_t)(Q * mcp + mcp) * sizeof(float)), *eb = tb + Q * mcp;
   int rc = -1;
-  if (utr && uti && tr && ti && ar && ai && best && bidx) {
+  if (utr && uti && tr && ti && ar && ai && best && bidx && ta && tb) {
     rc = 0;
     memset(utr, 0, (size_t)(len * mcp) * sizeof(float));
     memset(uti, 0, (size_t)(len * mcp) * sizeof(float));
@@ -76,7 +174,33 @@ int PairScores(const float *ur, const float *ui, const float *sr, const float *s
     memset(ai, 0, (size_t)(mca * len) * sizeof(float));
     memcpy(ar, ur, (size_t)(mc * len) * sizeof(float));
     memcpy(ai, ui, (size_t)(mc * len) * sizeof(float));
-    for (long long i = 0; i < mca * mcp; i++) { best[i] = -1.f; bidx[i] = 0; }
+    // the tails and error terms; padding is zero
+    memset(ta, 0, (size_t)(Q * mca + mca) * sizeof(float));
+    memset(tb, 0, (size_t)(Q * mcp + mcp) * sizeof(float));
+    const double eps = (8.0 * (double)len + 64.0) / 16777216.0;
+    for (long long b = 0; b < mc; b++) {
+      double tail = 0.0;
+      for (long long q = kStretches - 1, k = len - 1; q >= 0; q--) {
+        for (; k >= len * q / kStretches; k--) {
+          const double xr = ur[b * len + k], xi = ui[b * len + k];
+          tail += xr * xr + xi * xi;
+        }
+        if (q > 0) ta[(q - 1) * mca + b] = tb[(q - 1) * mcp + b] = (float)sqrt(tail);
+      }
+      ea[b] = eb[b] = (float)sqrt(eps * tail);
+    }
+    // a pair not scored (b <= a, padding, variances more than 15% apart) never holds a
+    // block back
+    for (long long a = 0; a < mca; a++)
+      for (long long b = 0; b < mcp; b++) {
+        bool scored = a < b && b < mc;
+        if (scored) {
+          const double vmin = v[a] < v[b] ? v[a] : v[b], vmax = v[a] > v[b] ? v[a] : v[b];
+          scored = !(vmin < 0.85 * vmax);
+        }
+        best[a * mcp + b] = scored ? -1.f : HUGE_VALF;
+        bidx[a * mcp + b] = 0;
+      }
     for (long long s = 0; s < nsh; s++) {
       // B_s[k][b] = U_b[k] S_s[k]
       for (long long k = 0; k < len; k++) {
@@ -87,53 +211,27 @@ int PairScores(const float *ur, const float *ui, const float *sr, const float *s
           hn::Store(hn::MulAdd(d, xr, hn::Mul(c, xi)), df, ti + k * mcp + b0);
         }
       }
-      const auto vs = hn::Set(di, (int32_t)s);
       for (long long a0 = 0; a0 + 1 < mc; a0 += A) {
         const float *u0 = ar + a0 * len, *w0 = ai + a0 * len;
-        for (long long b0 = (a0 + 1) / N * N; b0 < mcp; b0 += N) {
-          // re_j += ur_j br + ui_j bi, im_j += ui_j br - ur_j bi for rows a0 .. a0 + 3
-          V re0 = hn::Zero(df), re1 = re0, re2 = re0, re3 = re0;
-          V im0 = re0, im1 = re0, im2 = re0, im3 = re0;
-          for (long long k = 0; k < len; k++) {
-            const V br = hn::Load(df, tr + k * mcp + b0), bi = hn::Load(df, ti + k * mcp + b0);
-            V x = hn::Set(df, u0[k]), y = hn::Set(df, w0[k]);
-            re0 = hn::MulAdd(x, br, hn::MulAdd(y, bi, re0));
-            im0 = hn::MulAdd(y, br, hn::NegMulAdd(x, bi, im0));
-            x = hn::Set(df, u0[len + k]); y = hn::Set(df, w0[len + k]);
-            re1 = hn::MulAdd(x, br, hn::MulAdd(y, bi, re1));
-            im1 = hn::MulAdd(y, br, hn::NegMulAdd(x, bi, im1));
-            x = hn::Set(df, u0[2 * len + k]); y = hn::Set(df, w0[2 * len + k]);
-            re2 = hn::MulAdd(x, br, hn::MulAdd(y, bi, re2));
-            im2 = hn::MulAdd(y, br, hn::NegMulAdd(x, bi, im2));
-            x = hn::Set(df, u0[3 * len + k]); y = hn::Set(df, w0[3 * len + k]);
-            re3 = hn::MulAdd(x, br, hn::MulAdd(y, bi, re3));
-            im3 = hn::MulAdd(y, br, hn::NegMulAdd(x, bi, im3));
-          }
-          const V vals[A] = {hn::MulAdd(re0, re0, hn::Mul(im0, im0)),
-                             hn::MulAdd(re1, re1, hn::Mul(im1, im1)),
-                             hn::MulAdd(re2, re2, hn::Mul(im2, im2)),
-                             hn::MulAdd(re3, re3, hn::Mul(im3, im3))};
-          for (long long j = 0; j < A; j++) {
-            float *bp = best + (a0 + j) * mcp + b0;
-            int32_t *ip = bidx + (a0 + j) * mcp + b0;
-            const V old = hn::Load(df, bp);
-            const auto gt = hn::Gt(vals[j], old);              // strictly greater: first wins
-            hn::Store(hn::IfThenElse(gt, vals[j], old), df, bp);
-            hn::Store(hn::IfThenElse(hn::RebindMask(di, gt), vs, hn::Load(di, ip)), di, ip);
-          }
-        }
+        long long b0 = (a0 + 1) / N * N;
+        for (; b0 + kBlocks * N <= mcp; b0 += kBlocks * N)
+          ScoreBlocks<kBlocks>(u0, w0, tr, ti, len, mca, mcp, b0, (int32_t)s, floor, ta + a0,
+                               ea + a0, tb, eb, best + a0 * mcp, bidx + a0 * mcp);
+        for (; b0 < mcp; b0 += N)
+          ScoreBlocks<1>(u0, w0, tr, ti, len, mca, mcp, b0, (int32_t)s, floor, ta + a0,
+                         ea + a0, tb, eb, best + a0 * mcp, bidx + a0 * mcp);
       }
     }
     for (long long a = 0; a < mc; a++) {
       for (long long b = a + 1; b < mc; b++) {
-        const double vmin = v[a] < v[b] ? v[a] : v[b], vmax = v[a] > v[b] ? v[a] : v[b];
-        if (vmin < 0.85 * vmax) continue;
+        if (best[a * mcp + b] == HUGE_VALF) continue;
         r2[a * mc + b] = best[a * mcp + b];
         bs[a * mc + b] = bidx[a * mcp + b];
       }
     }
   }
   free(utr); free(uti); free(tr); free(ti); free(ar); free(ai); free(best); free(bidx);
+  free(ta); free(tb);
   return rc;
 }
 
@@ -365,12 +463,13 @@ static inline bool use_avx1() {
 #endif
 /* Dispatched unqualified from inside the namespace (see gauss.cc). */
 static int Dispatch(const float *ur, const float *ui, const float *sr, const float *si,
-                    const double *v, long long mc, long long len, long long nsh, float *r2,
-                    int32_t *bs) {
+                    const double *v, long long mc, long long len, long long nsh, float floor,
+                    float *r2, int32_t *bs) {
 #if AP_HAVE_AVX1
+  // every score exact: floor only allows less
   if (use_avx1()) return avx1::PairScores(ur, ui, sr, si, v, mc, len, nsh, r2, bs);
 #endif
-  return HWY_DYNAMIC_DISPATCH(PairScores)(ur, ui, sr, si, v, mc, len, nsh, r2, bs);
+  return HWY_DYNAMIC_DISPATCH(PairScores)(ur, ui, sr, si, v, mc, len, nsh, floor, r2, bs);
 }
 static void DispatchRefine(const double *prod_ab, const double *exp_all, const int64_t *pdl,
                            long long npairs, long long len, long long R, long long half_span,
@@ -385,11 +484,13 @@ static void DispatchRefine(const double *prod_ab, const double *exp_all, const i
 }
 }  // namespace ap_tier0
 /* The tier-0 pair scores of an mc-template chunk (see the top of this file), for the best
-   target this CPU runs. Returns 0, or -1 when out of memory. */
+   target this CPU runs: exact where they reach floor, below floor where they do not.
+   Returns 0, or -1 when out of memory. */
 extern "C" int ap_tier0_pair_scores(const float *ur, const float *ui, const float *sr,
                                     const float *si, const double *v, long long mc,
-                                    long long len, long long nsh, float *r2, int32_t *bs) {
-  return ap_tier0::Dispatch(ur, ui, sr, si, v, mc, len, nsh, r2, bs);
+                                    long long len, long long nsh, float floor, float *r2,
+                                    int32_t *bs) {
+  return ap_tier0::Dispatch(ur, ui, sr, si, v, mc, len, nsh, floor, r2, bs);
 }
 extern "C" void ap_tier0_refine_lags(const double *prod_ab, const double *exp_all,
                                      const int64_t *pdl, long long npairs, long long len,
