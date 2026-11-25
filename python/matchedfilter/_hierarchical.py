@@ -197,6 +197,26 @@ class _Resolved(NamedTuple):
     offsets: tuple = ()              # per-tier starting fine bin k0
 
 
+def _pack_tap_table(out, taps, counts, cplx, tap_stride):
+    """The GPU direct refine's tap table, written into out (uint32, (templates, 4 + tap_stride
+    words, twice that for complex taps)): per row the tap count, three zero words, then the
+    row's taps conjugated (complex) or as they are (real), zero past its count and to the
+    stride. Written in place, in one pass over the device-visible rows: a padded host table
+    copied in afterwards cost 0.3 ms of every GPU plan's first call."""
+    m = min(taps.shape[1], tap_stride)
+    out[:, 0] = counts.astype(np.uint32)
+    out[:, 1:4] = 0
+    width = 2 * m if cplx else m
+    body = out[:, 4:4 + width].view(np.complex64 if cplx else np.float32)
+    if cplx:
+        np.conjugate(taps[:, :m], out=body)
+    else:
+        body[...] = taps[:, :m]
+    body[np.arange(m)[None, :] >= counts[:, None]] = 0
+    out[:, 4 + width:] = 0
+    return out
+
+
 class HierarchicalFilter(MatchedFilter):
     """A matched filter that gates pairs on cheap coarse correlations and refines on demand.
 
@@ -1723,22 +1743,8 @@ class HierarchicalFilter(MatchedFilter):
             arr_taps, counts, cplx = taps
             tap_stride = (int(counts.max()) + 3) & ~3
             row_words = 4 + (2 * tap_stride if cplx else tap_stride)
-            packed = np.zeros((self.ntemplates, row_words), dtype=np.uint32)
-            packed[:, 0] = counts.astype(np.uint32)
-            m = min(arr_taps.shape[1], tap_stride)
-            mask = np.arange(m)[None, :] < counts[:, None]
-            if cplx:
-                masked = np.ascontiguousarray(
-                    np.where(mask, np.conj(arr_taps[:, :m]), np.complex64(0)),
-                    dtype=np.complex64)
-                packed[:, 4:4 + 2 * m] = masked.view(np.uint32)
-            else:
-                masked = np.ascontiguousarray(
-                    np.where(mask, arr_taps[:, :m], np.float32(0)),
-                    dtype=np.float32)
-                packed[:, 4:4 + m] = masked.view(np.uint32)
             buf = self._gpu.empty_shared((self.ntemplates, row_words), dtype=np.uint32)
-            buf[:] = packed
+            _pack_tap_table(buf, arr_taps, counts, cplx, tap_stride)
             view = shared_view(buf, self._gpu)
             if self._gpu.stage_host_inputs and view is not None:
                 self._gpu._x_prefetch(view, 0, buf.nbytes, None)

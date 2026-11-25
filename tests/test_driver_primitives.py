@@ -93,3 +93,37 @@ def test_half_bits_is_numpys_float16_cast_bit_for_bit():
     keep = ~np.isnan(ref)
     np.testing.assert_array_equal(packed[keep], ref.view(np.uint16)[keep])
     assert np.all(np.isnan(packed.view(np.float16)[~keep]))
+
+
+def test_the_direct_refine_tap_table_is_written_as_it_was_built():
+    """_pack_tap_table writes, into rows that held anything, what the padded host table
+    gave: the tap count, three zero words, the taps (conjugated when complex, NaN and -0.0
+    kept) up to the count, zeros past it and to the stride."""
+    import numpy as np
+    from matchedfilter._hierarchical import _pack_tap_table
+    rng = np.random.default_rng(3)
+    for cplx in (True, False):
+        for width in (37, 40, 52):
+            nt = 17
+            counts = rng.integers(5, 41, nt)
+            if cplx:
+                taps = (rng.standard_normal((nt, width))
+                        + 1j * rng.standard_normal((nt, width))).astype(np.complex64)
+            else:
+                taps = rng.standard_normal((nt, width)).astype(np.float32)
+            taps[0, 2], taps[1, 1] = np.nan, -0.0
+            stride = (int(counts.max()) + 3) & ~3
+            words = 4 + (2 * stride if cplx else stride)
+            want = np.zeros((nt, words), np.uint32)
+            want[:, 0] = counts
+            m = min(width, stride)
+            keep = np.arange(m)[None, :] < counts[:, None]
+            if cplx:
+                want[:, 4:4 + 2 * m] = np.ascontiguousarray(
+                    np.where(keep, np.conj(taps[:, :m]), np.complex64(0)),
+                    np.complex64).view(np.uint32)
+            else:
+                want[:, 4:4 + m] = np.ascontiguousarray(
+                    np.where(keep, taps[:, :m], np.float32(0)), np.float32).view(np.uint32)
+            got = np.full((nt, words), 0xDEADBEEF, np.uint32)
+            np.testing.assert_array_equal(_pack_tap_table(got, taps, counts, cplx, stride), want)
