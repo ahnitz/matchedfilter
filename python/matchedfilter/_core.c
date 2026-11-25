@@ -1208,6 +1208,74 @@ void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset);   /* s
 void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
                         uint64_t offset, uint64_t step, const float *scale,
                         const unsigned char *keep);
+/* vulkan_emit(cmd, fns, ops, start, end): the Vulkan emitter of the shared command list
+   (_gpuhost.CommandList): record ops[start:end) into command buffer cmd. ops is a list's
+   operations resolved to Vulkan (_vkcompute._VkNative): an opcode, then its integer
+   arguments (handles, words, barrier fields); fns holds the address of each opcode's entry
+   point. Returns the index past the last op recorded, or -1 on an unknown opcode. */
+typedef struct { uint32_t sType; const void *pNext; uint32_t src, dst; } vk_mem_barrier;
+typedef struct { uint32_t sType; const void *pNext; uint32_t src, dst, src_qf, dst_qf;
+                 uint64_t buffer, offset, size; } vk_buf_barrier;
+typedef void (*vk_bind_pipeline_fn)(void*, uint32_t, uint64_t);
+typedef void (*vk_bind_sets_fn)(void*, uint32_t, uint64_t, uint32_t, uint32_t, const uint64_t*,
+                                uint32_t, const uint32_t*);
+typedef void (*vk_push_fn)(void*, uint64_t, uint32_t, uint32_t, uint32_t, const void*);
+typedef void (*vk_dispatch_fn)(void*, uint32_t, uint32_t, uint32_t);
+typedef void (*vk_dispatch_indirect_fn)(void*, uint64_t, uint64_t);
+typedef void (*vk_fill_fn)(void*, uint64_t, uint64_t, uint64_t, uint32_t);
+typedef void (*vk_update_fn)(void*, uint64_t, uint64_t, uint64_t, const void*);
+typedef void (*vk_barrier_fn)(void*, uint32_t, uint32_t, uint32_t, uint32_t, const void*,
+                              uint32_t, const void*, uint32_t, const void*);
+static Py_ssize_t vulkan_emit_ops(void *cmd, const uint64_t *fn, const uint64_t *op, size_t start,
+                              size_t end){
+  size_t i=start;
+  while(i<end){
+    switch(op[i]){
+    case 1: ((vk_bind_pipeline_fn)(uintptr_t)fn[1])(cmd,(uint32_t)op[i+1],op[i+2]); i+=3; break;
+    case 2: { const uint64_t set=op[i+3];
+      ((vk_bind_sets_fn)(uintptr_t)fn[2])(cmd,(uint32_t)op[i+1],op[i+2],0,1,&set,0,NULL); i+=4; break; }
+    case 3: { uint32_t w[64]; const size_t nw=(size_t)op[i+5];
+      if(nw>64) return -1;
+      for(size_t k=0;k<nw;k++) w[k]=(uint32_t)op[i+6+k];
+      ((vk_push_fn)(uintptr_t)fn[3])(cmd,op[i+1],(uint32_t)op[i+2],(uint32_t)op[i+3],
+                                     (uint32_t)op[i+4],w);
+      i+=6+nw; break; }
+    case 4: ((vk_dispatch_fn)(uintptr_t)fn[4])(cmd,(uint32_t)op[i+1],(uint32_t)op[i+2],
+                                               (uint32_t)op[i+3]); i+=4; break;
+    case 5: ((vk_dispatch_indirect_fn)(uintptr_t)fn[5])(cmd,op[i+1],op[i+2]); i+=3; break;
+    case 6: ((vk_fill_fn)(uintptr_t)fn[6])(cmd,op[i+1],op[i+2],op[i+3],(uint32_t)op[i+4]);
+      i+=5; break;
+    case 7: ((vk_update_fn)(uintptr_t)fn[7])(cmd,op[i+1],op[i+2],op[i+3],
+                                             (const void*)(uintptr_t)op[i+4]); i+=5; break;
+    case 8: { vk_mem_barrier mb={46,NULL,(uint32_t)op[i+4],(uint32_t)op[i+5]};
+      ((vk_barrier_fn)(uintptr_t)fn[8])(cmd,(uint32_t)op[i+1],(uint32_t)op[i+2],(uint32_t)op[i+3],
+                                        1,&mb,0,NULL,0,NULL); i+=6; break; }
+    case 9: { vk_buf_barrier bb={44,NULL,(uint32_t)op[i+4],(uint32_t)op[i+5],(uint32_t)op[i+6],
+                                 (uint32_t)op[i+7],op[i+8],op[i+9],op[i+10]};
+      ((vk_barrier_fn)(uintptr_t)fn[8])(cmd,(uint32_t)op[i+1],(uint32_t)op[i+2],(uint32_t)op[i+3],
+                                        0,NULL,1,&bb,0,NULL); i+=11; break; }
+    case 10: ((vk_barrier_fn)(uintptr_t)fn[8])(cmd,(uint32_t)op[i+1],(uint32_t)op[i+2],
+                                               (uint32_t)op[i+3],0,NULL,0,NULL,0,NULL); i+=4; break;
+    default: return -1;
+    }
+  }
+  return (Py_ssize_t)i;
+}
+static PyObject *M_vulkan_emit(PyObject *self,PyObject *args){
+  (void)self; unsigned long long cmd; PyObject *fo, *oo; Py_ssize_t start, end;
+  if(!PyArg_ParseTuple(args,"KOOnn",&cmd,&fo,&oo,&start,&end)) return NULL;
+  Py_buffer f, o;
+  if(PyObject_GetBuffer(fo,&f,PyBUF_C_CONTIGUOUS)<0) return NULL;
+  if(PyObject_GetBuffer(oo,&o,PyBUF_C_CONTIGUOUS)<0){ PyBuffer_Release(&f); return NULL; }
+  Py_ssize_t r=-1;
+  if(f.itemsize==8 && o.itemsize==8 && f.len>=9*8 && start>=0 && start<=end && end*8<=o.len)
+    r=vulkan_emit_ops((void*)(uintptr_t)cmd,(const uint64_t*)f.buf,(const uint64_t*)o.buf,
+                  (size_t)start,(size_t)end);
+  PyBuffer_Release(&f); PyBuffer_Release(&o);
+  if(r<0){ PyErr_SetString(PyExc_ValueError,"vulkan_emit: bad ops, range or entry-point table"); return NULL; }
+  return PyLong_FromSsize_t(r);
+}
+
 /* One float32's bits as IEEE half bits, exactly as NumPy's float32 -> float16 cast
    (npy_floatbits_to_halfbits, NumPy's halffloat.c): round to nearest, ties to even;
    subnormal halves; overflow to a signed infinity; a NaN stays a NaN with its sign and the
@@ -3236,6 +3304,7 @@ static PyMethodDef methods[]={
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"xxh64",M_xxh64,METH_VARARGS,"xxh64(buffer, seed=0) -> int: XXH64 of a C-contiguous buffer's bytes"},
+  {"vulkan_emit",M_vulkan_emit,METH_VARARGS,"vulkan_emit(cmd, fns u64[9+], ops u64, start, end) -> end: the Vulkan emitter of the shared command list: record resolved ops[start:end) into cmd (_vkcompute._VkNative)"},
   {"half_bits",M_half_bits,METH_VARARGS,"half_bits(src float32, dst 16-bit): dst[i] = src[i] as IEEE half bits, NumPy's float32 -> float16 cast"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None, keep=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},

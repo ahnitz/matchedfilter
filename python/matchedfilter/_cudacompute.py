@@ -27,6 +27,7 @@ from . import _config, _cuda, _gputime, _kernels
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
+from ._gpuhost import CommandList
 from ._gpuexec import Arg, Executor, settle as _settle
 from ._shared import empty_shared, _Borrowed, _Storage
 from ._gpuhost import MAX_BINS, Section, carray, hier_peaks_grouped
@@ -1204,7 +1205,13 @@ class Context(Executor, InputUploads):
         return _Readback(self, nbytes) if readback else _Buffer(self, nbytes)
 
     def _x_list(self, label, once=False):
-        return _CudaList(self, label)
+        """The shared command list (_gpuhost.CommandList); _x_record makes it a native one."""
+        return CommandList(label, once, record=self._x_record)
+
+    def _x_record(self, commands):
+        """The native recording of a shared command list: today's launch-parameter list
+        (_CudaList), built from the list's calls as they were made."""
+        return commands.replay_into(_CudaList(self, commands.label)).end()
 
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         stream = self._x_launch(native, binds, slot, pre)

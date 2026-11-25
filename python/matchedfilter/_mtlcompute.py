@@ -45,6 +45,7 @@ _MAX_THREADS = 1024
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from . import _gputime, _settings
 from ._gpu_cache import InputUploads
+from ._gpuhost import CommandList
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 from . import _peaks as _pk
 from ._coarse import candidates, coarse_stem
@@ -1144,7 +1145,13 @@ class Context(Executor, InputUploads):
         return _Buffer(self, nbytes)
 
     def _x_list(self, label, once=False):
-        return _MtlList(label)
+        """The shared command list (_gpuhost.CommandList); _x_record makes it a native one."""
+        return CommandList(label, once, record=self._x_record)
+
+    def _x_record(self, commands):
+        """The native recording of a shared command list: today's (label, ops), encoded on
+        every run (_x_encode), built from the list's calls as they were made."""
+        return commands.replay_into(_MtlList(commands.label)).end()
 
     def _x_encode(self, cmd, ops, binds):
         """Encode a recorded list into a command buffer: serial compute encoders, a blit for

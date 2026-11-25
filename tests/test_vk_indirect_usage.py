@@ -5,9 +5,10 @@ RADV and ANV dispatch from a buffer without that usage, so a missing flag passes
 check, and no validation layer is installed to report it. From 8fd9f471 and 4a148370
 (2026-10-19) the executor's buffers had none, and the listed ops read their counts from them:
 a hierarchical call's counts (args0, args1, bargs), a follow-up group's table, the gate-way
-timing's count. These tests watch the Vulkan calls themselves -- the usage each vkCreateBuffer
-was given and the buffer each vkCmdDispatchIndirect names -- over every path that records a
-listed op, so they do not depend on how the driver chooses a buffer's usage.
+timing's count. These tests watch the usage each vkCreateBuffer was given and the buffer each
+indirect dispatch names -- in the commands a recording resolves to (_VkNative._resolve, what
+the list's Vulkan emitter records) -- over every path that records a listed op, so they do
+not depend on how the driver chooses a buffer's usage.
 """
 import numpy as np
 import pytest
@@ -34,10 +35,10 @@ class _Watch:
     the watch began."""
 
     def __init__(self, monkeypatch, ctx):
+        from matchedfilter import _vkcompute as V
         vk = ctx.vk                           # the device's table, which every context shares
-        self.ctx, self.reads, self._usage, self._bound = ctx, [], {}, {}
-        create, bind, indirect = (vk.vkCreateBuffer, vk.vkCmdBindPipeline,
-                                  vk.vkCmdDispatchIndirect)
+        self.ctx, self.reads, self._usage = ctx, [], {}
+        create, resolve = vk.vkCreateBuffer, V._VkNative._resolve
 
         def vk_create_buffer(device, info, allocator, handle):
             rc = create(device, info, allocator, handle)
@@ -45,18 +46,22 @@ class _Watch:
                 self._usage[handle._obj.value] = info._obj.usage
             return rc
 
-        def vk_cmd_bind_pipeline(cmd, point, pipeline):
-            self._bound[getattr(cmd, "value", cmd)] = getattr(pipeline, "value", pipeline)
-            return bind(cmd, point, pipeline)
-
-        def vk_cmd_dispatch_indirect(cmd, buf, offset):
-            pipe = self._bound.get(getattr(cmd, "value", cmd))
-            self.reads.append((self._kind(pipe), self._usage.get(getattr(buf, "value", buf))))
-            return indirect(cmd, buf, offset)
+        def watched_resolve(native, binds):
+            # each indirect dispatch (opcode 5) of the resolved commands, with the pipeline
+            # last bound before it (opcode 1)
+            ops, marks = resolve(native, binds)
+            i, pipe = 0, None
+            while i < len(ops):
+                code = ops[i]
+                if code == 1:
+                    pipe = ops[i + 2]
+                elif code == 5:
+                    self.reads.append((self._kind(pipe), self._usage.get(ops[i + 1])))
+                i += 6 + ops[i + 5] if code == 3 else V._VK_OP_SIZE[code]
+            return ops, marks
 
         monkeypatch.setattr(vk, "vkCreateBuffer", vk_create_buffer)
-        monkeypatch.setattr(vk, "vkCmdBindPipeline", vk_cmd_bind_pipeline)
-        monkeypatch.setattr(vk, "vkCmdDispatchIndirect", vk_cmd_dispatch_indirect)
+        monkeypatch.setattr(V._VkNative, "_resolve", watched_resolve)
 
     def _kind(self, pipe):
         """The kernel a pipeline was built as (its cache key's first name: refine, items,

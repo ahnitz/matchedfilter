@@ -9,6 +9,7 @@ callers who only ever use the CPU.
 Scope is deliberately compute-only.  No swapchain, no images, no graphics
 pipeline, one queue, one descriptor set.
 """
+import array as _array
 import ctypes
 import itertools
 from collections import OrderedDict
@@ -16,7 +17,7 @@ import time
 
 import numpy as np
 
-from . import _config, _gputime, _kernels, _settings, _vulkan, gatechain
+from . import _config, _core, _gputime, _kernels, _settings, _vulkan, gatechain
 from ._shared import BUFFER_SERIALS, empty_shared
 from ._gpuhost import (MAX_BINS, BufferPool, carray, MappedBuffer, Section, address,
                        hier_peaks_grouped)
@@ -283,6 +284,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
+from ._gpuhost import CommandList
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
@@ -427,22 +429,32 @@ class _Buffer(MappedBuffer):
             self.handle = None
 
 
-class _CaptureVK:
-    """The Vulkan function table, also logging vkCmd* calls (name, args) into a capture."""
+def _handle(x):
+    """A Vulkan handle (c_void_p, int or None) as an integer."""
+    x = getattr(x, "value", x)
+    return int(x or 0)
 
-    def __init__(self, real, cap):
-        self._real, self._cap = real, cap
 
-    def __getattr__(self, name):
-        fn = getattr(self._real, name)
-        if not name.startswith("vkCmd"):
-            return fn
-        cap = self._cap
+#: The Vulkan emitter's opcodes (_core.vulkan_emit) -> the entry point each calls. A list's
+#: operations resolved to Vulkan (_VkNative._resolve): 1 bind pipeline, 2 bind one
+#: descriptor set, 3 push constants (words inline), 4 dispatch, 5 indirect dispatch,
+#: 6 fill, 7 update (the data's address), 8 memory barrier, 9 buffer barrier, 10 barrier
+#: without memory barriers.
+_VK_OPS = {1: "vkCmdBindPipeline", 2: "vkCmdBindDescriptorSets", 3: "vkCmdPushConstants",
+           4: "vkCmdDispatch", 5: "vkCmdDispatchIndirect", 6: "vkCmdFillBuffer",
+           7: "vkCmdUpdateBuffer", 8: "vkCmdPipelineBarrier"}
+#: Words each opcode takes, the opcode included (3: plus its words).
+_VK_OP_SIZE = {1: 3, 2: 4, 4: 4, 5: 3, 6: 5, 7: 5, 8: 6, 9: 11, 10: 4}
 
-        def call(*args):
-            cap["ops"].append((name, args))
-            return fn(*args)
-        return call
+
+def _vulkan_emit_fns(dev):
+    """The device's entry-point table for _core.vulkan_emit (made once)."""
+    fns = dev.__dict__.get("vulkan_emit_fns")
+    if fns is None:
+        fns = dev.vulkan_emit_fns = _array.array("Q", [0] * 9)
+        for code, name in _VK_OPS.items():
+            fns[code] = ctypes.cast(getattr(dev.vk, name), ctypes.c_void_p).value
+    return fns
 
 
 #: Phases of forward and hierarchical recordings, in execution order. A fused batch runs
@@ -587,29 +599,35 @@ class _FusedBatch:
             prof._stamp(cmd, "start")
         # Phases run in lockstep across the batch's items, one global barrier per phase:
         # every item sees its own phases in order, each behind its own recorded barriers.
+        fns = _vulkan_emit_fns(dev)
+        emit, cmd_value = _core.vulkan_emit, cmd.value
         for phase in _FUSED_PHASES:
             barriers = []
             for ctx, cmds in self.items:
                 for h in cmds:
-                    work_bar = ctx._phases[h].get(phase)
-                    if work_bar is None:
+                    ph = ctx._phases[h]
+                    ranges = ph.get(phase)
+                    if ranges is None:
                         continue
-                    work, bar = work_bar
-                    for name, args in work:
-                        getattr(vk, name)(cmd, *args[1:])
-                    barriers.extend(bar)
+                    ops = ph["_ops"]
+                    if ranges[1] > ranges[0]:
+                        emit(cmd_value, fns, ops, ranges[0], ranges[1])
+                    if ranges[3] > ranges[2]:
+                        barriers.append((ops, ranges[2], ranges[3]))
             # One global barrier per distinct (stages, access) is enough for the step;
             # buffer barriers are kept as recorded.
             seen = set()
-            for name, args in barriers:
-                if args[4] == 1 and args[6] == 0:
-                    mb = getattr(args[5], "_obj", None)
-                    sig = (args[1], args[2], getattr(mb, "srcAccessMask", id(mb)),
-                           getattr(mb, "dstAccessMask", id(mb)))
-                    if sig in seen:
-                        continue
-                    seen.add(sig)
-                getattr(vk, name)(cmd, *args[1:])
+            for ops, i, end in barriers:
+                while i < end:
+                    size = _VK_OP_SIZE[ops[i]]
+                    if ops[i] == 8:
+                        sig = (ops[i + 1], ops[i + 2], ops[i + 4], ops[i + 5])
+                        if sig in seen:
+                            i += size
+                            continue
+                        seen.add(sig)
+                    emit(cmd_value, fns, ops, i, i + size)
+                    i += size
             if prof is not None:
                 prof._stamp(cmd, "fused " + phase)
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
@@ -957,19 +975,6 @@ class _Device:
         raise VulkanError("device exposes no compute queue")
 
 
-def _list_barrier(vk, cmd):
-    """A list's barrier (_gpuexec): every earlier compute or transfer write before every later
-    compute, transfer, indirect-argument or host access. Indirect fetch is in the scope: an
-    indirect dispatch reads a count a shader just wrote (missing it, Intel used the previous
-    dispatch's count)."""
-    mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
-                     _ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE
-                     | _ACCESS_INDIRECT_READ | _ACCESS_HOST_READ)
-    vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
-                            _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT
-                            | _STAGE_DRAW_INDIRECT_BIT, 0, 1, ctypes.byref(mb), 0, None, 0, None)
-
-
 def _flat_words(words, binds=None):
     out = []
     for w in words:
@@ -982,69 +987,46 @@ def _flat_words(words, binds=None):
     return out
 
 
-class _VkList:
-    """A command list being recorded (_gpuexec's driver interface). Descriptor sets and push
-    constants are fixed in a command buffer, so the list is kept as its operations and
-    recorded once per binding of its Args (_VkNative)."""
-
-    def __init__(self, ctx, label, once=False):
-        self.ctx, self.label, self.once, self.ops = ctx, label, once, []
-
-    def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
-        self.ops.append(("dispatch", kernel, int(groups), list(buffers), offsets, list(words)))
-
-    def listed(self, kernel, count, max_groups, buffers, words=(), offsets=None):
-        # Indirect, sized by the count a shader wrote; the bounded kernel's gridSize word is
-        # the upper bound, so each group takes one item.
-        self.ops.append(("listed", kernel, count, list(buffers), offsets,
-                         list(words) + [int(max_groups)]))
-
-    def barrier(self):
-        self.ops.append(("barrier",))
-
-    def stamp(self, name):
-        self.ops.append(("stamp", name))
-
-    def fill(self, buf, word, offset=0, nbytes=None, rows=1, pitch=0):
-        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF, offset, nbytes, rows, pitch))
-
-    def update(self, buf, words):
-        # vkCmdUpdateBuffer reads its data when recorded -- and again whenever a fused batch
-        # re-records a captured call -- so the words live as long as the list.
-        data = carray(ctypes.c_uint32, len(words))(*[int(w) & 0xFFFFFFFF for w in words])
-        self.ops.append(("update", buf, data))
-
-    def readback(self, buf, nbytes):
-        pass                        # host-visible memory: the host reads it after the run
-
-    def end(self):
-        return _VkNative(self.ctx, self.label, self.ops, self.once)
-
-
 #: Descriptor sets a device keeps per layout for reuse (_VkNative.free): about the most one
 #: top template's plans of a pycbc job hold at once.
 _DESC_SHELF = 1024
 
+#: A list barrier (_gpuexec): every earlier compute or transfer write before every later
+#: compute, transfer, indirect-argument or host access (stages, then access masks).
+#: Indirect fetch is in the scope: an indirect dispatch reads a count a shader just wrote
+#: (missing it, Intel used the previous dispatch's count).
+_LIST_BARRIER = (_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
+                 _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT
+                 | _STAGE_DRAW_INDIRECT_BIT, 0,
+                 _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
+                 _ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE
+                 | _ACCESS_INDIRECT_READ | _ACCESS_HOST_READ)
+
 
 class _VkNative:
-    """A recorded list: a command buffer per binding of its Args (just one without Args),
-    the most recently used _BINDINGS kept, each holding the views it binds so no allocation
-    can be freed and its handle reused under it. Past _BINDINGS, a run that is waited for
-    records a one-off command buffer instead (a stream of new search windows), freed when
-    it has finished: evicting a cached one would idle every queue. A `once` list (follow-up
-    items) is recorded for its one run and freed when that run has finished."""
+    """A recorded shared command list (_gpuhost.CommandList): a command buffer per binding
+    of its Args (just one without Args), the most recently used _BINDINGS kept, each holding
+    the views it binds so no allocation can be freed and its handle reused under it. Past
+    _BINDINGS, a run that is waited for records a one-off command buffer instead (a stream
+    of new search windows), freed when it has finished: evicting a cached one would idle
+    every queue. A `once` list (follow-up items) is recorded for its one run and freed when
+    that run has finished.
+
+    A command buffer is recorded by resolving the list for its binding -- each dispatch's
+    pipeline, descriptor set and push words, each fill, update and barrier -- into one array
+    of integers, which the Vulkan emitter (_core.vulkan_emit) records. A list with phase
+    stamps keeps that array by phase (ctx._phases), so a fused batch interleaves it with
+    other recordings' without recording anything again."""
     _BINDINGS = 8
 
-    def __init__(self, ctx, label, ops, once=False):
-        self.ctx, self.label, self.ops, self.once = ctx, label, ops, once
-        names = set()
-        for op in ops:
-            if op[0] in ("dispatch", "listed"):
-                names.update(b.name for b in op[3] if isinstance(b, Arg))
-                names.update(w.name for w in op[5] if isinstance(w, Arg))
-        self.args = sorted(names)
-        # A list with phase stamps is captured, so fused batches can interleave it.
-        self.captured = any(op[0] == "stamp" for op in ops)
+    def __init__(self, ctx, commands):
+        self.ctx, self.commands = ctx, commands
+        self.label, self.once = commands.label, commands.once
+        self.args = commands.arg_names()
+        self.captured = commands.has_stamps()
+        # vkCmdUpdateBuffer reads its data when recorded, and again when a fused batch
+        # records the phase: each update's words live as long as the native.
+        self._updates = {}
         self.cmds = {}                       # binding key -> (cmd, pools, held values)
 
     @staticmethod
@@ -1070,62 +1052,131 @@ class _VkNative:
         self.cmds[key] = entry               # most recently used last
         return entry[0], None
 
-    def record(self, binds):
-        """Record this list's operations into a new command buffer with the buffers and words in
-        binds. Returns (command buffer, the descriptor pools it made). A list that is captured
-        has its commands logged by phase as well, so that a fused batch can replay them.
-        """
-        ctx = self.ctx
-        pool_start = len(getattr(ctx, "_pools", []))
-        if self.captured:
-            ctx._capture_begin()
-        cmd = None
-        try:
-            # A kept recording may be submitted again while an earlier run of it is still in
-            # flight (a run left pending: a middle stage's zeroing, segment after segment).
-            rec = _Recording(ctx, self.label,
-                             flags=_ONE_TIME_SUBMIT if self.once else _SIMULTANEOUS_USE)
-            cmd = rec.cmd
-            self._emit(rec, binds)
-            rec.end()
-        finally:
-            if self.captured:
-                ctx._capture_end(cmd)
-        pools = list(getattr(ctx, "_pools", [])[pool_start:])
-        return cmd, pools
+    def _update_data(self, words):
+        """The update's words as a ctypes array the native keeps (one per distinct words)."""
+        key = tuple(words)
+        data = self._updates.get(key)
+        if data is None:
+            data = self._updates[key] = carray(ctypes.c_uint32, len(key))(*key)
+        return data
 
-    def _emit(self, rec, binds):
-        """Write this list's operations into the recording rec: barriers, timing stamps, buffer
-        fills and updates, and each dispatch (direct, or indirect for a listed kernel) with its
-        descriptor set and push-constant words, per-run arguments taken from binds.
-        """
+    def _resolve(self, binds):
+        """The list for this binding, resolved to the Vulkan emitter's integers: (ops array,
+        marks), marks [(stamp name, [(is a barrier, start, end) per command])] up to each
+        stamp. Descriptor sets are made here (their pools go to ctx._pools)."""
         ctx = self.ctx
-        for op in self.ops:
+        out = _array.array("Q")
+        marks, cur = [], []
+        for op in self.commands.decode():
             kind = op[0]
+            start = len(out)
             if kind == "barrier":
-                _list_barrier(ctx.vk, rec.cmd)
+                out.extend((8,) + _LIST_BARRIER)
+                cur.append((True, start, len(out)))
             elif kind == "stamp":
-                rec.stamp(op[1])
+                marks.append((op[1], cur))
+                cur = []
             elif kind == "fill":
                 _, buf, word, offset, nbytes, rows, pitch = op
                 base = getattr(buf, "offset", 0) + offset
-                size = _WHOLE_SIZE if nbytes is None else nbytes
+                size = 0xFFFFFFFFFFFFFFFF if nbytes is None else nbytes
                 for r in range(rows):
-                    ctx.vk.vkCmdFillBuffer(rec.cmd, buf.handle, base + r * pitch, size, word)
+                    out.extend((6, _handle(buf.handle), base + r * pitch, size, word))
+                cur.append((False, start, len(out)))
             elif kind == "update":
-                ctx.vk.vkCmdUpdateBuffer(rec.cmd, op[1].handle, getattr(op[1], "offset", 0),
-                                         ctypes.sizeof(op[2]), ctypes.addressof(op[2]))
-            else:
-                _, kernel, groups, buffers, offsets, words = op
-                bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
-                offs = [getattr(b, "offset", 0) + (offsets[i] if offsets else 0)
-                        for i, b in enumerate(bound)]
-                ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
-                rec.bind(kernel, ds, [int(w) & 0xFFFFFFFF for w in _flat_words(words, binds)])
+                _, buf, words = op
+                data = self._update_data(words)
+                out.extend((7, _handle(buf.handle), getattr(buf, "offset", 0),
+                            ctypes.sizeof(data), ctypes.addressof(data)))
+                cur.append((False, start, len(out)))
+            elif kind in ("dispatch", "listed"):
                 if kind == "dispatch":
-                    rec.dispatch(groups)
+                    _, kernel, groups, buffers, words, offsets = op
                 else:
-                    rec.dispatch_indirect(groups)
+                    _, kernel, count, max_groups, buffers, words, offsets = op
+                    words = list(words) + [int(max_groups)]
+                bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
+                offs = [getattr(b, "offset", 0) + (offsets[k] if offsets else 0)
+                        for k, b in enumerate(bound)]
+                ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
+                out.extend((1, _BIND_POINT_COMPUTE, _handle(kernel[0]),
+                            2, _BIND_POINT_COMPUTE, _handle(kernel[1]), _handle(ds)))
+                flat = [int(w) & 0xFFFFFFFF for w in _flat_words(words, binds)]
+                if flat:
+                    out.extend((3, _handle(kernel[1]), _STAGE_COMPUTE, 0, 4 * len(flat),
+                                len(flat)))
+                    out.extend(flat)
+                if kind == "dispatch":
+                    out.extend((4, int(groups), 1, 1))
+                else:
+                    cnt = binds[count.name] if isinstance(count, Arg) else count
+                    out.extend((5, _handle(cnt.handle), getattr(cnt, "offset", 0)))
+                cur.append((False, start, len(out)))
+        return out, marks
+
+    def record(self, binds):
+        """Record this list for binds into a new command buffer (the Vulkan emitter) and,
+        for a list with phase stamps, keep its resolved commands by phase for fused batches
+        (ctx._phases). Returns (command buffer, the descriptor pools it made)."""
+        ctx = self.ctx
+        pool_start = len(getattr(ctx, "_pools", []))
+        ops, marks = self._resolve(binds)
+        # A kept recording may be submitted again while an earlier run of it is still in
+        # flight (a run left pending: a middle stage's zeroing, segment after segment).
+        rec = _Recording(ctx, self.label,
+                         flags=_ONE_TIME_SUBMIT if self.once else _SIMULTANEOUS_USE)
+        fns = _vulkan_emit_fns(ctx._device_state)
+        emit, cmd = _core.vulkan_emit, rec.cmd
+        if getattr(ctx, "_profile", False) and marks:
+            # profiling: each stamp's timestamp after its phase's commands
+            at = 0
+            for name, cmds in marks:
+                end = cmds[-1][2] if cmds else at
+                if end > at:
+                    emit(cmd.value, fns, ops, at, end)
+                    at = end
+                ctx._stamp(cmd, name)
+            if len(ops) > at:
+                emit(cmd.value, fns, ops, at, len(ops))
+        elif len(ops):
+            emit(cmd.value, fns, ops, 0, len(ops))
+        rec.end()
+        if self.captured:
+            self._keep_phases(cmd, ops, marks)
+        pools = list(getattr(ctx, "_pools", [])[pool_start:])
+        return cmd, pools
+
+    def _keep_phases(self, cmd, ops, marks):
+        """Keep the resolved commands by phase in ctx._phases for a fused batch: per phase
+        (work start, work end, barriers start, barriers end) into `ops`. Nothing is kept, so
+        the recording is never fused, where a phase has a barrier between two of its
+        commands or the phases are not the ones a batch knows (_FUSED_PHASES)."""
+        phases, coarse = {}, 0
+        for label, cmds in marks:
+            if label == "start":
+                name = "start"
+            elif label.startswith("coarse"):
+                name = "coarse%d" % min(coarse, 1)
+                coarse += 1
+            elif label == "compact":
+                name = "compact0"
+            else:
+                name = label
+            kinds = [c[0] for c in cmds]
+            if any(b and not later for b, later in
+                   zip(kinds, [all(kinds[i + 1:]) for i in range(len(kinds))])):
+                # A barrier between two of a phase's commands: the batch would run them
+                # unordered (it keeps a phase's barriers for its end). Never fused.
+                return
+            work = [c for c in cmds if not c[0]]
+            bars = [c for c in cmds if c[0]]
+            phases[name] = ((work[0][1], work[-1][2]) if work else (0, 0)) + (
+                (bars[0][1], bars[-1][2]) if bars else (0, 0))
+        if set(phases) - set(_FUSED_PHASES) - {"start"}:
+            return                                  # an unknown structure: never fused
+        phases["_ops"] = ops
+        phases["_serial"] = next(_RECORDING_SERIAL)
+        self.ctx.__dict__.setdefault("_phases", {})[cmd.value] = phases
 
     def free(self, cmd, pools):
         ctx = self.ctx
@@ -1669,56 +1720,10 @@ class Context(Executor, InputUploads):
         ts["pending"][i] = (label, time.perf_counter())
         return _vp(ts["cmds"][2 * i]), _vp(ts["cmds"][2 * i + 1])
 
-    def _capture_begin(self):
-        """Record the vkCmd* calls of the recording about to be built, by phase (see _stamp),
-        so a fused batch can replay them interleaved with other recordings'."""
-        self._cap = {"phases": [], "ops": []}
-        self.vk = _CaptureVK(self.vk, self._cap)
-        return self.vk
-
-    def _capture_end(self, cmd):
-        """End a capture (_capture_begin) and keep the recording cmd's commands by phase, in
-        self._phases, for a fused batch to replay. Nothing is kept, so the recording is never
-        fused, where a phase has a barrier between two of its commands or the phases are not the
-        ones a batch knows (_FUSED_PHASES).
-        """
-        self.vk = getattr(self.vk, "_real", self.vk)
-        cap, self._cap = getattr(self, "_cap", None), None
-        if cap is None or cmd is None:
-            return
-        phases, coarse = {}, 0
-        for label, ops in cap["phases"]:
-            if label == "start":
-                name = "start"
-            elif label.startswith("coarse"):
-                name = "coarse%d" % min(coarse, 1)
-                coarse += 1
-            elif label == "compact":
-                name = "compact0"
-            else:
-                name = label
-            kinds = [o[0] == "vkCmdPipelineBarrier" for o in ops]
-            if any(b and not later for b, later in
-                   zip(kinds, [all(kinds[i + 1:]) for i in range(len(kinds))])):
-                # A barrier between two of a phase's commands: the batch would run them
-                # unordered (it keeps a phase's barriers for its end). Never fused.
-                return
-            phases[name] = ([o for o in ops if o[0] != "vkCmdPipelineBarrier"],
-                            [o for o in ops if o[0] == "vkCmdPipelineBarrier"])
-        if set(phases) - set(_FUSED_PHASES) - {"start"}:
-            return                                  # an unknown structure: never fused
-        phases["_serial"] = next(_RECORDING_SERIAL)
-        self.__dict__.setdefault("_phases", {})[getattr(cmd, "value", cmd)] = phases
-
     _PROF_QUERIES = 8192
 
     def _stamp(self, cmd, label):
-        """Mark a phase boundary in recording `cmd`: for a capture (fused batches), and with
-        MF_GPU_PROFILE=1 as a timestamp."""
-        cap = getattr(self, "_cap", None)
-        if cap is not None:
-            cap["phases"].append((label, cap["ops"]))
-            cap["ops"] = []
+        """With MF_GPU_PROFILE=1, a timestamp in recording `cmd` at a phase boundary."""
         if not getattr(self, "_profile", False):
             return
         vk = getattr(self.vk, "_real", self.vk)
@@ -2033,7 +2038,13 @@ class Context(Executor, InputUploads):
         return _Buffer(self, nbytes, readback=readback, usage=self._ALLOC_USAGE)
 
     def _x_list(self, label, once=False):
-        return _VkList(self, label, once)
+        """The shared command list (_gpuhost.CommandList); _x_record makes it a native one."""
+        return CommandList(label, once, record=self._x_record)
+
+    def _x_record(self, commands):
+        """The native recording of a shared command list: a command buffer per binding of its
+        Args (_VkNative), each emitted from the list by the Vulkan emitter."""
+        return _VkNative(self, commands)
 
     @staticmethod
     def _pre_commands(pre):

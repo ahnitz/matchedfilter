@@ -63,6 +63,214 @@ class MappedBuffer:
 
 
 
+class Arg:
+    """A value a recording binds per run (_x_run's binds), not when it is recorded.
+
+    A buffer: a caller's output or input that may lie elsewhere on every call. A record
+    keyed on it would re-upload its other inputs whenever it moved, and could replay one
+    call's binding into another's memory (handles are not identities).
+
+    words=k: k uniform words (a search window, a threshold) that change between calls on
+    the same buffers: one record serves every window."""
+    __slots__ = ("name", "words")
+
+    def __init__(self, name, words=0):
+        self.name, self.words = name, words
+
+
+
+class CommandList:
+    """A command list: what a recording runs, in one form every backend takes.
+
+    `_gpuexec` builds it through ctx._x_list(label, once) with the methods below, and end()
+    hands it to the backend's _x_record, which makes the backend's native recording. The
+    operations are one integer array (`ops`); everything that is an object -- a kernel, a
+    buffer, an Arg bound per run, a stamp's name, an update's words -- is an index into the
+    list's own tables. The list holds no API handle or enumerant: a kernel is whatever the
+    backend's _x_kernel returned and a buffer whatever it allocated, and only the backend's
+    emitter turns them into API calls. So the collector tracks a list's few tables, not an
+    object per command.
+
+    Operations and their meaning (and what each backend does with them today):
+
+      DISPATCH kernel, groups, buffers, words[, offsets]
+          run `kernel` over `groups` workgroups with `buffers` bound in order (each from its
+          byte offset) and `words` as uniforms. Vulkan: bind pipeline, a descriptor set,
+          push constants, vkCmdDispatch. CUDA: one launch, its parameters packed. Metal:
+          a compute encoder's pipeline, buffers and bytes, dispatchThreadgroups.
+      LISTED kernel, count, max_groups, buffers, words[, offsets]
+          `kernel` over a list whose length a kernel wrote to `count` (a buffer), at most
+          `max_groups` workgroups. Vulkan, Metal: an indirect dispatch on `count`. CUDA: a
+          resident grid that strides over the list (max_groups appended as a word).
+      BARRIER
+          every earlier write before every later access. Vulkan: a pipeline barrier.
+          CUDA: nothing (a stream is ordered). Metal: nothing (encoders are serial).
+      STAMP name
+          a phase boundary: the commands since the previous stamp are phase `name`. Fused
+          batches interleave recordings phase by phase (Vulkan); a profiling run timestamps
+          it. CUDA and Metal: nothing today.
+      FILL buffer, word, offset, nbytes, rows, pitch
+          set `rows` runs of `nbytes` bytes (None: to the end) every `pitch` bytes from
+          `offset` to `word`. Vulkan: vkCmdFillBuffer per row. CUDA: memset per row.
+          Metal: a blit fill (a byte pattern: 0 or 0xFFFFFFFF).
+      UPDATE buffer, words
+          write `words` to the start of `buffer` in stream order. Vulkan: vkCmdUpdateBuffer.
+          CUDA: a copy from a word slot. Metal: a host write as the run is encoded.
+      READBACK buffer, nbytes
+          the host reads `nbytes` of `buffer` after the run. CUDA: a copy into page-locked
+          memory. Vulkan, Metal: nothing (host-visible memory).
+
+    An Arg (a buffer or k words bound per run) is stored as a negative index, -(i + 1) into
+    `args`. Words are tagged: (0, value), (1, n, v0..vn-1) for a vector uniform, (2, arg, k)
+    for an Arg's k words."""
+
+    DISPATCH, LISTED, BARRIER, STAMP, FILL, UPDATE, READBACK = range(1, 8)
+    __slots__ = ("label", "once", "ops", "kernels", "buffers", "args", "data", "_record",
+                 "_index")
+
+    def __init__(self, label, once=False, record=None):
+        import array
+        self.label, self.once, self._record = label, once, record
+        self.ops = array.array("q")
+        self.kernels, self.buffers, self.args, self.data = [], [], [], []
+        self._index = {}                     # id(object) -> table index while building
+
+    def _ref(self, table, obj, tag):
+        key = (tag, id(obj))
+        i = self._index.get(key)
+        if i is None:
+            i = self._index[key] = len(table)
+            table.append(obj)
+        return i
+
+    def _buffer(self, b):
+        if isinstance(b, Arg):
+            return -(self._ref(self.args, b, "a") + 1)
+        return self._ref(self.buffers, b, "b")
+
+    def _words(self, words):
+        out = [len(words)]
+        for w in words:
+            if isinstance(w, Arg):
+                out += (2, self._ref(self.args, w, "a"), int(w.words))
+            elif isinstance(w, tuple):
+                out += (1, len(w)) + tuple(int(x) for x in w)
+            else:
+                out += (0, int(w))
+        return out
+
+    def _launch(self, code, kernel, head, buffers, words, offsets):
+        buffers = list(buffers)
+        self.ops.extend([code, self._ref(self.kernels, kernel, "k")] + head + [len(buffers)]
+                        + [self._buffer(b) for b in buffers]
+                        + ([1] + [int(o) for o in offsets] if offsets is not None else [0])
+                        + self._words(words))
+
+    def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
+        self._launch(self.DISPATCH, kernel, [int(groups)], buffers, words, offsets)
+
+    def listed(self, kernel, count, max_groups, buffers, words=(), offsets=None):
+        self._launch(self.LISTED, kernel, [self._buffer(count), int(max_groups)], buffers,
+                     words, offsets)
+
+    def barrier(self):
+        self.ops.append(self.BARRIER)
+
+    def stamp(self, name):
+        self.ops.extend((self.STAMP, self._ref(self.data, name, "s")))
+
+    def fill(self, buf, word, offset=0, nbytes=None, rows=1, pitch=0):
+        self.ops.extend((self.FILL, self._buffer(buf), int(word) & 0xFFFFFFFF, int(offset),
+                         -1 if nbytes is None else int(nbytes), int(rows), int(pitch)))
+
+    def update(self, buf, words):
+        self.data.append(tuple(int(w) & 0xFFFFFFFF for w in words))
+        self.ops.extend((self.UPDATE, self._buffer(buf), len(self.data) - 1))
+
+    def readback(self, buf, nbytes):
+        self.ops.extend((self.READBACK, self._buffer(buf), int(nbytes)))
+
+    def end(self):
+        """The backend's native recording of this list (its _x_record)."""
+        self._index = None
+        return self._record(self)
+
+    def arg_names(self):
+        """The names of the Args the list binds, sorted."""
+        return sorted({a.name for a in self.args})
+
+    def has_stamps(self):
+        return any(op[0] == "stamp" for op in self.decode())
+
+    def decode(self):
+        """The list's operations as the calls that built it, in order: (name, arguments)
+        with the objects that were passed (method names as above, lower case)."""
+        ops, i, n = self.ops, 0, len(self.ops)
+        buf = lambda k: self.args[-k - 1] if k < 0 else self.buffers[k]
+        while i < n:
+            code = ops[i]
+            if code in (self.DISPATCH, self.LISTED):
+                kernel = self.kernels[ops[i + 1]]
+                if code == self.DISPATCH:
+                    head, i = (ops[i + 2],), i + 3
+                else:
+                    head, i = (buf(ops[i + 2]), ops[i + 3]), i + 4
+                nb = ops[i]
+                buffers = [buf(k) for k in ops[i + 1:i + 1 + nb]]
+                i += 1 + nb
+                offsets = None
+                if ops[i]:
+                    offsets = list(ops[i + 1:i + 1 + nb])
+                    i += 1 + nb
+                else:
+                    i += 1
+                nw, words = ops[i], []
+                i += 1
+                for _ in range(nw):
+                    tag = ops[i]
+                    if tag == 0:
+                        words.append(ops[i + 1])
+                        i += 2
+                    elif tag == 1:
+                        words.append(tuple(ops[i + 2:i + 2 + ops[i + 1]]))
+                        i += 2 + ops[i + 1]
+                    else:
+                        words.append(self.args[ops[i + 1]])
+                        i += 3
+                name = "dispatch" if code == self.DISPATCH else "listed"
+                yield (name, kernel) + head + (buffers, words, offsets)
+            elif code == self.BARRIER:
+                yield ("barrier",)
+                i += 1
+            elif code == self.STAMP:
+                yield ("stamp", self.data[ops[i + 1]])
+                i += 2
+            elif code == self.FILL:
+                nb = ops[i + 4]
+                yield ("fill", buf(ops[i + 1]), ops[i + 2], ops[i + 3], None if nb < 0 else nb,
+                       ops[i + 5], ops[i + 6])
+                i += 7
+            elif code == self.UPDATE:
+                yield ("update", buf(ops[i + 1]), list(self.data[ops[i + 2]]))
+                i += 3
+            elif code == self.READBACK:
+                yield ("readback", buf(ops[i + 1]), ops[i + 2])
+                i += 3
+            else:
+                raise ValueError("unknown command-list operation %d" % code)
+
+    def replay_into(self, target):
+        """Make the same calls on `target` (a backend's own list): its native form, built
+        exactly as if the callers had called it."""
+        for op in self.decode():
+            name, args = op[0], op[1:]
+            if name in ("dispatch", "listed"):
+                getattr(target, name)(*args[:-3], args[-3], args[-2], args[-1])
+            else:
+                getattr(target, name)(*args)
+        return target
+
+
 #: ctypes array types the backends build calls with, made once (carray).
 _CARRAYS = {}
 

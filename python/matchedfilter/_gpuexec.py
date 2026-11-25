@@ -126,6 +126,7 @@ import numpy as np
 
 from ._errors import UnsupportedSize
 from ._gpuhier import HierOps
+from ._gpuhost import Arg  # the drivers import it from here
 from ._gpuhost import (
     MAX_BINS, bin_shift, plan_items, split_items, FollowupUnsupported, assemble_followups,
     ROWWIN_ON, grouped_row_windows, hier_peaks_grouped)
@@ -174,21 +175,6 @@ class Record:
 
     def __init__(self):
         self.buffers, self.owned, self.native = {}, set(), None
-
-
-class Arg:
-    """A value a recording binds per run (_x_run's binds), not when it is recorded.
-
-    A buffer: a caller's output or input that may lie elsewhere on every call. A record
-    keyed on it would re-upload its other inputs whenever it moved, and could replay one
-    call's binding into another's memory (handles are not identities).
-
-    words=k: k uniform words (a search window, a threshold) that change between calls on
-    the same buffers: one record serves every window."""
-    __slots__ = ("name", "words")
-
-    def __init__(self, name, words=0):
-        self.name, self.words = name, words
 
 
 _STARTS, _SERIES, _SPECTRA = Arg("starts"), Arg("series"), Arg("spectra")
