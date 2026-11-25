@@ -102,9 +102,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   (H1 and L1, ten segments, the GPU through `MF_DEVICE`) takes 50.0 s against 51.7 s over
   three alternated pairs, its root host time 2.6 -> 0.6 s, and its triggers move only by
   float rounding (8 of 1.3 million swap places at SNR 3).
-  The device root is offered on Vulkan only for now: the Metal kernels gave wrong series
-  on an Apple GPU in CI and the CUDA kernels have not been run, so those backends keep
-  the host root until their kernels pass the root tests on hardware.
+  The device root is verified on Vulkan (Radeon 8060S), Metal (Apple M2) and CUDA (Quadro
+  RTX 6000). The wrong series first seen on Metal were a driver fault, not the kernels: a
+  run submitted and left in flight was not registered as a pending write on Metal and CUDA,
+  so readers and later work on other queues did not wait for it. On CUDA only a run
+  without a slot is a pending write, as on Vulkan; registering leaf calls too had cost 17%
+  of a steady pass there.
 - Shared-screener clustering, the largest part of a hierarchical search's setup, does the
   same work in less time and gives the same screeners bit for bit. The pair scores stop
   summing a pair once it can no longer reach the score the matching reads, and keep twice
