@@ -18,7 +18,8 @@ import numpy as np
 
 from . import _config, _gputime, _kernels, _vulkan, gatechain
 from ._shared import empty_shared
-from ._gpuhost import MAX_BINS, MappedBuffer, Section, address, hier_peaks_grouped
+from ._gpuhost import (MAX_BINS, BUFFER_SERIALS, BufferPool, MappedBuffer, Section, address,
+                       hier_peaks_grouped)
 from . import _peaks as _pk
 from ._coarse import candidates, coarse_stem
 
@@ -375,16 +376,30 @@ class _Buffer(MappedBuffer):
     will be needed there -- deliberately not written until there is a discrete
     card to measure it on, because an unmeasured transfer path is exactly the
     kind of code that looks right and halves throughput.
+
+    The allocation comes from the device's BufferPool where one of its kind (memory type
+    direction, usage) and size class is idle, and goes back to it on destroy: the buffer
+    is made at the size class (`capacity`) and binds and maps `nbytes` of it. `serial`
+    names this buffer object; a recycled allocation keeps the handle and address it had.
     """
 
     #: Slotted: a search holds thousands, and every full garbage collection walks them.
-    __slots__ = ("ctx", "nbytes", "handle", "memory", "ptr", "_bytes")
+    __slots__ = ("ctx", "nbytes", "handle", "memory", "ptr", "_bytes", "serial", "capacity",
+                 "_kind")
 
     # TRANSFER_DST: any buffer may be cleared on the device (zero_columns, output fills).
     def __init__(self, ctx, nbytes, readback=False, usage=_BUF_STORAGE | _BUF_TRANSFER_DST):
         self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
+        self.serial = next(BUFFER_SERIALS)
+        pool = ctx._device_state.buffers
+        self.capacity = pool.size_class(self.nbytes)
+        self._kind = (bool(readback), int(usage))
+        got = pool.take(self._kind, self.capacity)
+        if got is not None:
+            self.handle, self.memory, self.ptr = got
+            return
         vk = ctx.vk
-        info = _BufferCreate(12, None, 0, self.nbytes, usage, 0, 0, None)
+        info = _BufferCreate(12, None, 0, self.capacity, usage, 0, 0, None)
         self.handle = _vp()
         _check(vk.vkCreateBuffer(ctx.device, ctypes.byref(info), None,
                                  ctypes.byref(self.handle)), "vkCreateBuffer")
@@ -399,13 +414,16 @@ class _Buffer(MappedBuffer):
         self.ptr = _vp()
         _check(vk.vkMapMemory(ctx.device, self.memory, 0, _WHOLE_SIZE, 0,
                               ctypes.byref(self.ptr)), "vkMapMemory")
+        pool.note_made(self.capacity)
 
     def destroy(self):
-        vk, dev = self.ctx.vk, self.ctx.device
+        """Give the allocation back to the device's pool, which frees it when full. The
+        caller guarantees, as it did when this freed the memory, that no submitted work
+        still uses it."""
         if self.handle:
-            vk.vkUnmapMemory(dev, self.memory)
-            vk.vkDestroyBuffer(dev, self.handle, None)
-            vk.vkFreeMemory(dev, self.memory, None)
+            dev = self.ctx._device_state
+            dev.buffers.give(self._kind, self.capacity, (self.handle, self.memory, self.ptr),
+                             address(self.ptr), dev.free_buffer)
             self.handle = None
 
 
@@ -700,12 +718,21 @@ class _Write:
 class _Device:
     """A Vulkan instance and logical device, its compute queues, command pool and pipelines."""
 
+    def free_buffer(self, res):
+        """Unmap and free one allocation (handle, memory, host pointer) the pool lets go."""
+        handle, memory, _ = res
+        self.vk.vkUnmapMemory(self.device, memory)
+        self.vk.vkDestroyBuffer(self.device, handle, None)
+        self.vk.vkFreeMemory(self.device, memory, None)
+
     def __init__(self, index):
         self.index = index
         vk, err = _vulkan._load()
         if vk is None:
             raise VulkanError(err)
         self.vk = vk
+        #: Idle allocations of this device's buffers (_Buffer), shared by its contexts.
+        self.buffers = BufferPool()
         # Every Context uses THIS function table (vk is shared): argtypes set on a context's
         # own table were dropped. VkDeviceSize is 64-bit; without argtypes ctypes passes a
         # Python int as a C int, truncating offsets and sizes (or crashing).

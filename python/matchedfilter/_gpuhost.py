@@ -8,6 +8,7 @@ helpers for the parts that must agree across backends.
 
 from collections import OrderedDict
 import ctypes
+import itertools
 
 import numpy as np
 
@@ -15,7 +16,8 @@ from ._errors import UnsupportedSize
 from ._windows import (
     coarse_lags, _merge_window_bins, _normalize_windows, _window_bin_phases, _window_layout)
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS
-from ._shared import _same_device, containing, containing_samples, shared_buffer, sparsified
+from ._shared import (BUFFER_SERIALS, _same_device, containing, containing_samples, shared_buffer,
+                      sparsified)
 from .device import parse as _parse_device
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).
@@ -58,6 +60,100 @@ class MappedBuffer:
         """Copy the start of the buffer into a caller's contiguous array, and return it."""
         ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
         return out
+
+
+
+class BufferPool:
+    """Device allocations a backend's buffers give back when freed, for its next buffers of
+    the same kind and size class to take, instead of freeing and allocating again.
+
+    A pycbc job builds a search per top template, and every search builds its plans'
+    series sources, spectra pools, slots and outputs afresh: on the 8060S that was 118,545
+    vkAllocateMemory/vkMapMemory and as many frees in the 171,828-template job, most of it
+    6-8 MB series and spectra buffers (about 2 GB of them per top template), about 15 s of
+    a 116 s job (2026-11-25). Allocations are pooled by the backend's kind key (memory type,
+    usage) and size class (the smallest m * 2^k of m in 4..7 that holds the request: at
+    most 25% over it).
+
+    No constant bounds the pool: allocations live and idle together never exceed the most
+    the backend ever had live at once (peak_live), so a pooled process never holds more
+    device memory than it needed at its peak without the pool. Past that the idle
+    allocations given back longest ago are freed.
+
+    What a backend must guarantee to give an allocation back: no submitted work still uses
+    it, the guarantee it already gives before freeing one. A recycled allocation keeps its
+    old contents (`poison`, for tests, fills it with 0xFF bytes instead); its handle and host
+    address are the old ones, so its buffer object takes a new serial (BUFFER_SERIALS).
+    """
+
+    #: Fill a recycled allocation with 0xFF bytes (float NaN) before it is handed out: for
+    #: tests that look for readers of memory nobody wrote.
+    poison = False
+
+    def __init__(self):
+        self.live_bytes = self.idle_bytes = self.peak_live = 0
+        self.made = self.reused = self.freed = 0
+        self._free = {}                  # (kind, capacity) -> {token: (res, ptr, release)}
+        self._age = OrderedDict()        # token -> (kind, capacity), oldest first
+        self._tokens = itertools.count()
+
+    @staticmethod
+    def size_class(nbytes):
+        """The capacity an allocation of nbytes is made at: at least 256 bytes, else the
+        smallest m * 2^k (m in 4..7) at or above nbytes."""
+        n = max(int(nbytes), 256)
+        k = max(0, n.bit_length() - 3)
+        m = -(-n >> k)          # ceil(n / 2^k), in 4..8
+        return m << k
+
+    def take(self, kind, capacity):
+        """An idle allocation (the backend's resources) of this kind and capacity, the one
+        given back last, or None: the backend then makes one and calls note_made()."""
+        free = self._free.get((kind, capacity))
+        if not free:
+            return None
+        token, (res, ptr, _) = free.popitem()
+        del self._age[token]
+        self.idle_bytes -= capacity
+        self.live_bytes += capacity
+        self.reused += 1
+        if self.poison and ptr:
+            ctypes.memset(ptr, 0xFF, capacity)
+        return res
+
+    def note_made(self, capacity):
+        """The backend made a new allocation of this capacity."""
+        self.made += 1
+        self.live_bytes += capacity
+        self.peak_live = max(self.peak_live, self.live_bytes)
+        self._trim()
+
+    def give(self, kind, capacity, res, ptr, release):
+        """Keep an allocation the backend is done with (res, its host address ptr; release(res)
+        frees it), freeing the oldest idle ones past the peak."""
+        self.live_bytes -= capacity
+        token = next(self._tokens)
+        self._free.setdefault((kind, capacity), {})[token] = (res, ptr, release)
+        self._age[token] = (kind, capacity)
+        self.idle_bytes += capacity
+        self._trim()
+
+    def _trim(self):
+        while self._age and self.live_bytes + self.idle_bytes > self.peak_live:
+            old, key = self._age.popitem(last=False)
+            r, _, rel = self._free[key].pop(old)
+            self.idle_bytes -= key[1]
+            self.freed += 1
+            rel(r)
+
+    def clear(self):
+        """Free every idle allocation."""
+        for free in self._free.values():
+            for res, _, release in free.values():
+                release(res)
+        self._free.clear()
+        self._age.clear()
+        self.idle_bytes = 0
 
 
 class Section:

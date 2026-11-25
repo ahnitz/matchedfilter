@@ -5,11 +5,18 @@ ROCm allocation. Consumers must finish writing before a synchronous filter call.
 """
 import bisect
 import ctypes
+import itertools
 import weakref
 import numpy as np
 from ._results import _SparsePeaks
 
 _allocations = weakref.WeakValueDictionary()
+
+#: A fresh name for every device buffer object and shared allocation a backend makes, a
+#: recycled allocation's included (_gpuhost.BufferPool): handles and host addresses are
+#: reused, so anything cached on a buffer is keyed on this, never on a handle, an address
+#: or id().
+BUFFER_SERIALS = itertools.count(1)
 # Sorted start addresses, for backends that bind views INSIDE an allocation
 # (ctx.shared_views): CUDA unified memory has one address on host and device, so a
 # row of a shared (templates, samples) output is itself a valid device pointer.
@@ -19,6 +26,8 @@ _starts = []
 class _Allocation:
     def __init__(self, buffer):
         self.buffer = buffer
+        # this allocation's name: its address and handle may be a freed one's (BufferPool)
+        self.serial = next(BUFFER_SERIALS)
         start = int(buffer.ptr.value if hasattr(buffer.ptr, 'value') else buffer.ptr)
         _allocations[start] = self
         bisect.insort(_starts, start)
@@ -83,6 +92,19 @@ def _containing(address):
         del _starts[i]           # freed: prune lazily
         i -= 1
     return None, None
+
+
+def allocation_serial(array):
+    """The serial of the shared allocation array lies in (_Allocation.serial), or None for
+    memory that is not one: what a cache keyed on an array's address adds, since a later
+    allocation can start at the same address."""
+    address = array.ctypes.data
+    allocation = _allocations.get(address)
+    if allocation is None:
+        start, allocation = _containing(address)
+        if allocation is not None and address >= start + allocation.buffer.nbytes:
+            allocation = None
+    return None if allocation is None else allocation.serial
 
 
 def shared_buffer(array, ctx):

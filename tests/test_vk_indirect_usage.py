@@ -98,6 +98,9 @@ def watch(monkeypatch):
     # follow-ups ran on its records, made before the watch began.
     gc.collect()
     table = _vkcompute.Context(index)        # reaches the device's function table
+    # Idle allocations an earlier test gave back (_gpuhost.BufferPool) would come back
+    # without a vkCreateBuffer the watch sees: free them, so every buffer is made under it.
+    table._device_state.buffers.clear()
     w = _Watch(monkeypatch, table)
     w.ctx = _vkcompute.Context(index)
     try:

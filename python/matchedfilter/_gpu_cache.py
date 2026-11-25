@@ -1,5 +1,6 @@
 """Input residency and in-flight results (Pending) shared by the Vulkan, CUDA and Metal
 dispatch caches."""
+from ._shared import allocation_serial
 
 
 class Pending:
@@ -80,7 +81,9 @@ class InputUploads:
             resident = self._uploaded[name]
             if dirty:
                 resident.clear()
-            signature = (array.ctypes.data, array.shape, array.strides)
+            # the allocation's serial too: a freed one's address is reused (BufferPool)
+            signature = (array.ctypes.data, array.shape, array.strides,
+                         allocation_serial(array))
             needed.append(resident.get(key) != signature)
             signatures.append(signature)
         return (*needed, *signatures)
