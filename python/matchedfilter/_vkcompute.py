@@ -658,6 +658,12 @@ class _FusedBatch:
         fences = (_vp * 1)(self.fence)
         _check(vk.vkWaitForFences(dev.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         vk.vkDestroyFence(dev.device, self.fence, None)
+        # A finished batch needs none of its contexts. The device's fused cache keeps the
+        # batch beside its recording (to wait on it before freeing the recording): with its
+        # items it kept every context of the last 64 fused recordings alive, and with them
+        # their plans' records and buffers -- about 30 top templates' worth (18 GB) in a
+        # pycbc job, whose recordings never recur once their search is gone.
+        self.items, self.prof = [], None
 
 
 def fused():
