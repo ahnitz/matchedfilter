@@ -683,7 +683,7 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
         pk = _roofline.peaks(device, ctx=roof["ctx"])
         rr = _roofline.report(roof["work"], pk, steady_segments, total,
                               {k: v for k, v in measured.items() if v is not None})
-        rr["problems"] = roof["problems"]
+        rr["problems"] = rr["problems"] + roof["problems"]
         rr["measured_note"] = ("measured ms: middle/followups are the ladder's host stage timers "
                                "(enqueue time under --pipeline on a GPU); CPU fine stages are "
                                "engine ticks (forward = run_series minus tiers and refine)")

@@ -509,9 +509,9 @@ class Context(Executor, InputUploads):
     _timing = False
 
     def _x_peaks(self, out):
-        """Theoretical peaks (_roofline.gpu_peaks): the core count plus a stated formula."""
-        chip = next((k for k in _pk._APPLE_GPU if k in (out["name"] or "")), "M2")
-        ghz, cores, bus, mts = _pk._APPLE_GPU[chip]
+        """Theoretical peaks (_roofline.gpu_peaks): the ioreg core count and the chip named
+        in the device name (_peaks.apple_gpu_peaks); an unlisted chip's peaks are unknown."""
+        cores = None
         try:
             import subprocess
             txt = subprocess.run(["ioreg", "-rc", "AGXAccelerator"], capture_output=True,
@@ -521,15 +521,7 @@ class Context(Executor, InputUploads):
                 cores = int(m.group(1))
         except OSError:
             pass
-        # 128 fp32 ALUs per core; Apple GPUs before M3 run fp16 at the fp32 rate.
-        f = cores * 128 * 2 * ghz * 1e9
-        out.update(cores=cores, clock_ghz=ghz, flops=dict(fp32=f, fp16=f, int16=f),
-                   bandwidth=bus * mts * 1e6 / 8,
-                   formula="%d cores (ioreg gpu-core-count) x 128 ALUs x 2 x %.3f GHz (vendor "
-                           "clock); fp16 at the fp32 rate" % (cores, ghz),
-                   bandwidth_formula="%d-bit LPDDR x %d MT/s / 8 (vendor figure)" % (bus, mts))
-        out["measured"] = _pk._MEASURED.get("Apple %s GPU" % chip)
-        return out
+        return _pk.apple_gpu_peaks(out, cores)
 
     def __init__(self, index=0):
         if sys.platform != "darwin":

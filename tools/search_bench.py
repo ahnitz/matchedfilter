@@ -120,7 +120,7 @@ def main():
     kernels = {}
     from matchedfilter import _gputime as gputime
     from matchedfilter import _roofline as rl
-    roof = dict(work=rl.Work(), problems=[], ctx=None)
+    roof = dict(work=rl.Work(), problems=[], ctx=None, ticks={})
     for f in files:
         rec = pickle.load(open(f, "rb"))
         search, inputs, windows, nt, secs = build(rec, a.device)
@@ -143,7 +143,10 @@ def main():
         if a.roofline:
             after = rl.snapshot(mids, fines)
             rl.middle_work(roof["work"], before, after, mids)
-            rl.fine_work(roof["work"], before, after, fines, a.device, problems=roof["problems"])
+            ticks = rl.fine_work(roof["work"], before, after, fines, a.device,
+                                 problems=roof["problems"])
+            for k, v in ticks.items():
+                roof["ticks"][k] = roof["ticks"].get(k, 0) + v
             roof["ctx"] = roof["ctx"] or rl.gpu_context(fines)
         if gputime.enabled():
             dev_s = gputime.busy(clear=True)[0] / a.repeats
@@ -174,9 +177,15 @@ def main():
             print("    %-28s %8.0f submissions/pass %8.3f s/pass" % (lab, n, sec))
     r = None
     if a.roofline:
+        # Measured per stage, as tools/ladder.py has it: the middle is the search's inner
+        # stage timer; the CPU's fine stages are engine ticks over the timed passes.
+        measured = {"middle": stage.get("inner", 0.0) * a.repeats} if "inner" in stage else {}
+        if roof["ticks"]:
+            rate = rl.cpu_tick_rate()
+            measured.update({k: v / rate for k, v in roof["ticks"].items()})
         r = rl.report(roof["work"], rl.peaks(a.device, ctx=roof["ctx"]), a.repeats,
-                      s * a.repeats)
-        r["problems"] = roof["problems"]
+                      s * a.repeats, measured)
+        r["problems"] = r["problems"] + roof["problems"]
         print(rl.format_report(r))
     if a.json:
         import json

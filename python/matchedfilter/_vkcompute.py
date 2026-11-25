@@ -686,7 +686,6 @@ _DEVICES = {}
 #: Live contexts by id(), for validating cached fused recordings (keys hold ids).
 import weakref as _weakref
 import struct
-import os as _os
 import re as _re
 _CONTEXTS_BY_ID = _weakref.WeakValueDictionary()
 
@@ -2103,11 +2102,36 @@ class Context(Executor, InputUploads):
 
 
 
-    def _shader_core(self):
-        """VkPhysicalDeviceShaderCorePropertiesAMD: (engines, arrays/engine, CUs/array, SIMDs/CU,
-        wave size), or None."""
+    def _device_extensions(self):
+        """The names (bytes) of the device extensions the physical device offers."""
+        vk = self.vk
+        vk.vkEnumerateDeviceExtensionProperties.argtypes = [_vp, _vp, ctypes.POINTER(_u32), _vp]
+        n = _u32()
+        vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), None)
+        exts = (_ExtProps * n.value)()
+        vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), exts)
+        return {e.extensionName for e in exts}
+
+    def _properties2(self, ext):
+        """Query one extension structure `ext` (sType set, pNext None) through
+        vkGetPhysicalDeviceProperties2; False when the entry point is missing."""
         vk = self.vk
         if not hasattr(vk, "vkGetPhysicalDeviceProperties2"):
+            return False
+
+        class Props2(ctypes.Structure):
+            _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
+                        ("props", ctypes.c_ubyte * 1024)]
+        p2 = Props2(1000059001, ctypes.cast(ctypes.pointer(ext), ctypes.c_void_p))
+        vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(p2))
+        return True
+
+    def _shader_core(self, extensions=None):
+        """VkPhysicalDeviceShaderCorePropertiesAMD: (engines, arrays/engine, CUs/array, SIMDs/CU,
+        wave size), or None when the device does not offer VK_AMD_shader_core_properties."""
+        exts = self._device_extensions() if extensions is None else extensions
+        if b"VK_AMD_shader_core_properties" not in exts:
             return None
 
         class Core(ctypes.Structure):
@@ -2118,60 +2142,49 @@ class Context(Executor, InputUploads):
                     "minSgprAllocation", "maxSgprAllocation", "sgprAllocationGranularity",
                     "vgprsPerSimd", "minVgprAllocation", "maxVgprAllocation",
                     "vgprAllocationGranularity")]
-
-        class Props2(ctypes.Structure):
-            _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
-                        ("props", ctypes.c_ubyte * 1024)]
         core = Core(1000185000, None)
-        p2 = Props2(1000059001, ctypes.cast(ctypes.pointer(core), ctypes.c_void_p))
-        vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(p2))
-        if not core.shaderEngineCount:
+        if not self._properties2(core) or not core.shaderEngineCount:
             return None
         return (core.shaderEngineCount, core.shaderArraysPerEngineCount,
                 core.computeUnitsPerShaderArray, core.simdPerComputeUnit, core.wavefrontSize)
 
+    def _pci_address(self, extensions=None):
+        """The device's PCI address ('0000:c2:00.0') from VK_EXT_pci_bus_info, or None when
+        the device does not offer it."""
+        exts = self._device_extensions() if extensions is None else extensions
+        if b"VK_EXT_pci_bus_info" not in exts:
+            return None
+
+        class Pci(ctypes.Structure):
+            _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
+                        ("domain", ctypes.c_uint32), ("bus", ctypes.c_uint32),
+                        ("device", ctypes.c_uint32), ("function", ctypes.c_uint32)]
+        pci = Pci(1000212000, None, 0, 0, 0, 0)
+        if not self._properties2(pci):
+            return None
+        return "%04x:%02x:%02x.%x" % (pci.domain, pci.bus, pci.device, pci.function)
+
     def _x_peaks(self, out):
-        """Theoretical peaks (_roofline.gpu_peaks): API-queryable counts plus a stated formula."""
-        m = _re.search(r"gfx\d+", out["name"] or "", _re.I)
-        arch = m.group(0).lower() if m else ""
-        core = self._shader_core()
-        cus = core[0] * core[1] * core[2] if core else None
-        if cus is None:
-            cus = {"gfx1151": 40}.get(arch)
-        if cus is None:
-            # No core count this API reports (VK_AMD_shader_core_properties is AMD's) and no
-            # table entry (e.g. Intel): peaks unknown, the fraction NaN, the report still made.
-            nan = float("nan")
-            out.update(arch=arch, cus=None, flops=dict(fp32=nan, fp16=nan, int16=nan),
-                       bandwidth=nan, formula="unknown (no shader-core count for this device)",
-                       bandwidth_formula="unknown")
-            out["measured"] = None
-            return out
-        mhz = 0
-        for card in sorted(_os.listdir("/sys/class/drm")) if _os.path.isdir("/sys/class/drm") else ():
-            txt = _pk._read("/sys/class/drm/%s/device/pp_dpm_sclk" % card)
-            if txt:
-                mhz = max([mhz] + [int(x) for x in _re.findall(r"(\d+)Mhz", txt)])
-        ghz = (mhz or 2900) / 1e3
-        # RDNA 3/3.5 (gfx11) and RDNA 4 (gfx12): 2 SIMD32 per CU, dual-issue fp32 (VOPD /
-        # wave64): 128 fp32 FMA per CU per clock; packed fp16 doubles it. (RDNA 2 and older,
-        # gfx10 and below: 64 / 128.)
-        gen = _re.match(r"gfx(\d+?)(\d{2})$", arch) if len(arch) >= 6 else None
-        dual_issue = gen is not None and int(gen.group(1)) >= 11
-        fp32 = 128 if dual_issue else 64
-        bus, mts = _pk._AMD_MEM.get(arch, (None, None))
-        out.update(arch=arch, cus=cus, clock_ghz=ghz,
-                   flops=dict(fp32=cus * fp32 * 2 * ghz * 1e9, fp16=cus * 2 * fp32 * 2 * ghz * 1e9,
-                              int16=cus * 2 * fp32 * 2 * ghz * 1e9),
-                   bandwidth=(bus * mts * 1e6 / 8) if bus else float("nan"),
-                   formula="%d CUs (%s) x %d fp32 lanes (dual issue) x 2 x %.2f GHz max sclk; "
-                           "fp16/int16 packed: 2x" % (cus, "VK_AMD_shader_core_properties" if core
-                                                       else "table", fp32, ghz),
-                   bandwidth_formula=("%d-bit x %d MT/s / 8 (vendor figure; Vulkan does not "
-                                      "describe memory)" % (bus, mts)) if bus else "unknown")
-        out["measured"] = _pk._MEASURED.get(arch)
-        return out
+        """Theoretical peaks (_roofline.gpu_peaks) from what the device reports: the CU count
+        from VK_AMD_shader_core_properties; the architecture from the amdgpu kernel driver's
+        IP discovery for this device's PCI address (VK_EXT_pci_bus_info), else from a gfx
+        name in the device name; the clock from the same device's pp_dpm_sclk. Whatever cannot
+        be derived is reported unknown (NaN, with the reason), never assumed."""
+        exts = self._device_extensions()
+        core = self._shader_core(exts)
+        pci = self._pci_address(exts)
+        arch, arch_source = None, None
+        if pci is not None:
+            arch = _pk.amd_ip_arch(pci)
+            arch_source = "amdgpu IP discovery" if arch else None
+        if arch is None:
+            m = _re.search(r"gfx[0-9a-f]+", out["name"] or "", _re.I)
+            arch, arch_source = (m.group(0).lower(), "device name") if m else (None, None)
+        sclk = (_pk.max_clock_mhz(_pk._read("/sys/bus/pci/devices/%s/pp_dpm_sclk" % pci))
+                if pci else None)
+        out.update(pci=pci)
+        return _pk.amd_gpu_peaks(out, core[0] * core[1] * core[2] if core else None, arch, sclk,
+                                 "VK_AMD_shader_core_properties" if core else None, arch_source)
 
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""

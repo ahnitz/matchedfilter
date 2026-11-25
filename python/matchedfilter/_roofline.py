@@ -130,15 +130,31 @@ class Stage:
         self.bytes += nbytes
         self.count += count
 
+    def terms_s(self, peaks):
+        """(compute seconds, memory seconds) at the peaks. A term with work whose peak is
+        unknown (missing, NaN or not positive) is NaN; a term without work is zero."""
+        def seconds(work, peak):
+            if not work:
+                return 0.0
+            return work / peak if (peak is not None and peak > 0) else float("nan")
+        return (seconds(self.flops, peaks["flops"].get(self.precision)),
+                seconds(self.bytes, peaks.get("bandwidth")))
+
     def roofline_s(self, peaks):
-        tf = self.flops / peaks["flops"][self.precision]
-        tb = self.bytes / peaks["bandwidth"]
+        """(seconds, bound): the larger of the compute and memory times and which one it is.
+        When either term is unknown the time is NaN and the bound 'unknown': a missing peak
+        never decides the bound by dropping out of the maximum."""
+        tf, tb = self.terms_s(peaks)
+        if math.isnan(tf) or math.isnan(tb):
+            return float("nan"), "unknown"
         return max(tf, tb), ("compute" if tf >= tb else "memory")
 
     def as_dict(self, peaks, per=1.0):
         t, bound = self.roofline_s(peaks)
+        tf, tb = self.terms_s(peaks)
         d = dict(stage=self.name, precision=self.precision, count=self.count / per, unit=self.unit,
-                 flops=self.flops / per, bytes=self.bytes / per, roofline_s=t / per, bound=bound)
+                 flops=self.flops / per, bytes=self.bytes / per, roofline_s=t / per, bound=bound,
+                 compute_s=tf / per, memory_s=tb / per)
         if self.measured_s is not None:
             d["measured_s"] = self.measured_s / per
         return d
@@ -430,7 +446,10 @@ def cpu_peaks(measure_bandwidth=True):
         except OSError:
             pass
         chip = next((k for k in _APPLE_CPU if k in brand), None)
-        ghz, pipes = _APPLE_CPU.get(chip, (3.0, 2))
+        # An unlisted chip's clock and pipes are unknown, not those of some other chip.
+        ghz, pipes = _APPLE_CPU.get(chip, (float("nan"), float("nan")))
+        if chip is None:
+            out["unknown"] = ["clock and FMA pipes of %r (no entry in _APPLE_CPU)" % brand]
         width = 128
         out["name"] = brand or "arm64"
         lanes = dict(fp32=width // 32, fp16=width // 16, int16=width // 16)
@@ -441,21 +460,31 @@ def cpu_peaks(measure_bandwidth=True):
         info = _cpuinfo()
         width, pipes, uarch, imul = _x86_core(info)
         khz = _read("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
-        ghz = int(khz) / 1e6 if khz else float(info.get("cpu MHz", "3000")) / 1e3
+        # Without cpufreq (some VMs) the clock is the current reading in /proc/cpuinfo, and
+        # the formula says so; without either it is unknown.
+        clock_source = "cpuinfo_max_freq, the base clock where turbo is off"
+        if khz:
+            ghz = int(khz) / 1e6
+        elif info.get("cpu MHz"):
+            ghz, clock_source = float(info["cpu MHz"]) / 1e3, "the current 'cpu MHz' reading"
+        else:
+            ghz, clock_source = float("nan"), "unknown"
+            out["unknown"] = ["CPU clock (no cpuinfo_max_freq and no 'cpu MHz')"]
         out["name"] = "%s (%s)" % (info.get("model name", "x86"), uarch)
         # No x86 FP16 arithmetic here (AVX512-FP16 aside): fp16 work runs at the fp32 rate.
         lanes = dict(fp32=width // 32, fp16=width // 32, int16=width // 16)
         out["formula"] = ("%d-bit datapath x %d FMA ports x lanes x 2 x %.3f GHz max clock "
                           "(fp16 at the fp32 rate: no FP16 vector arithmetic; int16: %d lanes x "
                           "%d int16 multiply pipe(s) x 2, multiply + add counted as one FMA; "
-                          "clock = cpuinfo_max_freq, the base clock where turbo is off)"
-                          % (width, pipes, ghz, width // 16, imul))
+                          "clock = %s)" % (width, pipes, ghz, width // 16, imul, clock_source))
         out["measured"] = _MEASURED.get(uarch)
     out["clock_ghz"] = ghz
     out["flops"] = {p: lanes[p] * pipes * 2 * ghz * 1e9 for p in lanes}
     if mach not in ("arm64", "aarch64"):
         out["flops"]["int16"] = lanes["int16"] * imul * 2 * ghz * 1e9
     out["bandwidth"] = cpu_bandwidth() if measure_bandwidth else float("nan")
+    if not measure_bandwidth:
+        out.setdefault("unknown", []).append("memory bandwidth (not measured)")
     out["bandwidth_formula"] = "one core's streaming copy (numpy, read + write), measured"
     return out
 
@@ -500,9 +529,18 @@ def report(work, pk, segments, wall_s, measured=None):
             if s.count or s.flops]
     roof = sum(r["roofline_s"] for r in rows)
     wall = wall_s / segments
+    problems = []
+    blind = [r["stage"] for r in rows if r["bound"] == "unknown"]
+    if blind:
+        # Loud: the total and the fraction are NaN rather than a smaller, wrong number.
+        problems.append("ROOFLINE INCOMPLETE: a peak is unknown, so stages %s have no roofline "
+                        "time and the fraction is NaN; unknown: %s" % (
+                            ", ".join(blind), "; ".join(pk.get("unknown") or
+                                                        ["a peak is NaN or missing"])))
+    known = [r for r in rows if not math.isnan(r["roofline_s"])]
     return dict(peaks=pk, segments=segments, stages=rows, roofline_s=roof, wall_s=wall,
-                fraction=roof / wall if wall > 0 else float("nan"),
-                dominant=max(rows, key=lambda r: r["roofline_s"])["stage"] if rows else None)
+                fraction=roof / wall if wall > 0 else float("nan"), problems=problems,
+                dominant=max(known, key=lambda r: r["roofline_s"])["stage"] if known else None)
 
 
 def format_report(r):
@@ -512,6 +550,9 @@ def format_report(r):
         ", ".join("%s %.3g TFLOP/s" % (k, v / 1e12) for k, v in pk["flops"].items()),
         pk["bandwidth"] / 1e9),
         "  flops: " + pk.get("formula", ""), "  bandwidth: " + pk.get("bandwidth_formula", "")]
+    for p in r.get("problems", []):
+        if p.startswith("ROOFLINE INCOMPLETE"):
+            lines.append("  WARNING: " + p)
     if pk.get("measured"):
         lines.append("  measured ceilings (not used): %s" % pk["measured"])
     lines.append("  %-14s %-5s %12s %-6s %10s %9s %8s %7s %11s" % (

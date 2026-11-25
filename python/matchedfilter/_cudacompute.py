@@ -1385,26 +1385,12 @@ class Context(Executor, InputUploads):
         self._cache_order = {}
 
     def _x_peaks(self, out):
-        """Theoretical peaks (_roofline.gpu_peaks): driver attributes plus a stated formula."""
+        """Theoretical peaks (_roofline.gpu_peaks) from the driver's attributes
+        (_peaks.cuda_gpu_peaks); a peak the attributes do not determine is reported unknown."""
         a = self._attr
-        sms, khz = a(16), a(13)              # MULTIPROCESSOR_COUNT, CLOCK_RATE (kHz)
-        mem_khz, bus = a(36), a(37)          # MEMORY_CLOCK_RATE (kHz), GLOBAL_MEMORY_BUS_WIDTH
-        cc = (a(75), a(76))
-        # FP32 lanes per SM by compute capability (CUDA C Programming Guide, arithmetic
-        # instruction throughput); vector fp16 runs at the fp32 rate from 8.6 on.
-        fp32 = {(7, 0): 64, (7, 5): 64, (8, 0): 64, (8, 6): 128, (8, 7): 128, (8, 9): 128,
-                (9, 0): 128}.get(cc, 128)
-        fp16 = {(7, 0): 128, (7, 5): 128, (8, 0): 256}.get(cc, fp32)
-        ghz = khz / 1e6
-        out.update(sms=sms, cc=cc, clock_ghz=ghz,
-                   flops=dict(fp32=sms * fp32 * 2 * ghz * 1e9, fp16=sms * fp16 * 2 * ghz * 1e9,
-                              int16=sms * fp32 * 2 * ghz * 1e9),
-                   bandwidth=2 * mem_khz * 1e3 * bus / 8,
-                   formula="%d SMs x %d fp32 lanes (fp16 %d) x 2 x %.3f GHz boost; int16 at the "
-                           "fp32 rate; tensor cores not counted" % (sms, fp32, fp16, ghz),
-                   bandwidth_formula="2 x %.0f MHz memory clock x %d-bit bus / 8" % (mem_khz / 1e3, bus))
-        out["measured"] = _pk._MEASURED.get("L40S") if "L40S" in (out["name"] or "") else None
-        return out
+        # MULTIPROCESSOR_COUNT, CLOCK_RATE (kHz), MEMORY_CLOCK_RATE (kHz),
+        # GLOBAL_MEMORY_BUS_WIDTH, COMPUTE_CAPABILITY_MAJOR/MINOR
+        return _pk.cuda_gpu_peaks(out, a(16), a(13), a(36), a(37), (a(75), a(76)))
 
     def _word_slots(self):
         slots = self.__dict__.get("_slots")
