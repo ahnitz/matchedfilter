@@ -80,19 +80,19 @@ Alpha releases may change the API. Pin a version for reproducible work.
   dispatches that take adjacent columns of the decomposition per workgroup and read the
   products a merge needs once; its output stays in device memory, where the middle stage
   reads it. A block's spectrum is uploaded once, the first time a search reads it, and kept
-  while the caller's array lives; the outputs, the template's buffer and one recording per
+  while the caller's array lives (checked by its XXH64 before each use, and uploaded again if
+  the caller rewrote it in place); the outputs, the template's buffer and one recording per
   chunk are kept for the process, so the search a caller builds per root (PyCBC) uploads
   and records nothing. Where a search computes its roots is a measured choice
-  (`root-place`): chunks alternate between the host and the device, a chunk in which setup
-  ran is no sample, and the device stands unless the host is clearly faster, so a device
-  that is already the bound can keep the host.
+  (`root-place`): a run's two halves go to the host and the device, their wall times per
+  unit of leaf work are a round, chunks in which setup ran are left out, and the device
+  stands unless the host is clearly faster (on a tie too: it moves work off the host).
   Radeon 8060S: a root of 2^20 samples takes the device 88 us per block (45 us at its
   bandwidth bound) against 1.6 ms of a Zen 5 core; `tools/search_bench.py` on the three
-  captured tops runs 257-304 M templates in real time against 170 M (root host time 70 -> 9 ms
-  a pass). In the PyCBC job the root's host time falls from 2.6 to 0.6 s but the job's wall
-  time does not change (52.2 against 52.5 s over three pairs): the host root was already
-  hidden under the device's leaf work, and the host now waits for it there. Its triggers
-  move only by float rounding (8 of 1.3 million swap places at SNR 3).
+  captured tops runs 322-335 M templates in real time against 216-232 M; the PyCBC job
+  (H1 and L1, ten segments, the GPU through `MF_DEVICE`) takes 50.0 s against 51.7 s over
+  three alternated pairs, its root host time 2.6 -> 0.6 s, and its triggers move only by
+  float rounding (8 of 1.3 million swap places at SNR 3).
 - Shared-screener clustering, the largest part of a hierarchical search's setup, does the
   same work in less time and gives the same screeners bit for bit. The pair scores stop
   summing a pair once it can no longer reach the score the matching reads, and keep twice

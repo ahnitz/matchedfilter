@@ -269,7 +269,9 @@ class Placement:
         whose own root and next root were both of that half: the chunk at the switch, the
         run's first chunk (its banks' first calls record their device work) and any chunk in
         which setup ran -- a bank built or calibrated, a root recording built or a block
-        uploaded (DeviceRoot.built), the host's transform plan made -- are left out, so
+        uploaded (DeviceRoot.built), the host's transform plan made, a recording built by a
+        bank's GPU context (a new top's first calls, a call shape's band forward) -- are
+        left out, so
         neither arm pays setup in its timed time;
       * the two halves of a run are a round (_choice.Choice.round): the device stands unless
         the host is faster by the tie in three quarters of rounds, and on a tie (see PLACES).
@@ -329,7 +331,9 @@ class Placement:
             return
         acc = run[2]
         if all(a[1] > 0 and a[0] > 0 for a in acc.values()):
-            from ._choice import _AUTOTUNE_LOCK
+            from ._choice import _AUTOTUNE_LOCK, _log_autotune
+            _log_autotune("root placement round: %s first, %s", run[0][0], ", ".join(
+                "%s %.4f s / %d = %.3g" % (arm, a[0], a[1], a[0] / a[1]) for arm, a in acc.items()))
             with _AUTOTUNE_LOCK:
                 self.choice.round({arm: a[0] / a[1] for arm, a in acc.items()})
 

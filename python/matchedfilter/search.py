@@ -1025,9 +1025,23 @@ class HierarchicalSearch:
 
     def _root_mark(self, root):
         """What a chunk's placement sample starts from: (time, setup time, device root
-        setup count, host root plans)."""
+        setup count, host root plans, recordings the banks' GPU contexts built)."""
         return (time.perf_counter(), self.timings["setup"], self._device_root(root).built,
-                len(_ROOT_PLANS))
+                len(_ROOT_PLANS), self._device_builds())
+
+    def _device_builds(self):
+        """Recordings built so far by the GPU contexts of this search's banks (leaf and
+        middle: Executor.built): a chunk in which one was built ran setup."""
+        total = 0
+        banks = list(self._leaf_banks.values()) + [b.bank for b in self._inner.values()]
+        for bank in banks:
+            for g in getattr(bank, "_groups", ()) or ():
+                for plan in {id(p): p for p in (g.__dict__.get("_plan"),
+                                                g.__dict__.get("_corr_plan")) if p}.values():
+                    ctx = getattr(plan, "_gpu", None)
+                    if ctx is not None:
+                        total += ctx.built()
+        return total
 
     def _root_sample(self, trial, root, mark, k, step):
         """Chunk k's wall time and leaf work for the placement trial (_gpuroot.Placement):
@@ -1036,7 +1050,7 @@ class HierarchicalSearch:
         if place is None or self._root_placed.get(k + 1, place) != place:
             return
         if (self.timings["setup"] != mark[1] or self._device_root(root).built != mark[2]
-                or len(_ROOT_PLANS) != mark[3]):
+                or len(_ROOT_PLANS) != mark[3] or self._device_builds() != mark[4]):
             return
         work = sum(len(lf.counts) * sum(b - a for a, b in step.win[(id(lf), c)])
                    for lf in self._leaves_below(root) for c in step.active)
