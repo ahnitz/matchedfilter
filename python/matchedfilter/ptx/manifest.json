@@ -2696,6 +2696,29 @@
    "tc_n": 131072,
    "tile": 1
   },
+  "tc_root1_2097152_lds32": {
+   "cap": 512,
+   "coarse16": 0,
+   "entry": "tcRootStage1",
+   "file": "tc_root1_2097152_lds32.ptx.gz",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 1024,
+   "n2": 2048,
+   "portable": 1,
+   "ppg": 8,
+   "role": "root1",
+   "sha256": "b2e2ed1a9785a96a33dffc5722c573c69af8f21b6de948774bcbb107cf23ef78",
+   "single_bin": 0,
+   "tc_n": 2097152,
+   "tile": 1
+  },
   "tc_root1_262144": {
    "cap": 512,
    "coarse16": 0,
@@ -2717,6 +2740,29 @@
    "sha256": "b74672f3ec92cbd1fd2427f24e8c398c1ffca78fea0201b9ff55d3363c17be2e",
    "single_bin": 0,
    "tc_n": 262144,
+   "tile": 1
+  },
+  "tc_root1_4194304_lds32": {
+   "cap": 512,
+   "coarse16": 0,
+   "entry": "tcRootStage1",
+   "file": "tc_root1_4194304_lds32.ptx.gz",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 2048,
+   "n2": 2048,
+   "portable": 1,
+   "ppg": 8,
+   "role": "root1",
+   "sha256": "43e80d7c3f4a1ce3e8b7c818f2b7c5a40b6d36f8b3d12c1449ec010205440a95",
+   "single_bin": 0,
+   "tc_n": 4194304,
    "tile": 1
   },
   "tc_root1_524288": {
@@ -2832,6 +2878,29 @@
    "sha256": "3b6cd8eb347ee04b8192cd373febd6ceddbc59fc9fc3b0d824a37d58a535b882",
    "single_bin": 0,
    "tc_n": 262144,
+   "tile": 1
+  },
+  "tc_root2_4194304_lds32": {
+   "cap": 512,
+   "coarse16": 0,
+   "entry": "tcRootStage2",
+   "file": "tc_root2_4194304_lds32.ptx.gz",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 2048,
+   "n2": 2048,
+   "portable": 1,
+   "ppg": 8,
+   "role": "root2",
+   "sha256": "5568d575deaa5ea7ca9de1a90014112db7b8ee3e6a4354281db980ec66b02b60",
+   "single_bin": 0,
+   "tc_n": 4194304,
    "tile": 1
   },
   "tc_root2_524288": {

@@ -674,7 +674,9 @@ class Context(Executor, InputUploads):
                  "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2",
                  "tcRootStage1": "root1", "tcRootStage2": "root2"}
         if entry in tierc:
-            return "tc_%s_%d" % (tierc[entry], n)
+            # The build this device's threadgroup memory holds: the root's stages at
+            # n >= 2^21 ask 64 KB, and their 32 KB builds are what an Apple GPU runs.
+            return self._runnable("tc_%s_%d" % (tierc[entry], n), n)
         if entry in ("compactPairs", "compactPairsClustered", "compactListed"):
             # One compaction each, at every length: they use no threadgroup memory.
             return {"compactPairs": "compact", "compactPairsClustered": "compactc",

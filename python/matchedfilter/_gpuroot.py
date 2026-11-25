@@ -111,7 +111,9 @@ class DeviceRoot:
             if n >= 4 and n & (n - 1) == 0:
                 try:
                     n1, n2 = self.ctx._x_tierc(h)
-                    ppg = int(_kernels.record(self.ctx.kernel_family, "tc_root1_%d" % h)["ppg"])
+                    fam = self.ctx.kernel_family
+                    ppg = int((_kernels.record(fam, "tc_root1_%d" % h)
+                               or _kernels.record(fam, "tc_root1_%d_lds32" % h))["ppg"])
                     got = (self.ctx._x_kernel("root1", h), self.ctx._x_kernel("root2", h),
                            n1 // ppg, n2 // ppg)
                 except Exception:      # not shipped, or a pipeline this device cannot make

@@ -7781,6 +7781,56 @@
    "tc_n": 2097152,
    "tile": 1
   },
+  "tc_root1_2097152_lds32": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_2097152_lds32.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 1024,
+   "n2": 2048,
+   "portable": 1,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "5438442591982073f2f96b30ee182abb071aec2a599eb9450849a721d968965d",
+   "single_bin": 0,
+   "tc_n": 2097152,
+   "tile": 1
+  },
   "tc_root1_262144": {
    "cap": 512,
    "coarse16": 0,
@@ -7877,6 +7927,56 @@
    "push_bytes": 4,
    "role": "root1",
    "sha256": "f11f1d7f872d384c397d3203ccc4ec85e58d4d2ef57adf02d14e92019dc17fcd",
+   "single_bin": 0,
+   "tc_n": 4194304,
+   "tile": 1
+  },
+  "tc_root1_4194304_lds32": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.data",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.tmpl",
+     "set": 0
+    },
+    {
+     "binding": 2,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.params",
+     "set": 0
+    },
+    {
+     "binding": 3,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage1",
+   "file": "tc_root1_4194304_lds32.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 2048,
+   "n2": 2048,
+   "portable": 1,
+   "ppg": 8,
+   "push_bytes": 4,
+   "role": "root1",
+   "sha256": "16f74fa6ec59d3e3f5dbeca848f1b1205a257ff6630ecf3dcc041d57f99b3fb6",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1
@@ -8117,6 +8217,44 @@
    "push_bytes": 0,
    "role": "root2",
    "sha256": "d7ed64dab541fcb9c64e572875071c961f83b883f6e204c60034c5588d1f8999",
+   "single_bin": 0,
+   "tc_n": 4194304,
+   "tile": 1
+  },
+  "tc_root2_4194304_lds32": {
+   "cap": 512,
+   "coarse16": 0,
+   "descriptors": [
+    {
+     "binding": 0,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.scratch",
+     "set": 0
+    },
+    {
+     "binding": 1,
+     "kind": "StorageBuffer",
+     "name": "entryPointParams.output",
+     "set": 0
+    }
+   ],
+   "entry": "tcRootStage2",
+   "file": "tc_root2_4194304_lds32.spv",
+   "gate_only": 0,
+   "lds_bytes": 32768,
+   "local_size": [
+    1024,
+    1,
+    1
+   ],
+   "n": 2048,
+   "n1": 2048,
+   "n2": 2048,
+   "portable": 1,
+   "ppg": 8,
+   "push_bytes": 0,
+   "role": "root2",
+   "sha256": "2faf004fd4a8cc75a192b7d77992c717bac962d9432f093c54c98be7c9cededf",
    "single_bin": 0,
    "tc_n": 4194304,
    "tile": 1

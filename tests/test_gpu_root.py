@@ -67,6 +67,26 @@ def test_the_device_root_gives_the_host_root():
         dev.give_output(N, c, 0, out)
 
 
+@pytest.mark.parametrize("n", [1 << 22, 1 << 23])
+def test_the_longest_roots_run_on_the_device(n):
+    """The two longest series lengths, whose root stages ask 64 KB of workgroup memory at
+    their tuned staging, have a build every GPU holds (32 KB, Apple's limit): the device
+    computes their roots, and gives the host's."""
+    rng = np.random.default_rng(11)
+    dev = _device_root()
+    assert dev.kernels(n) is not None, "no device root at n=%d on %s" % (n, dev.name)
+    h = n // 2
+    T, D = _spec(rng, n), _spec(rng, n)
+    dev.set_template(n, T)
+    out = dev.take_output(n, 0, 0)
+    band = (7, h - 3)
+    dev.run(n, 0, [D], [out], band, [0.5])
+    _settle_device_writes()
+    ref = _host(D, T, band, 0.5, n)
+    np.testing.assert_allclose(out, ref, rtol=0, atol=2e-5 * np.abs(ref).max())
+    dev.give_output(n, 0, 0, out)
+
+
 def test_a_run_left_in_flight_is_a_pending_write():
     """A run is a write left in flight, which settle_writes waits for: the series a host
     reads right after settling is the root's, not what the buffer held before (here NaN),

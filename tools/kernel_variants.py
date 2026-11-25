@@ -170,7 +170,10 @@ MAX_TILED_BAND = 1024
 #:     aae09340 (2026-10-08); its script also built 8 and 16 up to 1024 threads -- six
 #:     modules at bands 256-2048 that were never committed, so no host could offer them.
 #:   Metal: METAL_C16_PPG, up to METAL_C16_MAX_THREADS threads per group (an Apple GPU runs
-#:     32-wide SIMD groups).
+#:     32-wide SIMD groups), and every Vulkan packing besides (metal_c16_ppgs), its staging
+#:     cut to Apple's 32 KB where it would exceed it (metal_c16_cap). The Vulkan packings
+#:     past 256 threads were never generated for Metal before 2026-11-26 (no Apple limit:
+#:     a threadgroup takes 1024 threads), so its layout choice saw fewer candidates.
 #:   CUDA: 2 and 4 everywhere, 8 and 16 at bands up to 256 (filling a 32- or 64-thread block,
 #:     where WG = n/16 is 4 at band 64); a module past 48 KB of static shared memory or
 #:     MAX_INVOCATIONS threads is not built (STATIC_SHARED_MAX).
@@ -178,6 +181,34 @@ VK_C16_PPG = (2, 4, 8, 16)
 VK_C16_WIDE_PPG_THREADS = 128
 METAL_C16_PPG = (2, 4, 8, 16, 32)
 METAL_C16_MAX_THREADS = 256
+
+
+#: Pairs per workgroup of the tiled coarse builds Vulkan makes (within MAX_INVOCATIONS).
+VK_C16_TILED_PPG = (1, 2, 4, 8, 16)
+#: Apple's threadgroup memory per group (maxThreadgroupMemoryLength on every Apple GPU).
+METAL_SHARED_BYTES = 32 * 1024
+
+
+def metal_c16_ppgs(n):
+    """The untiled coarse packings the Metal build makes at band n: METAL_C16_PPG up to
+    METAL_C16_MAX_THREADS threads (filling Apple's 32-wide SIMD groups at the small bands),
+    and every packing the Vulkan build makes (vk_c16_ppgs), so the measured layout choice
+    has the same candidates on both."""
+    wg = n // radix(n)
+    return tuple(sorted({p for p in METAL_C16_PPG if wg * p <= METAL_C16_MAX_THREADS}
+                        | set(vk_c16_ppgs(n))))
+
+
+def metal_c16_cap(n, cap, ppg, tile=1):
+    """The staging cap of a Metal coarse build: the length's own (metal_cap) where its staging
+    fits Apple's 32 KB, else halved until it does (more exchange chunks; a pipeline that
+    cannot be made is no candidate at all). A tiled build at WG <= 32 stages nothing."""
+    wg = n // radix(n)
+    if tile % 2 == 0 and wg <= 32:
+        return cap
+    while cap > wg and staging_bytes(n, cap, ppg, 1) > METAL_SHARED_BYTES:
+        cap //= 2
+    return cap
 
 
 def vk_c16_ppgs(n):
@@ -486,18 +517,19 @@ def _band_family(backend, n, add):
     if backend == "metal":
         mcap = metal_cap(n)
         if radix(n) == 16:
+            wg = n // radix(n)
             add(_tierb(backend, n, "fusedTierB", mcap, "_c16", coarse16=1))
-            for p in METAL_C16_PPG:
-                if (n // radix(n)) * p <= METAL_C16_MAX_THREADS:
-                    add(_tierb(backend, n, "fusedTierB", mcap, "_c16p%d" % p, coarse16=1, ppg=p))
+            for p in metal_c16_ppgs(n):
+                add(_tierb(backend, n, "fusedTierB", metal_c16_cap(n, mcap, p), "_c16p%d" % p,
+                           coarse16=1, ppg=p))
             # Tiled, ragged builds for Metal too (two templates per lane in one half2
             # register; _mtlcompute.coarse_geometry).
             for t in (COARSE_TILES if n <= MAX_TILED_BAND else ()):
-                for p in (1,) + METAL_C16_PPG:
-                    if (n // radix(n)) * p <= METAL_C16_MAX_THREADS:
-                        add(_tierb(backend, n, "fusedTierB", mcap,
-                                   "_c16%st%d" % ("p%d" % p if p > 1 else "", t),
-                                   coarse16=1, ppg=p, tile=t))
+                for p in sorted({1, *(q for q in METAL_C16_PPG if wg * q <= METAL_C16_MAX_THREADS),
+                                 *(q for q in VK_C16_TILED_PPG if wg * q <= MAX_INVOCATIONS)}):
+                    add(_tierb(backend, n, "fusedTierB", metal_c16_cap(n, mcap, p, t),
+                               "_c16%st%d" % ("p%d" % p if p > 1 else "", t),
+                               coarse16=1, ppg=p, tile=t))
         for entry in ("fusedTierB", "refineListed",
                       "refineItems") + (("fullCorrelation", "fullCorrelationSeries")
                                         if n >= 1024 else ()):
@@ -516,6 +548,14 @@ def _band_family(backend, n, add):
                 if entry == "refineListed" and n <= 1024:
                     add(_tierb(backend, n, entry, cap, "_onebin_gate", single_bin=1,
                                gate_only=1))
+        elif n > max(METAL_SINGLE_BIN_CAP):
+            # The one-bin builds past 8192, as on Vulkan: the tuned staging (64 KB) and the
+            # 32 KB build Apple runs. Never generated for Metal before 2026-11-26. (At 8192
+            # the one-bin build is already at 32 KB, METAL_SINGLE_BIN_CAP, so it has no
+            # _lds32 twin.)
+            for entry in ("fusedTierB", "refineListed"):
+                add(_tierb(backend, n, entry, mcap, "_onebin", single_bin=1))
+                add(_tierb(backend, n, entry, PORTABLE_CAP, "_onebin_lds32", single_bin=1))
         if n <= 512:
             add(_tierb(backend, n, "refineListed", mcap, "_c16", coarse16=1, ppg=1024 // n))
         return
@@ -667,11 +707,29 @@ def _tierc_family(backend, n, add):
         flags = (CUDA_WIDE_BLOCK_FLAGS if backend == "cuda" and sub // r >= MAX_INVOCATIONS
                  else ())
         extra = TIER_C_EXTRA.get(role)
-        add(Variant(backend, "tc_%s_%d" % (role, n), entry,
-                    text=(lambda d=defines, x=extra: d + source("tierb.slang")
-                          + ("\n" + source(x) if x else "")), src=src, flags=flags,
-                    facts=dict(n=sub, tc_n=n, cap=cap, ppg=ppg, tile=1, coarse16=0, single_bin=0,
-                               gate_only=0, portable=0, role=role, n1=n1, n2=n2)))
+        stem = "tc_%s_%d" % (role, n)
+        builds = [("", cap, defines, src)]
+        # A stage whose staging passes 32 KB (the root's, which stages PPG columns: at
+        # n >= 2^21 it asks 64 KB) also gets a 32 KB build, which the host takes where the
+        # first does not fit (_kernels.runnable): Apple's limit, and the only build a CUDA
+        # device can load past STATIC_SHARED_MAX. Never generated before 2026-11-26, so
+        # those lengths had no device root on Metal or CUDA.
+        small = cap
+        while small > sub // r and staging_bytes(sub, small, ppg) > PORTABLE_CAP * 8:
+            small //= 2
+        if small != cap:
+            builds.append(("_lds32", small,
+                           defines.replace("#define LDS_CAP %d\n" % cap,
+                                           "#define LDS_CAP %d\n" % small),
+                           src.replace(".slang", "_lds32.slang", 1) if src.endswith(".slang")
+                           else src))
+        for suffix, c, d, s in builds:
+            add(Variant(backend, stem + suffix, entry,
+                        text=(lambda d=d, x=extra: d + source("tierb.slang")
+                              + ("\n" + source(x) if x else "")), src=s, flags=flags,
+                        facts=dict(n=sub, tc_n=n, cap=c, ppg=ppg, tile=1, coarse16=0,
+                                   single_bin=0, gate_only=0, portable=int(bool(suffix)),
+                                   role=role, n1=n1, n2=n2)))
 
 
 def _standalone(backend, stem, entry, include=False):

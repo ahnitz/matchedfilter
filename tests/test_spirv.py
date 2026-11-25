@@ -158,20 +158,27 @@ def test_blobs_match_the_current_kernel_source(manifest, tmp_path):
     if slangc is None:
         pytest.skip("slangc not installed (build-time dependency only)")
     kv.check_slangc_version(slangc)
-    flat = {"tierb_%d" % n for n in kv.TIER_B}
-    for v in kv.variants("vulkan"):
-        if v.stem not in flat:
-            continue
-        fresh = kv.compile_variant(slangc, v, tmp_path).read_bytes()
-        assert fresh == (SPIRV_DIR / v.file).read_bytes(), (
-            "%s is stale: src/gpu has changed since it was built. "
-            "Re-run tools/kernel_variants.py build." % v.file)
+    from conftest import kernel_dir
+    # The flat and listed-refine builds at every length, on the two targets built from
+    # source text here (the Metal refines once shipped from an older tierb.slang, their code
+    # the same and their #line directives not, which a SPIR-V-only check could not see).
+    flat = {"%s_%d" % (role, n) for n in kv.TIER_B for role in ("tierb", "refine")}
+    for backend, folder in (("vulkan", SPIRV_DIR), ("metal", kernel_dir("metal"))):
+        out = tmp_path / backend
+        out.mkdir()
+        for v in kv.variants(backend):
+            if v.stem not in flat:
+                continue
+            fresh = kv.compile_variant(slangc, v, out).read_bytes()
+            assert fresh == (folder / v.file).read_bytes(), (
+                "%s %s is stale: src/gpu has changed since it was built. "
+                "Re-run tools/kernel_variants.py build." % (backend, v.file))
 
 
 #: The kernels a host picks by the device's workgroup memory (_kernels.runnable): each needs
 #: a 32 KB build where its own asks for more. The coarse layouts are a measured choice among
 #: the builds a device holds instead.
-_RUNNABLE = ("tierb_", "refine_", "items_", "full_")
+_RUNNABLE = ("tierb_", "refine_", "items_", "full_", "tc_")
 
 
 @pytest.mark.parametrize("backend", ["vulkan", "metal"])
