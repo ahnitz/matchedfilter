@@ -44,6 +44,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The calls a consumer's hooks make back into a hierarchical search, per trigger, repeat less
+  work: a single-template follow-up (`PeaksContext.refilter`) runs its one job through the
+  batched follow-up path without building a batch around it, and on a GPU bank whose call
+  shape is locked to the CPU goes there without laying its window out twice; a hook's series
+  reads settle the inner rows once; a leaf bank handed out is not looked up again; the last
+  filter spectrum `get_filter_f` made is kept (PyCBC's power chisq asks for each one twice)
+  and `taps_to_spectra` keeps its transform per block length instead of making one a call.
+  In the 171,828-template PyCBC job (H1 and L1, ten segments, one Zen 5 core, a reused cost
+  file) the hooks took 4.60 s and now take 4.38 s (31.7 to 29.4 billion instructions), and
+  with the leaves on the Radeon 8060S 4.94 s and now 4.46 s (33.8 to 29.9 billion); the
+  triggers are identical. The rest of the hooks is PyCBC's own work (about 3 s) and the
+  follow-up's filtering (1.1 s, its transforms).
 - Shared-screener clustering, the largest part of a hierarchical search's setup, does the
   same work in less time and gives the same screeners bit for bit. The pair scores stop
   summing a pair once it can no longer reach the score the matching reads, and keep twice
