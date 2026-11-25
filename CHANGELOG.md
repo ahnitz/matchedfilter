@@ -30,6 +30,17 @@ Alpha releases may change the API. Pin a version for reproducible work.
   variants of every untiled layout within 5% of the fastest, not of the two fastest alone,
   so a reshuffle of nearly equal untiled layouts no longer leaves the best tiled one
   untimed; and a feed cost that a calibration measured as negative is priced as zero.
+- GPU (experimental): a hierarchical search whose device comes from `MF_DEVICE` now
+  defers and fuses its leaf calls and keeps the middle rows on the device, as a search
+  given the device by name always did; five places tested for a named device instead of
+  resolving it. A finished fused batch no longer keeps its plans alive: the cache of fused
+  recordings held about thirty top templates' plans and buffers (25 GB of device memory in
+  a PyCBC job, now 6.9 GB). Together these take the warm 171,828-template job on a Radeon
+  8060S from 64.6 s to 55.2 s with identical triggers.
+- The roofline report takes a GPU's peaks from device properties instead of a pattern in
+  the driver's device name, which a driver update had stopped matching: the compute peak
+  came out halved and the bandwidth bound was silently dropped. A peak that cannot be
+  derived is now reported as unknown, with a warning, on every backend.
 
 ### Performance
 
