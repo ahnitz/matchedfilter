@@ -16,7 +16,8 @@ N = 1 << 15                      # block length
 VALID = (4096, N - 4096)
 BAND = (60, N // 2 - 200)
 LEAF = dict(engine="flat", binsize=512)
-# The block sizes a GPU leaf chooses among (a CPU one may add 1024: _small_blocks_fit).
+# Block sizes from 2048, for tests that pin both devices to one layout (a leaf left to
+# choose may take 1024: _small_blocks_fit, _gpu_small_blocks).
 GPU_NS = (2048, 4096, 8192, 16384, 32768, 65536)
 
 
@@ -487,6 +488,23 @@ def test_a_profile_per_channel_is_one_leaf_bank_holding_each(monkeypatch):
     assert [g[:3] for g in got] == [g[:3] for g in plain]
     for g, p in zip(got, plain):
         _assert_same_peaks(g[3], p[3], rtol=0)
+
+
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_a_gpu_leaf_bank_measures_1024_blocks_too(monkeypatch):
+    """A GPU hierarchical bank with a peak granularity (a search's leaf) measures its block
+    size among candidates that include 1024, as a CPU one does; a GPU flat bank keeps the
+    valid-fraction rule's sizes from 2048."""
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    rng = np.random.default_rng(3131)
+    taps = rng.standard_normal((32, 200)).astype(np.float32)
+    counts = np.full(32, 200, dtype=np.int64)
+    opts = dict(tap_sample_rate=2048, data_sample_rate=2048, binsize=512, threshold=6.0,
+                false_dismissal=1e-3, device="gpu:0")
+    hier = TimeDomainFilterBank(taps, counts, engine="hier", **opts)
+    assert hier._candidate_ns[0] == 1024 and 1024 in hier._choice_ns
+    flat = TimeDomainFilterBank(taps, counts, engine="flat", **opts)
+    assert flat._candidate_ns[0] == 2048
 
 
 @pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")

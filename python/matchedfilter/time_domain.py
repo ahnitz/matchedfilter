@@ -183,8 +183,8 @@ def _small_blocks_fit(device):
     sizes (_choose_layout). Measured 2026-10-24 on test27's fine banks (257-297 taps; 1024
     against 2048): Haswell and Zen 3 (32 KB) -10% / -11%, Ivy Bridge (32 KB) -15%, Zen 5
     (48 KB) -9%, an M2 (128 KB) +2.6%, which keeps 2048. Above 1024 Hz the candidates had started
-    at 2048 since a decimation scheme removed on 2026-10-05; no measurement chose that. GPU
-    banks keep it."""
+    at 2048 since a decimation scheme removed on 2026-10-05; no measurement chose that. A
+    GPU bank has no such rule: its block-size candidates are _gpu_small_blocks'."""
     try:
         if _device.parse(device).kind != "cpu":
             return False
@@ -192,6 +192,22 @@ def _small_blocks_fit(device):
         return False
     l1d = int(_core.l1d_bytes())
     return bool(l1d) and 3 * 8 * 2048 >= l1d
+
+
+def _gpu_small_blocks(device, engine, binsize):
+    """Whether 1024-sample blocks are a candidate for a GPU bank above 1024 Hz: for a
+    hierarchical bank with a peak granularity, which measures its block size (the bank's
+    joint trial, _choose_layout) rather than taking the valid-fraction rule. Excluding 1024
+    there was no measurement's choice: offered it, the 8060S's trial took 1024 on the
+    171,828-template BNS search (2026-11-25; 2048 and 1024 timed within 0.2% per call) and
+    the pycbc job ran 98-102 s against 112-128 s at 2048, most of it the per-plan chain
+    choice and clustering, which cost less at the smaller block."""
+    try:
+        if _device.parse(device).kind != "gpu":
+            return False
+    except (TypeError, ValueError):
+        return False
+    return engine == 'hier' and binsize is not None
 
 
 def _trial_key(bank):
@@ -1138,7 +1154,8 @@ class TimeDomainFilterBank:
         if fft_lengths is None:
             if (self.data_sample_rate <= 1024.0 or self.analytic
                     or ((self.engine == 'flat' or (self.engine == 'hier' and binsize is not None))
-                        and _small_blocks_fit(device))):
+                        and _small_blocks_fit(device))
+                    or _gpu_small_blocks(device, self.engine, binsize)):
                 candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
