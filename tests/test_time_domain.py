@@ -1061,3 +1061,42 @@ def test_gpu_workspace_growth_settles_calls_in_flight(monkeypatch):
             np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
     assert replaced, "the pools never grew; the test does not exercise the growth"
     assert all(not owners for owners in replaced), "pools replaced under calls in flight"
+
+
+def test_a_gpu_banks_cpu_side_calls_take_the_batched_follow_up_path(monkeypatch):
+    """A GPU bank's single-template call whose shape runs on the CPU (its lock, here forced)
+    takes the CPU banks' batched follow-up path (_batches._cpu_single_td_batch, a batch of
+    one), not a one-template plan: the same peaks, to the bit, as a CPU bank's call."""
+    from types import SimpleNamespace
+    from conftest import usable_gpu
+    from matchedfilter import _batches, _settings
+    from matchedfilter import time_domain as td
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip(usable_gpu_reason())
+    rng = np.random.default_rng(14)
+    counts = list(rng.integers(200, 400, 20))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    S = 1 << 17
+    X = np.fft.fft(rng.standard_normal(S))
+    X[S // 2:] = 0
+    x = (np.fft.ifft(X) * 2).astype(np.complex64)
+    gpu = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                               false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+    cpu = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                               false_dismissal=1e-3, fft_lengths=[2048], binsize=2048)
+    for b in (gpu, cpu):
+        b.set_reference(w, delta_f=df)
+    locked = SimpleNamespace(winner=_settings.arm("side", "cpu"))
+    monkeypatch.setattr(td, "_single_choice", lambda *a: locked)
+    forced = []
+    real = _batches._cpu_single_td_batch
+    monkeypatch.setattr(_batches, "_cpu_single_td_batch",
+                        lambda jobs, out, skip=None, force_cpu=False:
+                        forced.append(force_cpu) or real(jobs, out, skip=skip, force_cpu=force_cpu))
+    for k, c in enumerate(range(20000, 110000, 7000)):
+        kw = dict(windows=slice(c - 9000, c + 9000), binsize=61, threshold=0.0, template_index=k % 5)
+        r_g, r_c = gpu.filter_series(x, **kw), cpu.filter_series(x, **kw)
+        np.testing.assert_array_equal(r_g.sample_indices, r_c.sample_indices)
+        np.testing.assert_array_equal(r_g.snr, r_c.snr)
+    assert forced.count(True) == 13
