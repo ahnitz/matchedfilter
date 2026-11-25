@@ -8,8 +8,8 @@ from matchedfilter.search import _InnerBatch, Inner
 
 def test_a_device_batch_correlates_its_channels_in_one_submission(monkeypatch):
     """compute_channels on a device: every channel's blocks go to the device in one
-    correlate_continuous call (a part per channel), and each channel's rows are exactly
-    what its own call gives."""
+    correlate_continuous call (a part per channel, where the device writes the rows in
+    place), and each channel's rows are exactly what its own call gives."""
     from matchedfilter import _gpuexec
     device = usable_gpu()
     if device is None:
@@ -40,7 +40,12 @@ def test_a_device_batch_correlates_its_channels_in_one_submission(monkeypatch):
     assert calls == [1, 1]
     both.compute_channels(list(regions), rows)
     both.bank.wait()
-    assert calls[2:] == [2]
+    # A device that writes these rows through a host view (Metal's unified memory) keeps
+    # its own per-channel path; elsewhere the channels are one call.
+    ctx = both.bank._groups[0].get_correlation_plan()._gpu
+    view = getattr(ctx, "host_view", None)
+    hosted = view is not None and view(both._chan["A"]["slots"][:2]) is not None
+    assert calls[2:] == ([1, 1] if hosted else [2])
     for ch in regions:
         np.testing.assert_array_equal(np.asarray(both._chan[ch]["slots"][:2]),
                                       np.asarray(one._chan[ch]["slots"][:2]))
