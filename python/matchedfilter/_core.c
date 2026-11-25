@@ -1759,6 +1759,44 @@ static PyObject *M_window_bin_keep(PyObject *self,PyObject *args){
                              "or a peak before the first window"); return NULL; }
   return PyLong_FromLongLong(r);
 }
+/* taps_to_spectra's transforms, kept per block length: a consumer's get_filter_f makes one
+   spectrum a call (pycbc's power chisq, about 14,000 calls in the 171,828-template job), and
+   creating the plan and its buffer was 6 of its 7.7 us (Zen 5, n = 1024). Taken and given back
+   under the GIL, which the call holds on both sides of its transforms, so two threads never
+   share one; a busy or missing slot gives a plan made for the call, as before. Keyed by the
+   ISA as well, which set_target can change. */
+#define T2S_SLOTS 8
+static struct { size_t n; const char *isa; ap_plan *plan; float *buf; int busy; } t2s_tab[T2S_SLOTS];
+static long long t2s_made = 0;     /* plans taps_to_spectra has made, kept or not */
+
+static PyObject *M_t2s_plans(PyObject *self, PyObject *args){
+  (void)self; (void)args;
+  return PyLong_FromLongLong(t2s_made);
+}
+
+static int t2s_take(size_t n){
+  const char *isa = ap_isa();
+  int spare = -1;
+  for(int i = 0; i < T2S_SLOTS; i++){
+    if(t2s_tab[i].busy) continue;
+    if(t2s_tab[i].plan && t2s_tab[i].n == n && t2s_tab[i].isa == isa){ t2s_tab[i].busy = 1; return i; }
+    if(spare < 0 || (t2s_tab[spare].plan && !t2s_tab[i].plan)) spare = i;
+  }
+  if(spare < 0) return -1;
+  if(t2s_tab[spare].plan){ ap_destroy(t2s_tab[spare].plan); free(t2s_tab[spare].buf); }
+  t2s_tab[spare].plan = ap_create(n);
+  t2s_made++;
+  t2s_tab[spare].buf = t2s_tab[spare].plan ? (float*)ap_alloc64(2 * n * sizeof(float)) : NULL;
+  if(!t2s_tab[spare].plan || !t2s_tab[spare].buf){
+    if(t2s_tab[spare].plan) ap_destroy(t2s_tab[spare].plan);
+    free(t2s_tab[spare].buf);
+    t2s_tab[spare].plan = NULL; t2s_tab[spare].buf = NULL;
+    return -1;
+  }
+  t2s_tab[spare].n = n; t2s_tab[spare].isa = isa; t2s_tab[spare].busy = 1;
+  return spare;
+}
+
 static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
   Py_buffer btaps, bcnt, bout;
   Py_ssize_t n, max_taps;
@@ -1795,14 +1833,15 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     return NULL;
   }
 
-  ap_plan *plan = ap_create((size_t)n);
+  const int slot = t2s_take((size_t)n);
+  ap_plan *plan = slot >= 0 ? t2s_tab[slot].plan : (t2s_made++, ap_create((size_t)n));
   if(!plan){
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
     PyErr_SetString(PyExc_RuntimeError, "failed to create FFT plan");
     return NULL;
   }
 
-  float *in_buf = (float*)ap_alloc64(2 * (size_t)n * sizeof(float));
+  float *in_buf = slot >= 0 ? t2s_tab[slot].buf : (float*)ap_alloc64(2 * (size_t)n * sizeof(float));
   if(!in_buf){
     ap_destroy(plan);
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
@@ -1844,8 +1883,12 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
   }
   Py_END_ALLOW_THREADS
 
-  free(in_buf);
-  ap_destroy(plan);
+  if(slot >= 0){
+    t2s_tab[slot].busy = 0;
+  } else {
+    free(in_buf);
+    ap_destroy(plan);
+  }
   PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
   Py_RETURN_NONE;
 }
@@ -3097,6 +3140,7 @@ static PyMethodDef methods[]={
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
   {"window_bin_keep",M_window_bin_keep,METH_VARARGS,"window_bin_keep(win_starts, binsize, t, s, v, keep, is_float) -> kept count, or -1 when not ordered by template then sample"},
   {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra, complex=False)"},
+  {"_t2s_plans",M_t2s_plans,METH_NOARGS,"_t2s_plans() -> FFT plans taps_to_spectra has made (it keeps them per block length)"},
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
 PyMODINIT_FUNC PyInit__core(void){

@@ -183,3 +183,26 @@ def test_a_gpu_banks_locked_cpu_follow_up_lays_out_no_window(monkeypatch, tmp_pa
                         staticmethod(lambda g, W, S: laid.append(1) or layout(g, W, S)))
     _same(bank.filter_series(x, **kw), out[0])
     assert laid == []
+
+
+def test_filter_spectra_keep_their_transform_per_block_length():
+    """taps_to_spectra keeps a transform per block length: one-row calls (get_filter_f's,
+    one per call) make none once their sizes have one, and give the rows of a call with
+    every row, to the bit."""
+    from matchedfilter import _core
+    rng = np.random.default_rng(9)
+    counts = np.array([90, 300, 517, 700], np.int64)
+    m = int(counts.max())
+    for cplx in (False, True):
+        taps = _taps(rng, counts, cplx=cplx)
+        full = {n: np.zeros((len(counts), n), np.complex64) for n in (1024, 2048)}
+        for n, out in full.items():
+            _core.taps_to_spectra(taps, counts, n, m, out, cplx)
+        made = _core._t2s_plans()
+        for _ in range(3):
+            for t in range(len(counts)):
+                for n in (1024, 2048):
+                    one = np.zeros((1, n), np.complex64)
+                    _core.taps_to_spectra(taps[t:t + 1], counts[t:t + 1], n, m, one, cplx)
+                    np.testing.assert_array_equal(one[0], full[n][t])
+        assert _core._t2s_plans() == made
