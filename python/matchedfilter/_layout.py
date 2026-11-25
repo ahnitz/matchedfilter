@@ -215,6 +215,112 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     return (max(per_block[0] - 2.0 * s1, 0.5 * s1), b, w)
 
 
+#: (device, rows, taps, candidate sizes) -> {n: seconds per row per series sample}
+#: (_corr_group_prices).
+_CORR_GROUP_PRICES: Dict[Tuple[str, int, int, Tuple[int, ...]], Dict[int, float]] = {}
+
+#: Series samples a group is priced over: about the half million a middle stage's call
+#: covers, so a price carries the call's fixed costs (the forward's latency, a partly filled
+#: last round of workgroups) in the proportion the call does.
+_GROUP_PRICE_SPAN = 1 << 19
+
+
+def _corr_group_prices(cands, rows, taps, device):
+    """{n: seconds per row per series sample} of continuous correlation at each transform
+    size of `cands`, for a group of `rows` templates of at most `taps` (data-rate) taps,
+    measured at that shape: a call over _GROUP_PRICE_SPAN samples of a real series in device
+    memory into device output, as the middle stage calls it, timed by the device's timers
+    (else the host clock). The sizes are timed in turn, round after round
+    (_choice.fastest_of_rounds): an idle GPU's clock ramps over the first calls and moved one
+    call's device time 3x (0.65 to 2.1 ms on a Radeon 8060S), so sizes priced one after the
+    other ranked by when they ran. Kept in MF_COST_FILE under the kernels they timed.
+
+    The per-size model (_corr_block_costs) is measured at 2 and 16 templates of n/4 taps and
+    extrapolated; it priced n=16384 at 1.8x its device time for the middle stage's 18 rows
+    of 5720 taps (n=32768 within 5%), so a bank ran at 32768, which spills registers there
+    and is 6% slower over a whole call and 18% over the real job's shorter calls."""
+    cands = tuple(sorted(int(n) for n in cands))
+    dev = _parse_device(device)
+    dkey = str(device)
+    kids = ";".join(_corr_kernel_id(n, getattr(dev, "backend", None)) for n in cands)
+    key = "corrgroup2,%s,%d,%d,%s|k%s" % (dkey, int(rows), int(taps),
+                                         ";".join(map(str, cands)), kids)
+    mkey = (dkey, int(rows), int(taps), cands)
+
+    def measure():
+        v = _corr_group_measure(cands, int(rows), int(taps), device)
+        ok = all(p > 0 for p in v.values())
+        return v, ({"prices": {str(n): p for n, p in v.items()}} if ok else None)
+
+    def read(r):
+        if not (isinstance(r, dict) and isinstance(r.get("prices"), dict)):
+            return None
+        try:
+            v = {int(n): float(p) for n, p in r["prices"].items()}
+        except (TypeError, ValueError):
+            return None
+        return v if set(v) == set(cands) and all(p > 0 for p in v.values()) else None
+    return price_once(_CORR_GROUP_PRICES, mkey, "choice|" + key, measure, read)
+
+
+def _corr_group_measure(cands, rows, taps, device):
+    """_corr_group_prices' measurement: per size, the fastest of 5 rounds that time every size
+    once in turn; device time where the call's submissions recorded one, else the host time
+    of the waited call."""
+    from . import CorrelationFilter
+    from . import gatechain
+    length = _GROUP_PRICE_SPAN + max(cands)
+    runs = {}
+    for n in cands:
+        half = min(int(taps) // 2, n // 2 - 1)
+        cf = CorrelationFilter(n, ndata=1, ntemplates=rows, valid=(half, n - half), device=device)
+        cf.set_templates(np.zeros((rows, n), np.complex64))     # values do not move the time
+        ser = cf.empty_shared((length,), np.float32)
+        ser[:] = np.random.default_rng(7).standard_normal(length)
+        st, _, _ = _automatic_series_layout(length, cf.valid)
+        dest = cf.empty_shared((rows, length))
+        runs[n] = (cf._gpu, lambda cf=cf, ser=ser, st=st, dest=dest:
+                   cf._continuous_gpu(ser, st, 0, rows, dest))
+
+    def time_one(n):
+        # The context's timers on for this call (as the GPU calibration times its calls),
+        # its own entries read and dropped, the log and the setting left as they were.
+        ctx, call = runs[n]
+        was = getattr(ctx, "_timing", False)
+        ctx._timing = True
+        first = len(ctx.timings())
+        try:
+            t0 = time.perf_counter()
+            call()
+            host = time.perf_counter() - t0
+            log = ctx.timings()
+            dev_s = gatechain._run_ms(log[first:]) * 1e-3
+            del log[first:]
+        finally:
+            ctx._timing = was
+        return dev_s if dev_s > 0 else host
+    for _, call in runs.values():
+        call()                                  # warm-up: recordings and uploads
+    best = _choice.fastest_of_rounds(list(cands), time_one, 5)
+    return {n: (best[n] / (rows * length) if best[n] > 0 else 0.0) for n in cands}
+
+
+def _corr_group_size(ns, n_model, rows, taps, device):
+    """The transform size a GPU bank's group of `rows` templates of at most `taps` taps runs
+    at: of the model's choice n_model and its neighbours n/2 and 2n among ns (each long
+    enough for the taps), the one _corr_group_prices measures cheapest at the group's shape.
+    A neighbour replaces the model's choice only when it is cheaper by more than
+    _choice.TIE, so measurement noise does not move a bank between sizes run to run."""
+    cands = [m for m in (n_model // 2, n_model, 2 * n_model) if m in ns and m - taps >= 1]
+    if len(cands) < 2:
+        return n_model
+    prices = _corr_group_prices(cands, rows, taps, device)
+    if not all(prices.get(m, 0) > 0 for m in cands):
+        return n_model
+    best = min(cands, key=prices.get)
+    return best if prices[best] < prices[n_model] * (1.0 - _choice.TIE) else n_model
+
+
 def _batch_target(n: int, max_batch: Optional[int]) -> int:
     """Templates per group: the bank's cache-resident sizing, or the caller's bound."""
     if max_batch is not None:

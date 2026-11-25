@@ -1270,6 +1270,10 @@ class TimeDomainFilterBank:
         j = M
         while j > 0:
             i_prev, n_chosen = arg[j]
+            if is_gpu:
+                # The model partitions; each group's size is then measured at its own shape.
+                n_chosen = _layout._corr_group_size(ns, n_chosen, j - i_prev, int(Ls[j - 1]),
+                                                    self.device)
             groups.append((i_prev, j, n_chosen, int(Ls[j - 1])))
             j = i_prev
         return groups[::-1], order
