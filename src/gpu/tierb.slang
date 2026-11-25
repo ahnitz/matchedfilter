@@ -1880,6 +1880,65 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
 #endif
 }
 
+//: Store a transform's registers in natural lag order through the staging, so the lanes of
+//: a wave write consecutive output elements. The transform leaves register i of thread tid
+//: at lag slotToIndex(tid*R + i), and consecutive threads at lags far apart (stride 32 at
+//: n=32768): every lane's 8-byte store landed in its own cache line. The middle stage's
+//: correlation writes most of its bytes this way; measured on a Radeon 8060S at n=32768,
+//: 18 templates x 25 blocks, the scattered stores were half the call's device time.
+//:
+//: slotToIndex is a permutation of bits (every digit is a power of two), so a lag is
+//: slotToIndex(tid << LGR) | slotToIndex(i). The staging holds CH registers of every thread,
+//: so the registers go in R/CH rounds; the bits round c fixes (the register's own above CH)
+//: are left out of the staging address (natSqueeze), and the reader puts them back
+//: (natExpand). Addresses are XOR-swizzled within rows of 32 elements, so neither the
+//: transposed writes nor the contiguous reads fall on one bank. Rows lo <= lag < hi only.
+uint natSqueeze(uint x, uint fixedBits)
+{
+    uint o = 0u, k = 0u;
+    [ForceUnroll] for (uint b = 0u; b < 32u; ++b) {
+        if ((1u << b) >= N) break;
+        if (((fixedBits >> b) & 1u) == 0u) { o |= ((x >> b) & 1u) << k; ++k; }
+    }
+    return o;
+}
+
+uint natExpand(uint x, uint fixedBits)
+{
+    uint o = 0u, k = 0u;
+    [ForceUnroll] for (uint b = 0u; b < 32u; ++b) {
+        if ((1u << b) >= N) break;
+        if (((fixedBits >> b) & 1u) == 0u) { o |= ((x >> k) & 1u) << b; ++k; }
+    }
+    return o;
+}
+
+uint natSwizzle(uint x) { return x ^ ((x >> 5u) & 31u); }
+
+[ForceInline]
+void storeNatural(inout C r[RADIX], uint tid, RWStructuredBuffer<float2> output, uint base,
+                  uint lo, uint hi)
+{
+    const uint fixedBits = slotToIndex(R - CH);
+    const uint wA = natSwizzle(natSqueeze(slotToIndex(tid << LGR), fixedBits));
+    const uint eT = natExpand(tid, fixedBits);
+    const uint rT = natSwizzle(tid);
+    MF_UNROLL for (uint c = 0u; c < R / CH; ++c) {
+        GroupMemoryBarrierWithGroupSync();
+        MF_UNROLL for (uint j = 0u; j < CH; ++j)
+            stgPut(wA ^ natSwizzle(natSqueeze(slotToIndex(c * CH + j), fixedBits)),
+                   float2(float(r[c * CH + j].x), float(r[c * CH + j].y)));
+        GroupMemoryBarrierWithGroupSync();
+        const uint fb = slotToIndex(c * CH);
+        MF_UNROLL for (uint j = 0u; j < CH; ++j) {
+            uint lag = eT | natExpand(j * WG, fixedBits) | fb;
+            float2 v = stgGet(rT ^ natSwizzle(j * WG));
+            if (lag >= lo && lag < hi)
+                output[base + lag] = v;
+        }
+    }
+}
+
 // Full circular correlation in natural lag order. The same fused spectral
 // product and transform as the peak path, with one ordered output write per
 // transformed sample and no peak table or reduction.
@@ -1898,8 +1957,7 @@ void fullCorrelation(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         r[i] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
     }
     transform(r, tid);
-    MF_UNROLL for (uint i = 0; i < R; ++i)
-        output[pair*N + slotToIndex(tid*R + i)] = float2(float(r[i].x), float(r[i].y));
+    storeNatural(r, tid, output, pair*N, 0u, N);
 }
 
 // The same transform, with its valid lags written at absolute series offsets.
@@ -1921,11 +1979,7 @@ void fullCorrelationSeries(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         r[i] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
     }
     transform(r, tid);
-    MF_UNROLL for (uint i = 0; i < R; ++i) {
-        uint lag = slotToIndex(tid*R + i);
-        if (lag >= params.z && lag < params.w && lag < params.y - start)
-            output[t*params.y + start + lag] = float2(float(r[i].x), float(r[i].y));
-    }
+    storeNatural(r, tid, output, t*params.y + start, params.z, min(params.w, params.y - start));
 }
 
 //: Compaction. One THREAD per pair, not one workgroup.

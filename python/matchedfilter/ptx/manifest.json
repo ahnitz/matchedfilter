@@ -928,7 +928,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "10b2a3dc73b528f4ee35cf4577f1e4bb61c9d24f89eb6db228903af1842154c5",
+   "sha256": "fc43aef845f2892f9980e46c9d1ba90f61f755d1cb2d00746d633d9f65dacd07",
    "single_bin": 0,
    "tile": 1
   },
@@ -947,7 +947,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "869454a1023b41257733176788a7ac53d20fb856a0ecfc6c3c5b3a43f946245b",
+   "sha256": "4ed2bb964795b81d8945fc3c39e17918d166dda068e972427074b66e14e7127b",
    "single_bin": 0,
    "tile": 1
   },
@@ -966,7 +966,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "2b51748d0dfee7a71be1262cfc02e46d923535d47cd6a808dc10eb18988da02f",
+   "sha256": "c873cdb10fd26a106255f26bf8c9c7601f70e3e2c3d47c22aba4b10197cf66a6",
    "single_bin": 0,
    "tile": 1
   },
@@ -985,7 +985,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "eb24f0295d615c40f9442a1beb4b1e3c09ce5da4b36132ef4e1ee00206bcd44e",
+   "sha256": "e0417b94351f6ab106f9aef6965c3c3445150507efb2bde7814836278e3cf6c1",
    "single_bin": 0,
    "tile": 1
   },
@@ -1004,7 +1004,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "bff71c30d7ff3ec20b0ae5a5a926f07c73a06e6f642548a219d89bf8987ec2ef",
+   "sha256": "fc12b0de5a0d12a574f93c0ff48cbeecb7c84b695130621ccc6b9b6fa77bf06d",
    "single_bin": 0,
    "tile": 1
   },
@@ -1023,7 +1023,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "18aba65bcbcae035e9c467832cc091d62df32fb4e335a884cb817fe2ec9e4948",
+   "sha256": "9ed35ec71bcbf26a4fc298a47c800b1c1b82304a13cb34d98291476616d8d2bc",
    "single_bin": 0,
    "tile": 1
   },
@@ -1042,7 +1042,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "87a02beffe2cd414b26626d2be7afabaef22cb41e033f0bea2247669c29f2063",
+   "sha256": "7acc0a5e4f037321a2c15fcd3ef2c2a84f1b2410de5c89d2e0005d1836b64cc8",
    "single_bin": 0,
    "tile": 1
   },
@@ -1061,7 +1061,7 @@
    "n": 1024,
    "portable": 0,
    "ppg": 1,
-   "sha256": "8d589f1ba7bb110a4c4fd24316a7ed041f30aed347c24334251d7997ef825dd5",
+   "sha256": "6e77b718be6365556de2efbed21c901ec71146e0f3649672cd41c1f0ee2c6847",
    "single_bin": 0,
    "tile": 1
   },
@@ -1080,7 +1080,7 @@
    "n": 16384,
    "portable": 1,
    "ppg": 1,
-   "sha256": "1083a02160a5a66e356238c21e547234d4fa352f8a8c1d6c833cfb1c5d56faf0",
+   "sha256": "0ed70cc815ff68b34d4e6b2107e9ba0bd0eba25c8a4e4fb3d936705b02844cc9",
    "single_bin": 0,
    "tile": 1
   },
@@ -1099,7 +1099,7 @@
    "n": 2048,
    "portable": 0,
    "ppg": 1,
-   "sha256": "9aa3c6d1a2e3e57d0a79251e13548f3827a86d1f2e12e5ea3c2bdbc469d65b3e",
+   "sha256": "5ecc1fe6119f85e1c72b73d04b15742aed20dcf8cb44794ace49b368380d9502",
    "single_bin": 0,
    "tile": 1
   },
@@ -1118,7 +1118,7 @@
    "n": 32768,
    "portable": 1,
    "ppg": 1,
-   "sha256": "e571bf556c3818138777a38551337382d5398f28bdb39faae43d2588f341ee01",
+   "sha256": "ad988298e0bfb3c6c86a4aba2e2b188b4b911961739fa70fdaddc4618fc23ee4",
    "single_bin": 0,
    "tile": 1
   },
@@ -1137,7 +1137,7 @@
    "n": 4096,
    "portable": 0,
    "ppg": 1,
-   "sha256": "3755533d5ae3568143e278edadb67d36a3e8c799afb047691db18022d695b21a",
+   "sha256": "feb517020355070e87a45bf04a52816417c2f6271a30ba86cfd4584c1beb400e",
    "single_bin": 0,
    "tile": 1
   },
@@ -1156,7 +1156,7 @@
    "n": 65536,
    "portable": 1,
    "ppg": 1,
-   "sha256": "63e2cabb0ba96e862b9a45f08d1682422ea8042b063700334069eaf408d3901f",
+   "sha256": "5a647b4e2bb308e9e7b0e81a3dae5b7633c95f2281bcea0864bff6ea5a163c46",
    "single_bin": 0,
    "tile": 1
   },
@@ -1175,7 +1175,7 @@
    "n": 8192,
    "portable": 1,
    "ppg": 1,
-   "sha256": "e2c516ce61053301a989c6839570ae726e59feffd5ba431b7487c6fbf497c8fb",
+   "sha256": "c4844d7f017ad520ab8591afef30059c5ecbcf9e2c0353e6cc08a1fa3dc14e01",
    "single_bin": 0,
    "tile": 1
   },
@@ -6286,7 +6286,7 @@
   "refine_td.slang": "51a985b8148f49b08079cf2782429cb29bddc7fda538b65930d08b434ac38bd2",
   "series_bands.slang": "3a73e4936a174feda042fb3572bd4c2266e7bc786b7cf3a30648ca597cffa727",
   "series_forward.slang": "d0eeeb45919905c746274ddb96d149c56ca3e8448406c3ec6045b8601051c433",
-  "tierb.slang": "a5b408a6218a5429ea84ac087e0548dfb2263787ed144715b52262a783980d15",
+  "tierb.slang": "146b89f6fddffe9bc100203c1808444101616d88666497b658e88db40b237db0",
   "twiddle.slang": "f4459e231e7d8ca95fda92e1d73780cd723bdb4a2589753632b02293821433e7"
  },
  "two_stage": {
