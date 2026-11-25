@@ -1019,6 +1019,11 @@ class _VkList:
         return _VkNative(self.ctx, self.label, self.ops, self.once)
 
 
+#: Descriptor sets a device keeps per layout for reuse (_VkNative.free): about the most one
+#: top template's plans of a pycbc job hold at once.
+_DESC_SHELF = 1024
+
+
 class _VkNative:
     """A recorded list: a command buffer per binding of its Args (just one without Args),
     the most recently used _BINDINGS kept, each holding the views it binds so no allocation
@@ -1126,8 +1131,20 @@ class _VkNative:
         ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
         dead = {pool.value for pool in pools}
+        # The recording's sets are no longer in use (its command buffer is freed): each goes
+        # back to the device's shelf for its layout, for the next recording to rewrite
+        # (vkUpdateDescriptorSets) instead of creating, allocating and destroying a pool --
+        # 18,328 sets a pycbc job, every top template's plans new. The shelf holds handles
+        # only (no context), at most _DESC_SHELF per layout; past that the pool is destroyed.
+        shelf = ctx._device_state.__dict__.setdefault("desc_shelf", {})
+        owned = ctx.__dict__.get("_pool_sets", {})
         for pool in pools:
-            ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
+            got = owned.pop(pool.value, None)
+            kept = shelf.setdefault(got[0], []) if got is not None else None
+            if kept is not None and len(kept) < _DESC_SHELF:
+                kept.append((pool, got[1]))
+            else:
+                ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
         ctx._pools = [pool for pool in getattr(ctx, "_pools", []) if pool.value not in dead]
 
     def release_one(self, key, done=False):
@@ -1520,20 +1537,33 @@ class Context(Executor, InputUploads):
             if offsets is not None:
                 offsets = list(offsets) + [0] * (want - len(offsets))
         nbind = len(bufs)
-        sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, nbind))
-        dp = _DescPoolCreate(33, None, 0, 1, 1, sizes)
-        pool = _vp()
-        _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None,
-                                         ctypes.byref(pool)),
-               "vkCreateDescriptorPool")
+        # A set a freed recording gave back (_VkNative.free) for this layout, rewritten below;
+        # else a new one-set pool. The layout is a device-lifetime object (pipelines live as
+        # long as the process), so its handle names one layout for the shelf's whole life.
+        key = (getattr(set_layout, "value", set_layout), nbind)
+        shelf = self._device_state.__dict__.setdefault("desc_shelf", {}).get(key)
         self._pools = getattr(self, "_pools", [])
+        if shelf:
+            pool, dset = shelf.pop()
+        else:
+            sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, nbind))
+            dp = _DescPoolCreate(33, None, 0, 1, 1, sizes)
+            pool = _vp()
+            _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None,
+                                             ctypes.byref(pool)),
+                   "vkCreateDescriptorPool")
+            layouts = (_vp * 1)(set_layout)
+            da = _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))
+            dset = _vp()
+            try:
+                _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(da),
+                                                   ctypes.byref(dset)),
+                       "vkAllocateDescriptorSets")
+            except Exception:
+                vk.vkDestroyDescriptorPool(self.device, pool, None)
+                raise
         self._pools.append(pool)
-        layouts = (_vp * 1)(set_layout)
-        da = _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))
-        dset = _vp()
-        _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(da),
-                                           ctypes.byref(dset)),
-               "vkAllocateDescriptorSets")
+        self.__dict__.setdefault("_pool_sets", {})[pool.value] = (key, dset)
         # A view's nbytes already excludes its own offset (_Borrowed): the range runs from
         # the descriptor offset to the end of the whole buffer, at most max_binding_bytes.
         limit = self.max_binding_bytes
@@ -2202,6 +2232,7 @@ class Context(Executor, InputUploads):
         for pool in getattr(self, '_pools', []):
             self.vk.vkDestroyDescriptorPool(self.device, pool, None)
         self._pools = []
+        self.__dict__.pop("_pool_sets", None)
         self._cache_order = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 

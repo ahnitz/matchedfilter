@@ -396,3 +396,45 @@ def test_a_dropped_gpu_filter_gives_its_descriptors_back():
         "12 dropped GPU filters left %d descriptors behind; they used to "
         "leak about 4 each, which exhausts a 1024 limit in one session"
         % grown)
+
+
+def test_a_freed_plans_descriptor_sets_serve_the_next_plan():
+    """A recording that is freed gives its descriptor sets back to the device for the next
+    recording to rewrite: a second plan of the same shape, after the first is gone, creates
+    no descriptor pool, and its peaks are a fresh plan's (the rewritten sets bind its own
+    buffers, not the freed plan's)."""
+    from matchedfilter.device import parse
+    if DEVICE is None or parse(DEVICE).backend != "vulkan":
+        pytest.skip("Vulkan's descriptor sets")
+    import gc
+    d1, h1 = spectra(1)
+    d2, h2 = spectra(4)
+    f = mf.MatchedFilter(N, ND, NT, device=DEVICE)
+    f.set_templates(h1)
+    f.set_data(d1)
+    f.run(binsize=N, threshold=0.0)
+    vk = f._gpu.vk
+    del f
+    gc.collect()
+    real = vk.vkCreateDescriptorPool
+    made = []
+
+    def counting(*a):
+        made.append(1)
+        return real(*a)
+    vk.vkCreateDescriptorPool = counting
+    try:
+        g = mf.MatchedFilter(N, ND, NT, device=DEVICE)
+        g.set_templates(h2)
+        g.set_data(d2)
+        got = g.run(binsize=N, threshold=0.0).copy()
+    finally:
+        vk.vkCreateDescriptorPool = real
+    assert made == []
+    ref = mf.MatchedFilter(N, ND, NT, device="cpu")
+    ref.set_templates(h2)
+    ref.set_data(d2)
+    want = ref.run(binsize=N, threshold=0.0)
+    np.testing.assert_array_equal(got["index"], want["index"])
+    np.testing.assert_allclose(np.abs(got["value"]), np.abs(want["value"]), rtol=1e-4,
+                               atol=1e-4)
