@@ -415,19 +415,21 @@ def settle_all():
 
 
 class _Write:
-    """A write left in flight (Executor._writes): a command buffer of `ctx` that signals
-    its event. Settling waits for everything that context has in flight and releases the
-    host memory those commands read in place."""
-    __slots__ = ("ctx",)
+    """A write left in flight (Executor._writes): one command buffer of `ctx` that signals
+    its event, and `wait`, its in-flight result (_commit). Settling waits for that run; once
+    the context has nothing left in flight it also releases the host memory its commands
+    read in place."""
+    __slots__ = ("ctx", "wait")
 
-    def __init__(self, ctx):
-        self.ctx = ctx
+    def __init__(self, ctx, wait):
+        self.ctx, self.wait = ctx, wait
 
     def settle(self):
         try:
-            self.ctx._drain()
+            self.wait()
         finally:
-            self.ctx._keep_until_done.clear()
+            if not self.ctx._inflight:
+                self.ctx._keep_until_done.clear()
 
 
 def _writers(dev):
@@ -1241,8 +1243,7 @@ class Context(Executor, InputUploads):
             self._commit(cmd, label)
             return
         self._signal_write(cmd)
-        self._commit(cmd, label, async_submit=True)
-        self._pend_write()
+        self._pend_write(self._commit(cmd, label, async_submit=True))
 
     def _signal_write(self, cmd):
         """Make a command buffer left in flight a pending write: it signals this context's
@@ -1256,35 +1257,34 @@ class Context(Executor, InputUploads):
                     args=(self._signal_event, self._signal_value),
                     argtypes=(ctypes.c_void_p, ctypes.c_uint64))
 
-    def _pend_write(self):
-        """This context's write token moved to the newest place on the device's list. One
-        token per context: settling one drains the whole context, so a token per run only
-        lengthened the list every new command buffer scans (_writers)."""
-        token = self.__dict__.get("_write")
-        if token is None:
-            token = self._write = _Write(self)
+    def _pend_write(self, wait):
+        """A token for the run whose in-flight result is `wait`, newest on the device's list:
+        one per run, so settle_until(token) waits for that run and older ones and leaves newer
+        ones registered (one token per context, moved to the newest place, settled them all).
+        Tokens of runs already collected are dropped, so the list stays as short as what is
+        in flight."""
         pend = self._writes()
-        for i, w in enumerate(pend):
-            if w is token:
-                del pend[i]
-                break
-        pend.append(token)
+        pend[:] = [w for w in pend if not getattr(w.wait, "done", False)]
+        pend.append(_Write(self, wait))
 
     @_autoreleased
-    def _x_submit(self, native, binds, slot, pre=()):
+    def _x_submit(self, native, binds, slot, pre=(), pending=False):
         """Run a recording and leave it in flight: the driver primitive `_x_submit` (_gpuexec).
-        Returns wait(). The run is also a pending write, as on Vulkan: another context's
+        Returns wait(). With pending=True the run is also a pending write: another context's
         command buffer waits for it on the GPU and a host reader settles it (a device root's
         series, which the middle stage reads on its own queue and a test reads after
-        settle_writes, was read before it was written)."""
+        settle_writes, was read before it was written). Otherwise only this context's queue
+        is ordered after it."""
         label, ops = native
         cmd = self._command_buffer()
         for nat, b in pre:
             self._x_encode(cmd, nat[1], b or {})
         self._x_encode(cmd, ops, binds or {})
-        self._signal_write(cmd)
+        if pending:
+            self._signal_write(cmd)
         wait = self._commit(cmd, label, async_submit=True)
-        self._pend_write()
+        if pending:
+            self._pend_write(wait)
         return wait
 
     @staticmethod

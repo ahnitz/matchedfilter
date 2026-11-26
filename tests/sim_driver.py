@@ -51,8 +51,9 @@ from matchedfilter._shared import BUFFER_SERIALS, empty_shared
 #: Faults a simulated context can be given, each a driver bug that happened.
 FAULTS = {
     "submit_not_pending":
-        "_x_submit leaves its run unknown to settle_writes and to other queues (Metal and "
-        "CUDA before 05fb2378: the device root's series read before it was written)",
+        "_x_submit(pending=True) leaves its run unknown to settle_writes and to other queues "
+        "(Metal and CUDA before 05fb2378: the device root's series read before it was "
+        "written)",
     "run_ignores_slot":
         "_x_run(wait=False) runs on the main queue whatever its slot (Vulkan at 05fb2378)",
     "drops_pre_frees":
@@ -531,12 +532,12 @@ class Context(Executor, InputUploads):
         else:
             self._writes().append(_Write(job))
 
-    def _x_submit(self, native, binds, slot, pre=()):
+    def _x_submit(self, native, binds, slot, pre=(), pending=False):
         frees = []
         items, pre_frees = self._bind_items(native, binds, pre, True, frees)
         job = self._submit(items, slot)
         job.frees = frees + pre_frees
-        if "submit_not_pending" not in self.faults:
+        if pending and "submit_not_pending" not in self.faults:
             self._writes().append(_Write(job))
         return job.finish
 

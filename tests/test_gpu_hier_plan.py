@@ -110,7 +110,7 @@ class Driver(Executor, InputUploads):
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         self.runs.append((native, binds, slot, list(pre)))
 
-    def _x_submit(self, native, binds, slot, pre=()):
+    def _x_submit(self, native, binds, slot, pre=(), pending=False):
         self._x_run(native, False, binds, slot, pre)
         return lambda: None
 

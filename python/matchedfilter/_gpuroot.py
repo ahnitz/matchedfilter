@@ -254,7 +254,7 @@ class DeviceRoot:
             lst.barrier()
             native = self._records[key] = lst.end()
             self.built += 1
-        wait = self.ctx._x_submit(native, {}, None)
+        wait = self.ctx._x_submit(native, {}, None, pending=True)
         self._last[(n, parity)] = wait
         self._tmpl_run[n] = wait
         return self.built - built

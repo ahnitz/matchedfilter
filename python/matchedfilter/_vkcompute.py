@@ -711,13 +711,16 @@ def settle_all():
 
 
 class _Write:
-    """A run left in flight (Executor._writes): the fence its submission signals, or the
-    fused batch that took it (_FusedBatch.add), which settling submits first."""
-    __slots__ = ("vk", "device", "fence", "collected")
+    """A run left in flight (Executor._writes, or a submission's wait()): the fence its
+    submission signals, or the fused batch that took it (_FusedBatch.add), which settling
+    submits first; the queue it runs on (its value); and the one-off recordings it holds,
+    freed once it has finished."""
+    __slots__ = ("vk", "device", "fence", "collected", "queue", "frees")
 
-    def __init__(self, ctx, fence):
+    def __init__(self, ctx, fence, queue=None, frees=()):
         self.vk, self.device, self.fence = ctx.vk, ctx.device, fence
         self.collected = ctx.__dict__.setdefault("_collected", {})
+        self.queue, self.frees = queue, list(frees)
 
     def settle(self):
         if self.fence is None:
@@ -730,6 +733,9 @@ class _Write:
                                            0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         self.vk.vkDestroyFence(self.device, self.fence, None)
         self.fence = None
+        frees, self.frees = self.frees, []
+        for free in frees:
+            free()
 
 
 class _Device:
@@ -1791,32 +1797,44 @@ class Context(Executor, InputUploads):
 
     def _submit(self, cmd, fence=None, wait=True, slot=None, pre=(), label="run"):
         """Submit commands (pre: run first, in the same submission -- the work the executor
-        deferred for this slot) and wait for them unless asked not to."""
+        deferred for this slot) on the slot's queue, and wait for them unless asked not to.
+        Returns the value of the queue they run on (a fused batch's: the main queue)."""
         commands = list(pre)
         if cmd is not None:
             commands.append(cmd)
         if not commands:
-            return
+            return None
         batch = self._device_state.collector
-        if (batch is not None and fence is not None and not wait
-                and all(getattr(c, "value", c) in getattr(self, "_phases", {}) for c in commands)):
+        fuse = (batch is not None and fence is not None and not wait
+                and all(getattr(c, "value", c) in getattr(self, "_phases", {}) for c in commands))
+        # _queue_offset spreads concurrent plans over the compute queues (filter_series_many):
+        # barriers order work only within a queue, so banks on different queues overlap.
+        queue = (self.queues[(slot + self._queue_offset) % len(self.queues)]
+                 if (getattr(self, "queues", None) and slot is not None and not fuse)
+                 else self.queue)
+        dev = getattr(self, "_device_state", None)
+        if dev is not None and dev.pending_writes:
+            # Barriers order only one queue: pending writes on another are settled first.
+            here = getattr(queue, "value", queue)
+            if any(w.fence is not None and w.queue != here for w in dev.pending_writes):
+                self.settle_writes()
+            elif not fuse and batch is not None and batch.items and any(
+                    w.fence is not None
+                    and w.collected.get(getattr(w.fence, "value", w.fence)) is batch
+                    for w in dev.pending_writes):
+                # Pending writes the open batch collected are not submitted yet: they go
+                # first, on this (the main) queue, so this run is ordered after them.
+                batch.flush()
+        if fuse:
             # A fused batch (filter_series_many): recorded with the others when first waited on.
             batch.add(self, commands, fence)
-            return
+            return getattr(self.queue, "value", self.queue)
         if self._timing:
             begin, end = self._timestamp_pair(label)
             self._profile_submitted(commands)
             commands = [begin] + commands + [end]
         cmds = carray(_vp, len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
-        # _queue_offset spreads concurrent plans over the compute queues (filter_series_many):
-        # barriers order work only within a queue, so banks on different queues overlap.
-        queue = (self.queues[(slot + self._queue_offset) % len(self.queues)]
-                 if (getattr(self, "queues", None) and slot is not None) else self.queue)
-        dev = getattr(self, "_device_state", None)
-        if dev is not None and dev.pending_writes and queue is not self.queue \
-                and getattr(queue, "value", queue) != getattr(self.queue, "value", self.queue):
-            self.settle_writes()                # barriers order only one queue
         _check(self.vk.vkQueueSubmit(queue, 1, ctypes.byref(submit), fence),
                "vkQueueSubmit")
         if wait:
@@ -1824,6 +1842,7 @@ class Context(Executor, InputUploads):
                 self._wait_fence(fence)
             else:
                 _check(self.vk.vkQueueWaitIdle(queue), "vkQueueWaitIdle")
+        return getattr(queue, "value", queue)
 
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     #: Kernels are specialized when their pipeline is built (constants 75/76/79): the tiers
@@ -2027,36 +2046,32 @@ class Context(Executor, InputUploads):
         return out, frees
 
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
+        """Run a recording on the slot's queue: the driver primitive `_x_run` (_gpuexec). Left
+        in flight it is a pending write, which frees the one-off recordings of the run and its
+        deferred work when settled."""
         cmd, release = native.command(binds or {}, transient=wait)
         pcmds, frees = self._pre_commands(pre)
+        frees = frees + ([release] if release is not None else [])
         if wait:
             self._submit(cmd, slot=slot, pre=pcmds, label=native.label)
-            for free in frees + ([release] if release is not None else []):
+            for free in frees:
                 free()
         else:
-            self._submit_pending(cmd, pre=pcmds, label=native.label)
+            self._submit_pending(cmd, pre=pcmds, label=native.label, slot=slot, frees=frees)
 
-    def _x_submit(self, native, binds, slot, pre=()):
+    def _x_submit(self, native, binds, slot, pre=(), pending=False):
         """Run a recording and leave it in flight: the driver primitive `_x_submit` (_gpuexec).
         pre is deferred work that runs first in the same submission. Returns a function that
-        waits for it and frees what the run held: on a slot, the slot's fence; without one, the
-        submission's own write token, which other queues' submissions and host readers settle.
+        waits for it and frees what the run held. pending=True makes it a pending write (its
+        own fence, which other queues' submissions and host readers settle); otherwise it is
+        waited for through its slot's fence, or, without a slot, a fence of its own.
         """
         cmd, release = native.command(binds, transient=True)
         pcmds, frees = self._pre_commands(pre)
         frees = frees + ([release] if release is not None else [])
-        if slot is None:
-            # Its own fence, as a run left in flight: another queue's submission and a host
-            # reader settle it first (_submit, settle_writes).
-            self._submit_pending(cmd, pre=pcmds, label=native.label)
-            write = self._writes()[-1]
-
-            def settle():
-                write.settle()
-                for free in frees:
-                    free()
-                del frees[:]
-            return settle
+        if pending or slot is None:
+            return self._submit_pending(cmd, pre=pcmds, label=native.label, slot=slot,
+                                        frees=frees, pending=pending).settle
         fence = self._get_fence(slot)
         self._submit(cmd, fence=fence, wait=False, slot=slot, pre=pcmds, label=native.label)
 
@@ -2107,17 +2122,22 @@ class Context(Executor, InputUploads):
     def _x_view(buf, dtype, count):
         return buf.view(dtype, count)
 
-    def _submit_pending(self, cmd, pre=(), label="run"):
-        """Submit on the main queue and leave it in flight (see _Device.pending_writes)."""
+    def _submit_pending(self, cmd, pre=(), label="run", slot=None, frees=(), pending=True):
+        """Submit on the slot's queue under a fence of its own and leave it in flight: a
+        pending write (_Device.pending_writes) unless pending is False. Returns its _Write,
+        whose settle() waits for it and frees `frees` (its one-off recordings)."""
         fence = _vp()
         _check(self.vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
                                      ctypes.byref(fence)), "vkCreateFence")
         try:
-            self._submit(cmd, fence=fence, wait=False, pre=pre, label=label)
+            queue = self._submit(cmd, fence=fence, wait=False, slot=slot, pre=pre, label=label)
         except BaseException:
             self.vk.vkDestroyFence(self.device, fence, None)
             raise
-        self._writes().append(_Write(self, fence))
+        write = _Write(self, fence, queue, frees)
+        if pending:
+            self._writes().append(write)
+        return write
 
 
 

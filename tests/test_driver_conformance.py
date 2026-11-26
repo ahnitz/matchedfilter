@@ -281,30 +281,28 @@ def test_a_submitted_run_is_finished_by_its_wait(make, slot):
     w.check()
 
 
-@known_gap("vulkan", "a slotted _x_submit is not a pending write (_vkcompute._x_submit "
-                     "waits on the slot's own fence and registers no write token; audit "
-                     "section 3.1), while the interface says it is _x_run left in flight",
-           slot=0)
-@known_gap("vulkan", "a slotted _x_submit is not a pending write (_vkcompute._x_submit "
-                     "waits on the slot's own fence and registers no write token; audit "
-                     "section 3.1), while the interface says it is _x_run left in flight",
-           slot=1)
+@pytest.mark.parametrize("pending", [True, False])
 @pytest.mark.parametrize("slot", SLOTS)
-def test_a_submitted_run_is_a_pending_write(make, slot):
-    """_x_submit is _x_run left in flight (the interface's wording): a pending write on any
-    slot, the device's newest write token, which settle_writes waits for. The device root
-    (an unslotted submission) depends on it: the middle stage and the host read its series."""
+def test_a_submission_is_a_pending_write_exactly_when_asked(make, slot, pending):
+    """_x_submit(pending=True) is a pending write on any slot: the device's newest write
+    token, which settle_writes waits for (the device root's series, which the middle stage
+    and the host read). Without pending it registers nothing -- settle_writes and other
+    slots do not wait for a pipelined call -- and its wait() finishes it."""
     ctx = make()
     w = Writer(make, ctx, np.random.default_rng(4))
     before = ctx.write_token()
-    wait = ctx._x_submit(w.native, {}, slot)
+    wait = ctx._x_submit(w.native, {}, slot, pending=pending)
     token = ctx.write_token()
     try:
-        assert token is not None and token is not before, "no write token for the run"
-        ctx.settle_writes()
-        w.check()
+        if pending:
+            assert token is not None and token is not before, "no write token for the run"
+            ctx.settle_writes()
+            w.check()
+        else:
+            assert token is before, "a submission without pending registered a write token"
     finally:
         wait()
+    w.check()
 
 
 # ---- C4, C5: who is ordered after a pending write -----------------------------------------
@@ -322,7 +320,7 @@ def test_another_context_reads_a_pending_write(make, form, slot):
         a._x_run(w.native, False)
         wait = None
     else:
-        wait = a._x_submit(w.native, {}, None)
+        wait = a._x_submit(w.native, {}, None, pending=True)
     b._x_run(r.native, True, None, slot)
     r.check("a reader in another context")
     if wait is not None:
@@ -343,9 +341,6 @@ def test_another_slot_reads_a_pending_write(make, slots):
     ctx.settle_writes()
 
 
-@known_gap("vulkan", "_x_run(wait=False) submits to the main queue whatever its slot "
-                     "(_vkcompute._submit_pending passes no slot; audit section 3.1), so it "
-                     "is not ordered after earlier work on its slot's queue", form="in flight")
 @pytest.mark.parametrize("form", ["waited", "in flight"])
 def test_a_run_on_a_slot_follows_earlier_work_on_that_slot(make, form):
     """Work a context submits on a slot executes after the work it submitted on that slot
@@ -477,15 +472,15 @@ def instrument(ctx):
     raise AssertionError("no counters for driver %s: add them here" % family)
 
 
-@known_gap("vulkan", "_x_run(wait=False) drops the frees of the one-off command buffers "
-                     "its deferred work records past 8 bindings (_vkcompute._x_run: frees "
-                     "unused when not waiting; audit section 3.1)", form="in flight")
 @pytest.mark.parametrize("form", ["waited", "in flight", "submitted"])
 def test_one_off_recordings_are_freed_after_their_run(make, form):
     """A recording bound to more bindings than a driver keeps (a stream of new outputs)
     records a one-off instance per run, which is freed once that run has finished: after
     the runs are waited or settled and the recordings released, the driver holds no more
-    recordings than before them."""
+    recordings than before them. What it covers per backend: Vulkan's command buffers (a
+    one-off one past 8 bindings, which _x_run(wait=False) once leaked), CUDA's graph
+    executables, the simulated driver's instances; Metal makes no recording objects (every
+    run encodes afresh), so there it holds by construction and checks only the outputs."""
     ctx = make()
     counters = instrument(ctx)
     rng = np.random.default_rng(8)
@@ -520,9 +515,6 @@ def test_one_off_recordings_are_freed_after_their_run(make, form):
 
 
 # ---- C7: settling up to a token ------------------------------------------------------------
-@known_gap("metal", "_mtlcompute.Context._pend_write keeps one write token per context and moves "
-                    "it to the newest place, so two runs left in flight share one token and "
-                    "settling the older settles the newer too (found on an Apple M2)")
 def test_settle_until_waits_for_that_write_and_older_ones(make):
     """settle_until(token) waits for the pending write that token names and every older
     one, and leaves newer ones registered; a token already settled is a no-op."""
@@ -680,8 +672,6 @@ def test_timing_logs_one_interval_per_submission(make):
     assert all(np.isfinite(ms) and ms > 0 for _, ms in log), log
 
 
-@known_gap("cuda", "_cudacompute._x_time takes min() of an empty list when no run recorded a "
-                   "time, and raises (audit section 1.1)")
 def test_a_timing_without_a_sample_is_no_time(make):
     """_x_time gives the least device time of `reps` runs after a warm-up: a positive finite
     time, or, when no run recorded one (reps=0 here), the value _choice.no_time reads as
@@ -849,9 +839,6 @@ def test_fused_runs_give_unfused_results_and_settle(make, settle):
         w.check("a fused run's output")
 
 
-@known_gap("vulkan", "a run collected by an open fused batch is submitted only when the batch "
-                     "flushes, and a run outside the batch submitted meanwhile on the main "
-                     "queue is not ordered after it (_vkcompute._submit, _FusedBatch.add)")
 def test_a_run_outside_a_fused_batch_follows_its_pending_writes(make):
     """A run that is not fused (one not recorded in phases) is ordered after the pending
     writes that runs collected in an open fused batch left before it, as after any pending
@@ -926,11 +913,6 @@ def test_a_driver_reports_its_documented_features(make):
     assert isinstance(ctx.inplace_feed, bool)
 
 
-_NAME_GAP = ("the device's name is `name`, not `device_name`, so shared code reads both "
-             "through getattr chains (audit sections 1.2 and 1.3 #3, #8; plan step 2)")
-
-
-@known_gap("cuda", _NAME_GAP)
 def test_a_driver_names_its_device_and_shares_its_state(make):
     """Every context on a device has the same device state object (_device_state, which
     holds the device's pending writes) and names the device as device_name."""
@@ -946,9 +928,12 @@ def _faulty(*faults):
 
 #: For each simulated fault, the tests (with parameters) that must fail under it.
 CATCHES = {
-    "submit_not_pending": [(test_a_submitted_run_is_a_pending_write, {"slot": None}),
+    "submit_not_pending": [(test_a_submission_is_a_pending_write_exactly_when_asked,
+                            {"slot": 1, "pending": True}),
                            (test_another_context_reads_a_pending_write,
                             {"form": "submit", "slot": 1})],
+    "run_ignores_slot": [(test_a_run_on_a_slot_follows_earlier_work_on_that_slot,
+                          {"form": "in flight"})],
     "drops_pre_frees": [(test_one_off_recordings_are_freed_after_their_run,
                          {"form": "in flight"})],
     "no_pool": [(test_freed_allocations_are_recycled, {"kind": "device"}),

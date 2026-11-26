@@ -706,6 +706,7 @@ class Context(Executor, InputUploads):
         name_buf = ctypes.create_string_buffer(256)
         self.cuda.cuDeviceGetName(name_buf, len(name_buf), self.device.value)
         self.name = name_buf.value.decode("utf-8", "replace").strip()
+        self.device_name = self.name        # what every driver calls it
         self.sm_count = self._attr(_cuda._CUDA_DEVICE_ATTR_MULTIPROCESSOR_COUNT) or 1
         self.cc = (self._attr(_cuda._CUDA_DEVICE_ATTR_COMPUTE_CAPABILITY_MAJOR),
                    self._attr(_cuda._CUDA_DEVICE_ATTR_COMPUTE_CAPABILITY_MINOR))
@@ -1194,7 +1195,7 @@ class Context(Executor, InputUploads):
         finally:
             self.cuda.cuEventDestroy_v2(e0)
             self.cuda.cuEventDestroy_v2(e1)
-        return min(times)
+        return min(times) if times else 0.0     # 0.0: no run recorded a time (_choice.no_time)
 
     def _x_tierc(self, n):
         return self._tierc(n, "corr1")[2:]
@@ -1220,18 +1221,19 @@ class Context(Executor, InputUploads):
         else:
             self._pend_write(stream)
 
-    def _x_submit(self, native, binds, slot, pre=()):
-        """_x_run left in flight, returning wait(). Without a slot, as on Vulkan, it is a
-        pending write like a run with wait=False: another stream is ordered after it and a
-        host reader settles it (a device root's series is read by the middle stage and, after
-        settle_writes, by the host; without it a host read after settle_writes saw the
-        unwritten series every time on an RTX 6000). A slot's run is read through its wait()
-        only, as Vulkan's slot fence is: pending, it ordered every later launch on the
-        device's other streams after the leaf calls in flight: search_bench's steady pass
-        took 1.55 s against 1.28 s (means of four runs each on the RTX 6000, alternated;
-        three of the pairs 19-31% apart, one tied)."""
+    def _x_submit(self, native, binds, slot, pre=(), pending=False):
+        """_x_run left in flight, returning wait(). With pending=True (the caller's choice: an
+        unslotted run other work depends on) it is a pending write like a run with
+        wait=False: another stream is ordered after it and a host reader settles it (a device
+        root's series is read by the middle stage and, after settle_writes, by the host;
+        without it a host read after settle_writes saw the unwritten series every time on an
+        RTX 6000). Otherwise only its stream is ordered after it, and it is read through its
+        wait(): a slotted leaf call made pending ordered every later launch on the device's
+        other streams after the leaf calls in flight -- search_bench's steady pass took 1.55 s
+        against 1.28 s (means of four runs each on the RTX 6000, alternated; three of the
+        pairs 19-31% apart, one tied)."""
         stream = self._x_launch(native, binds, slot, pre)
-        if slot is None:
+        if pending:
             self._pend_write(stream)
         return lambda: self._sync(stream)
 

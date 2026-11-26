@@ -82,22 +82,29 @@ Driver primitives (a Context provides each):
                               end()          -> native: what _x_run runs and _x_release frees.
   _x_run(native, wait, binds=None, slot=None, pre=())
                             run a recorded list, binding each Arg to binds[name] (a view), on
-                            the queue or stream of pipelining slot `slot`, after `pre`
-                            ((native, binds) deferred for it) in the same submission;
-                            wait=False leaves it in flight as a pending write (device work is
-                            ordered after it, a host reader waits through settle_writes).
-  _x_submit(native, binds, slot, pre=())
-                            _x_run, returning wait(): a call that blocks until it has finished
-                            (a result read later).
+                            pipelining slot `slot`, after `pre` ((native, binds) deferred for
+                            it) in the same submission. wait=True: finished on return;
+                            wait=False: left in flight as a pending write (see "Work in
+                            flight" below).
+  _x_submit(native, binds, slot, pre=(), pending=False)
+                            the same run left in flight, returning wait(): a call that blocks
+                            until it has finished and frees what it held (a result read
+                            later). A pending write only with pending=True, which the caller
+                            passes for an unslotted run other work may depend on (the device
+                            root, whose series the middle stage and the host read; the
+                            follow-up batches); a slotted pipelined call, whose result is
+                            read through its wait(), passes none.
   _x_prefetch(view, offset, nbytes, slot)
                             start moving a span of a shared allocation to the device ahead of
                             the kernel that reads it (memory that migrates).
-  _x_after_readers()        order the next run after earlier device work on this device that
-                            may still read what it rewrites (another context's queue).
+  _x_after_readers()        order the next run after every run on the device submitted before
+                            this call, by any context, pending write or not: readers still in
+                            flight of what it rewrites (another context's queue).
   _x_release(native, done=False)
-                            free a recording (done: its runs are known to have finished).
-  _x_idle()                 wait for every run this context submitted (its own queues or
-                            streams: not other contexts' work on the device).
+                            free a recording (done: its runs are known to have finished;
+                            otherwise its runs in flight are waited for first).
+  _x_idle()                 wait for every run this context submitted, pending write or not,
+                            on every slot (a driver may wait for more of the device).
   _x_free(buf)              free an _x_alloc buffer no run of this context still uses (a
                             driver whose frees synchronize the device keeps it for reuse).
   _x_read(buf, out, offset=0)
@@ -111,6 +118,37 @@ Driver primitives (a Context provides each):
                             the first count elements of a readback buffer as a host array,
                             read in place where the host sees that memory (valid until the
                             buffer's next run: gather from it, do not keep it), else a copy.
+
+Work in flight, and its order. Every driver keeps these rules, whatever its API; the driver
+conformance suite (tests/test_driver_conformance.py) checks them on each.
+  * After _x_run(wait=True) returns, the run has finished. _x_run(wait=False) and _x_submit
+    return with the run in flight.
+  * A pending write is a run left in flight by _x_run(wait=False) or _x_submit(pending=True):
+    a run other device work or the host will read the outputs of. It is the device's newest
+    write token (write_token) until it is settled. settle_writes, on any context of the
+    device, waits for every pending write of the device and frees what each held;
+    settle_until(token) waits for that one and every older one. Every run any context
+    submits to the device after it, on any slot, executes after it.
+  * A run left in flight that is not a pending write (_x_submit without pending) is waited
+    for by its wait(), by _x_idle and by _x_release of its recording, never by
+    settle_writes, and other slots' and other contexts' runs are not ordered after it: it is
+    for a result its caller reads itself, from outputs nothing else reads before its wait().
+  * Work a context submits on a slot executes after the work it submitted on that slot
+    before (where a barrier lies between them: a list that reads earlier work's outputs
+    begins with barrier()), whether either is waited for or left in flight. Different slots
+    may run concurrently, or in one order (Metal: one queue per context). A slot has one
+    _x_submit in flight at a time: a pipelining caller waits for a slot's result before it
+    submits there again.
+  * `pre` runs first, in the run's own submission and slot. A one-off recording the run or
+    its pre made (more bindings than the driver keeps) is freed once the run has finished:
+    on return when waited for, when its pending write is settled, or by its wait().
+  * _x_after_readers orders the context's next run after every run on the device submitted
+    before the call; _x_release(native) without done waits for the recording's runs, after
+    which the buffers they used may be freed (_x_free). Drivers may wait on the host for
+    either.
+  * The host's writes (_x_upload, a buffer's write) are not ordered after runs in flight
+    that read the buffer: the caller writes an input only once no run in flight reads it (the
+    executor settles first).
 
 Features a driver reports (attributes): max_dispatch_x (the most groups one dispatch takes),
 storage_offset_alignment (a bound buffer's offset must be a multiple of this),
@@ -355,9 +393,11 @@ class Executor(HierOps):
         self._x_run(native, wait, binds, slot, pre=self._take(slot, reads))
 
     def _exec_submit(self, native, binds, slot, rec=None):
-        """_exec_run, left running: returns wait() (_x_submit)."""
+        """_exec_run, left running: returns wait() (_x_submit). Unslotted it is a pending
+        write; a call pipelined on a slot is read through its wait() and is not."""
         reads = None if rec is None or slot is not None else self._reads(rec, binds)
-        return self._x_submit(native, binds, slot, pre=self._take(slot, reads))
+        return self._x_submit(native, binds, slot, pre=self._take(slot, reads),
+                              pending=slot is None)
 
     def _exec_evict(self, key, done=False):
         """Drop one executor record: its in-flight results are collected first, then the
@@ -1097,7 +1137,7 @@ class Executor(HierOps):
         lst.readback(bi, size * 4)
         lst.readback(bv, size * 8)
         native = lst.end()
-        wait = self._x_submit(native, {}, None, pre=self._take_items())
+        wait = self._x_submit(native, {}, None, pre=self._take_items(), pending=True)
 
         def result():
             wait()
@@ -1180,7 +1220,7 @@ class Executor(HierOps):
         *first, (rec, binds, _) = runs
         wait = self._x_submit(rec.native, binds, None,
                               pre=list(self._take(None, reads))
-                              + [(r.native, b) for r, b, _ in first])
+                              + [(r.native, b) for r, b, _ in first], pending=True)
         done = []
 
         def read(gw):
