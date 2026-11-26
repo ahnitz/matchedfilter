@@ -961,10 +961,11 @@ def test_a_driver_reports_every_documented_property(make):
 
 def test_a_driver_names_its_device_and_shares_its_state(make):
     """Every context on a device has the same device state object (_device_state, which
-    holds the device's pending writes) and the same properties record, which names the
-    device as device_name does."""
+    holds the device's pending writes; open while a buffer made on it can be freed) and the
+    same properties record, which names the device as device_name does."""
     a, b = make(), make()
     assert a._device_state is not None and a._device_state is b._device_state
+    assert a._device_state.open is True
     assert a.props is b.props
     assert a.props.name == a.device_name
 

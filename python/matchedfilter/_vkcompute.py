@@ -741,6 +741,11 @@ class _Write:
 class _Device:
     """A Vulkan instance and logical device, its compute queues, command pool and pipelines."""
 
+    @property
+    def open(self):
+        """Whether the logical device is still open, so a buffer made on it can be freed."""
+        return self.device is not None and bool(self.device.value)
+
     def free_buffer(self, res):
         """Unmap and free one allocation (handle, memory, host pointer) the pool lets go."""
         handle, memory, _ = res

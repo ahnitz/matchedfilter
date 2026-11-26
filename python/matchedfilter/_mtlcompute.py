@@ -273,6 +273,11 @@ class _Device:
     Never released: it lives as long as the process.
     """
 
+    @property
+    def open(self):
+        """Whether the MTLDevice is held, so a buffer made on it can be released."""
+        return self.__dict__.get("handle") is not None
+
     def __init__(self, index):
         self.o = o = _ObjC()
         o.metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p

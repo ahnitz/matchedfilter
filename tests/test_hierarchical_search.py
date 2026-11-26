@@ -467,7 +467,7 @@ def test_a_search_on_the_environment_device_runs_as_on_an_explicit_one(monkeypat
         assert not undeferred, name
         assert search._inner and all(b._alloc is not None for b in search._inner.values()), name
         # root outputs in device memory: taken from the device's pool for the run, where
-        # this device's backend runs a root (_gpuroot.VERIFIED_BACKENDS)
+        # this device's backend runs a root (its driver's device_root)
         if _gpuroot.device_root(parse("gpu:0")) is not None:
             assert search._root_pos and search._device_root(root) is not None, name
         monkeypatch.undo()

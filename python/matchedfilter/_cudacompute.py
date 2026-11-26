@@ -77,6 +77,13 @@ class _DeviceShared:
         treat a buffer released through the device like one held by a live context."""
         return self
 
+    @property
+    def open(self):
+        """Whether the context this state belongs to is still open (the primary context is
+        retained for the process; a context of its own is open until destroyed), so a buffer
+        made on it can be freed. Not the device's index, which is 0 on the first device."""
+        return bool(self.ctx.value)
+
     def _bind(self):
         """Make the device's primary context current (a buffer freed after its context)."""
         if getattr(_BOUND, "ctx", None) != self.ctx.value:
@@ -87,14 +94,14 @@ class _DeviceShared:
 class _Owned:
     """A buffer's link to its context: weakly to the context (its streams, timers and the
     function table a test may wrap) and strongly to the device state it frees through (the
-    primary context, the function table and the pools; the context itself where it has no
-    shared state). A context holds its buffers through its records, so a buffer that held the
+    primary context, or the one context of a driver without one; the function table and the
+    pools). A context holds its buffers through its records, so a buffer that held the
     context made every context a reference cycle, freed only by a full collection -- with its
     recordings and device memory -- however long after the plan was dropped."""
     __slots__ = ()
 
     def _own(self, ctx):
-        self._dev = getattr(ctx, "_device_state", None) or ctx
+        self._dev = ctx._device_state
         self._ctx = weakref.ref(ctx)
 
     @property

@@ -82,6 +82,9 @@ class SimHazard(AssertionError):
 class _Device:
     """The simulated device: its allocation pool, unfinished runs and pending writes."""
 
+    #: A simulated device is never closed: a buffer made on it can always be freed.
+    open = True
+
     def __init__(self):
         self.buffers = BufferPool()
         self.pending_writes = []

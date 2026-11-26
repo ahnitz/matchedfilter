@@ -5,6 +5,7 @@ Checks both:
    no StructuredBuffer count padding).
 2. Live hardware execution against CPU reference when an NVIDIA GPU is present.
 """
+import ctypes
 import gzip
 import json
 import pathlib
@@ -307,3 +308,15 @@ def test_a_kernel_is_offered_to_an_older_driver_at_the_version_it_reads(manifest
     assert _ptx_for_driver(ptx, _Driver(13020)) is None
     assert _ptx_for_driver(ptx, _Driver(10020)) is None
     assert _ptx_for_driver(ptx, _Driver(11060, status=1)) is None
+
+
+def test_a_device_state_is_open_by_its_context_not_by_its_device_index():
+    """A CUDA device state is open while its context is (a buffer made on it can then be
+    freed), on device 0 as on any other: the device's index, a c_int that is false on the
+    first device, says nothing about whether the device can still free a buffer."""
+    from matchedfilter import _cudacompute
+    handle = ctypes.c_void_p(0x1234)
+    state = _cudacompute._DeviceShared(None, 0, handle)      # device 0, a context of its own
+    assert state.open is True
+    handle.value = None                                       # the context destroyed
+    assert state.open is False

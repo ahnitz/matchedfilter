@@ -40,7 +40,7 @@ def test_updates_and_fills_land_in_list_order(order, request):
     same (the buffer is rewritten between runs from the host through its write(), which
     every _x_alloc buffer has, to show it is the run's)."""
     f, ctx = _context()
-    if ctx.kernel_family == "cuda":
+    if ctx.props.artifact_family == "cuda":
         request.node.add_marker(pytest.mark.xfail(strict=True, reason=(
             "known gap on cuda: a readback buffer (_cudacompute._Readback) has no write(), "
             "which the interface gives every _x_alloc buffer")))
