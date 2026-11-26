@@ -905,6 +905,26 @@ def test_after_readers_orders_the_next_run_after_readers_in_flight(make, slot):
     a.settle_writes()
 
 
+# ---- C16b: kernel resolution ---------------------------------------------------------------
+def test_a_kernel_the_device_cannot_run_is_reported_not_substituted(make):
+    """_x_kernel raises UnsupportedSize for a build the device cannot run -- a gate-only
+    build at a length none was built for, a two-stage kernel at a one-stage length -- and
+    ValueError for a name that is no kernel, never handing back another kernel."""
+    from matchedfilter import UnsupportedSize
+    ctx = make()
+    with pytest.raises(UnsupportedSize):
+        ctx._x_kernel("tier1", 1 << 20, dict(gate=True))
+    with pytest.raises(UnsupportedSize):
+        ctx._x_kernel("tc1", N)
+    with pytest.raises(ValueError):
+        ctx._x_kernel("no such kernel", N)
+    for name in ("compactc", "tier1", "tier1_c16", "fwd_tier0", "items", "tier1gate",
+                 "refine_td"):
+        assert isinstance(ctx._x_has_kernel(name, N), bool), name
+    with pytest.raises(ValueError):
+        ctx._x_has_kernel("no such kernel", N)
+
+
 # ---- C17: what a driver reports ------------------------------------------------------------
 #: What each documented DeviceProps field must hold: a test of the value.
 def _positive(v):
@@ -922,7 +942,7 @@ def _name(v):
 PROPERTY_TYPES = {
     "name": _name, "artifact_family": _name,
     "max_group_memory": _positive, "max_threads": _positive,
-    "indirect_dispatch": _flag, "runtime_specialization": _flag,
+    "indirect_dispatch": _flag, "runtime_specialization": _flag, "load_time_constants": _flag,
     "max_dispatch_x": _positive,
     "max_binding_bytes": lambda v: v is None or _positive(v),
     "offset_alignment": lambda v: _positive(v) and v & (v - 1) == 0,

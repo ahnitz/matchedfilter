@@ -295,11 +295,11 @@ def test_the_chosen_kernel_fits_the_device():
         ctx = V.Context(dev.index)
         try:
             for n in mf._filter._GPU_SIZES:
-                chosen = ctx._kernel_file(n)
+                chosen = ctx._kernel_record("peaks", n)["file"]
                 need = by_file[chosen]["lds_bytes"]
-                assert need <= ctx.max_shared_memory, (
+                assert need <= ctx.props.max_group_memory, (
                     "%s picked %s needing %d KB with %d KB available"
-                    % (dev, chosen, need // 1024, ctx.max_shared_memory // 1024))
+                    % (dev, chosen, need // 1024, ctx.props.max_group_memory // 1024))
         finally:
             ctx.destroy()
 
@@ -312,10 +312,12 @@ def test_both_staging_variants_agree(n):
     d = (rng.standard_normal((2, n)) + 1j * rng.standard_normal((2, n))).astype(np.complex64)
     h = (rng.standard_normal((3, n)) + 1j * rng.standard_normal((3, n))).astype(np.complex64)
     out = []
-    for forced in (None, "tierb_%d_lds32.spv" % n):
+    for forced in (None, 32768):
         ctx = V.Context(0)
         if forced:
-            ctx._kernel_file = lambda _n, f=forced: f
+            from matchedfilter._gpuhost import DeviceProps   # a 32 KB device: the portable build
+            ctx.props = DeviceProps(**dict(ctx.props.as_dict(), max_group_memory=forced))
+            assert ctx._kernel_record("peaks", n)["stem"] == "tierb_%d_lds32" % n
         try:
             out.append(ctx.peaks(n, d, h, binsize=n, threshold=0.0))
         finally:
@@ -340,11 +342,11 @@ def test_the_chosen_kernel_fits_the_invocation_limit():
         try:
             for n in mf._filter._GPU_SIZES:
                 rec = _kernels.record("vulkan", "tierb_%d" % n)
-                if rec["local_size"][0] <= ctx.max_invocations:
-                    ctx._kernel_file(n)          # must not raise
+                if rec["local_size"][0] <= ctx.props.max_threads:
+                    ctx._kernel_record("peaks", n)          # must not raise
                 else:
-                    with pytest.raises(V.UnsupportedSize, match="thread workgroup"):
-                        ctx._kernel_file(n)
+                    with pytest.raises(V.UnsupportedSize, match="threads"):
+                        ctx._kernel_record("peaks", n)
         finally:
             ctx.destroy()
 

@@ -111,8 +111,7 @@ import numpy as np
 
 from .time_domain import _stored_bins, _normalize_windows
 from ._peaks import _MEASURED, _read
-from ._filter import _compute_module
-from . import _core
+from . import _core, _kernels
 from .device import parse
 
 #: Bytes per complex value at each precision.
@@ -223,12 +222,13 @@ def _sub(a, b):
 
 
 def _backend_c16(device):
-    """Whether the device runs tier 0 at `band` in packed fp16 (its driver's _x_has_c16: an
-    fp16 coarse build shipped for the band), as a function of band; None on a CPU."""
+    """Whether the device runs tier 0 at `band` in packed fp16 (an fp16 coarse build shipped
+    for the band in its driver's artifact family), as a function of band; None on a CPU."""
     d = parse(device)
     if d.kind != "gpu":
         return None
-    return _compute_module(d).Context._x_has_c16
+    # a device's backend names the artifact family its driver runs (DeviceProps)
+    return lambda band: _kernels.shipped(d.backend, "tierb_%d_c16" % band)
 
 
 def tier_precision(device, tier, band):

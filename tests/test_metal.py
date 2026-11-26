@@ -13,6 +13,7 @@ import json
 import pathlib
 
 import pytest
+import sim_driver
 
 import matchedfilter
 from matchedfilter._shared import pack_half2
@@ -89,10 +90,14 @@ def test_the_compactions_are_one_kernel_each(manifest):
 def test_metal_fp16_helpers():
     import numpy as np
     from matchedfilter import _mtlcompute as M
+    ctx = M.Context.__new__(M.Context)
+    ctx.max_shared_memory = 32768
+    ctx.props = sim_driver.stated_props(artifact_family="metal", max_group_memory=32768,
+                                            load_time_constants=True)
     for band in (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384):
-        assert M.Context._x_has_c16(band)
-    assert not M.Context._x_has_c16(32768)
-    assert not M.Context._x_has_c16(65536)
+        assert ctx._x_has_c16(band)
+    assert not ctx._x_has_c16(32768)
+    assert not ctx._x_has_c16(65536)
 
     # Values including subnormals, zeros, negative numbers, infinities, boundaries
     vals = np.array([0.0, -0.0, 1.0, -0.5, 2.0, -2.0, 65504.0, -65504.0, 2**-14], dtype=np.float32)
@@ -113,15 +118,18 @@ def test_metal_stem_resolution():
     ctx = FakeContext.__new__(FakeContext)
     ctx.max_shared_memory = 32768
     ctx.name = "Apple M2"
+    ctx.props = sim_driver.stated_props(artifact_family="metal", max_group_memory=32768,
+                                            load_time_constants=True)
+    stem = lambda role, n, consts=None: ctx._kernel_record(role, n, consts)["stem"]
     for band in (64, 128, 256, 512, 1024, 2048, 4096):
-        assert ctx._stem(band, "coarse16") == f"tierb_{band}_c16"
+        assert stem("coarse", band, dict(ppg=1, tile=1, twt=1)) == f"tierb_{band}_c16"
     for band in (64, 4096, 65536):
-        assert ctx._stem(band, "compactPairs") == "compact"
-        assert ctx._stem(band, "compactListed") == "compactl"
+        assert stem("compact", band) == "compact"
+        assert stem("compactl", band) == "compactl"
     # Lengths whose flat filter asks for more than 32 KB take its 32 KB build on an M2
     for n in (8192, 16384, 32768, 65536):
-        assert ctx._stem(n, "fusedTierB") == f"tierb_{n}_lds32"
-        assert ctx._stem(n, "refineListed") == f"refine_{n}_lds32"
+        assert stem("peaks", n) == f"tierb_{n}_lds32"
+        assert stem("tier", n) == f"refine_{n}_lds32"
 
 
 @pytest.mark.parametrize("n", [2048, 4096, 8192])
@@ -149,14 +157,20 @@ def test_single_bin_and_general_pipeline_agree(n, hierarchical, monkeypatch):
         f = matchedfilter.MatchedFilter(n, 3, 7, device='gpu')
     f.set_templates(bank)
     f.set_data(data)
-    pipeline = f._gpu.pipeline
+    resolve = f._gpu._kernel_record
+    general = {"peaks1": "peaks", "tier1": "tier", "refine1": "refine"}
+
+    def general_only(name, size, consts=None):
+        if name in general:      # the general kernel, which has no gate-only build
+            name, consts = general[name], {k: v for k, v in (consts or {}).items() if k != "gate"}
+        return resolve(name, size, consts)
     for threshold in (0., 5.5):
         for window in ((0, n), (7, n-3), (17, 18)):
             for binsize in (n, 257, n):
-                monkeypatch.setattr(f._gpu, 'pipeline', pipeline)
+                monkeypatch.setattr(f._gpu, '_kernel_record', resolve)
                 got = f.run(window=window, binsize=binsize, threshold=threshold).copy()
-                monkeypatch.setattr(f._gpu, 'pipeline',
-                    lambda size, entry='fusedTierB', one_bin=False: pipeline(size, entry))
+                # the general kernels in place of the one-bin builds
+                monkeypatch.setattr(f._gpu, '_kernel_record', general_only)
                 ref = f.run(window=window, binsize=binsize, threshold=threshold)
                 np.testing.assert_array_equal(got['index'], ref['index'])
                 np.testing.assert_allclose(got['value'], ref['value'], rtol=3e-5, atol=3e-5)
@@ -208,13 +222,13 @@ def test_the_chosen_metal_kernel_fits_the_device(manifest):
         for n in sorted(matchedfilter._filter._GPU_SIZES):
             if n < 1024:
                 continue
-            stem = ctx._stem(n, "fusedTierB")
+            stem = ctx._kernel_record("peaks", n)["stem"]
             need = manifest[stem]["lds_bytes"]
-            assert need <= ctx.max_shared_memory, (
+            assert need <= ctx.props.max_group_memory, (
                 "n=%d picked %s needing %d KB with %d KB available"
-                % (n, stem, need // 1024, ctx.max_shared_memory // 1024))
+                % (n, stem, need // 1024, ctx.props.max_group_memory // 1024))
             # And it must actually build, which is the failure being guarded.
-            ctx.pipeline(n)
+            ctx._x_kernel("peaks", n)
     finally:
         ctx.destroy()
 

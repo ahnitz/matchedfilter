@@ -10,6 +10,8 @@ import gzip
 import json
 import pathlib
 import pytest
+
+import sim_driver
 import numpy as np
 
 import matchedfilter
@@ -80,7 +82,7 @@ def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(m
 
 
 def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypatch):
-    """Context.pipeline serves the flat, one-bin flat, refine, one-bin refine, follow-up,
+    """Context._x_kernel serves the flat, one-bin flat, refine, one-bin refine, follow-up,
     forward and full-correlation kernels at every length from a module that ships: its own
     build, or the _lds32 build where its own staging is past CUDA's static shared limit and
     so did not ship. A one-bin request gets a one-bin build wherever one is built (from 256).
@@ -97,7 +99,13 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
     _kernels.clear()
     ctx = C.Context.__new__(C.Context)
     ctx._pipelines = {}
+    ctx.props = sim_driver.stated_props(artifact_family="cuda", max_group_memory=48 * 1024,
+                                        max_threads=1024, load_time_constants=False)
     ctx._load = lambda stem, path, fn_name, wg: (stem, path)
+    role = {("fusedTierB", False): "peaks", ("fusedTierB", True): "peaks1",
+            ("refineListed", False): "tier", ("refineListed", True): "tier1",
+            ("refineItems", False): "items", ("seriesForward", False): "forward",
+            ("fullCorrelation", False): "full", ("fullCorrelationSeries", False): "series"}
     served = {}
     for n in build_ptx.TIER_B:
         asks = [("fusedTierB", False), ("refineListed", False), ("refineListed", True),
@@ -106,7 +114,7 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
         asks += [("fusedTierB", True)] if n >= 4096 else []
         for entry, one_bin in asks:
             try:
-                (stem, path), _ = ctx.pipeline(n, entry, one_bin=one_bin)
+                (stem, path) = ctx._x_kernel(role[(entry, one_bin)], n)[0]
             except UnsupportedSize as e:
                 pytest.fail("n=%d %s one_bin=%s: %s" % (n, entry, one_bin, e))
             assert path.is_file() and path.name == stem + ".ptx.gz", (n, entry, stem)
@@ -115,7 +123,7 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
             served[(n, entry, one_bin)] = stem
     assert served[(8192, "fusedTierB", False)] == "tierb_8192_lds32"
     assert served[(65536, "refineListed", True)] == "refine_65536_onebin_lds32"
-    assert C.Context._x_has_kernel("items", 16384) and C.Context._x_has_kernel("tier1", 16384)
+    assert ctx._x_has_kernel("items", 16384) and ctx._x_has_kernel("tier1", 16384)
     _kernels.clear()
 
 

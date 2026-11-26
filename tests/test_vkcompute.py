@@ -84,9 +84,9 @@ def test_pipeline_is_cached():
     from matchedfilter import _vkcompute
     c = _vkcompute.Context(0)
     try:
-        first = c.pipeline(1024)
-        assert c.pipeline(1024) is first
-        assert c.pipeline(2048) is not first
+        first = c._x_kernel("peaks", 1024)
+        assert c._x_kernel("peaks", 1024) is first
+        assert c._x_kernel("peaks", 2048) is not first
     finally:
         c.destroy()
 

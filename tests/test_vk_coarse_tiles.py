@@ -7,8 +7,10 @@ import ctypes
 import numpy as np
 import pytest
 
+import sim_driver
+
 from matchedfilter import _vulkan
-from matchedfilter._coarse import coarse_launch
+from matchedfilter._coarse import coarse_launch, coarse_stem
 from matchedfilter._shared import pack_half2
 
 _devices, _reason = _vulkan.enumerate_devices()
@@ -49,7 +51,7 @@ def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None, twt=1):
             bufs[2].write(np.full(nd * nt + spare, _SENTINEL, np.uint32))
             bufs[3].write(np.full(2 * (nd * nt + spare), _SENTINEL, np.uint32))
         pipe, layout, sl = ctx._build_pipeline(
-            ("coarse16-test", band, ppg, tile), V.coarse_stem(band, ppg, tile) + ".spv",
+            ("coarse16-test", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
             V._NBIND, V._PUSH_BYTES, data_stride=band, subgroup=subgroup, coarse_twt=twt)
         dset = ctx._descriptor_set(sl, bufs)
         slot_val, groups = coarse_launch(nd, nt, ppg, tile, band)
@@ -87,9 +89,9 @@ def test_untiled_groups_are_ragged(ctx, band):
     device can require, and write nothing -- each pair's peak is the one-pair build's,
     and the outputs past the last pair are untouched. The exact-divisor rule this replaced
     ran odd counts at one pair per group."""
-    from matchedfilter import _vkcompute as V
-    ppgs = [p for p in (2, 4, 8, 16, 32) if V._spv_shipped(V.coarse_stem(band, p, 1))]
-    if not ppgs or not V._spv_shipped(V.coarse_stem(band, 1, 1)):
+    from matchedfilter import _kernels
+    ppgs = [p for p in (2, 4, 8, 16, 32) if _kernels.shipped("vulkan", coarse_stem(band, p, 1))]
+    if not ppgs or not _kernels.shipped("vulkan", coarse_stem(band, 1, 1)):
         pytest.skip("no packed untiled builds at band %d" % band)
     rng = np.random.default_rng(band + 3)
     nd, nt = 3, 7                            # 21 pairs: no packing divides them
@@ -131,9 +133,10 @@ def test_every_backend_offers_the_coarse_builds_its_device_holds(backend):
            "cuda": _cudacompute.Context}[backend]
     for shared in (32768, 65536):
         ctx = SimpleNamespace(max_invocations=1024, max_shared_memory=shared,
-                              subgroup_range=None, max_workgroup_subgroups=0)
-        if backend == "cuda":
-            ctx._stem = lambda *a, **k: cls._stem(ctx, *a, **k)
+                              subgroup_range=None, max_workgroup_subgroups=0,
+                              props=sim_driver.stated_props(
+                                  artifact_family=backend, max_group_memory=shared,
+                                  load_time_constants=backend != "cuda"))
         got = {(p, t, w) for _, p, t, w in cls._x_coarse_candidates(ctx, band)}
         want = set()
         for stem, rec in kernels.items():

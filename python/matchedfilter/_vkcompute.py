@@ -22,19 +22,11 @@ from ._shared import BUFFER_SERIALS, empty_shared
 from ._gpuhost import (BufferPool, carray, MappedBuffer, Section, address,
                        hier_peaks_grouped)
 from . import _peaks as _pk
-from ._coarse import candidates, coarse_stem
+from ._coarse import candidates
+from ._kernels import KernelRoles
 
 _SPIRV = _kernels.folder("vulkan")
 
-
-def _kernel(stem):
-    """The manifest record of a shipped SPIR-V module (_kernels.record), or None."""
-    return _kernels.record("vulkan", stem)
-
-
-def _spv_shipped(stem):
-    """Whether spirv/<stem>.spv shipped."""
-    return _kernels.shipped("vulkan", stem)
 
 #: The per-bin table aliases the 8 KB exchange staging: CAP=1024 complex =
 #: 2048 uints. Past that the kernel needs its own array and the LDS cost
@@ -1194,7 +1186,7 @@ class _VkNative:
         self.cmds.clear(self._free_instance, done=True)
 
 
-class Context(Executor, InputUploads):
+class Context(KernelRoles, Executor, InputUploads):
     """One Vulkan device, its compute queue, and the pipelines built on it: the Vulkan driver
     under the shared GPU executor (_gpuexec)."""
 
@@ -1269,7 +1261,7 @@ class Context(Executor, InputUploads):
         return DeviceProps(
             name=dev.device_name, artifact_family="vulkan",
             max_group_memory=dev.max_shared_memory, max_threads=dev.max_invocations,
-            indirect_dispatch=True, runtime_specialization=True,
+            indirect_dispatch=True, runtime_specialization=True, load_time_constants=True,
             max_dispatch_x=dev.max_dispatch_x, max_binding_bytes=dev.max_binding_bytes,
             offset_alignment=dev.storage_offset_alignment,
             subgroup_size=dev.subgroup_size, subgroup_range=dev.subgroup_range,
@@ -1368,60 +1360,6 @@ class Context(Executor, InputUploads):
         raise VulkanError("no host-visible memory type available")
 
     # ---- pipeline ---------------------------------------------------------
-    def _runnable(self, stem):
-        """The file of the build of `stem` this device's workgroup memory runs
-        (_kernels.runnable: stem's own or its 32 KB build), or None."""
-        rec = _kernels.runnable("vulkan", stem, self.max_shared_memory)
-        return None if rec is None else rec["file"]
-
-    def _refine_file(self, n):
-        """refineListed for `n`, its 32 KB build where the device needs it."""
-        return self._runnable("refine_%d" % n) or "refine_%d.spv" % n
-
-    @staticmethod
-    def _gate_file(n):
-        """The one-bin listed refine's gate-only build at n (tierb.slang MF_GATE_ONLY), or None."""
-        rec = _kernel("refine_%d_onebin_gate" % n)
-        return None if rec is None else rec["file"]
-
-    def _peak_file(self, n, nbins, refine=False):
-        general = self._refine_file(n) if refine else self._kernel_file(n)
-        if nbins == 1:
-            one = self._runnable("%s_%d_onebin" % ("refine" if refine else "tierb", n))
-            if one:
-                return one
-        return general
-
-    def pipeline(self, n):
-        """Build (and cache) the compute pipeline for transform length ``n``.
-
-        Cached because creating a pipeline compiles the SPIR-V in the driver,
-        which costs milliseconds -- far more than a dispatch -- and a batched
-        workload calls this once and dispatches many times.
-        """
-        return self._build_pipeline(n, self._kernel_file(n), _NBIND, _PUSH_BYTES)
-
-    def _kernel_file(self, n):
-        """The fastest variant this device can actually run.
-
-        Falls back to the 32 KB build when the preferred one asks for more
-        shared memory than the device offers, rather than failing to create
-        the pipeline on the user's machine.
-        """
-        info = _kernel("tierb_%d" % n)
-        if info and info["local_size"][0] > self.max_invocations:
-            raise UnsupportedSize(
-                "n=%d needs a %d-thread workgroup and this device allows %d; "
-                "use a shorter transform or device='cpu'"
-                % (n, info["local_size"][0], self.max_invocations))
-        filename = self._runnable("tierb_%d" % n)
-        if filename is None and info is not None:
-            raise VulkanError(
-                "n=%d needs %d KB of workgroup memory and this device "
-                "offers %d KB" % (n, info["lds_bytes"] // 1024,
-                                  self.max_shared_memory // 1024))
-        return filename or "tierb_%d.spv" % n
-
     def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
                         subgroup=0, data_scale=0, coarse_twt=None):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
@@ -1880,32 +1818,29 @@ class Context(Executor, InputUploads):
     def _x_kernel(self, name, n, consts=None):
         """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`
         (_gpuexec's module docstring lists the names and the build-time constants in consts).
-        Returns the pipeline of the kernel's SPIR-V module, built on first use with the constants
-        as specialisation (data stride, per-row windows, subgroup size, the fp16 tier's data scale
-        and twiddle source).
+        The build is the role table's (_kernels.resolve, under this device's limits); returns
+        its pipeline, built on first use with the constants as specialisation (data stride,
+        per-row windows, subgroup size, the fp16 tier's data scale and twiddle source).
 
         Raises UnsupportedSize where no build of the kernel was shipped that this device can run,
         and ValueError for a name that is not a kernel.
         """
         c = consts or {}
         stride, rowwin = int(c.get("stride", 0) or 0), 1 if c.get("rowwin") else 0
-        if name in ("peaks", "peaks1"):
-            # rowwin: each row's window and bin phase from the table (a phased series call).
-            filename = self._peak_file(n, 1 if name == "peaks1" else 2)
+        rec = self._kernel_record(name, n, {k: c[k] for k in ("ppg", "tile", "twt", "gate") if k in c})
+        filename = rec["file"]
+        if name in ("peaks", "peaks1", "gate"):
+            # fusedTierB; rowwin: each row's window and bin phase from the table (a phased
+            # series call); stride: the fp32 filter as a gate tier, at its band
             return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES,
+                                        data_stride=stride if name == "gate" else 0,
                                         row_windows=rowwin)
-        if name == "gate":                    # the fp32 filter as a gate tier, at its band
-            filename = self._kernel_file(n)
-            return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES,
-                                        data_stride=stride, row_windows=rowwin)
         if name == "coarse":
-            filename = coarse_stem(n, c["ppg"], c["tile"]) + ".spv"
             return self._build_pipeline(
                 ("coarse16", n, c["ppg"], c["tile"]), filename, _NBIND, _PUSH_BYTES,
                 data_stride=stride, row_windows=rowwin, subgroup=c.get("sg", 0),
                 data_scale=c.get("scale", 0), coarse_twt=c.get("twt", 1))
         if name == "tier1_c16":
-            filename = "refine_%d_c16.spv" % n
             return self._build_pipeline(
                 ("refine", filename), filename, 6, 32,
                 data_stride=stride, row_windows=rowwin, subgroup=self._fit_subgroup(n),
@@ -1913,71 +1848,19 @@ class Context(Executor, InputUploads):
         if name in ("tier", "tier1", "refine", "refine1"):
             # refineListedBounded (refine_bounded.slang): data, tmpl, idx, val, survivors and
             # their count, then the row-window table (binding 6).
-            filename = self._peak_file(n, 1 if name.endswith("1") else 2, refine=True)
-            if c.get("gate"):                    # the one-bin build's gate-only variant
-                filename = self._gate_file(n) or filename
             return self._build_pipeline(("refine", filename), filename, 6, 32,
                                         data_stride=stride, row_windows=rowwin,
                                         subgroup=self._fit_subgroup(n))
         if name == "items":
             # refineItems (refine_bounded.slang): data, tmpl, idx, val, entries and their
             # count, then ntmpl, binsize, binShift, nbins, thrBits and the grid size.
-            filename = self._runnable("items_%d" % n)
-            if filename is None:
-                raise UnsupportedSize("no refineItems module for n=%d" % n)
             return self._build_pipeline(("items", filename), filename, 6, 24,
                                         subgroup=self._fit_subgroup(n))
-        if name == "refine_td":
-            rec = _kernels.runnable("vulkan", "refine_td", self.max_shared_memory)
-            if rec is None:
-                raise UnsupportedSize("no refine_td GPU kernel this device can run")
-            return self._build_pipeline(("refine_td", rec["file"]), rec["file"],
-                                        len(rec["descriptors"]), rec["push_bytes"],
-                                        row_windows=rowwin)
         # The other kernels: bindings and push-constant bytes as the module declares them
         # (the manifest's reflection of it).
-        stems = {"compact": "compact", "compactc": "compactc", "compactl": "compactl",
-                 "mark": "markblocks", "pack": "pack_coarse", "compact_peaks": "compact_peaks",
-                 "fwd_tier0": "forward_tier0_%d" % n, "fwd_bands": "forward_bands_%d" % n,
-                 "fwd_listed": "forward_listed_%d" % n, "forward": "forward_%d" % n,
-                 "full": "full_%d" % n, "series": "full_series_%d" % n,
-                 "tc1": "tc_corr1_%d" % n, "tf1": "tc_fwd1_%d" % n, "tf2": "tc_fwd2_%d" % n,
-                 "tcs2": "tc_corr_series2_%d" % n, "tc2": "tc_corr2_%d" % n,
-                 "root1": "tc_root1_%d" % n, "root2": "tc_root2_%d" % n}
-        if name not in stems:
-            raise ValueError("no GPU kernel %r" % (name,))
-        rec = _kernels.runnable("vulkan", stems[name], self.max_shared_memory)
-        if rec is None:
-            raise UnsupportedSize("no %s GPU kernel for n=%d this device can run"
-                                  % (stems[name], n))
-        return self._build_pipeline((name, rec["file"]), rec["file"], len(rec["descriptors"]),
-                                    rec["push_bytes"])
-
-    @staticmethod
-    def _x_has_c16(band):
-        return _spv_shipped("tierb_%d_c16" % band)
-
-    @staticmethod
-    def _x_has_kernel(name, n):
-        """Whether the optional kernel `name` was shipped for this backend at length n: the driver
-        primitive `_x_has_kernel` (_gpuexec). The names are compactc, tier1 (a one-bin refine
-        build), tier1_c16, fwd_tier0, items, tier1gate and refine_td; any other raises ValueError.
-        """
-        if name == "compactc":
-            return _spv_shipped("compactc")
-        if name == "tier1":
-            return _spv_shipped("refine_%d_onebin" % n) or _spv_shipped("refine_%d_onebin_lds32" % n)
-        if name == "tier1_c16":
-            return _spv_shipped("refine_%d_c16" % n)
-        if name == "fwd_tier0":
-            return _spv_shipped("forward_tier0_%d" % n)
-        if name == "items":
-            return _spv_shipped("items_%d" % n) or _spv_shipped("items_%d_lds32" % n)
-        if name == "tier1gate":
-            return Context._gate_file(n) is not None
-        if name == "refine_td":
-            return _spv_shipped("refine_td")
-        raise ValueError(name)
+        return self._build_pipeline((name, filename), filename, len(rec["descriptors"]),
+                                    rec["push_bytes"],
+                                    row_windows=rowwin if name == "refine_td" else 0)
 
     def hier_peaks_grouped(self, *args, **kwargs):
         return hier_peaks_grouped(self, *args, **kwargs)
@@ -1996,7 +1879,8 @@ class Context(Executor, InputUploads):
         if rng:
             sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
         lim = getattr(self, "max_workgroup_subgroups", 0)
-        out = candidates(band, lambda ppg, tile, twt: _kernel(coarse_stem(band, ppg, tile)),
+        props = self.props
+        out = candidates(band, lambda ppg, tile, twt: _kernels.coarse_record(props, band, ppg, tile, twt),
                          lambda tile: (1, 0) if tile == 1 else (1,),
                          self.max_invocations, self.max_shared_memory,
                          lambda group: [sg for sg in sizes

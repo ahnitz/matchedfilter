@@ -34,6 +34,7 @@ from ._shared import empty_shared, _Borrowed, _Storage
 from ._gpuhost import DeviceProps, Section, carray, hier_peaks_grouped
 from . import _peaks as _pk
 from ._coarse import candidates
+from ._kernels import KernelRoles
 
 
 def _borrowed_dptr(self):
@@ -193,18 +194,6 @@ _GRAPHS = True
 _ADVISE_PREFERRED_LOCATION = 3
 _ADVISE_ACCESSED_BY = 5
 _CPU_DEVICE = -1
-
-
-def _shipped(stem):
-    """The manifest record of the PTX module that serves `stem`, or None when none ships.
-
-    That is the stem's own build or, where its staging needs more than the 48 KB of static
-    shared memory CUDA allows a block (tools/kernel_variants.py builds no module past it), the same
-    kernel built with 32 KB staging (`<stem>_lds32`), which computes the same transform in
-    more exchange passes. The limit is checked where modules are built and by
-    tests/test_cuda.py, not here: a module past it put in ptx/ by hand is served, and fails
-    in cuModuleLoadData rather than falling back to its _lds32 build."""
-    return _kernels.record("cuda", stem) or _kernels.record("cuda", stem + "_lds32")
 
 
 #: The per-row window table argument every fusedTierB and refineListedBounded launch ends with
@@ -727,7 +716,7 @@ class _CudaNative:
                 self.slots.give(op[2], op[4])
 
 
-class Context(Executor, InputUploads):
+class Context(KernelRoles, Executor, InputUploads):
     """One NVIDIA CUDA device context, stream, and loaded PTX pipelines."""
 
     cache_limit_bytes = 1024 * 1024 * 1024
@@ -825,7 +814,7 @@ class Context(Executor, InputUploads):
             max_group_memory=self.max_shared_memory, max_threads=self.max_invocations,
             # A resident grid strides over a listed op's items; constants are launch
             # parameters.
-            indirect_dispatch=False, runtime_specialization=False,
+            indirect_dispatch=False, runtime_specialization=False, load_time_constants=False,
             # The most blocks one launch takes (gridDim.x), no per-binding limit below
             # the allocation, and a bound view's alignment for the widest element a
             # kernel reads (float2).
@@ -975,65 +964,14 @@ class Context(Executor, InputUploads):
             self.cuda.cuMemPrefetchAsync(buf.dptr.value + offset, nbytes, self.device.value, stream)
 
     # ---- kernels -------------------------------------------------------------
-    def _stem(self, n, entry, one_bin=False, c16=False, ppg=1, tile=1, twt=False):
-        """The file stem of the PTX module that holds entry point `entry` at length n, for the
-        build the flags select: a one-bin build where one was shipped, the fp16 coarse build at
-        its packing (ppg), tile and twiddle source (twt), or the fp16 listed refine.
-        """
-        if entry == "packCoarse":
-            return "pack_coarse"
-        if entry == "compactPairs":
-            return "compact"
-        if entry == "compactPairsClustered":
-            return "compactc"
-        if entry == "compactListed":
-            return "compactl"
-        if entry == "markBlocks":
-            return "markblocks"
-        if entry == "refineDirect":
-            return "refine_td"
-        if entry in ("seriesForwardBands", "seriesForwardListed", "forwardTier0"):
-            return {"seriesForwardBands": "forward_bands", "seriesForwardListed": "forward_listed",
-                    "forwardTier0": "forward_tier0"}[entry] + f"_{n}"
-        if entry == "seriesForward":
-            return f"forward_{n}"
-        if entry == "refineItems":
-            return f"items_{n}"
-        if entry == "refineListed" and c16:
-            return f"refine_{n}_c16"
-        if c16:
-            p_s = f"p{ppg}" if ppg > 1 else ""
-            t_s = f"t{tile}" if tile > 1 else ""
-            return f"tierb_{n}_c16{p_s}{t_s}{'w' if twt else ''}"
-        if entry == "refineListed":
-            one = f"refine_{n}_onebin"
-            return one if (one_bin and _shipped(one)) else f"refine_{n}"
-        if entry == "fullCorrelation":
-            return f"full_{n}"
-        if entry == "fullCorrelationSeries":
-            return f"full_series_{n}"
-        one = f"tierb_{n}_onebin"
-        return one if (one_bin and _shipped(one)) else f"tierb_{n}"
-
-    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1, twt=False,
-                 gate=False):
-        """Retrieve or load the compiled PTX kernel function: (function, threads per block).
-        twt: the coarse build with the fp16 twiddle table (tools/kernel_variants.py)."""
-        key = (n, entry, one_bin, c16, ppg, tile, twt, gate)
-        if key in self._pipelines:
-            return self._pipelines[key]
-
-        stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile, twt=twt)
-        if gate:                                 # the one-bin build's gate-only variant
-            stem += "_gate"
-        rec = _shipped(stem)
-        if rec is None:
-            # A missing variant is not silently replaced by a different one: the
-            # PPG/TILE_T are compiled in and the launch geometry depends on them.
-            raise UnsupportedSize(f"no PTX kernel for {stem} (n={n}, entry={entry})")
-        res = self._load_record(rec)
-        self._pipelines[key] = res
-        return res
+    def _kernel_function(self, rec):
+        """(function, threads per block) of a resolved kernel record (_kernels.resolve),
+        loaded once per context."""
+        key = ("record", rec["file"])
+        got = self._pipelines.get(key)
+        if got is None:
+            got = self._pipelines[key] = self._load_record(rec)
+        return got
 
     def _load_record(self, rec):
         """(function, threads per block) of a manifest record: its entry point at the block
@@ -1091,17 +1029,6 @@ class Context(Executor, InputUploads):
         self._labels[hfunc.value] = stem          # its module, for every Context on the device
         return hfunc
 
-    def _tierc(self, n, role):
-        """A two-stage (Tier C) kernel past 65536 (role corr1, corr2, corr_series2, fwd1, fwd2,
-        root1 or root2): (function, threads, n1, n2)."""
-        key = ("tierc", n, role)
-        if key not in self._pipelines:
-            rec, split = _shipped(f"tc_{role}_{n}"), _kernels.two_stage("cuda", n)
-            if rec is None or split is None:
-                raise UnsupportedSize(f"no two-stage CUDA kernel for n={n}")
-            self._pipelines[key] = self._load_record(rec) + split
-        return self._pipelines[key]
-
     def _blocks_per_sm(self, fn, wg):
         key = fn.value
         if key not in self._occupancy:
@@ -1136,14 +1063,6 @@ class Context(Executor, InputUploads):
             return _HostBuffer(ctx, size, readback=readback, host_input=host_input)
         return empty_shared(self, factory, shape, dtype)
 
-    def _compact_peaks(self):
-        key = ("compactPeaks",)
-        if key not in self._pipelines:
-            rec = _shipped("compact_peaks")
-            if rec is None:
-                raise UnsupportedSize("compact_peaks.ptx not built")
-            self._pipelines[key] = self._load_record(rec)
-        return self._pipelines[key]
 
     # ---- flat ------------------------------------------------------------------
 
@@ -1157,8 +1076,9 @@ class Context(Executor, InputUploads):
     def _x_kernel(self, name, n, consts=None):
         """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`
         (_gpuexec's module docstring lists the names and the build-time constants in consts).
-        Returns (function, block size[, lead, trail, extra]): the PTX module's entry point and
-        its block size, and for the tiered kernels how a launch orders its parameters -- the
+        The build is the role table's (_kernels.resolve, under this device's limits). Returns
+        (function, block size[, lead, trail, extra]): the PTX module's entry point and its
+        block size, and for the tiered kernels how a launch orders its parameters -- the
         first `lead` buffers, the uniform words, the remaining buffers (`trail` of them
         optional), then `extra`, the data stride and fp16 scale passed as arguments.
 
@@ -1166,67 +1086,18 @@ class Context(Executor, InputUploads):
         and ValueError for a name that is not a kernel.
         """
         c = consts or {}
+        rec = self._kernel_record(name, n, {k: c[k] for k in ("ppg", "tile", "twt", "gate") if k in c})
+        fn, wg = self._kernel_function(rec)
         stride = int(c.get("stride") or 0)
         scale = (int(np.float32(2.0 ** int(c["scale"])).view(np.uint32))
                  if c.get("scale") else 0x3F800000)
-        if name in ("peaks", "peaks1", "gate"):
-            fn, wg = self.pipeline(n, "fusedTierB", one_bin=(name == "peaks1"))
+        if name in ("peaks", "peaks1", "gate", "coarse"):
             return fn, wg, 4, 1, (stride, scale)
-        if name == "coarse":
-            fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
-                                   twt=bool(c.get("twt")))
-            return fn, wg, 4, 1, (stride, scale)
-        if name == "tier1_c16":
-            fn, wg = self.pipeline(n, "refineListed", c16=True)
-            return fn, wg, 6, 1, (stride, scale)
-        if name in ("tier", "tier1", "refine", "refine1"):
-            fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"),
-                                   gate=bool(c.get("gate")))
+        if name in ("tier1_c16", "tier", "tier1", "refine", "refine1"):
             return fn, wg, 6, 1, (stride, scale)
         if name == "refine_td":
-            fn, wg = self.pipeline(n, "refineDirect")
             return fn, wg, 11, 1
-        if name == "compact_peaks":
-            return self._compact_peaks()
-        entries = {"compact": "compactPairs", "compactc": "compactPairsClustered",
-                   "compactl": "compactListed", "mark": "markBlocks",
-                   "pack": "packCoarse", "fwd_tier0": "forwardTier0",
-                   "fwd_bands": "seriesForwardBands", "fwd_listed": "seriesForwardListed",
-                   "full": "fullCorrelation", "series": "fullCorrelationSeries",
-                   "forward": "seriesForward", "items": "refineItems"}
-        if name in entries:
-            return self.pipeline(n, entries[name])
-        role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2",
-                "tf1": "fwd1", "tf2": "fwd2", "root1": "root1",
-                "root2": "root2"}[name]
-        fn, wg, _, _ = self._tierc(n, role)
         return fn, wg
-
-    @staticmethod
-    def _x_has_c16(band):
-        return _shipped(f"tierb_{band}_c16") is not None
-
-    @staticmethod
-    def _x_has_kernel(name, n):
-        """Whether the optional kernel `name` was shipped for this backend at length n: the driver
-        primitive `_x_has_kernel` (_gpuexec). The names are compactc, tier1 (a one-bin refine
-        build), tier1_c16, fwd_tier0, items, tier1gate and refine_td; any other raises ValueError.
-        """
-        if name == "compactc":
-            return _shipped("compactc") is not None
-        if name == "tier1":
-            return _shipped(f"refine_{n}_onebin") is not None
-        if name == "tier1_c16":
-            return _shipped(f"refine_{n}_c16") is not None
-        if name == "fwd_tier0":
-            return _shipped(f"forward_tier0_{n}") is not None
-        if name == "items":
-            return _shipped(f"items_{n}") is not None
-        if name == "tier1gate":
-            return _shipped(f"refine_{n}_onebin_gate") is not None
-        if name == "refine_td":
-            return _shipped("refine_td") is not None
-        raise ValueError(name)
 
     def hier_peaks_grouped(self, *args, **kwargs):
         return hier_peaks_grouped(self, *args, **kwargs)
@@ -1236,8 +1107,9 @@ class Context(Executor, InputUploads):
         (_coarse.candidates): each shipped build this device's block limits hold
         (MAX_THREADS_PER_BLOCK, MAX_SHARED_MEMORY_PER_BLOCK), its twiddles computed or from
         the fp16 table (the "w" builds)."""
-        return candidates(band, lambda ppg, tile, twt: _shipped(self._stem(
-                              band, "fusedTierB", c16=True, ppg=ppg, tile=tile, twt=bool(twt))),
+        props = self.props
+        return candidates(band, lambda ppg, tile, twt: _kernels.coarse_record(
+                              props, band, ppg, tile, bool(twt)),
                           lambda tile: (0, 1), self.max_invocations, self.max_shared_memory)
 
     def _x_time(self, native, binds, reps):
@@ -1263,7 +1135,10 @@ class Context(Executor, InputUploads):
         return min(times) if times else 0.0     # 0.0: no run recorded a time (_choice.no_time)
 
     def _x_tierc(self, n):
-        return self._tierc(n, "corr1")[2:]
+        split = _kernels.two_stage(self.props.artifact_family, n)
+        if split is None:
+            raise UnsupportedSize("no two-stage kernels for n=%d" % n)
+        return split
 
     def _x_alloc(self, nbytes, readback=False, upload=False):
         if upload:

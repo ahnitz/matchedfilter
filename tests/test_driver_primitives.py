@@ -36,7 +36,8 @@ def _primitives():
 
 @pytest.mark.parametrize("driver", DRIVERS)
 def test_every_driver_context_defines_every_primitive(driver):
-    shared = _methods("_gpuexec.py", "Executor") | _methods("_gpu_cache.py", "InputUploads")
+    shared = (_methods("_gpuexec.py", "Executor") | _methods("_gpu_cache.py", "InputUploads")
+              | _methods("_kernels.py", "KernelRoles"))
     missing = sorted(_primitives() - _methods(driver, "Context") - shared)
     assert not missing, "%s Context lacks %s" % (driver, missing)
 

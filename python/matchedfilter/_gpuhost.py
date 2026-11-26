@@ -296,6 +296,13 @@ class DeviceProps:
       runtime_specialization  whether constants are given to a kernel when its pipeline is
                               created (Vulkan specialization constants); CUDA (launch
                               parameters) and Metal (build-time macros) False.
+      load_time_constants     whether a kernel's build-time constants (data stride and
+                              scale, row windows, the coarse twiddle source) are set when its
+                              artifact is loaded, so one artifact serves every value: Vulkan
+                              (specialization constants) and Metal (source macros, compiled
+                              when the library is made) True; CUDA False (PTX: a constant that
+                              changes the code is an artifact of its own, the "w" coarse
+                              builds). The kernel-role table reads it (_kernels.resolve).
       max_dispatch_x          the most workgroups one dispatch takes. Vulkan
                               maxComputeWorkGroupCount[0]; CUDA 2^31-1 and Metal 2^32-1
                               (stated).
@@ -344,7 +351,8 @@ class DeviceProps:
     """
 
     FIELDS = ("name", "artifact_family", "max_group_memory", "max_threads",
-              "indirect_dispatch", "runtime_specialization", "max_dispatch_x",
+              "indirect_dispatch", "runtime_specialization", "load_time_constants",
+              "max_dispatch_x",
               "max_binding_bytes", "offset_alignment", "subgroup_size", "subgroup_range",
               "unified_memory", "managed_inputs", "offset_views", "host_pointer_views",
               "shared_queue", "fp16", "cache_budget", "memory_budget", "device_root")

@@ -48,12 +48,16 @@ class ObjC:
         return None
 
 
+#: A resolved kernel record (_kernels.resolve) as a pipeline is built from it: its stem, entry
+#: point and recorded threadgroup.
+_REC = dict(stem="test", file="test.metal", entry="fusedTierB", local_size=[64, 1, 1])
+
+
 def context(fail=None, limits=(1024, 1024)):
     c = M.Context.__new__(M.Context)
     c.o = ObjC(fail, limits)
     c.device, c.queue, c.name = 1, 2, 'fake'
     c._pipelines = {}
-    c._stem = lambda *args: 'test'
     c._library = lambda stem, **kw: c.o.new(3)
     c._error = lambda err: 'injected failure'
     return c
@@ -65,13 +69,12 @@ def context(fail=None, limits=(1024, 1024)):
     ('fallback', (32, 1024)), (None, (32, 32))])
 def test_pipeline_ownership(fail, limits, monkeypatch):
     c = context(fail, limits)
-    monkeypatch.setattr(M, "_threads", lambda stem: 64)   # the kernel's recorded group
     if fail or limits == (32, 32):
         with pytest.raises((M.MetalError, M.UnsupportedSize)):
-            c.pipeline(1024)
+            c._pipeline(_REC, 1024)
     else:
-        pipeline = c.pipeline(1024)
-        assert c.pipeline(1024) == pipeline  # cache owns exactly one reference
+        pipeline = c._pipeline(_REC, 1024)
+        assert c._pipeline(_REC, 1024) == pipeline  # cache owns exactly one reference
         assert c.o.refs[pipeline] == 1
     assert c.o.pools == 0
     c.destroy()

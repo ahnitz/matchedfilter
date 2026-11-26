@@ -359,18 +359,16 @@ def test_metal_tier1_fp16_resolution_and_manifest():
     ctx.name = "Apple M2"
     dev = types.SimpleNamespace(name=ctx.name, max_shared_memory=ctx.max_shared_memory)
     assert ctx._device_props(dev).fp16 is False
+    ctx.props = ctx._device_props(dev)
 
-    assert _mtlcompute._twt_entry("refineListedC16w") == ("refineListedC16", True)
-    assert _mtlcompute._twt_entry("refineListedC16") == ("refineListedC16", False)
     assert ("MF_ROW_WINDOWS", 1) in ctx._macros({"rowwin": True, "stride": 2048, "scale": 2})
 
     for band in (64, 128, 256, 512):
         assert ctx._x_has_kernel("tier1_c16", band)
-        for entry in ("refineListedC16", "refineListedC16w"):
-            assert _mtlcompute._function(entry) == "refineListedBounded"
-            base, _ = _mtlcompute._twt_entry(entry)
-            stem = ctx._stem(band, base)
-            assert stem == "refine_%d_c16" % band
+        for twt in (0, 1):               # the twiddle source is a library macro, one build
+            rec = ctx._kernel_record("tier1_c16", band, dict(twt=twt))
+            stem = rec["stem"]
+            assert stem == "refine_%d_c16" % band and rec["entry"] == "refineListedBounded"
             assert stem in manifest
             rec_m = manifest[stem]
             assert rec_m["coarse16"] == 1

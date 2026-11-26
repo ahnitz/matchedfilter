@@ -370,6 +370,7 @@ def stated_props(**values):
     any of them (a test's driver that is not made by a driver's own __init__)."""
     props = dict(name="simulated GPU", artifact_family="sim", max_group_memory=32768,
                  max_threads=1024, indirect_dispatch=True, runtime_specialization=False,
+                 load_time_constants=True,
                  max_dispatch_x=2 ** 31 - 1, max_binding_bytes=None, offset_alignment=16,
                  subgroup_size=32, subgroup_range=None, unified_memory=True,
                  managed_inputs=False, offset_views=False, host_pointer_views=False,
@@ -482,7 +483,11 @@ class Context(Executor, InputUploads):
 
     # ---- driver primitives ----------------------------------------------------------
     def _x_kernel(self, name, n, consts=None):
-        if name in ("forward", "fwd_listed") and 64 <= n <= 65536 and n & (n - 1) == 0:
+        from matchedfilter._kernels import ROLES
+        if name not in ROLES:
+            raise ValueError("no GPU kernel %r" % (name,))
+        if (name in ("forward", "fwd_listed") and 64 <= n <= 65536 and n & (n - 1) == 0
+                and not (consts or {}).get("gate")):
             return _Kernel(name, n)
         raise UnsupportedSize("the simulated driver has no %s kernel at n=%d" % (name, n))
 

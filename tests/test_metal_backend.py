@@ -10,6 +10,7 @@ import sys
 
 import numpy as np
 import pytest
+import sim_driver
 from conftest import assert_same_follow_up
 
 import matchedfilter as mf
@@ -46,15 +47,17 @@ def test_every_selectable_metal_kernel_fits_32k_of_threadgroup_memory(n):
     """
     c = _mtlcompute.Context.__new__(_mtlcompute.Context)
     c.max_shared_memory = 32768
+    c.props = sim_driver.stated_props(artifact_family="metal", max_group_memory=32768,
+                                      load_time_constants=True)
     c.name = "32 KB device"
-    entries = ["fusedTierB", "refineListed", "compactPairs", "seriesForward"]
+    roles = [("peaks", None), ("tier", None), ("compact", None), ("forward", None)]
     if n >= 1024:
-        entries += ["fullCorrelation", "fullCorrelationSeries"]
+        roles += [("full", None), ("series", None)]
     if (_mtlcompute._METAL_DIR / ("tierb_%d_c16.metal" % n)).is_file():
-        entries.append("coarse16")
+        roles.append(("coarse", dict(ppg=1, tile=1, twt=0)))
     from matchedfilter import _kernels
-    for entry in entries:
-        stem = c._stem(n, entry)
+    for role, consts in roles:
+        stem = c._kernel_record(role, n, consts)["stem"]
         src = (_mtlcompute._METAL_DIR / (stem + ".metal")).read_text()
         assert _threadgroup_bytes(src) <= 32768, (stem, _threadgroup_bytes(src))
     for role in ("tierb", "refine"):
@@ -65,8 +68,9 @@ def test_every_selectable_metal_kernel_fits_32k_of_threadgroup_memory(n):
 
 
 def test_every_shipped_metal_library_declares_the_function_its_pipeline_asks_for():
-    """pipeline() looks a function up by name (_mtlcompute._function): a build that renames
-    an entry point fails only on a Mac, at the first call."""
+    """A pipeline looks its function up by the name its manifest record gives
+    (Context._pipeline): a build that renames an entry point fails only on a Mac, at the
+    first call."""
     from matchedfilter import _kernels
     checked = 0
     for stem, rec in _kernels.manifest("metal")["kernels"].items():
@@ -74,30 +78,37 @@ def test_every_shipped_metal_library_declares_the_function_its_pipeline_asks_for
         assert re.search(r"\bvoid %s\(" % rec["entry"], src), (stem, rec["entry"])
         checked += 1
     assert checked > 50
-    # and the function each entry's pipeline asks for is the one its library was built with
-    for entry, stem in (("fusedTierB", "tierb_4096"), ("refineListed", "refine_4096"),
-                        ("coarse16p4", "tierb_256_c16p4"), ("compactPairs", "compact")):
-        assert _mtlcompute._function(entry) == _kernels.record("metal", stem)["entry"], entry
+    # and the record each role resolves to names the function its library declares
+    lim = sim_driver.stated_props(artifact_family="metal", max_group_memory=32768,
+                                  load_time_constants=True)
+    for role, n, consts in (("peaks", 4096, None), ("tier", 4096, None),
+                            ("coarse", 256, dict(ppg=4, tile=1, twt=0)), ("compact", 0, None)):
+        rec = _kernels.resolve(lim, role, n, consts)
+        src = (_mtlcompute._METAL_DIR / rec["file"]).read_text()
+        assert re.search(r"\bvoid %s\(" % rec["entry"], src), (role, rec["entry"])
 
 
 def test_every_entry_the_shared_layer_asks_for_has_a_metal_library():
-    """_x_kernel's entries (fixed, forward family, listed) resolve through _stem to a shipped
-    source at every length the build covers: a missing mapping fails only on a Mac."""
+    """_x_kernel's roles (fixed, forward family, listed) resolve (_kernels.resolve) to a
+    shipped source at every length the build covers: a missing mapping fails only on a Mac."""
     c = _mtlcompute.Context.__new__(_mtlcompute.Context)
     c.max_shared_memory, c.name = 32768, "32 KB device"
+    c.props = sim_driver.stated_props(artifact_family="metal", max_group_memory=32768,
+                                      load_time_constants=True)
     from matchedfilter import _kernels
     for n in sorted({rec["n"] for stem, rec in _kernels.manifest("metal")["kernels"].items()
                      if stem.startswith("tierb_") and rec.get("n")}):
-        entries = ["fusedTierB", "compactPairs", "compactListed", "refineListed"]
+        roles = ["peaks", "compact", "compactl", "tier"]
         if (_mtlcompute._METAL_DIR / ("forward_%d.metal" % n)).is_file():
-            entries += ["seriesForward", "seriesForwardBands", "seriesForwardListed"]
+            roles += ["forward", "fwd_bands", "fwd_listed"]
         if (_mtlcompute._METAL_DIR / ("forward_tier0_%d.metal" % n)).is_file():
-            entries.append("forwardTier0")
-        for entry in entries:
-            stem = c._stem(n, entry)
-            assert (_mtlcompute._METAL_DIR / (stem + ".metal")).is_file(), (n, entry, stem)
-    for entry in ("markBlocks", "packCoarse", "compactPeaks"):
-        assert (_mtlcompute._METAL_DIR / (c._stem(4096, entry) + ".metal")).is_file(), entry
+            roles.append("fwd_tier0")
+        for role in roles:
+            stem = c._kernel_record(role, n)["stem"]
+            assert (_mtlcompute._METAL_DIR / (stem + ".metal")).is_file(), (n, role, stem)
+    for role in ("mark", "pack", "compact_peaks"):
+        stem = c._kernel_record(role, 4096)["stem"]
+        assert (_mtlcompute._METAL_DIR / (stem + ".metal")).is_file(), role
 
 
 # --- hardware ---------------------------------------------------------------
