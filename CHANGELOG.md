@@ -85,10 +85,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   leaf call, which made other queues wait on it: its `search_bench` pass goes from 1.17 s
   to 0.85 s on an Apple M2. A driver conformance suite states 29 driver contracts once and
   runs each on a simulated driver (on any machine) and on the host's device.
-- GPU (experimental): a dropped Vulkan or Metal context is freed at once instead of at the
-  next full garbage collection (its buffers held it in a reference cycle). The peak GPU
-  memory of the 171,828-template PyCBC job on a Radeon 8060S falls from 6.3 GB to 3.5 GB
-  and its garbage-collection time from 3.7 s to 2.6 s.
+- GPU (experimental): a dropped context is freed at once on every backend instead of at
+  the next full garbage collection (its buffers held it in a reference cycle). The peak
+  GPU memory of the 171,828-template PyCBC job falls from 6.3 GB to 3.5 GB on a Radeon
+  8060S (Vulkan) and from 3.6 GB to 2.1 GB on a Quadro RTX 6000 (CUDA), and its
+  garbage-collection time from 3.7 s to 2.6 s on the Radeon.
 
 ### Performance
 
