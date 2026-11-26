@@ -90,6 +90,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   GPU memory of the 171,828-template PyCBC job falls from 6.3 GB to 3.5 GB on a Radeon
   8060S (Vulkan) and from 3.6 GB to 2.1 GB on a Quadro RTX 6000 (CUDA), and its
   garbage-collection time from 3.7 s to 2.6 s on the Radeon.
+- GPU (experimental): two more pieces of the backends are written once. Each device has
+  one properties record that its driver fills from what the API reports
+  (`_gpuhost.DeviceProps`), and shared code reads it instead of asking which backend it is
+  running on. And one table in `_kernels` resolves a kernel role to the build a device can
+  run, from the manifests and the device's limits; a kernel the device cannot run is
+  reported, where each driver had returned a different substitute or a file that did not
+  exist.
 
 ### Performance
 
