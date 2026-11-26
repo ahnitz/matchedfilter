@@ -69,6 +69,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   channels are fused into one call also when the device writes caller arrays in place,
   and the number of submissions a fused batch puts in one buffer is a measured device
   choice on every backend instead of a constant per driver.
+- GPU (experimental): a GPU bank's middle block size is measured at each group's own
+  rows and taps, by device time, among the cost model's pick and its neighbours. The model
+  extrapolates from two small measurements and had priced 16384-sample blocks at 1.8 times
+  their device time, so the 171,828-template PyCBC job ran its middle at 32768; it now runs
+  at 16384 and the middle's device time falls from 0.88 s to 0.81 s. The prices are stored
+  in the cost file per shape; a neighbour replaces the model's pick only beyond the tie.
 
 ### Performance
 
