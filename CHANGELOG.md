@@ -75,6 +75,20 @@ Alpha releases may change the API. Pin a version for reproducible work.
   their device time, so the 171,828-template PyCBC job ran its middle at 32768; it now runs
   at 16384 and the middle's device time falls from 0.88 s to 0.81 s. The prices are stored
   in the cost file per shape; a neighbour replaces the model's pick only beyond the tie.
+- GPU (experimental): the three backends share more of their code, and state what they
+  share. A recording is one backend-neutral command list (seven operations in one integer
+  array, no API handles), with one per-binding instance cache and one plan for fusing a
+  batch; Vulkan replays it through a C emitter and its private capture format is gone.
+  What a submission leaves in flight is one contract (`_gpuexec`, "Work in flight, and
+  its order"): a submission is a pending write when its caller says so, the device root
+  and unslotted batches do, and a leaf call on a slot does not. Metal had registered every
+  leaf call, which made other queues wait on it: its `search_bench` pass goes from 1.17 s
+  to 0.85 s on an Apple M2. A driver conformance suite states 29 driver contracts once and
+  runs each on a simulated driver (on any machine) and on the host's device.
+- GPU (experimental): a dropped Vulkan or Metal context is freed at once instead of at the
+  next full garbage collection (its buffers held it in a reference cycle). The peak GPU
+  memory of the 171,828-template PyCBC job on a Radeon 8060S falls from 6.3 GB to 3.5 GB
+  and its garbage-collection time from 3.7 s to 2.6 s.
 
 ### Performance
 
