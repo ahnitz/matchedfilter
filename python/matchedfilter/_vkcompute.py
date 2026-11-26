@@ -386,12 +386,15 @@ class _Buffer(MappedBuffer):
     """
 
     #: Slotted: a search holds thousands, and every full garbage collection walks them.
-    __slots__ = ("ctx", "nbytes", "handle", "memory", "ptr", "_bytes", "serial", "capacity",
+    #: A buffer holds its device (`dev`, the process's _Device: its pool and function table),
+    #: not the context that made it: a context holds its buffers, and a buffer holding the
+    #: context made every context a reference cycle, freed only by a full collection.
+    __slots__ = ("dev", "nbytes", "handle", "memory", "ptr", "_bytes", "serial", "capacity",
                  "_kind")
 
     # TRANSFER_DST: any buffer may be cleared on the device (zero_columns, output fills).
     def __init__(self, ctx, nbytes, readback=False, usage=_BUF_STORAGE | _BUF_TRANSFER_DST):
-        self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
+        self.dev, self.nbytes = ctx._device_state, max(int(nbytes), 4)
         self.serial = next(BUFFER_SERIALS)
         pool = ctx._device_state.buffers
         self.capacity = pool.size_class(self.nbytes)
@@ -423,7 +426,7 @@ class _Buffer(MappedBuffer):
         caller guarantees, as it did when this freed the memory, that no submitted work
         still uses it."""
         if self.handle:
-            dev = self.ctx._device_state
+            dev = self.dev
             dev.buffers.give(self._kind, self.capacity, (self.handle, self.memory, self.ptr),
                              address(self.ptr), dev.free_buffer)
             self.handle = None
@@ -1005,7 +1008,10 @@ class _VkNative:
     _BINDINGS = 8
 
     def __init__(self, ctx, commands):
-        self.ctx, self.commands = ctx, commands
+        # The context holds its natives (in its records), so it outlives them; a strong
+        # reference back made every context a reference cycle, freed only by a full
+        # collection, and device memory followed the collector's timing.
+        self._ctx, self.commands = _weakref.ref(ctx), commands
         self.label, self.once = commands.label, commands.once
         self.args = commands.arg_names()
         self.captured = commands.has_stamps()
@@ -1014,6 +1020,10 @@ class _VkNative:
         self._updates = {}
         # (command buffer, descriptor pools) per binding (the shared BindingCache)
         self.cmds = BindingCache(self._BINDINGS)
+
+    @property
+    def ctx(self):
+        return self._ctx()
 
     def command(self, binds, transient=False):
         """(command buffer, release): release() frees a one-off one once its run finished

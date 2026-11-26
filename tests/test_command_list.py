@@ -303,3 +303,39 @@ def test_the_fusion_plan_interleaves_by_phase_with_one_barrier_each():
         ("work", 0, "forward"), ("work", 1, "forward"), ("barrier", "forward"),
         ("work", 0, "coarse0"), ("work", 1, "coarse0"), ("barrier", "coarse0"),
         ("work", 0, "refine"), ("barrier", "refine")]
+
+
+def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection():
+    """A plan's context, with its recordings and buffers, is freed by reference counting when
+    the plan is dropped: no object it holds refers back to it (Vulkan buffers hold their
+    device, natives hold their context weakly). Held in a reference cycle, contexts died
+    only in full collections and a pycbc GPU job's device memory followed the collector's
+    timing. CUDA's and Metal's buffers still hold their context (a known gap there)."""
+    import weakref
+    from conftest import usable_gpu
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    import matchedfilter as mf
+    backend = next(d for d in mf.devices() if str(d) == dev).backend
+    if backend != "vulkan":
+        pytest.xfail("known gap on %s: its buffers hold their context (a reference cycle "
+                     "through the context's records)" % backend)
+    f = mf.MatchedFilter(1024, 2, 2, device=dev)
+    rng = np.random.default_rng(2)
+    h = (rng.normal(size=(2, 1024)) + 1j * rng.normal(size=(2, 1024))).astype(np.complex64)
+    f.set_templates(h)
+    f.set_data(h)
+    f.run(binsize=1024)
+    ctx = weakref.ref(f._gpu)
+    pool = f._gpu._device_state.buffers
+    gc.collect()
+    gc.disable()
+    try:
+        live = pool.live_bytes
+        assert live > 0
+        del f
+        assert ctx() is None                     # reference counting alone freed it
+        assert pool.live_bytes < live            # and gave its buffers back to the pool
+    finally:
+        gc.enable()

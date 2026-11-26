@@ -41,7 +41,7 @@ class _Allocation:
         i = bisect.bisect_left(_starts, start)
         if i < len(_starts) and _starts[i] == start:
             del _starts[i]
-        if getattr(buf.ctx, 'device', None):
+        if _buffer_live(buf):
             buf.destroy()
 
 
@@ -89,6 +89,23 @@ class _Borrowed:
 
     def destroy(self):
         pass
+
+
+def _buffer_live(buf):
+    """Whether a buffer's device is still open (its destroy() has somewhere to go): a buffer
+    that names its device (`dev`, Vulkan) asks it; one that names its context asks that."""
+    dev = getattr(buf, "dev", None)
+    if dev is not None:
+        return bool(getattr(dev, "device", None))
+    return bool(getattr(getattr(buf, "ctx", None), "device", None))
+
+
+def _buffer_on(buf, ctx):
+    """Whether a buffer can be bound by ctx: made on ctx's device (_same_device)."""
+    dev = getattr(buf, "dev", None)
+    if dev is not None:
+        return dev is getattr(ctx, "_device_state", None)
+    return _same_device(buf.ctx, ctx)
 
 
 def _same_device(a, b):
@@ -141,7 +158,7 @@ def shared_buffer(array, ctx):
     if allocation is None and getattr(ctx, 'shared_views', False):
         start, allocation = _containing(address)
         offset = address - start if allocation is not None else 0
-    if (allocation is None or not _same_device(allocation.buffer.ctx, ctx)
+    if (allocation is None or not _buffer_on(allocation.buffer, ctx)
             or offset + array.nbytes > allocation.buffer.nbytes):
         return None
     return _Borrowed(allocation, offset)
@@ -160,7 +177,7 @@ def shared_view(array, ctx, align=None):
     start = address
     if allocation is None:
         start, allocation = _containing(address)
-    if allocation is None or not _same_device(allocation.buffer.ctx, ctx):
+    if allocation is None or not _buffer_on(allocation.buffer, ctx):
         return None
     offset = address - start
     if offset + array.nbytes > allocation.buffer.nbytes:
@@ -190,7 +207,7 @@ def containing(array, ctx):
         return None
     nbytes = allocation.buffer.nbytes
     if not (addr + array.nbytes <= start + nbytes and (addr - start) % item == 0
-            and _same_device(allocation.buffer.ctx, ctx)):
+            and _buffer_on(allocation.buffer, ctx)):
         return None
     return _whole_view(start, allocation, array.dtype), (addr - start) // item
 
@@ -210,7 +227,7 @@ def containing_samples(array, ctx):
     nbytes = allocation.buffer.nbytes
     end = addr + (array.size - 1) * array.strides[0] + 4
     if not (end <= start + nbytes - nbytes % 8 and (addr - start) % 4 == 0
-            and _same_device(allocation.buffer.ctx, ctx)):
+            and _buffer_on(allocation.buffer, ctx)):
         return None
     return (_whole_view(start, allocation, np.dtype(np.complex64)), (addr - start) // 4,
             array.strides[0] // 4)
