@@ -280,13 +280,19 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
         f.set_templates(h)
         f.set_data(d)
         if not specialized:
-            real = f._gpu.pipeline
-            f._gpu.pipeline = (lambda n_, entry="fusedTierB", one_bin=False, c16=False,
-                               macros=(), gate=False, real=real: real(n_, entry, False, c16,
-                                                                      macros))
-            # A cascade's tier 1 asks a one-bin build for its gate alone: none here.
-            f._gpu.__dict__.setdefault("_shipped_memo", {}).update(
-                {("tier1", b): False for b in (64, 128, 256, 512, 1024, 2048, 4096, 8192)})
+            # The general kernels in place of the one-bin builds (the role table's records),
+            # and no one-bin gate-only build for a cascade's tier 1.
+            resolve, has = f._gpu._kernel_record, f._gpu._x_has_kernel
+            general = {"peaks1": "peaks", "tier1": "tier", "refine1": "refine"}
+
+            def pick(name, size, consts=None, resolve=resolve):
+                if name in general:
+                    name = general[name]
+                    consts = {k: v for k, v in (consts or {}).items() if k != "gate"}
+                return resolve(name, size, consts)
+            f._gpu._kernel_record = pick
+            f._gpu._x_has_kernel = (lambda name, size, has=has:
+                                    False if name in ("tier1", "tier1gate") else has(name, size))
         filters.append(f)
     for window in [(0, n), (11, n - 17)]:
         for threshold in (0., 1e10):
