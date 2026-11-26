@@ -92,6 +92,7 @@ def _stub_cuda_context(monkeypatch):
     ctx._next_addr = 0x100000
     ctx._pinned_keep = []
     ctx.name, ctx.max_shared_memory, ctx.max_invocations = "stub", 48 * 1024, 1024
+    ctx._attr = lambda attr: 0        # no device: the queried properties take stated values
     ctx.props = ctx._device_props()
     ctx._device_state = types.SimpleNamespace()
 

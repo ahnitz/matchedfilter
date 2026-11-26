@@ -815,11 +815,14 @@ class Context(KernelRoles, Executor, InputUploads):
             # A resident grid strides over a listed op's items; constants are launch
             # parameters.
             indirect_dispatch=False, runtime_specialization=False, load_time_constants=False,
-            # The most blocks one launch takes (gridDim.x), no per-binding limit below
-            # the allocation, and a bound view's alignment for the widest element a
-            # kernel reads (float2).
-            max_dispatch_x=2 ** 31 - 1, max_binding_bytes=None, offset_alignment=16,
-            subgroup_size=32, subgroup_range=None,          # the warp
+            # The most blocks one launch takes (gridDim.x, as the device reports it), no
+            # per-binding limit below the allocation, and a bound view's alignment for the
+            # widest element a kernel reads (float2).
+            max_dispatch_x=self._attr(_cuda._CUDA_DEVICE_ATTR_MAX_GRID_DIM_X) or 2 ** 31 - 1,
+            max_binding_bytes=None, offset_alignment=16,
+            # the warp, as the device reports it
+            subgroup_size=self._attr(_cuda._CUDA_DEVICE_ATTR_WARP_SIZE) or 32,
+            subgroup_range=None,
             # Device memory is separate from host memory (residency matters for pricing);
             # shared allocations are managed memory, which migrates between the two.
             unified_memory=False, managed_inputs=True,

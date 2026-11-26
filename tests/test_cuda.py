@@ -328,3 +328,20 @@ def test_a_device_state_is_open_by_its_context_not_by_its_device_index():
     assert state.open is True
     handle.value = None                                       # the context destroyed
     assert state.open is False
+
+
+def test_the_warp_and_grid_limit_are_the_devices_reports():
+    """props.subgroup_size and props.max_dispatch_x are what the device reports
+    (cuDeviceGetAttribute WARP_SIZE, MAX_GRID_DIM_X), not stated constants; a device that
+    reports nothing (0) gets the stated values. Host-only: the attribute query is stubbed."""
+    from matchedfilter import _cuda as cu
+    from matchedfilter import _cudacompute as C
+    for reported, want in (({cu._CUDA_DEVICE_ATTR_WARP_SIZE: 64,
+                             cu._CUDA_DEVICE_ATTR_MAX_GRID_DIM_X: 65535}, (64, 65535)),
+                           ({}, (32, 2 ** 31 - 1))):
+        ctx = C.Context.__new__(C.Context)
+        ctx.name, ctx.max_shared_memory, ctx.max_invocations = "stub", 49152, 1024
+        ctx.cache_limit_bytes = 1 << 30
+        ctx._attr = lambda attr, reported=reported: reported.get(attr, 0)
+        props = ctx._device_props()
+        assert (props.subgroup_size, props.max_dispatch_x) == want
