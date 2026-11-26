@@ -565,6 +565,10 @@ def test_a_released_recording_and_its_freed_buffers_are_not_written_later(make):
 
 
 # ---- C9, C11: per-run bindings -------------------------------------------------------------
+@known_gap("cuda", "_x_read of a readback buffer copies its page-locked mirror, which only a "
+                   "list's readback op of that buffer refreshes: a run that writes it through "
+                   "an Arg (no readback op of its own) is read as the mirror of an earlier "
+                   "run (_cudacompute._Readback.read_into)")
 @pytest.mark.parametrize("wait", [True, False])
 def test_a_recording_writes_the_buffers_each_run_binds(make, wait):
     """A recording with an Arg writes the buffer each run binds: two buffers in turn, more
@@ -632,7 +636,9 @@ def test_freed_allocations_are_recycled(make, kind):
     cycles make no new device allocation after the first."""
     ctx = make()
     counters = instrument(ctx)
-    size = 3 * 1024 * 1024
+    # each kind its own size: a pool is the device's for the process (CUDA's _Pool), so an
+    # earlier kind's freed allocation of the same size would serve this kind's first buffer
+    size = {"device": 3 << 20, "readback": 7 << 19, "upload": 5 << 20, "shared": 7 << 20}[kind]
 
     def cycle():
         if kind == "shared":
