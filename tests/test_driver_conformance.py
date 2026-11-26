@@ -24,7 +24,6 @@ the suite runs there.
 Run on one backend: OMP_NUM_THREADS=1 python -m pytest tests/test_driver_conformance.py
 tests/test_gpu_root.py -q -rxX (the backend is the host's GPU; -rxX lists each known gap).
 """
-import ctypes
 import gc
 
 import numpy as np
@@ -521,6 +520,9 @@ def test_one_off_recordings_are_freed_after_their_run(make, form):
 
 
 # ---- C7: settling up to a token ------------------------------------------------------------
+@known_gap("metal", "_mtlcompute.Context._pend_write keeps one write token per context and moves "
+                    "it to the newest place, so two runs left in flight share one token and "
+                    "settling the older settles the newer too (found on an Apple M2)")
 def test_settle_until_waits_for_that_write_and_older_ones(make):
     """settle_until(token) waits for the pending write that token names and every older
     one, and leaves newer ones registered; a token already settled is a no-op."""
@@ -678,8 +680,6 @@ def test_timing_logs_one_interval_per_submission(make):
     assert all(np.isfinite(ms) and ms > 0 for _, ms in log), log
 
 
-@known_gap("metal", "_mtlcompute._x_time returns infinity when no run recorded a time, which "
-                    "_choice.no_time does not read as no time (audit section 1.1)")
 @known_gap("cuda", "_cudacompute._x_time takes min() of an empty list when no run recorded a "
                    "time, and raises (audit section 1.1)")
 def test_a_timing_without_a_sample_is_no_time(make):
@@ -719,9 +719,6 @@ def test_fill_sets_every_word_of_its_range_in_each_row(make):
     np.testing.assert_array_equal(_read(ctx, buf, np.uint32, words), want)
 
 
-@known_gap("metal", "_mtlcompute writes a list's update words when the run is encoded, not "
-                    "in order with the list's work, so earlier work in the list overwrites "
-                    "them (audit section 1.3, driver-internal divergences)")
 def test_update_is_in_order_with_the_lists_work(make):
     """update(buf, words) writes its words in order with the list's work: after a fill
     before it (and behind a barrier) and before work after it."""
@@ -937,7 +934,6 @@ _NAME_GAP = ("the device's name is `name`, not `device_name`, so shared code rea
 
 
 @known_gap("cuda", _NAME_GAP)
-@known_gap("metal", _NAME_GAP)
 def test_a_driver_names_its_device_and_shares_its_state(make):
     """Every context on a device has the same device state object (_device_state, which
     holds the device's pending writes) and names the device as device_name."""

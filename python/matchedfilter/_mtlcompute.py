@@ -575,7 +575,7 @@ class Context(Executor, InputUploads):
         self._device_state = dev
         dev.contexts.add(self)
         self.device = dev.handle
-        self.name = dev.name
+        self.name = self.device_name = dev.name    # device_name: what every driver calls it
         self.max_shared_memory = dev.max_shared_memory
         self._pipelines = dev.pipelines
         self.pipeline_names = dev.pipeline_names
@@ -1132,7 +1132,7 @@ class Context(Executor, InputUploads):
             t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
             if rep and isinstance(t0, float) and isinstance(t1, float) and t1 > t0:
                 times.append(t1 - t0)
-        return min(times) if times else float("inf")
+        return min(times) if times else 0.0     # 0.0: no run recorded a time (_choice.no_time)
 
     def _x_tierc(self, n):
         split = _kernels.two_stage("metal", n)
