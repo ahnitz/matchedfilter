@@ -25,6 +25,7 @@ Run on one backend: OMP_NUM_THREADS=1 python -m pytest tests/test_driver_conform
 tests/test_gpu_root.py -q -rxX (the backend is the host's GPU; -rxX lists each known gap).
 """
 import gc
+import re
 
 import numpy as np
 import pytest
@@ -436,7 +437,7 @@ def instrument(ctx):
     every run encodes afresh, so it holds no recordings). The CUDA and Metal counters are
     unverified until the suite runs there."""
     counts = {}
-    family = ctx.kernel_family
+    family = ctx.props.artifact_family
     if family == "sim":
         dev = ctx._device_state
         return lambda: {"recordings": dev.live_recordings, "allocations": dev.allocations}
@@ -745,7 +746,7 @@ def test_a_listed_dispatch_runs_the_count_a_run_wrote(make):
     nser = x.size
     st = (np.arange(rows) * N + rng.integers(0, N, rows)).astype(np.uint32)
     ids = rng.permutation(rows).astype(np.uint32)
-    align = max(16, int(ctx.storage_offset_alignment))
+    align = max(16, int(ctx.props.offset_alignment))
     tab = ctx._x_alloc(3 * align + 4 * rows + 4 * cap, upload=True)
     host = np.zeros(tab.nbytes // 4, np.uint32)
     o_st, o_ids, o_args = 0, -(-4 * rows // align) * align, 0
@@ -776,10 +777,10 @@ def test_a_listed_dispatch_runs_the_count_a_run_wrote(make):
 
 
 def test_sections_of_one_buffer_are_filled_updated_and_read_together(make):
-    """Sections (_x_section) of one buffer at multiples of storage_offset_alignment are
+    """Sections (_x_section) of one buffer at multiples of props.offset_alignment are
     filled and updated as buffers of their own, and read back with the buffer."""
     ctx = make()
-    align = max(16, int(ctx.storage_offset_alignment))
+    align = max(16, int(ctx.props.offset_alignment))
     buf = ctx._x_alloc(4 * align, readback=True)
     parts = [ctx._x_section(buf, i * align, align) for i in range(4)]
     lst = ctx._x_list("sections")
@@ -806,7 +807,7 @@ def test_a_fill_without_a_size_ends_at_the_end_of_its_section(make):
     """fill(view, word) without nbytes fills to the end of the view it was given -- a section's
     own end, not its buffer's: the sections after it keep their words."""
     ctx = make()
-    align = max(16, int(ctx.storage_offset_alignment))
+    align = max(16, int(ctx.props.offset_alignment))
     buf = ctx._x_alloc(3 * align, readback=True)
     lst = ctx._x_list("section fill")
     lst.fill(buf, 0)
@@ -905,26 +906,67 @@ def test_after_readers_orders_the_next_run_after_readers_in_flight(make, slot):
 
 
 # ---- C17: what a driver reports ------------------------------------------------------------
-def test_a_driver_reports_its_documented_features(make):
-    """A Context reports every feature the interface documents, with its type:
-    max_dispatch_x and subgroup_size positive integers, storage_offset_alignment a power of
-    two, kernel_family a name, stage_host_inputs and inplace_feed booleans."""
+#: What each documented DeviceProps field must hold: a test of the value.
+def _positive(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def _flag(v):
+    return isinstance(v, bool)
+
+
+def _name(v):
+    return isinstance(v, str) and bool(v)
+
+
+PROPERTY_TYPES = {
+    "name": _name, "artifact_family": _name,
+    "max_group_memory": _positive, "max_threads": _positive,
+    "indirect_dispatch": _flag, "runtime_specialization": _flag,
+    "max_dispatch_x": _positive,
+    "max_binding_bytes": lambda v: v is None or _positive(v),
+    "offset_alignment": lambda v: _positive(v) and v & (v - 1) == 0,
+    "subgroup_size": _positive,
+    "subgroup_range": lambda v: v is None or (len(v) == 2 and 0 < v[0] <= v[1]),
+    "unified_memory": _flag, "managed_inputs": _flag, "offset_views": _flag,
+    "host_pointer_views": _flag, "shared_queue": _flag, "fp16": _flag,
+    "cache_budget": _positive,
+    "memory_budget": lambda v: v is None or _positive(v),
+    "device_root": _flag,
+}
+
+
+def test_a_driver_reports_every_documented_property(make):
+    """A Context reports every property DeviceProps documents (ctx.props), each a value of
+    its kind: the record is a DeviceProps, every field in its FIELDS is documented in its
+    docstring and checked here, every field holds a value of its kind, the subgroup size
+    lies in the subgroup range where there is one, and device_root is the driver's class
+    attribute (what _gpuroot.device_root reads before it makes a context). inplace_feed,
+    a driver attribute, is a boolean."""
+    from matchedfilter._gpuhost import DeviceProps
     ctx = make()
-    assert int(ctx.max_dispatch_x) > 0
-    assert int(ctx.subgroup_size) > 0
-    a = int(ctx.storage_offset_alignment)
-    assert a > 0 and a & (a - 1) == 0
-    assert isinstance(ctx.kernel_family, str) and ctx.kernel_family
-    assert isinstance(ctx.stage_host_inputs, bool)
+    props = ctx.props
+    assert type(props) is DeviceProps
+    assert set(PROPERTY_TYPES) == set(DeviceProps.FIELDS)
+    documented = set(re.findall(r"^ +(\w+)  +\S", DeviceProps.__doc__, re.M))
+    assert set(DeviceProps.FIELDS) <= documented, set(DeviceProps.FIELDS) - documented
+    bad = {f: getattr(props, f) for f in DeviceProps.FIELDS
+           if not PROPERTY_TYPES[f](getattr(props, f))}
+    assert not bad, bad
+    if props.subgroup_range is not None:
+        assert props.subgroup_range[0] <= props.subgroup_size <= props.subgroup_range[1]
+    assert props.device_root is type(ctx).device_root
     assert isinstance(ctx.inplace_feed, bool)
 
 
 def test_a_driver_names_its_device_and_shares_its_state(make):
     """Every context on a device has the same device state object (_device_state, which
-    holds the device's pending writes) and names the device as device_name."""
+    holds the device's pending writes) and the same properties record, which names the
+    device as device_name does."""
     a, b = make(), make()
     assert a._device_state is not None and a._device_state is b._device_state
-    assert isinstance(a.device_name, str) and a.device_name
+    assert a.props is b.props
+    assert a.props.name == a.device_name
 
 
 # ---- the suite catches the faults that happened ---------------------------------------------

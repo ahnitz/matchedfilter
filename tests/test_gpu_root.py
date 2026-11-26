@@ -2,6 +2,7 @@
 against the host's, what it keeps across runs and searches, and where a search computes its
 roots."""
 import gc
+import types
 
 import numpy as np
 import pytest
@@ -337,20 +338,37 @@ def test_the_placement_trial_keeps_the_device_unless_the_host_is_clearly_faster(
 
 
 def test_a_backend_with_unverified_root_kernels_keeps_the_host_root(monkeypatch):
-    """device_root gives no DeviceRoot for a backend outside VERIFIED_BACKENDS, whatever
-    the host: its searches compute their roots on the host."""
-    class Other:
-        backend, index = "not-verified", 0
+    """device_root gives no DeviceRoot for a device whose driver says its root kernels are
+    not verified (its Context's device_root), and makes no context to find that out: its
+    searches compute their roots on the host. A driver that says they are gets one."""
+    from matchedfilter import _filter
+    made = []
+
+    class Driver:
+        device_root = False
+
+        def __init__(self, index):
+            made.append(index)
+            self.props = types.SimpleNamespace(name="a verified device")
+
+    class Device:
+        backend, index = "vulkan", 0
 
         def __str__(self):
-            return "gpu:0 (not verified)"
+            return "gpu:0 (driver under test)"
+    monkeypatch.setattr(_filter, "_compute_module", lambda device: types.SimpleNamespace(
+        Context=Driver))
     monkeypatch.setattr(_gpuroot, "_ROOTS", {})
-    assert _gpuroot.device_root(Other()) is None
+    assert _gpuroot.device_root(Device()) is None and made == []
+    monkeypatch.setattr(_gpuroot, "_ROOTS", {})
+    monkeypatch.setattr(Driver, "device_root", True)
+    root = _gpuroot.device_root(Device())
+    assert root is not None and root.name == "a verified device" and made == [0]
 
 
 def test_every_backend_that_ships_root_kernels_runs_the_device_root():
     """A GPU whose backend ships the root kernels gets a DeviceRoot: Vulkan, Metal and CUDA
-    have been run against the host root (VERIFIED_BACKENDS), so none of them silently keeps
+    have been run against the host root (each driver's device_root), so none of them silently keeps
     the host root on a device that can run its own."""
     from matchedfilter import _kernels
     from matchedfilter.device import parse

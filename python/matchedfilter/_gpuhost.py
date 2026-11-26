@@ -273,6 +273,98 @@ class CommandList:
         return target
 
 
+class DeviceProps:
+    """What a GPU device is, as the shared layer reads it: one record per device, filled by
+    its driver from what the API reports (or, where it reports nothing, the driver's stated
+    value), and read through ctx.props instead of asking which backend or device a context
+    is. The fields, and where each driver's value comes from today:
+
+      name                    the device's name. Vulkan deviceName; CUDA cuDeviceGetName;
+                              Metal the MTLDevice's name.
+      artifact_family         the family of shipped kernel artifacts the device runs and the
+                              kernel identity its measured choices belong to: "vulkan",
+                              "cuda", "metal".
+      max_group_memory        bytes of group-shared memory one workgroup may use. Vulkan
+                              maxComputeSharedMemorySize; CUDA MAX_SHARED_MEMORY_PER_BLOCK;
+                              Metal maxThreadgroupMemoryLength.
+      max_threads             invocations one workgroup may have. Vulkan
+                              maxComputeWorkGroupInvocations; CUDA MAX_THREADS_PER_BLOCK;
+                              Metal 1024 (stated, not queried: every Metal 3 GPU).
+      indirect_dispatch       whether a dispatch can take its group count from a buffer a
+                              kernel wrote (a listed op). Vulkan and Metal True; CUDA False
+                              (a resident grid strides over the list instead).
+      runtime_specialization  whether constants are given to a kernel when its pipeline is
+                              created (Vulkan specialization constants); CUDA (launch
+                              parameters) and Metal (build-time macros) False.
+      max_dispatch_x          the most workgroups one dispatch takes. Vulkan
+                              maxComputeWorkGroupCount[0]; CUDA 2^31-1 and Metal 2^32-1
+                              (stated).
+      max_binding_bytes       the most bytes one storage binding may cover (Vulkan
+                              maxStorageBufferRange), or None for no limit (CUDA, Metal).
+      offset_alignment        the byte alignment a bound buffer's offset must have. Vulkan
+                              minStorageBufferOffsetAlignment; CUDA and Metal 16 (stated).
+      subgroup_size           the subgroup (wave, warp, SIMD-group) width kernels run at.
+                              Vulkan the queried subgroupSize; CUDA 32 (stated: the warp);
+                              Metal the threadExecutionWidth of a coarse pipeline, queried
+                              once per device.
+      subgroup_range          (least, most) subgroup size a pipeline can be required to
+                              run at (Vulkan subgroup size control), or None.
+      unified_memory          whether a device output the host reads needs no copy into
+                              host memory: Vulkan and Metal True; CUDA False (discrete
+                              cards; readbacks are copied into page-locked memory).
+      managed_inputs          whether shared allocations migrate between host and device,
+                              so kernels must not read host inputs in place: CUDA (managed
+                              memory) True; Vulkan, Metal False.
+      offset_views            whether a binding may start anywhere inside an allocation (a
+                              row of a shared output bound in place): CUDA, Metal True;
+                              Vulkan False (offsets must keep offset_alignment).
+      host_pointer_views      whether a host array can be bound in place without a copy
+                              (the driver's host_view): Metal True; Vulkan, CUDA False.
+      shared_queue            whether every context on the device submits to one queue,
+                              so work of one can be ordered behind another's in stream
+                              (zeroing coalesced into an earlier context's submission):
+                              Vulkan True; CUDA, Metal False.
+      fp16                    whether packed half-precision tiers run at twice the fp32
+                              rate, so the fp16 tier 1 and its gate-way timing are offered:
+                              Vulkan, CUDA True; Metal False (stated: AGX runs fp16 at the
+                              fp32 rate; a measurement for the constants step).
+      cache_budget            the bytes of recordings and their buffers a context keeps
+                              (its initial cache_limit_bytes): Vulkan, Metal 512 MiB; CUDA
+                              1 GiB (stated values, for the constants step).
+      memory_budget           the device memory a process may use, in bytes, or None where
+                              it is not queried (no backend queries it yet).
+      device_root             whether the backend's root kernels have been verified
+                              against the host root, so a search's root stage may run on
+                              the device (_gpuroot.device_root reads the driver's class
+                              attribute of that name before it makes a context): True on
+                              all three.
+
+    A record is made once per device by its first context and shared by every context on
+    the device (ctx.props); it holds values only, never a reference to a context.
+    """
+
+    FIELDS = ("name", "artifact_family", "max_group_memory", "max_threads",
+              "indirect_dispatch", "runtime_specialization", "max_dispatch_x",
+              "max_binding_bytes", "offset_alignment", "subgroup_size", "subgroup_range",
+              "unified_memory", "managed_inputs", "offset_views", "host_pointer_views",
+              "shared_queue", "fp16", "cache_budget", "memory_budget", "device_root")
+    __slots__ = FIELDS
+
+    def __init__(self, **values):
+        missing = [f for f in self.FIELDS if f not in values]
+        extra = sorted(set(values) - set(self.FIELDS))
+        if missing or extra:
+            raise TypeError("DeviceProps: missing %s, unknown %s" % (missing, extra))
+        for f in self.FIELDS:
+            setattr(self, f, values[f])
+
+    def as_dict(self):
+        return {f: getattr(self, f) for f in self.FIELDS}
+
+    def __repr__(self):
+        return "DeviceProps(%s)" % ", ".join("%s=%r" % kv for kv in self.as_dict().items())
+
+
 def binding_key(value):
     """The identity of a value an Arg is bound to, for caching what a recording binds: an
     allocation's serial and offset (a view of a shared array), a buffer's serial, a section's
@@ -839,12 +931,10 @@ def _followup_owner_ctx(bank, g):
     pctx = _gpu_ctx_of(bank, g)
     if pctx is None:
         return None
-    holder = getattr(pctx, "_device_state", None)
-    if holder is not None:
-        ref = holder.__dict__.get("followup_owner")
-        owner = ref() if ref is not None else None
-        if owner is not None:
-            return owner
+    ref = pctx._device_state.__dict__.get("followup_owner")
+    owner = ref() if ref is not None else None
+    if owner is not None:
+        return owner
     ctx = bank.__dict__.get("_followup_gpu_ctx")
     if ctx is None:
         ctx = type(pctx)(_parse_device(g.device).index)

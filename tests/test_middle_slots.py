@@ -72,7 +72,7 @@ def test_host_outputs_on_unified_memory_are_one_submission(monkeypatch):
     bank = TimeDomainFilterBank(taps, counts, engine="corr", device=device)
     ctx = bank._groups[0].get_correlation_plan()._gpu
     page = getattr(ctx, "page_bytes", None)
-    if getattr(ctx, "host_view", None) is None or page is None:
+    if not ctx.props.host_pointer_views or page is None:
         pytest.skip("the device does not write host memory in place")
     series, windows = [], [[(20000, 70000)], [(5000, 9000), (60000, 120000)]]
     for _ in windows:

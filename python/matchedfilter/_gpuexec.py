@@ -41,7 +41,7 @@ Driver primitives (a Context provides each):
   _x_section(buf, offset, nbytes)
                             a view of bytes [offset, offset + nbytes) of an _x_alloc buffer,
                             bound, filled, updated and counted like a buffer (offset: a
-                            multiple of storage_offset_alignment). A record's small words
+                            multiple of props.offset_alignment). A record's small words
                             share one buffer, so they move in one copy each way.
   _x_upload(buf, array, slot)
                             write an upload buffer, ordered before the next work on `slot`.
@@ -150,13 +150,15 @@ conformance suite (tests/test_driver_conformance.py) checks them on each.
     that read the buffer: the caller writes an input only once no run in flight reads it (the
     executor settles first).
 
-Features a driver reports (attributes): max_dispatch_x (the most groups one dispatch takes),
-storage_offset_alignment (a bound buffer's offset must be a multiple of this),
-stage_host_inputs (shared allocations migrate between host and device: kernels must not read
-small host-written inputs from them, which are uploaded into device memory instead, and spans
-a kernel will read are prefetched), inplace_feed (kernels are specialized when created, so
-the hierarchical tiers read the spectra in place at a stride and scale; else packed bands),
-subgroup_size, kernel_family (whose kernel identity stored measured choices belong to).
+What a driver reports about its device is one record, ctx.props (_gpuhost.DeviceProps, whose
+docstring lists the fields): among them max_dispatch_x (the most groups one dispatch takes),
+offset_alignment (a bound buffer's offset must be a multiple of this), managed_inputs (shared
+allocations migrate between host and device: kernels must not read small host-written inputs
+from them, which are uploaded into device memory instead, and spans a kernel will read are
+prefetched), subgroup_size and artifact_family (whose kernel identity stored measured choices
+belong to). Every context also has _device_state, the state its device's contexts share (its
+pending writes, among others). A driver attribute, not a property: inplace_feed (the
+hierarchical tiers read the spectra in place at a stride and scale; else packed bands).
 """
 import weakref
 
@@ -246,8 +248,8 @@ class Executor(HierOps):
     _FULL_BUDGET = 64 * 1024 * 1024
     #: Peak records a sparse result reads back with the count; more take a second read.
     _SPARSE_FIRST = 4096
-    #: See the module docstring (a driver feature).
-    stage_host_inputs = False
+    #: The most bins one grouped dispatch takes (_gpuhost.MAX_BINS, the same on every backend).
+    max_grouped_bins = MAX_BINS
     #: The compute queue offset a plan's deferred calls set (MatchedFilter._series_flags):
     #: a driver with several compute queues (Vulkan) submits slot s to queue s + offset
     #: (modulo their count).
@@ -474,7 +476,7 @@ class Executor(HierOps):
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.shape != (nd, nt, n):
             raise ValueError('full output shape does not match the banks')
-        limit = getattr(self, "max_binding_bytes", None)
+        limit = self.props.max_binding_bytes
         row = nt * n * 8
         if limit and out.nbytes > limit and nd > 1 and row <= limit:
             # One binding spans at most `limit` bytes (Vulkan's maxStorageBufferRange): runs
@@ -491,14 +493,14 @@ class Executor(HierOps):
         ov = shared_view(out, self)
         direct = ov is not None
         working = nd * nt * 8 * n * ((1 if direct else 2) if tierc else (0 if direct else 1))
-        if (working <= self._FULL_BUDGET and nd * nt * groups <= self.max_dispatch_x
+        if (working <= self._FULL_BUDGET and nd * nt * groups <= self.props.max_dispatch_x
                 and not (limit and out.nbytes > limit)):
             self._correlate_tile(n, data, tmpl, out, upload_data, upload_tmpl, split,
                                  wait or not direct, ov)
             return out
         per_pair = 8 * n * (2 if tierc else 1)
         tile = min(nt, max(1, self._FULL_BUDGET // per_pair),
-                   max(1, self.max_dispatch_x // groups),
+                   max(1, self.props.max_dispatch_x // groups),
                    max(1, limit // (8 * n)) if limit else nt)
         for d in range(nd):
             for t0 in range(0, nt, tile):
@@ -577,7 +579,7 @@ class Executor(HierOps):
         for o, ov, st in zip(outs, ovs, startss):
             if ov is None or o.ndim != 2 or o.shape[0] != nt or st.ndim != 1:
                 raise ValueError('continuous output must be a shared GPU buffer of every template')
-        limit = getattr(self, "max_binding_bytes", None)
+        limit = self.props.max_binding_bytes
         split = self._x_tierc(n) if n > 65536 else None
         if len(outs) > 1 and (split or (limit and any(o.nbytes > limit for o in outs))):
             # Two-stage or past the binding limit: each part on its own (below).
@@ -610,7 +612,7 @@ class Executor(HierOps):
         # Block starts are uploaded where they lie outside device memory, where the device
         # stages host-written inputs, or per run of a part split in runs (each run's starts
         # from its first row).
-        staged = self.stage_host_inputs or any(v is None for v in svs) or len(runs) > len(outs)
+        staged = self.props.managed_inputs or any(v is None for v in svs) or len(runs) > len(outs)
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
         lengths = tuple(o.shape[1] for o in outs)
         key = ("series", n, nd, nt, lengths, tuple(counts), tuple(firsts), lo, hi,
@@ -682,7 +684,7 @@ class Executor(HierOps):
         """The device's writes left in flight (a run with wait=False), oldest first: driver
         tokens, each with settle() -- wait for that run and free what it held. Device work
         is ordered after them by the driver; a host reader settles them."""
-        holder = getattr(self, "_device_state", None) or self
+        holder = self._device_state
         pend = holder.__dict__.get("pending_writes")
         if pend is None:
             pend = holder.pending_writes = []
@@ -780,11 +782,11 @@ class Executor(HierOps):
         # Block starts are bound where they lie, unless they lie outside device memory or
         # the device stages host-written inputs: then they are uploaded every call.
         stv = shared_view(starts, self)
-        staged = self.stage_host_inputs or stv is None
-        if not staged and (r0 * 4) % self.storage_offset_alignment:
+        staged = self.props.managed_inputs or stv is None
+        if not staged and (r0 * 4) % self.props.offset_alignment:
             raise ValueError("forward row offsets must be multiples of %d"
-                             % (self.storage_offset_alignment // 4))
-        if self.stage_host_inputs and count:
+                             % (self.props.offset_alignment // 4))
+        if self.props.managed_inputs and count:
             st = starts[r0:r0 + count]
             lo = int(min(int(st.min()), series.size))
             hi = int(min(series.size, int(st.max()) + n))
@@ -923,10 +925,7 @@ class Executor(HierOps):
         # how many bins clear the threshold and on what a byte of readback costs here (a
         # bus, or nothing on unified memory): measured per call shape.
         # A kernel slot of the device trial, played on whole batches (_settings.slot).
-        holder = getattr(self, "_device_state", None) or self
-        name = (getattr(holder, "device_name", "") or getattr(self, "device_name", "")
-                or getattr(self, "name", ""))
-        way = _settings.slot(name, "sparse", "flat", *SPARSE_WAYS["flat"])
+        way = _settings.slot(self.props.name, "sparse", "flat", *SPARSE_WAYS["flat"])
         res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
                              upload_tmpl, slot, async_submit, way == "compact", rowtab)
         if way == "dense":
@@ -950,7 +949,7 @@ class Executor(HierOps):
         # Each group's results start at its rows' place in (rows, templates, bins) where that
         # offset is a bound view's alignment; else every group is packed, aligned, and the
         # host gathers the rows.
-        unit = max(1, self.storage_offset_alignment // 4)
+        unit = max(1, self.props.offset_alignment // 4)
         natural = all((a * nt * nbins) % unit == 0 for a, _ in rows)
         if natural:
             offsets, size = [a * nt * nbins for a, _ in rows], nd * nt * nbins
@@ -1086,7 +1085,7 @@ class Executor(HierOps):
         binsize = int(binsize)
         shift = bin_shift(binsize) & 0xFFFFFFFF
         t2bits = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
-        align_words = max(1, self.storage_offset_alignment // 4)
+        align_words = max(1, self.props.offset_alignment // 4)
         offs, nbs, size = plan_items(items, binsize, align_words, MAX_BINS, phase)
         tab = tab_offs = None
         if phase is not None:
@@ -1103,7 +1102,7 @@ class Executor(HierOps):
         # Outputs per DEVICE: follow-ups run on a single-template plan per bank, each its own
         # context, and outputs per context meant an allocation on nearly every call. One
         # result may be pending: its outputs are about to be reused.
-        holder = getattr(self, "_device_state", None) or self
+        holder = self._device_state
         prior = holder.__dict__.pop("items_inflight", None)
         if prior is not None:
             prior()
@@ -1167,7 +1166,7 @@ class Executor(HierOps):
         # One context per device owns the follow-up records: every single-template plan is
         # its own context, and records per context were rebuilt whenever a batch's first job
         # moved to another template group. The owner passes on when it is destroyed.
-        holder = getattr(self, "_device_state", None) or self
+        holder = self._device_state
         ref = holder.__dict__.get("followup_owner")
         owner = ref() if ref is not None else None
         if owner is None:
@@ -1247,8 +1246,11 @@ class Executor(HierOps):
 
     def _retire(self):
         """This context is being destroyed (a driver's destroy): the device's follow-ups
-        finish, and their ownership passes to the next context that runs them."""
-        holder = getattr(self, "_device_state", None) or self
+        finish, and their ownership passes to the next context that runs them. A context
+        whose construction failed before it reached its device has nothing to retire."""
+        holder = self.__dict__.get("_device_state")
+        if holder is None:
+            return
         ref = holder.__dict__.get("followup_owner")
         if ref is not None and ref() is self:
             prior = holder.__dict__.pop("followups_inflight", None)
@@ -1261,7 +1263,7 @@ class Executor(HierOps):
         rows, entries, the identity list the listed forward walks, and the row count as
         indirect arguments -- share one upload buffer, and its unique template rows share
         a dedicated template upload buffer."""
-        align = max(16, int(self.storage_offset_alignment))
+        align = max(16, int(self.props.offset_alignment))
         offs, at = [], 0
         for nbytes in (4 * cap, 24 * cap, 4 * cap, 16):      # entries: six words (refineItems)
             offs.append(at)

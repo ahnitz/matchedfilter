@@ -19,7 +19,7 @@ _allocations = weakref.WeakValueDictionary()
 #: or id().
 BUFFER_SERIALS = itertools.count(1)
 # Sorted start addresses, for backends that bind views INSIDE an allocation
-# (ctx.shared_views): CUDA unified memory has one address on host and device, so a
+# (ctx.props.offset_views): CUDA unified memory has one address on host and device, so a
 # row of a shared (templates, samples) output is itself a valid device pointer.
 _starts = []
 
@@ -104,7 +104,7 @@ def _buffer_on(buf, ctx):
     """Whether a buffer can be bound by ctx: made on ctx's device (_same_device)."""
     dev = getattr(buf, "dev", None)
     if dev is not None:
-        return dev is getattr(ctx, "_device_state", None)
+        return dev is ctx._device_state
     return _same_device(buf.ctx, ctx)
 
 
@@ -112,10 +112,7 @@ def _same_device(a, b):
     """Contexts whose buffers are interchangeable: the same one, or two on one shared
     device (Vulkan contexts share a logical device per process; CUDA contexts on one
     device share its primary context)."""
-    if a is b:
-        return True
-    da = getattr(a, '_device_state', None)
-    return da is not None and da is getattr(b, '_device_state', None)
+    return a is b or a._device_state is b._device_state
 
 
 def _containing(address):
@@ -147,15 +144,16 @@ def allocation_serial(array):
 def shared_buffer(array, ctx):
     """Recognize a contiguous prefix, including through host DLPack imports.
 
-    A backend declaring ``shared_views`` also gets contiguous views that start
-    inside an allocation (e.g. one row of a shared output), with ``offset`` set.
+    A device whose bindings start anywhere (ctx.props.offset_views) also gets contiguous
+    views that start inside an allocation (e.g. one row of a shared output), with
+    ``offset`` set.
     """
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         return None
     address = array.ctypes.data
     allocation = _allocations.get(address)
     offset = 0
-    if allocation is None and getattr(ctx, 'shared_views', False):
+    if allocation is None and ctx.props.offset_views:
         start, allocation = _containing(address)
         offset = address - start if allocation is not None else 0
     if (allocation is None or not _buffer_on(allocation.buffer, ctx)
@@ -167,8 +165,7 @@ def shared_buffer(array, ctx):
 def shared_view(array, ctx, align=None):
     """shared_buffer, also for a contiguous view starting inside an allocation (e.g. a
     template group's rows of a caller's (templates, samples) output), whose offset is a
-    multiple of align (default: the context's queried storage_offset_alignment, else 256,
-    the largest storage-buffer offset alignment Vulkan allows).
+    multiple of align (default: the device's offset_alignment, ctx.props).
     For a backend call that applies the returned _Borrowed's offset itself."""
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         return None
@@ -182,10 +179,10 @@ def shared_view(array, ctx, align=None):
     offset = address - start
     if offset + array.nbytes > allocation.buffer.nbytes:
         return None
-    # A backend declaring shared_views binds any offset (shared_buffer's rule).
-    if offset and not getattr(ctx, 'shared_views', False):
+    # A device whose bindings start anywhere binds any offset (shared_buffer's rule).
+    if offset and not ctx.props.offset_views:
         if align is None:
-            align = getattr(ctx, 'storage_offset_alignment', 256)
+            align = ctx.props.offset_alignment
         if offset % align:
             return None
     return _Borrowed(allocation, offset)

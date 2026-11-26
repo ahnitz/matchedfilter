@@ -72,7 +72,7 @@ def test_sparse_holds_exactly_the_dense_peaks(ctx, monkeypatch, packed):
     if packed:
         # Every group's result then starts at a 64-byte boundary, which none of these row
         # offsets is: the groups are packed and the host maps them back.
-        monkeypatch.setattr(ctx, 'storage_offset_alignment', 64, raising=False)
+        monkeypatch.setattr(ctx.props, 'offset_alignment', 64)
     data, h = _spectra(7, 7), _spectra(8, 3)
     groups = [(0, 700, 0, 3), (100, 1000, 3, 5), (5, 900, 5, 7)]
     dense = ctx.peaks_grouped(N, data, h, groups, 64, 0.0)

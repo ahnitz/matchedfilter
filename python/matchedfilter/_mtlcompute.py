@@ -22,7 +22,7 @@ import re as _re
 
 import numpy as np
 from ._shared import empty_shared, _Allocation, _containing
-from ._gpuhost import MAX_BINS, MappedBuffer, Section, carray, hier_peaks_grouped
+from ._gpuhost import DeviceProps, MappedBuffer, Section, carray, hier_peaks_grouped
 from . import _kernels
 
 _METAL_DIR = _kernels.folder("metal")
@@ -36,7 +36,6 @@ _STORAGE_SHARED = 0
 #: kernel cannot hold more bins than that. Identical to the SPIR-V build --
 #: same Slang source, same limit -- and the split below is how both stay
 #: correct past it rather than quietly writing off the end of the table.
-_MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 #: Threads per threadgroup: 1024 on every Metal 3 GPU (the Metal feature set tables; the
 #: device reports it as an MTLSize, which the ctypes bridge does not return).
 _MAX_THREADS = 1024
@@ -539,13 +538,9 @@ def _function(entry):
 class Context(Executor, InputUploads):
     """A queue and dispatch caches on one process-wide Metal device (see _Device)."""
 
-    max_grouped_bins = _MAX_BINS
-    #: shared_buffer() may hand back a view inside an allocation (one row of a device-
-    #: resident middle output); every binding adds its offset.
-    shared_views = True
-    #: Apple AGX executes fp16 at the fp32 rate (no 2x packed half2 throughput win).
-    packed_fp16 = False
     _timing = False
+    #: The root kernels are verified on this backend (DeviceProps.device_root).
+    device_root = True
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): the ioreg core count and the chip named
@@ -600,6 +595,35 @@ class Context(Executor, InputUploads):
         if not self.queue:
             raise MetalError("newCommandQueue failed")
         self._uploaded = {"data": {}, "tmpl": {}}
+        props = dev.__dict__.get("props")
+        if props is None:
+            props = dev.props = self._device_props(dev)
+        self.props = props
+
+    def _device_props(self, dev):
+        """The properties of `dev` (_gpuhost.DeviceProps), made by its first context: the
+        threadgroup memory the device reports and the coarse pipeline's SIMD-group width;
+        the rest stated for every Metal device."""
+        return DeviceProps(
+            name=dev.name, artifact_family="metal",
+            max_group_memory=dev.max_shared_memory, max_threads=_MAX_THREADS,
+            indirect_dispatch=True, runtime_specialization=False,
+            # The most threadgroups one dispatch takes, no per-binding limit below the
+            # allocation, and a bound view's alignment (setBuffer:offset: for the widest
+            # element a kernel reads, float2).
+            max_dispatch_x=2 ** 32 - 1, max_binding_bytes=None, offset_alignment=16,
+            subgroup_size=self._simd_width(256), subgroup_range=None,
+            # Unified memory: shared_buffer() may hand back a view inside an allocation
+            # (one row of a device-resident middle output), every binding adding its
+            # offset, and a page-aligned host array binds in place (host_view).
+            unified_memory=True, managed_inputs=False, offset_views=True,
+            host_pointer_views=True,
+            # Each context has its own queue (newCommandQueue above).
+            shared_queue=False,
+            # Apple AGX executes fp16 at the fp32 rate (no 2x packed half2 throughput
+            # win): stated, for the constants step.
+            fp16=False, cache_budget=self.cache_limit_bytes, memory_budget=None,
+            device_root=self.device_root)
 
     # ---- kernels ----------------------------------------------------------
     def _library(self, stem, twt=False, macros=()):
@@ -1020,23 +1044,16 @@ class Context(Executor, InputUploads):
         except MetalError:
             return None
 
+    def hold_until_idle(self, owners):
+        """Keep host_view owners (host memory deferred commands read in place) until this
+        context's work in flight is done: _x_idle and a settled result release them."""
+        self._keep_until_done.extend(owners)
+
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
-    #: The most threadgroups one dispatch takes, and the byte alignment of a bound view
-    #: (setBuffer:offset: for the widest element a kernel reads, float2).
-    max_dispatch_x = 2 ** 32 - 1
-    max_binding_bytes = None        # no per-binding limit below the allocation
-    storage_offset_alignment = 16
 
     #: Libraries compile at run time, with the build-time constants as macros (twiddle.slang):
     #: the tiers read the spectra in place, at a stride and a data scale (_gpuhier feeds).
     inplace_feed = True
-    #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
-    kernel_family = "metal"
-
-    @property
-    def subgroup_size(self):
-        """The SIMD-group width (threadExecutionWidth of a coarse pipeline; 32 on Apple)."""
-        return self._simd_width(256)
 
     @staticmethod
     def _macros(c):

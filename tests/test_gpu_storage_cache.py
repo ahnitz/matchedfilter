@@ -145,13 +145,13 @@ def test_storage_shape_cap_preserves_recent_shape(plan):
 
 
 @pytest.mark.parametrize('limit', [2, 3])
-def test_run_and_series_share_pair_limit(plan, limit):
+def test_run_and_series_share_pair_limit(plan, limit, monkeypatch):
     rng = np.random.default_rng(14)
     series = (rng.normal(size=3000)+1j*rng.normal(size=3000)).astype('complex64')
     expected_run = plan.run(binsize=128).copy()
     expected_series = plan.run_series(series,[0,512],[0,0],[1024,1024],binsize=128).copy()
     plan.set_data(plan._gdata)
-    plan._gpu.max_dispatch_x = limit  # force data and template splits on small cases
+    monkeypatch.setattr(plan._gpu.props, 'max_dispatch_x', limit)  # force data and template splits
     actual, counts = plan.run(binsize=128, counts=True)
     check(expected_run, actual)
     np.testing.assert_array_equal(counts, (actual['index']>=0).sum(axis=-1))

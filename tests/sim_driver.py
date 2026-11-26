@@ -45,7 +45,7 @@ import numpy as np
 from matchedfilter._errors import UnsupportedSize
 from matchedfilter._gpuexec import Arg, Executor
 from matchedfilter._gpu_cache import InputUploads
-from matchedfilter._gpuhost import BufferPool, CommandList, MappedBuffer, Section
+from matchedfilter._gpuhost import BufferPool, CommandList, DeviceProps, MappedBuffer, Section
 from matchedfilter._shared import BUFFER_SERIALS, empty_shared
 
 #: Faults a simulated context can be given, each a driver bug that happened.
@@ -362,17 +362,27 @@ class _Write:
         self.job.finish()
 
 
+def stated_props(**values):
+    """A DeviceProps of stated values: the simulated device's, with `values` in place of
+    any of them (a test's driver that is not made by a driver's own __init__)."""
+    props = dict(name="simulated GPU", artifact_family="sim", max_group_memory=32768,
+                 max_threads=1024, indirect_dispatch=True, runtime_specialization=False,
+                 max_dispatch_x=2 ** 31 - 1, max_binding_bytes=None, offset_alignment=16,
+                 subgroup_size=32, subgroup_range=None, unified_memory=True,
+                 managed_inputs=False, offset_views=False, host_pointer_views=False,
+                 shared_queue=False, fp16=True, cache_budget=512 * 1024 * 1024,
+                 memory_budget=None, device_root=False)
+    props.update(values)
+    return DeviceProps(**props)
+
+
 class Context(Executor, InputUploads):
     """A simulated GPU context (see the module docstring): the driver primitives over host
     memory, run lazily. Contexts made with the same `device` share one simulated device."""
 
-    kernel_family = "sim"
-    storage_offset_alignment = 16
-    max_dispatch_x = 2 ** 31 - 1
-    subgroup_size = 32
     inplace_feed = True
-    max_binding_bytes = None
-    max_grouped_bins = 2048
+    #: No root kernels: a simulated device keeps the host root.
+    device_root = False
 
     def __init__(self, index=0, device=None, faults=()):
         unknown = set(faults) - set(FAULTS)
@@ -382,6 +392,13 @@ class Context(Executor, InputUploads):
         self._device_state = device if device is not None else _Device()
         self.device = "sim"
         self.device_name = self.name = "simulated GPU"
+        # The simulated device's properties: stated, one record per simulated device.
+        props = self._device_state.__dict__.get("props")
+        if props is None:
+            props = self._device_state.props = stated_props(
+                name=self.device_name, cache_budget=self.cache_limit_bytes,
+                device_root=self.device_root)
+        self.props = props
         self._timing = False
         self.timing_log = []
         self._uploaded = {"data": {}, "tmpl": {}}

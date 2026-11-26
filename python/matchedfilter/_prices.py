@@ -88,10 +88,8 @@ def _gpu_direct_ratio(n, ctx, real_series=False, complex_taps=False):
     pair on `ctx`, timed once per (n, device, kernel family, mode) and kept in MF_COST_FILE."""
     rs, ct = bool(real_series), bool(complex_taps)
     mode = "|%d%d" % (rs, ct) if (rs or ct) else ""
-    dev_fn = getattr(ctx, "_dev_name", None)
-    dev = ((dev_fn() if dev_fn is not None else "")
-           or getattr(ctx, "device_name", "") or getattr(ctx, "name", "") or "gpu").strip()
-    kid = gatechain.gpu_kernel_id(getattr(ctx, "kernel_family", None))
+    dev = (ctx.props.name or "gpu").strip()
+    kid = gatechain.gpu_kernel_id(ctx.props.artifact_family)
     key = "gpu-direct-ratio|%d|%s|%s%s" % (int(n), dev, kid, mode)
 
     def measure():

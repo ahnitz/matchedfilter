@@ -215,7 +215,7 @@ def test_pipelined_series_across_streams_matches_cpu(kind, tiled, monkeypatch):
         if dev == DEV:
             f.set_memory_limits(series_bytes=8 * n * 6)       # ~6 blocks per batch: many batches
             if tiled:
-                monkeypatch.setattr(f._gpu, "max_dispatch_x", nt // 2, raising=False)
+                monkeypatch.setattr(f._gpu.props, "max_dispatch_x", nt // 2)
         # A race shows intermittently: repeat the device call.
         out[dev] = [f.run_series(ser, starts=starts, win_start=ws, win_end=we,
                                  binsize=30000, threshold=3.0).copy()

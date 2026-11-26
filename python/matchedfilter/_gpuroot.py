@@ -36,32 +36,34 @@ from ._shared import BUFFER_SERIALS, shared_view
 #: Per device (its str): the DeviceRoot, or None where the device cannot run the root.
 _ROOTS = {}
 
-#: Backends whose root kernels have been run against the host root on hardware. Metal joined
-#: on an Apple M2 (2026-11-25) once its runs were pending writes: its kernels were right,
+#: Each driver's Context says whether its backend's root kernels have been run against the
+#: host root on hardware (its class attribute device_root, DeviceProps.device_root). Metal
+#: joined on an Apple M2 (2026-11-25) once its runs were pending writes: its kernels were right,
 #: but the driver's _x_submit left them unknown to settle_writes and to other queues, so a
 #: host or the middle stage read the series before it was written (CI's Metal job). CUDA
 #: joined on a Quadro RTX 6000 (sm_75, 2026-11-25), with the same pending write: without it
 #: every host read after settle_writes saw the unwritten buffer and the search test failed
 #: in 4 of 5 runs; with it its series are the host's to 1.5e-6 of their peak at every length
 #: it ships (2^18 to 2^21; 2^22 and 2^23 have no CUDA stage-1 build and keep the host root).
-#: This is a statement about verification, not a tuning choice; a backend joins the list
-#: when its kernels pass, and placement is then measured as on Vulkan.
-VERIFIED_BACKENDS = ("vulkan", "metal", "cuda")
+#: This is a statement about verification, not a tuning choice; a backend's device_root
+#: becomes True when its kernels pass, and placement is then measured as on Vulkan.
 
 
 def device_root(device):
     """The DeviceRoot of a parsed GPU device, made on first use, or None when its backend
-    cannot run one (no context) or its root kernels are not verified (VERIFIED_BACKENDS)."""
+    cannot run one (no context) or its root kernels are not verified (the driver's
+    device_root, read before a context is made)."""
     key = str(device)
     if key not in _ROOTS:
         from ._filter import _compute_module
         ctx = None
         try:
-            if device.backend in VERIFIED_BACKENDS:
-                ctx = _compute_module(device).Context(device.index)
+            driver = _compute_module(device).Context
+            if driver.device_root:
+                ctx = driver(device.index)
         except Exception:          # no driver for it: the host computes every root
             ctx = None
-        _ROOTS[key] = (DeviceRoot(ctx, getattr(ctx, "device_name", None) or key)
+        _ROOTS[key] = (DeviceRoot(ctx, ctx.props.name or key)
                        if ctx is not None else None)
     return _ROOTS[key]
 
@@ -113,7 +115,7 @@ class DeviceRoot:
             if n >= 4 and n & (n - 1) == 0:
                 try:
                     n1, n2 = self.ctx._x_tierc(h)
-                    fam = self.ctx.kernel_family
+                    fam = self.ctx.props.artifact_family
                     ppg = int((_kernels.record(fam, "tc_root1_%d" % h)
                                or _kernels.record(fam, "tc_root1_%d_lds32" % h))["ppg"])
                     got = (self.ctx._x_kernel("root1", h), self.ctx._x_kernel("root2", h),
@@ -365,5 +367,5 @@ def placement(root, n):
     if p is None:
         from ._costmodel import gpu_kernel_id
         p = _PLACEMENTS[key] = Placement(key, "root-place|%s|n%d|k%s" % (
-            key[0], n, gpu_kernel_id(root.ctx.kernel_family)))
+            key[0], n, gpu_kernel_id(root.ctx.props.artifact_family)))
     return p

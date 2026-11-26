@@ -185,7 +185,7 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
             # output is written over the bus at a cost per sample independent of n, which
             # swamped the kernel and priced n=32768 (whose CUDA kernel spills) as cheapest.
             # There, price the kernel into device-resident output (the resident path).
-            dest = cf.empty_shared((nt, L), readback=not getattr(cf._gpu, 'discrete', False))
+            dest = cf.empty_shared((nt, L), readback=cf._gpu.props.unified_memory)
             run = lambda cf=cf, st=st, nt=nt, dest=dest: cf._continuous_gpu(ser, st, 0, nt, dest)
         else:
             dest = np.zeros((nt, L), np.complex64)

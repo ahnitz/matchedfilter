@@ -4,6 +4,7 @@ changes the call -- data rewritten in place, a new allocation (perhaps at the sa
 new calibration, evicted records -- must either still be exact or fall back to the full path.
 """
 import gc
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -252,7 +253,7 @@ def test_staged_series_in_flight(monkeypatch):
     # Unified memory (Metal: host_view): every group reads the caller's series in place
     # (_stage_series returns it), so no staging buffer exists to guard; the results below
     # are still checked call by call.
-    in_place = all(getattr(g, "host_view", None) is not None for g in gpus.values())
+    in_place = all(g.props.host_pointer_views for g in gpus.values())
     if in_place:
         assert "_ser_stagings" not in bank.__dict__ and not any(e[0] == "fill" for e in events)
         calls = []
@@ -281,6 +282,9 @@ def test_follow_up_pool_never_hands_out_a_workspace_in_use():
     from matchedfilter import MatchedFilter
 
     class FakeGPU:
+        def __init__(self):
+            self._device_state = SimpleNamespace()        # where the device's pool lives
+
         def empty_shared(self, shape, dtype=np.complex64):
             return np.zeros(shape, dtype)
 
@@ -547,8 +551,7 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     warm = len(made)
     pools = len(getattr(ctx, "_pools", []))
     def held():
-        holder = getattr(ctx, "_device_state", None) or ctx
-        owner = holder.followup_owner()               # the device's follow-up records
+        owner = ctx._device_state.followup_owner()               # the device's follow-up records
         return {k for k in owner._exec_table() if k[0] == "followups"}
     workspaces = len(held())
     assert workspaces, "the device follow-up path was not taken"

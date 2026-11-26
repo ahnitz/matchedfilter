@@ -2556,12 +2556,13 @@ class TimeDomainFilterBank:
             ser = _host_copy(ser, np.complex64)   # this plan reads complex
         # Unified memory (Metal): write straight into dest, and read the series where it
         # is. A page-aligned destination needs no workspace and no copy-out.
-        view = getattr(cplan._gpu, 'host_view', None)
-        out_owner = view(dest) if view is not None else None
+        gpu = cplan._gpu
+        out_owner = (gpu.host_view(dest) if gpu is not None and gpu.props.host_pointer_views
+                     else None)
         if out_owner is not None:
             # The views' owners: shared_buffer() recognises an array only while its owner
             # lives, so both are held until the call returns, and dropped before the arrays.
-            owners = [out_owner, view(ser) if ser.flags.writeable else None]
+            owners = [out_owner, gpu.host_view(ser) if ser.flags.writeable else None]
             del out_owner
             try:
                 cplan._continuous_gpu(ser, st, t0, nt, dest)
@@ -2699,13 +2700,12 @@ class TimeDomainFilterBank:
         need_gpu = (W.shape[0] > 0 or getattr(g, '_corr_plan', None) is not None
                     or _device.parse(self.device).kind == 'gpu')
         gpu = getattr(g.get_correlation_plan(), '_gpu', None) if need_gpu else None
-        if gpu is not None and settle:
-            q = getattr(gpu, 'queue', None)
-            if q is not None:
-                for prev in settle:
-                    if getattr(prev, 'queue', None) is q:
-                        gpu = prev
-                        break
+        if gpu is not None and settle and gpu.props.shared_queue:
+            # Contexts submitting to one queue: zero in the earlier one's submission.
+            for prev in settle:
+                if prev.props is gpu.props:
+                    gpu = prev
+                    break
         zero = gpu.zero_columns if gpu is not None else None
         if zero is not None:
             held = shared_view(dest, gpu, align=4)
@@ -2734,14 +2734,13 @@ class TimeDomainFilterBank:
         host_view, its owner kept until the work is settled); else channel by channel."""
         cplan = g.get_correlation_plan()
         gpu = cplan._gpu
-        view = getattr(gpu, 'host_view', None) if gpu is not None else None
         # Host destinations the device can write where they are (Metal): their views live
-        # with the context's in-flight work (_keep_until_done, released when it is settled).
+        # with the context's in-flight work (hold_until_idle, released when it is settled).
         owners = []
-        if view is not None and hasattr(gpu, '_keep_until_done'):
+        if gpu is not None and gpu.props.host_pointer_views:
             for _, _, dest, _ in items:
                 if dest.flags.c_contiguous and shared_view(dest, gpu) is None:
-                    owner = view(dest)
+                    owner = gpu.host_view(dest)
                     if owner is not None:
                         owners.append(owner)
         if gpu is None or not _gpu_reads_real(gpu, g.n) or any(
@@ -2753,7 +2752,7 @@ class TimeDomainFilterBank:
                 self._correlate_windows(g, ser, W, t0, nt, dest, settle, support=support)
             return
         if owners:
-            gpu._keep_until_done.extend(owners)
+            gpu.hold_until_idle(owners)
             owners.clear()
         layouts = [self._windows_layout(g, ser.size, W, support) for ser, W, _, support in items]
         cplan._require_templates(t0, nt)
@@ -3045,7 +3044,7 @@ class TimeDomainFilterBank:
             if gpu is None:
                 return ser
             gpus.append(gpu)
-        if len(gpus) < 2 or getattr(gpus[0], 'host_view', None) is not None:
+        if len(gpus) < 2 or gpus[0].props.host_pointer_views:
             return ser                       # one group, or unified memory read in place
         if all((containing_samples(ser, gpu) if ser.dtype == np.float32
                 else shared_buffer(ser, gpu)) is not None for gpu in gpus):

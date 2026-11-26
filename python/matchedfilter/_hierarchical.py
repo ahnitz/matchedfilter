@@ -1746,7 +1746,7 @@ class HierarchicalFilter(MatchedFilter):
             buf = self._gpu.empty_shared((self.ntemplates, row_words), dtype=np.uint32)
             _pack_tap_table(buf, arr_taps, counts, cplx, tap_stride)
             view = shared_view(buf, self._gpu)
-            if self._gpu.stage_host_inputs and view is not None:
+            if self._gpu.props.managed_inputs and view is not None:
                 self._gpu._x_prefetch(view, 0, buf.nbytes, None)
             tap_meta = (tap_stride << 1) | int(bool(cplx))
             info = self._gtaps_info = (self._gpu, buf, view, tap_meta, {})

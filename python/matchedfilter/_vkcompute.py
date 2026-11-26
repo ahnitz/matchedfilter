@@ -19,7 +19,7 @@ import numpy as np
 
 from . import _config, _core, _gputime, _kernels, _settings, _vulkan, gatechain
 from ._shared import BUFFER_SERIALS, empty_shared
-from ._gpuhost import (MAX_BINS, BufferPool, carray, MappedBuffer, Section, address,
+from ._gpuhost import (BufferPool, carray, MappedBuffer, Section, address,
                        hier_peaks_grouped)
 from . import _peaks as _pk
 from ._coarse import candidates, coarse_stem
@@ -39,7 +39,6 @@ def _spv_shipped(stem):
 #: The per-bin table aliases the 8 KB exchange staging: CAP=1024 complex =
 #: 2048 uints. Past that the kernel needs its own array and the LDS cost
 #: halves occupancy, so this refuses rather than silently getting slower.
-_MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
 
 def _module_bindings(blob):
@@ -284,7 +283,8 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
-from ._gpuhost import FUSED_PHASES, BindingCache, CommandList, fusion_plan, list_phases
+from ._gpuhost import (FUSED_PHASES, BindingCache, CommandList, DeviceProps, fusion_plan,
+                       list_phases)
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
@@ -1193,7 +1193,8 @@ class Context(Executor, InputUploads):
     """One Vulkan device, its compute queue, and the pipelines built on it: the Vulkan driver
     under the shared GPU executor (_gpuexec)."""
 
-    max_grouped_bins = _MAX_BINS
+    #: The root kernels are verified on this backend (DeviceProps.device_root).
+    device_root = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -1232,12 +1233,10 @@ class Context(Executor, InputUploads):
             self.timing_log.clear()
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
-               "_accurate_trig", "device_name", "max_shared_memory", "max_invocations", "max_dispatch_x",
+               "_accurate_trig", "device_name", "max_shared_memory", "max_invocations",
                "subgroup_size", "subgroup_range", "max_workgroup_subgroups", "full_subgroups",
                "mem_props", "command_pool", "_ts_period",
-               "_reset_query",
-               "storage_offset_alignment", "max_workgroup_size", "timestamp_bits",
-               "max_binding_bytes")
+               "_reset_query", "max_workgroup_size", "timestamp_bits")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -1254,6 +1253,30 @@ class Context(Executor, InputUploads):
         for name in self._SHARED:
             setattr(self, name, getattr(dev, name))
         self._pipelines = dev.pipelines
+        props = dev.__dict__.get("props")
+        if props is None:
+            props = dev.props = self._device_props(dev)
+        self.props = props
+
+    def _device_props(self, dev):
+        """The properties of `dev` (_gpuhost.DeviceProps), from what the device reported
+        (_Device) and what every Vulkan device has."""
+        return DeviceProps(
+            name=dev.device_name, artifact_family="vulkan",
+            max_group_memory=dev.max_shared_memory, max_threads=dev.max_invocations,
+            indirect_dispatch=True, runtime_specialization=True,
+            max_dispatch_x=dev.max_dispatch_x, max_binding_bytes=dev.max_binding_bytes,
+            offset_alignment=dev.storage_offset_alignment,
+            subgroup_size=dev.subgroup_size, subgroup_range=dev.subgroup_range,
+            # Host-visible device memory the host reads where it is; no staging copy (a
+            # discrete card would need one: _Buffer's docstring).
+            unified_memory=True, managed_inputs=False, offset_views=False,
+            host_pointer_views=False,
+            # Every context submits to the device's queues (_SHARED: queue).
+            shared_queue=True,
+            # Stated for every Vulkan device, not measured (the constants step).
+            fp16=True, cache_budget=self.cache_limit_bytes,
+            memory_budget=None, device_root=self.device_root)
 
     #: The largest relative error a native-trig forward transform may have before every
     #: pipeline is built with accurate twiddles (specialization constant 73). Measured
@@ -1595,7 +1618,7 @@ class Context(Executor, InputUploads):
         self.__dict__.setdefault("_pool_sets", {})[pool.value] = (key, dset)
         # A view's nbytes already excludes its own offset (_Borrowed): the range runs from
         # the descriptor offset to the end of the whole buffer, at most max_binding_bytes.
-        limit = self.max_binding_bytes
+        limit = self.props.max_binding_bytes
         infos = carray(_DescBufferInfo, nbind)(
             *[_DescBufferInfo(b.handle, offset,
                               min(b.nbytes + getattr(b, 'offset', 0) - offset, limit))
@@ -1848,8 +1871,6 @@ class Context(Executor, InputUploads):
     #: Kernels are specialized when their pipeline is built (constants 75/76/79): the tiers
     #: read the spectra in place, at a stride and a data scale (_gpuhier feeds).
     inplace_feed = True
-    #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
-    kernel_family = "vulkan"
 
     def _x_kernel(self, name, n, consts=None):
         """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`

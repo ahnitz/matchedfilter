@@ -219,9 +219,6 @@ def _rw_names(ntiers):
 class HierOps:
     """The hierarchical operations of _gpuexec.Executor (a mixin of it)."""
 
-    #: True on GPU backends whose packed half2 ALU throughput exceeds fp32 (RDNA, CUDA).
-    packed_fp16 = True
-
     #: Pair-count bound a coarse layout is timed at (synthetic data), and the screen size
     #: every candidate is first timed at (a pathological layout is dropped before a
     #: full-size dispatch of it can run long enough for the driver to reset the device).
@@ -246,15 +243,15 @@ class HierOps:
         two on synthetic dispatches (_coarse.shortlist, kept in MF_COST_FILE). The device
         trial plays them on real batches (kernel slots, _settings.slot). MF_COARSE_LAYOUT
         forces a layout, unplayed. Made once per band and setting: every call asks."""
-        holder = getattr(self, "_device_state", None) or self
+        holder = self._device_state
         forced = forced_layout(band) if what == "coarse" else None
         made = holder.__dict__.setdefault("kernel_pairs", {})
         pair = made.get((what, band, forced))
         if pair is not None:
             return pair
         memo = holder.__dict__.setdefault("screens", {})
-        device = getattr(self, "device_name", "") or getattr(self, "name", "")
-        kid = gatechain.gpu_kernel_id(self.kernel_family)
+        device = self.props.name
+        kid = gatechain.gpu_kernel_id(self.props.artifact_family)
         if what == "coarse":
             pair = shortlist(memo, "coarse", device, band, self._x_coarse_candidates(band),
                              lambda c: self._layout_label(band, c), kid,
@@ -273,7 +270,7 @@ class HierOps:
         if second is None:
             return first
         a, b = self._slot_labels(what, band, (first, second))
-        return second if _settings.slot(self._dev_name(), what, band, a, b) == b else first
+        return second if _settings.slot(self.props.name, what, band, a, b) == b else first
 
     def _slot_labels(self, what, band, pair):
         """A kernel pair's labels as its slot names them."""
@@ -285,17 +282,12 @@ class HierOps:
         """The fp16 coarse layout a call runs at this band (_played "coarse")."""
         return self._played("coarse", band)
 
-    def _dev_name(self):
-        holder = getattr(self, "_device_state", None) or self
-        return (getattr(holder, "device_name", "") or getattr(self, "device_name", "")
-                or getattr(self, "name", ""))
-
     def _gate_use(self, band):
         """Whether a later gate tier at this band runs the one-bin refine's gate-only build,
         reporting the window's maximum alone (nbins word 0), rather than the one-bin election
         (tierb.slang MF_GATE_ONLY or peakTwoGate) -- measured per pair (_played "gateway")."""
-        if self.packed_fp16 and self._shipped("c16", band) and self._shipped("tier1_c16", band):
-            if band // 16 > self.subgroup_size:
+        if self.props.fp16 and self._shipped("c16", band) and self._shipped("tier1_c16", band):
+            if band // 16 > self.props.subgroup_size:
                 return False
             return self._played("gateway", band) == "gate"
         if not (self._shipped("tier1", band) and self._shipped("tier1gate", band)):
@@ -316,8 +308,8 @@ class HierOps:
         rng = np.random.default_rng(1)
         x = ((rng.standard_normal((pairs // ntm, band))
               + 1j * rng.standard_normal((pairs // ntm, band))) * 0.1).astype(np.complex64)
-        c16 = (self.packed_fp16 and self._shipped("c16", band)
-               and self._shipped("tier1_c16", band) and band // 16 <= self.subgroup_size)
+        c16 = (self.props.fp16 and self._shipped("c16", band)
+               and self._shipped("tier1_c16", band) and band // 16 <= self.props.subgroup_size)
         drows = (x if self.inplace_feed else pack_half2(x)) if c16 else x
         trows = pack_half2(x[:ntm]) if c16 else x[:ntm]
         bufs = [self._x_alloc(drows.nbytes), self._x_alloc(trows.nbytes),
@@ -509,7 +501,7 @@ class HierOps:
         sg, _, tile, _ = layout[:4]
         if tile <= 1:
             return 0
-        if band // 16 > (sg or self.subgroup_size):
+        if band // 16 > (sg or self.props.subgroup_size):
             return 0
         return _bits(max(float(thr), _TINY))
 
@@ -612,7 +604,7 @@ class HierOps:
         shifted = any(k0s)
         bands = tuple(b for b, _, _ in tiers)
         tier0_fp16 = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
-        tier1_fp16 = (len(bands) > 1 and self.packed_fp16 and self._shipped("c16", bands[1])
+        tier1_fp16 = (len(bands) > 1 and self.props.fp16 and self._shipped("c16", bands[1])
                  and self._shipped("tier1_c16", bands[1]))
         layout0 = self._coarse_layout(bands[0]) if tier0_fp16 else None
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
@@ -789,7 +781,7 @@ class HierOps:
         cb1 = 4 if tier1_fp16 else 8
         t1_ppg = (1024 // bands[1]) if tier1_fp16 else 0
         t1_shift = ((2 * t1_ppg).bit_length() - 1) if tier1_fp16 else 0
-        align = max(16, int(self.storage_offset_alignment))
+        align = max(16, int(self.props.offset_alignment))
         count_step = max(32 if t1_shift else 16, align)
         estimate = (sum(a.nbytes for a, v in ((data, data_view), (tmpl, tmpl_view)) if v is None)
                     + sum((cb0 * b * nc if i == 0 else cb1 * b * nt) for i, b in enumerate(bands))
@@ -1084,7 +1076,7 @@ class HierOps:
         """How a sparse result is read -- its survivors' rows gathered on the host, or the hits
         compacted on the device: a kernel slot of the device trial (_gpuexec.SPARSE_WAYS)."""
         from ._gpuexec import SPARSE_WAYS
-        return _settings.slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
+        return _settings.slot(self.props.name, "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, slot, async_submit):
         """Run a recorded call and return its result (a tracked collector when async)."""
@@ -1180,7 +1172,7 @@ class HierOps:
             if pair[1] is not None:
                 out.append(("coarse", bands[0], self._slot_labels("coarse", bands[0], pair)))
         can_gate1 = (not use_direct and len(bands) > 1
-                     and ((tier1_fp16 and bands[1] // 16 <= self.subgroup_size)
+                     and ((tier1_fp16 and bands[1] // 16 <= self.props.subgroup_size)
                           or (not tier1_fp16 and self._shipped("tier1", bands[1])
                               and self._shipped("tier1gate", bands[1]))))
         if can_gate1:
@@ -1192,7 +1184,7 @@ class HierOps:
         return tuple(out)
 
     def _slot_values(self, slots):
-        name = self._dev_name()
+        name = self.props.name
         return tuple(_settings.slot(name, w, b, *pair) for w, b, pair in slots)
 
     def hier_replay(self, h, slot, async_submit, validated=False):

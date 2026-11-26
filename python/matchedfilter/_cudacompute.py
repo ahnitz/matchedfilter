@@ -31,7 +31,7 @@ from ._gpu_cache import InputUploads
 from ._gpuhost import CommandList
 from ._gpuexec import Arg, Executor, settle as _settle
 from ._shared import empty_shared, _Borrowed, _Storage
-from ._gpuhost import MAX_BINS, Section, carray, hier_peaks_grouped
+from ._gpuhost import DeviceProps, Section, carray, hier_peaks_grouped
 from . import _peaks as _pk
 from ._coarse import candidates
 
@@ -52,11 +52,17 @@ class _DeviceShared:
     retain the same primary context, so one module load serves every plan (a bank
     makes dozens of plans; each used to JIT-load its own copy of every kernel)."""
 
-    def __init__(self, cuda, device):
+    def __init__(self, cuda, device, ctx=None):
+        """The state of `device`'s primary context, retained for the process lifetime; or,
+        given `ctx` (a context of its own, where the driver has no primary context), the
+        state of that one context alone."""
         self.cuda = cuda
-        self.ctx = ctypes.c_void_p()
-        check_cuda(cuda.cuDevicePrimaryCtxRetain(ctypes.byref(self.ctx), device),
-                   "cuDevicePrimaryCtxRetain")       # held for the process lifetime
+        if ctx is None:
+            self.ctx = ctypes.c_void_p()
+            check_cuda(cuda.cuDevicePrimaryCtxRetain(ctypes.byref(self.ctx), device),
+                       "cuDevicePrimaryCtxRetain")       # held for the process lifetime
+        else:
+            self.ctx = ctx
         self.modules = {}
         self.pipelines = {}
         # Events after writes left in flight (correlate_series(wait=False)): every Context's
@@ -166,7 +172,6 @@ def _ptx_for_driver(ptx, cuda):
     return ptx[:found.start()] + b".version %d.%d" % reads + ptx[found.end():]
 
 
-_MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 # The primary context this thread last made current (handles are stable: _DeviceShared retains
 # each device's primary context for the process lifetime). cuCtxSetCurrent per call measured
 # ~75 us of host time per fine-stage forward on the L40S.
@@ -257,7 +262,7 @@ class _Pool:
 
 
 def _pools(ctx):
-    holder = getattr(ctx, "_device_state", None) or ctx
+    holder = ctx._device_state
     pools = holder.__dict__.get("pools")
     if pools is None:
         pools = holder.pools = (_Pool(1 << 30), _Pool(256 << 20))       # device, page-locked
@@ -718,14 +723,11 @@ class _CudaNative:
 class Context(Executor, InputUploads):
     """One NVIDIA CUDA device context, stream, and loaded PTX pipelines."""
 
-    max_grouped_bins = _MAX_BINS
     cache_limit_bytes = 1024 * 1024 * 1024
     _profile = False                # MF_GPU_PROFILE (with MF_GPU_TIMING): per-kernel times
     _in_run = None                  # inside a timed run: its kernels' and copies' regions
-    # Unified addressing: a view inside a shared allocation is a device pointer.
-    shared_views = True
-    # Device memory is separate from host memory (residency matters for pricing).
-    discrete = True
+    #: The root kernels are verified on this backend (DeviceProps.device_root).
+    device_root = True
 
     @property
     def timing(self):
@@ -789,21 +791,47 @@ class Context(Executor, InputUploads):
         self.last_gpu_time = 0.0
         self.last_refinements = 0
         self.last_tier1_survivors = 0
-        shared = _DEVICE_SHARED.get(index)
-        if shared is None and self._using_primary_ctx:
-            shared = _DEVICE_SHARED[index] = _DeviceShared(self.cuda, self.device.value)
-        # _shared._same_device: Contexts with one _device_state exchange buffers freely.
-        self._device_state = shared
-        if shared is not None:
-            self._modules, self._pipelines = shared.modules, shared.pipelines
-            self._occupancy, self._labels = shared.occupancy, shared.labels
-            self._shared_modules = True
+        # _shared._same_device: Contexts with one _device_state exchange buffers freely. A
+        # context without the primary context has a state of its own (shared with none).
+        if self._using_primary_ctx:
+            shared = _DEVICE_SHARED.get(index)
+            if shared is None:
+                shared = _DEVICE_SHARED[index] = _DeviceShared(self.cuda, self.device.value)
         else:
-            self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
-            self._shared_modules = False
+            shared = _DeviceShared(self.cuda, self.device.value, self.ctx)
+        self._device_state = shared
+        self._modules, self._pipelines = shared.modules, shared.pipelines
+        self._occupancy, self._labels = shared.occupancy, shared.labels
+        self._shared_modules = self._using_primary_ctx
+        props = shared.__dict__.get("props")
+        if props is None:
+            props = shared.props = self._device_props()
+        self.props = props
         self._uploaded = {"data": {}, "tmpl": {}}
 
     # ---- device plumbing -----------------------------------------------------
+    def _device_props(self):
+        """The device's properties (_gpuhost.DeviceProps): its name and block limits as the
+        driver reports them; the rest stated for every CUDA device."""
+        return DeviceProps(
+            name=self.name, artifact_family="cuda",
+            max_group_memory=self.max_shared_memory, max_threads=self.max_invocations,
+            # A resident grid strides over a listed op's items; constants are launch
+            # parameters.
+            indirect_dispatch=False, runtime_specialization=False,
+            # The most blocks one launch takes (gridDim.x), no per-binding limit below
+            # the allocation, and a bound view's alignment for the widest element a
+            # kernel reads (float2).
+            max_dispatch_x=2 ** 31 - 1, max_binding_bytes=None, offset_alignment=16,
+            subgroup_size=32, subgroup_range=None,          # the warp
+            # Device memory is separate from host memory (residency matters for pricing);
+            # shared allocations are managed memory, which migrates between the two.
+            unified_memory=False, managed_inputs=True,
+            # Unified addressing: a view inside a shared allocation is a device pointer.
+            offset_views=True, host_pointer_views=False, shared_queue=False,
+            fp16=True, cache_budget=self.cache_limit_bytes, memory_budget=None,
+            device_root=self.device_root)
+
     def _attr(self, attr):
         v = ctypes.c_int(0)
         self.cuda.cuDeviceGetAttribute(ctypes.byref(v), attr, self.device.value)
@@ -1114,21 +1142,10 @@ class Context(Executor, InputUploads):
 
     # ---- full correlation --------------------------------------------------------
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
-    #: The most blocks one launch takes (gridDim.x), and the byte alignment of a bound view:
-    #: a device pointer plus offset, aligned for the widest element a kernel reads (float2).
-    max_dispatch_x = 2 ** 31 - 1
-    max_binding_bytes = None        # no per-binding limit below the allocation
-    storage_offset_alignment = 16
-    #: Shared allocations are managed memory, which migrates between host and device.
-    stage_host_inputs = True
     #: Tiers read full or band-only fp32 spectra directly in place via per-launch data stride
     #: and fp16 scale entry parameters (twiddle.slang), matching Vulkan and Metal without
     #: packCoarse or intermediate band allocations.
     inplace_feed = True
-    #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
-    kernel_family = "cuda"
-    #: The warp.
-    subgroup_size = 32
 
     def _x_kernel(self, name, n, consts=None):
         """The compiled kernel `name` at transform length n: the driver primitive `_x_kernel`

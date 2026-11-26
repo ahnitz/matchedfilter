@@ -7,6 +7,7 @@ import pytest
 import matchedfilter as mf
 from matchedfilter.device import Device
 from matchedfilter._execution_policy import select
+from sim_driver import stated_props
 
 
 def row():
@@ -92,7 +93,7 @@ def test_gpu_policy_caps_batches_without_overriding_memory(tmp_path, monkeypatch
     f.device = Device('gpu', 0, 'model', backend, arch=('test-gpu',))
     f._gtmpl = np.zeros((nt, n), np.complex64)
     calls = []
-    f._gpu = SimpleNamespace(max_dispatch_x=65535,
+    f._gpu = SimpleNamespace(props=stated_props(max_dispatch_x=65535), cache_limit_bytes=1 << 30,
                              empty_shared=lambda shape, dtype=np.complex64: np.empty(shape, dtype),
                              forward=lambda n, source, starts, spec, **kw: calls.append(len(starts)),
                              cancel_forward=lambda **kw: None)

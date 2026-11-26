@@ -572,7 +572,7 @@ class MatchedFilter:
             attr = "_gdata" if what == "data" else "_gtmpl"
             if shared_buffer(a, self._gpu) is not None:
                 setattr(self, attr, a)
-            elif what == "template" and getattr(self._gpu, "_device_state", None) is not None:
+            elif what == "template":
                 # One device copy of the bank that every recording binds in place. Copied per
                 # storage (per slot, window group and chain), the spectra overran the cache
                 # budget at n=4096, and each eviction drained the in-flight batch.
@@ -714,7 +714,7 @@ class MatchedFilter:
 
 
     def _gpu_pair_limit(self):
-        limit = getattr(self._gpu, 'max_dispatch_x', 2**32 - 1)
+        limit = self._gpu.props.max_dispatch_x
         # Large transforms can exceed a driver's submission timeout when a
         # whole bank runs at once. Bound worst-case work, including a fully
         # admitted hierarchical batch, independently of storage capacity.
@@ -1141,8 +1141,7 @@ class MatchedFilter:
 
     @staticmethod
     def _items_pool(gpu, n):
-        holder = getattr(gpu, "_device_state", None) or gpu
-        return holder.__dict__.setdefault("items_pool", {}).setdefault(n, [])
+        return gpu._device_state.__dict__.setdefault("items_pool", {}).setdefault(n, [])
 
     def _items_checkout(self, gpu, n, rows):
         """A free (spectra, starts) workspace of at least rows rows, taken out of the pool."""
@@ -1212,7 +1211,7 @@ class MatchedFilter:
             series, starts, win_start, win_end, binsize, templates, ragged=True,
             bin_phase=bin_phase)
         if ((len(layout.groups) < 2 and layout.phase is None)
-                or layout.nbins > getattr(self._gpu, "max_grouped_bins", 0)
+                or layout.nbins > self._gpu.max_grouped_bins
                 or nt > self._gpu_pair_limit()):
             return None
         self._dataset = False
@@ -1834,17 +1833,17 @@ class MatchedFilter:
         c.skw = {"sparse": True} if sparse else {}
         c.is_hier = self._is_hierarchical
         # A declared capability, not a probe for one backend's internals.
-        can_pipeline = getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024
+        can_pipeline = self._gpu.cache_limit_bytes > 1024 * 1024
         # A phased call (bin_phase) reads every row's window and bin phase from a row table,
         # which only the grouped dispatch has: it goes grouped even with one window group.
         phased = layout.phase is not None
-        if phased and (nb > getattr(self._gpu, "max_grouped_bins", 0)
+        if phased and (nb > self._gpu.max_grouped_bins
                        or nt > self._gpu_pair_limit()):
             raise ValueError("bin_phase needs the grouped dispatch: at most %d bins and %d "
-                             "templates a call here" % (getattr(self._gpu, "max_grouped_bins", 0),
+                             "templates a call here" % (self._gpu.max_grouped_bins,
                                                          self._gpu_pair_limit()))
         grouped_flat = ((len(layout.groups) > 1 or phased) and type(self) is MatchedFilter
-                        and nb <= getattr(self._gpu, "max_grouped_bins", 0)
+                        and nb <= self._gpu.max_grouped_bins
                         and nt <= self._gpu_pair_limit())
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
         # GPU works on this call while the host prepares the next bank's. (A joint trial's
@@ -1861,7 +1860,7 @@ class MatchedFilter:
         # launches of the synchronous call, measured 1.4x slower on CUDA).
         c.grouped = grouped_flat or (
             (len(layout.groups) > 1 or phased) and c.is_hier
-            and nb <= getattr(self._gpu, "max_grouped_bins", 0)
+            and nb <= self._gpu.max_grouped_bins
             and nt <= self._gpu_pair_limit())
         # A real series: the GPU forward reads its samples from complex64 storage, by float
         # offset and stride (c.real), never widened on the host.
@@ -1871,9 +1870,9 @@ class MatchedFilter:
         # Unified memory: read a page-aligned series where it is rather than copying the
         # span into the source buffer (a fine-stage call copied ~6 MB per call). The owner
         # lives for this call; each command buffer retains what it reads.
-        view = getattr(self._gpu, "host_view", None)
-        series_owner = view(ser) if (view is not None and not source_shared
-                                     and not real) else None
+        series_owner = (self._gpu.host_view(ser) if (self._gpu.props.host_pointer_views
+                                                     and not source_shared and not real)
+                        else None)
         if series_owner is not None:
             source_shared = True
         # A series inside a device allocation (a row of a device buffer a caller reuses, e.g.
@@ -2283,9 +2282,9 @@ class CorrelationFilter(MatchedFilter):
         if real is None and source is staging and defer:
             # Unified memory: read the caller's series in place; the context keeps the
             # view until zero_columns_done has waited for the work that reads it.
-            owner = getattr(self._gpu, 'host_view', lambda a: None)(ser)
+            owner = self._gpu.host_view(ser) if self._gpu.props.host_pointer_views else None
             if owner is not None:
-                self._gpu._keep_until_done.append(owner)
+                self._gpu.hold_until_idle((owner,))
                 source = ser
         if real is None and source is staging:
             source[:] = ser
@@ -2319,7 +2318,7 @@ class CorrelationFilter(MatchedFilter):
         this device's memory, all the blocks one batch (else each part runs as its own call).
         """
         gpu = self._gpu
-        align = max(1, getattr(gpu, 'storage_offset_alignment', 256) // 4)
+        align = max(1, gpu.props.offset_alignment // 4)
         sources, total = [], 0
         for ser, starts, out in parts:
             c = (containing_samples(ser, gpu) if ser.dtype == np.float32 else None)

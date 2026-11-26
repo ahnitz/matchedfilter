@@ -81,7 +81,7 @@ def test_irregular_windows_share_one_submission(monkeypatch):
     grouped = f.run_blocks(series, starts, low, low+512).copy()
     assert len(calls) == 1
     # A template bank larger than the dispatch limit still uses template tiling.
-    monkeypatch.setattr(f._gpu, 'max_dispatch_x', 2, raising=False)
+    monkeypatch.setattr(f._gpu.props, 'max_dispatch_x', 2)
     tiled = f.run_blocks(series, starts, low, low+512)
     np.testing.assert_array_equal(tiled['index'], grouped['index'])
     np.testing.assert_allclose(tiled['value'], grouped['value'], rtol=3e-5, atol=3e-5)

@@ -61,14 +61,14 @@ def test_a_staged_forward_deferred_twice_runs_the_first_before_restaging():
                  + 1j * rng.standard_normal(series.shape)).astype(np.complex64)
     spec = [plan.empty_shared((2, 1024)) for _ in range(2)]
     starts = [np.array([0, 1024], np.uint32), np.array([3000, 5000], np.uint32)]
-    staged = ctx.stage_host_inputs
-    ctx.stage_host_inputs = True                 # every backend stages the starts here
+    staged = ctx.props.managed_inputs
+    ctx.props.managed_inputs = True              # every backend stages the starts here
     try:
         for s, st in zip(spec, starts):
             ctx.forward(1024, series, st, s, defer=True, slot=0)
         ctx.peaks(1024, spec[1], np.ones((1, 1024), np.complex64), binsize=1024, slot=0)
     finally:
-        ctx.stage_host_inputs = staged
+        ctx.props.managed_inputs = staged
     for s, st in zip(spec, starts):
         ref = np.fft.fft(np.stack([series[a:a + 1024] for a in st]), axis=1) / 1024
         np.testing.assert_allclose(s, ref, rtol=0, atol=1e-5 * np.abs(ref).max())

@@ -18,6 +18,7 @@ import ctypes
 import json
 import re
 import struct
+import types
 
 import numpy as np
 import pytest
@@ -43,7 +44,7 @@ class _Tier1C16Driver(Driver):
 
     def __init__(self, inplace_feed=True, subgroup_size=32, fwd_tier0=True):
         super().__init__(inplace_feed=inplace_feed, c16=True, one_bin=True)
-        self.subgroup_size = subgroup_size
+        self.props.subgroup_size = subgroup_size
         self.fwd_tier0 = fwd_tier0
 
     def _x_has_c16(self, band):
@@ -69,7 +70,7 @@ def _enumerated_gpu_specs():
             try:
                 c = _vkcompute.Context(idx)
                 name = getattr(c, "device_name", "") or str(info)
-                sg = getattr(c, "subgroup_size", 0)
+                sg = c.props.subgroup_size
                 c.destroy()
                 specs.append(("vulkan:%d" % idx, "vk%d_%s_sg%d" % (idx, name.split()[0], sg)))
             except Exception:
@@ -356,7 +357,8 @@ def test_metal_tier1_fp16_resolution_and_manifest():
     ctx = _mtlcompute.Context.__new__(_mtlcompute.Context)
     ctx.max_shared_memory = 32768
     ctx.name = "Apple M2"
-    assert ctx.packed_fp16 is False
+    dev = types.SimpleNamespace(name=ctx.name, max_shared_memory=ctx.max_shared_memory)
+    assert ctx._device_props(dev).fp16 is False
 
     assert _mtlcompute._twt_entry("refineListedC16w") == ("refineListedC16", True)
     assert _mtlcompute._twt_entry("refineListedC16") == ("refineListedC16", False)
@@ -433,7 +435,7 @@ def test_gpu_tier1_fp16_chains_and_feeds(gpu_dev, chain, feed_mode, monkeypatch)
             cascade_band=b0, ct1=tmpl[:, :b1], raw_thr1=0.5, handle_out=hout)
         assert hout[0].key[8] == feed_mode
 
-    assert ("t1args" in hout[0].rec.buffers) == (b1 <= 512 and ctx.packed_fp16)
+    assert ("t1args" in hout[0].rec.buffers) == (b1 <= 512 and ctx.props.fp16)
     hits = ref_i >= 0
     assert int(hits.sum()) >= 3
     np.testing.assert_array_equal(got_i[hits], ref_i[hits])
@@ -444,7 +446,7 @@ def test_gpu_tier1_fp16_chains_and_feeds(gpu_dev, chain, feed_mode, monkeypatch)
 def test_gpu_tier1_fp16_survivor_counts_and_overflow(gpu_dev, chain, monkeypatch):
     """Verify exact 0, 1, 3, 5, and 7 survivor counts (`NOPAIR` odd lanes) and FP16 overflow."""
     _, ctx = gpu_dev
-    monkeypatch.setattr(ctx, "packed_fp16", True)
+    monkeypatch.setattr(ctx.props, "fp16", True)
     b0, b1 = chain
     n, nd, nt = 2048, 4, 8
     rng = np.random.default_rng(2200 + b1)
@@ -624,8 +626,7 @@ def test_gpu_tier1_fp16_direct_refine_and_overflow_fallback(gpu_dev, chain, monk
     """Verify `HierarchicalFilter` with `set_taps` (`use_direct=True`) elects coarse lags in FP16
     Tier 1 and falls back cleanly to `fbSurv` on an FP16-overflowing glitch block."""
     dev_str, ctx = gpu_dev
-    monkeypatch.setattr(type(ctx), "packed_fp16", True)
-    monkeypatch.setattr(ctx, "packed_fp16", True)
+    monkeypatch.setattr(ctx.props, "fp16", True)
     from matchedfilter.benchmark import _inspiral_power
     n, nt, nblocks = 2048, 16, 24
     rng = np.random.default_rng(5500 + chain[1])

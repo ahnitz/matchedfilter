@@ -7,8 +7,12 @@ the survivor lists the device wrote; and the feed is chosen from what the driver
 The hardware tests (test_vk_cascade, test_cuda_parity, test_metal_backend) compare the
 same calls against the CPU.
 """
+import types
+
 import numpy as np
 import pytest
+
+from sim_driver import stated_props
 
 from matchedfilter import _gpuhier
 from matchedfilter._gpu_cache import InputUploads
@@ -72,12 +76,10 @@ class _List:
 class Driver(Executor, InputUploads):
     """A driver whose kernels are their names and whose runs record their bindings. Every
     count reads back zero: no pair survives, so a result is all "no peak"."""
-    max_dispatch_x = 65535
-    storage_offset_alignment = 16
-    subgroup_size = 32
-    kernel_family = "fake"
 
     def __init__(self, inplace_feed=True, c16=False, one_bin=True):
+        self.props = stated_props(artifact_family="fake", max_dispatch_x=65535)
+        self._device_state = types.SimpleNamespace()
         self.inplace_feed = inplace_feed
         self.c16, self.one_bin = c16, one_bin
         self._uploaded = {"data": {}, "tmpl": {}}

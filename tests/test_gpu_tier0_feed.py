@@ -14,6 +14,7 @@ import ctypes
 import gzip
 import re
 import struct
+import types
 
 import numpy as np
 import pytest
@@ -90,6 +91,9 @@ def _stub_cuda_context(monkeypatch):
     ctx.cache_limit_bytes = 1 << 30
     ctx._next_addr = 0x100000
     ctx._pinned_keep = []
+    ctx.name, ctx.max_shared_memory, ctx.max_invocations = "stub", 48 * 1024, 1024
+    ctx.props = ctx._device_props()
+    ctx._device_state = types.SimpleNamespace()
 
     def load(stem, path, fn_name, wg):
         return (stem, path, fn_name)
