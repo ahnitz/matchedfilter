@@ -20,6 +20,7 @@ import gzip
 import re
 import struct
 import threading
+import weakref
 
 import numpy as np
 
@@ -63,6 +64,38 @@ class _DeviceShared:
         self.pending_writes = []
         self.occupancy = {}
         self.labels = {}
+
+    @property
+    def _device_state(self):
+        """Itself: what a context's _device_state is, so _pools and _shared._same_device
+        treat a buffer released through the device like one held by a live context."""
+        return self
+
+    def _bind(self):
+        """Make the device's primary context current (a buffer freed after its context)."""
+        if getattr(_BOUND, "ctx", None) != self.ctx.value:
+            check_cuda(self.cuda.cuCtxSetCurrent(self.ctx), "cuCtxSetCurrent")
+            _BOUND.ctx = self.ctx.value
+
+
+class _Owned:
+    """A buffer's link to its context: weakly to the context (its streams, timers and the
+    function table a test may wrap) and strongly to the device state it frees through (the
+    primary context, the function table and the pools; the context itself where it has no
+    shared state). A context holds its buffers through its records, so a buffer that held the
+    context made every context a reference cycle, freed only by a full collection -- with its
+    recordings and device memory -- however long after the plan was dropped."""
+    __slots__ = ()
+
+    def _own(self, ctx):
+        self._dev = getattr(ctx, "_device_state", None) or ctx
+        self._ctx = weakref.ref(ctx)
+
+    @property
+    def ctx(self):
+        """The live context, else the device state it was made on."""
+        c = self._ctx()
+        return c if c is not None else self._dev
 
 
 _DEVICE_SHARED = {}
@@ -231,14 +264,14 @@ def _pools(ctx):
     return pools
 
 
-class _Buffer:
+class _Buffer(_Owned):
     """Device memory: cuMemAlloc'd, or reused from the device's pool (_Pool). Slotted, as
     are the other buffer kinds: a search holds thousands, which the garbage collector walks
     at every full collection."""
-    __slots__ = ("ctx", "nbytes", "dptr", "_size", "ptr", "handle")
+    __slots__ = ("_ctx", "_dev", "nbytes", "dptr", "_size", "ptr", "handle")
 
     def __init__(self, ctx, nbytes):
-        self.ctx = ctx
+        self._own(ctx)
         self.nbytes = int(nbytes)
         self.dptr = ctypes.c_uint64(0)
         self._size = 0
@@ -299,7 +332,7 @@ class _Buffer:
             pass
 
 
-class _HostBuffer:
+class _HostBuffer(_Owned):
     """Host-visible allocation for empty_shared: CUDA managed (unified) memory.
 
     One address valid on host and device. A ``readback`` allocation (an output
@@ -309,7 +342,7 @@ class _HostBuffer:
     """
 
     def __init__(self, ctx, nbytes, readback=False, host_input=False):
-        self.ctx = ctx
+        self._own(ctx)
         self.nbytes = max(int(nbytes), 4)
         self.dptr = ctypes.c_uint64(0)
         self.managed = hasattr(self.ctx.cuda, "cuMemAllocManaged")
@@ -378,12 +411,12 @@ class _HostBuffer:
             pass
 
 
-class _Pinned:
+class _Pinned(_Owned):
     """Page-locked host staging for asynchronous readback (cuMemAllocHost)."""
-    __slots__ = ("ctx", "nbytes", "_size", "ptr", "handle", "_raw")
+    __slots__ = ("_ctx", "_dev", "nbytes", "_size", "ptr", "handle", "_raw")
 
     def __init__(self, ctx, nbytes):
-        self.ctx = ctx
+        self._own(ctx)
         self.nbytes = max(int(nbytes), 16)
         self._size = _size_class(self.nbytes)
         ptr = _pools(ctx)[1].take(self._size)
@@ -418,12 +451,13 @@ class _Pinned:
             pass
 
 
-class _GraphCache:
+class _GraphCache(_Owned):
     """Instantiated CUDA graphs of one record, LRU-bounded; destroyed with the record."""
     nbytes = 0          # host-side handles: nothing for the cache budget
 
     def __init__(self, ctx, limit=8):
-        self.ctx, self.limit, self.items, self.seen = ctx, limit, {}, {}
+        self._own(ctx)                         # the context holds it through its records
+        self.limit, self.items, self.seen = limit, {}, {}
 
     def get(self, key):
         ex = self.items.pop(key, None)
@@ -444,15 +478,16 @@ class _GraphCache:
         self.items.clear()
 
 
-class _Staged:
+class _Staged(_Owned):
     """A device buffer the host rewrites before every run (_x_alloc(upload=True)). The values
     go through page-locked staging in one asynchronous copy on the context's stream: a copy
     from managed memory costs ~144 us, and a kernel reading a host-written managed page
     faults it over (132 us a forward launch on the L40S, 15 us from device memory)."""
-    __slots__ = ("ctx", "nbytes", "device", "pinned", "dptr")
+    __slots__ = ("_ctx", "_dev", "nbytes", "device", "pinned", "dptr")
 
     def __init__(self, ctx, nbytes):
-        self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
+        self._own(ctx)
+        self.nbytes = max(int(nbytes), 4)
         self.device, self.pinned = _Buffer(ctx, self.nbytes), _Pinned(ctx, self.nbytes)
         self.dptr = self.device.dptr
 
@@ -489,8 +524,13 @@ class _WordSlots:
     CHUNK = 4096
 
     def __init__(self, ctx):
-        self.ctx, self.chunks, self.free = ctx, [], {}
+        self._ctx = weakref.ref(ctx)           # the context holds its slots
+        self.chunks, self.free = [], {}
         self.at, self.end = 0, 0
+
+    @property
+    def ctx(self):
+        return self._ctx()
 
     def take(self, nbytes):
         size = -(-max(int(nbytes), 16) // 16) * 16
@@ -514,14 +554,15 @@ class _WordSlots:
         self.at = self.end = 0
 
 
-class _Readback:
+class _Readback(_Owned):
     """A device buffer the host reads (_x_alloc(readback=True)): a list's readback op copies
     a prefix of it into page-locked memory on the stream, so the host reads it after the
     run's one synchronization (a range past that prefix is copied when it is read)."""
-    __slots__ = ("ctx", "nbytes", "device", "dptr", "pinned", "mirrored")
+    __slots__ = ("_ctx", "_dev", "nbytes", "device", "dptr", "pinned", "mirrored")
 
     def __init__(self, ctx, nbytes):
-        self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
+        self._own(ctx)
+        self.nbytes = max(int(nbytes), 4)
         self.device = _Buffer(ctx, self.nbytes)
         self.dptr = self.device.dptr
         self.pinned, self.mirrored = None, 0

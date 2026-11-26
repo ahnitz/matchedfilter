@@ -307,11 +307,11 @@ def test_the_fusion_plan_interleaves_by_phase_with_one_barrier_each():
 
 def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection(monkeypatch):
     """A plan's context, with its recordings and buffers, is freed by reference counting when
-    the plan is dropped: no object it holds refers back to it (Vulkan and Metal buffers hold
-    their device, Vulkan natives hold their context weakly; Metal natives are lists of
-    ops). Held in a reference cycle, contexts died only in full collections and a pycbc
-    GPU job's device memory followed the collector's timing. CUDA's buffers still hold
-    their context (a known gap there)."""
+    the plan is dropped: no object it holds refers back to it. Vulkan and Metal buffers hold
+    their device and Vulkan natives hold their context weakly (Metal natives are lists of
+    ops); CUDA buffers and graph caches hold their context weakly and the device state
+    strongly. Held in a reference cycle, contexts died only in full collections and a pycbc
+    GPU job's device memory followed the collector's timing."""
     import weakref
     from conftest import usable_gpu
     dev = usable_gpu()
@@ -319,7 +319,7 @@ def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection(monke
         pytest.skip("no usable GPU")
     import matchedfilter as mf
     backend = next(d for d in mf.devices() if str(d) == dev).backend
-    if backend not in ("vulkan", "metal"):
+    if backend not in ("vulkan", "metal", "cuda"):
         pytest.xfail("known gap on %s: its buffers hold their context (a reference cycle "
                      "through the context's records)" % backend)
     released = []
@@ -340,17 +340,23 @@ def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection(monke
     f.set_data(h)
     f.run(binsize=1024)
     ctx = weakref.ref(f._gpu)
-    pool = getattr(f._gpu._device_state, "buffers", None)
+    if backend == "cuda":
+        # the device's pool of device buffers, which a destroyed context's buffers join
+        from matchedfilter import _cudacompute
+        pool = _cudacompute._pools(f._gpu)[0]
+        given = lambda: -pool.held
+    elif backend == "metal":
+        given = lambda: -len(released)           # no pool: given back means released
+    else:
+        pool = f._gpu._device_state.buffers
+        given = lambda: pool.live_bytes
     gc.collect()
     gc.disable()
     try:
-        live = pool.live_bytes if pool is not None else None
-        assert live is None or live > 0
+        live = given()
+        assert backend != "vulkan" or live > 0
         del f
         assert ctx() is None                     # reference counting alone freed it
-        if pool is not None:
-            assert pool.live_bytes < live        # and gave its buffers back to the pool
-        else:
-            assert released, "no buffer of the dropped context was released"
+        assert given() < live                    # and gave its buffers back
     finally:
         gc.enable()
