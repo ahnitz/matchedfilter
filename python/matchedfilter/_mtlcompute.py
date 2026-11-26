@@ -174,11 +174,16 @@ class _MTLSize(ctypes.Structure):
 
 class _Buffer(MappedBuffer):
     """A shared-storage buffer, mapped for the lifetime of the object. Slotted: a search
-    holds thousands, and every full garbage collection walks them."""
-    __slots__ = ("ctx", "nbytes", "handle", "ptr", "_bytes", "__dict__")
+    holds thousands, and every full garbage collection walks them.
+
+    It holds its device (`dev`, the _Device whose bridge it releases through), not the
+    context that made it: a context holds its buffers (records, caches), so a buffer that
+    held its context made every context a reference cycle, freed only by a full collection
+    (_shared asks `dev` whether the buffer can be bound or released)."""
+    __slots__ = ("dev", "nbytes", "handle", "ptr", "_bytes", "__dict__")
 
     def __init__(self, ctx, nbytes):
-        self.ctx = ctx
+        self.dev = ctx._device_state
         self.nbytes = max(int(nbytes), 16)
         self.handle = ctx.o.call(
             ctx.device, b"newBufferWithLength:options:",
@@ -197,7 +202,7 @@ class _Buffer(MappedBuffer):
 
     def destroy(self):
         if self.handle:
-            self.ctx.o.call(self.handle, b"release")
+            self.dev.o.call(self.handle, b"release")
             self.handle = None
 
 
@@ -210,7 +215,7 @@ class _HostBuffer(_Buffer):
     """
 
     def __init__(self, ctx, array):
-        self.ctx = ctx
+        self.dev = ctx._device_state
         self.nbytes = array.nbytes
         self.ptr = ctypes.c_void_p(array.ctypes.data)
         self.handle = ctx.o.call(
@@ -307,6 +312,12 @@ class _Device:
         self.collector = None
         #: Live contexts on this device, so _x_after_readers can finish readers on other queues.
         self.contexts = weakref.WeakSet()
+
+    @property
+    def device(self):
+        """The MTLDevice, open for the life of the process: what _shared asks a buffer's
+        device (`dev.device`) before it releases the buffer."""
+        return self.handle
 
 
 _DEVICES = {}

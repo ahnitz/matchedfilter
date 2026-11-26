@@ -305,12 +305,13 @@ def test_the_fusion_plan_interleaves_by_phase_with_one_barrier_each():
         ("work", 0, "refine"), ("barrier", "refine")]
 
 
-def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection():
+def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection(monkeypatch):
     """A plan's context, with its recordings and buffers, is freed by reference counting when
-    the plan is dropped: no object it holds refers back to it (Vulkan buffers hold their
-    device, natives hold their context weakly). Held in a reference cycle, contexts died
-    only in full collections and a pycbc GPU job's device memory followed the collector's
-    timing. CUDA's and Metal's buffers still hold their context (a known gap there)."""
+    the plan is dropped: no object it holds refers back to it (Vulkan and Metal buffers hold
+    their device, Vulkan natives hold their context weakly; Metal natives are lists of
+    ops). Held in a reference cycle, contexts died only in full collections and a pycbc
+    GPU job's device memory followed the collector's timing. CUDA's buffers still hold
+    their context (a known gap there)."""
     import weakref
     from conftest import usable_gpu
     dev = usable_gpu()
@@ -318,9 +319,20 @@ def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection():
         pytest.skip("no usable GPU")
     import matchedfilter as mf
     backend = next(d for d in mf.devices() if str(d) == dev).backend
-    if backend != "vulkan":
+    if backend not in ("vulkan", "metal"):
         pytest.xfail("known gap on %s: its buffers hold their context (a reference cycle "
                      "through the context's records)" % backend)
+    released = []
+    if backend == "metal":
+        # Metal keeps no pool: its buffers given back are buffers released.
+        from matchedfilter import _mtlcompute
+        real = _mtlcompute._Buffer.destroy
+
+        def destroy(self):
+            if self.handle:
+                released.append(self.nbytes)
+            real(self)
+        monkeypatch.setattr(_mtlcompute._Buffer, "destroy", destroy)
     f = mf.MatchedFilter(1024, 2, 2, device=dev)
     rng = np.random.default_rng(2)
     h = (rng.normal(size=(2, 1024)) + 1j * rng.normal(size=(2, 1024))).astype(np.complex64)
@@ -328,14 +340,17 @@ def test_a_dropped_plan_frees_its_context_and_buffers_without_a_collection():
     f.set_data(h)
     f.run(binsize=1024)
     ctx = weakref.ref(f._gpu)
-    pool = f._gpu._device_state.buffers
+    pool = getattr(f._gpu._device_state, "buffers", None)
     gc.collect()
     gc.disable()
     try:
-        live = pool.live_bytes
-        assert live > 0
+        live = pool.live_bytes if pool is not None else None
+        assert live is None or live > 0
         del f
         assert ctx() is None                     # reference counting alone freed it
-        assert pool.live_bytes < live            # and gave its buffers back to the pool
+        if pool is not None:
+            assert pool.live_bytes < live        # and gave its buffers back to the pool
+        else:
+            assert released, "no buffer of the dropped context was released"
     finally:
         gc.enable()
