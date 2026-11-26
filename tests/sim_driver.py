@@ -45,7 +45,7 @@ import numpy as np
 from matchedfilter._errors import UnsupportedSize
 from matchedfilter._gpuexec import Arg, Executor
 from matchedfilter._gpu_cache import InputUploads
-from matchedfilter._gpuhost import BufferPool, MappedBuffer, Section
+from matchedfilter._gpuhost import BufferPool, CommandList, MappedBuffer, Section
 from matchedfilter._shared import BUFFER_SERIALS, empty_shared
 
 #: Faults a simulated context can be given, each a driver bug that happened.
@@ -512,7 +512,12 @@ class Context(Executor, InputUploads):
         self._submit([("upload", (target, data))], slot)
 
     def _x_list(self, label, once=False):
-        return _List(self, label, once)
+        """The shared command list (_gpuhost.CommandList), as every backend takes it."""
+        return CommandList(label, once, record=self._x_record)
+
+    def _x_record(self, commands):
+        """The native recording of a shared list: the simulated list built from its calls."""
+        return commands.replay_into(_List(self, commands.label, commands.once)).end()
 
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         frees = []
