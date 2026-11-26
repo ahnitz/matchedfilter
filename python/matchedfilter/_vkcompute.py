@@ -284,7 +284,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
-from ._gpuhost import BindingCache, CommandList
+from ._gpuhost import FUSED_PHASES, BindingCache, CommandList, fusion_plan, list_phases
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
@@ -457,15 +457,8 @@ def _vulkan_emit_fns(dev):
     return fns
 
 
-#: Phases of forward and hierarchical recordings, in execution order. A fused batch runs
-#: every recording's work for a phase, then their barriers, then the next phase: the
-#: dispatches of a phase are independent across recordings and overlap on the device.
-#: A phase is ONE step of each recording: a fused batch emits every item's work for a phase
-#: and then their barriers, so a recording's barrier only separates its phases. Steps that
-#: depend on each other within a call (marking survivor blocks, then recomputing them) are
-#: therefore separate phases.
-_FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1",
-                 "refine_td", "mark", "recompute", "refine", "peaks")
+#: Phases a fused batch knows, in order (_gpuhost.FUSED_PHASES).
+_FUSED_PHASES = FUSED_PHASES
 
 #: A unique number per captured recording. Fused recordings are cached by their constituents,
 #: and a command-buffer handle is no identity: once a recording is evicted the driver hands
@@ -601,33 +594,25 @@ class _FusedBatch:
         # every item sees its own phases in order, each behind its own recorded barriers.
         fns = _vulkan_emit_fns(dev)
         emit, cmd_value = _core.vulkan_emit, cmd.value
+        # The shared fusion plan (_gpuhost.fusion_plan) over each recording's phases, carried
+        # out by the Vulkan emitter: each item's resolved work for a phase, then one barrier.
+        recs = [ctx._phases[h] for ctx, cmds in self.items for h in cmds]
+        plan = fusion_plan([{p: (r[0] < r[1], r[2] < r[3]) for p, r in ph.items()
+                             if p in _FUSED_PHASES} for ph in recs])
+        by_phase = {}
+        for step in plan:
+            by_phase.setdefault(step[-1], []).append(step)
         for phase in _FUSED_PHASES:
-            barriers = []
-            for ctx, cmds in self.items:
-                for h in cmds:
-                    ph = ctx._phases[h]
-                    ranges = ph.get(phase)
-                    if ranges is None:
-                        continue
-                    ops = ph["_ops"]
-                    if ranges[1] > ranges[0]:
-                        emit(cmd_value, fns, ops, ranges[0], ranges[1])
-                    if ranges[3] > ranges[2]:
-                        barriers.append((ops, ranges[2], ranges[3]))
-            # One global barrier per distinct (stages, access) is enough for the step;
-            # buffer barriers are kept as recorded.
-            seen = set()
-            for ops, i, end in barriers:
-                while i < end:
-                    size = _VK_OP_SIZE[ops[i]]
-                    if ops[i] == 8:
-                        sig = (ops[i + 1], ops[i + 2], ops[i + 4], ops[i + 5])
-                        if sig in seen:
-                            i += size
-                            continue
-                        seen.add(sig)
-                    emit(cmd_value, fns, ops, i, i + size)
-                    i += size
+            for step in by_phase.get(phase, ()):
+                if step[0] == "work":
+                    ph = recs[step[1]]
+                    r = ph[phase]
+                    emit(cmd_value, fns, ph["_ops"], r[0], r[1])
+                else:
+                    ph = next(p for p in recs if phase in p and p[phase][2] < p[phase][3])
+                    r = ph[phase]
+                    emit(cmd_value, fns, ph["_ops"], r[2],
+                         r[2] + _VK_OP_SIZE[ph["_ops"][r[2]]])
             if prof is not None:
                 prof._stamp(cmd, "fused " + phase)
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
@@ -1141,29 +1126,15 @@ class _VkNative:
         (work start, work end, barriers start, barriers end) into `ops`. Nothing is kept, so
         the recording is never fused, where a phase has a barrier between two of its
         commands or the phases are not the ones a batch knows (_FUSED_PHASES)."""
-        phases, coarse = {}, 0
-        for label, cmds in marks:
-            if label == "start":
-                name = "start"
-            elif label.startswith("coarse"):
-                name = "coarse%d" % min(coarse, 1)
-                coarse += 1
-            elif label == "compact":
-                name = "compact0"
-            else:
-                name = label
-            kinds = [c[0] for c in cmds]
-            if any(b and not later for b, later in
-                   zip(kinds, [all(kinds[i + 1:]) for i in range(len(kinds))])):
-                # A barrier between two of a phase's commands: the batch would run them
-                # unordered (it keeps a phase's barriers for its end). Never fused.
-                return
+        named = list_phases(self.commands)
+        if named is None or len(named) != len(marks):
+            return                              # not a structure a batch can fuse
+        phases = {}
+        for (name, _, _), (_, cmds) in zip(named, marks):
             work = [c for c in cmds if not c[0]]
             bars = [c for c in cmds if c[0]]
             phases[name] = ((work[0][1], work[-1][2]) if work else (0, 0)) + (
                 (bars[0][1], bars[-1][2]) if bars else (0, 0))
-        if set(phases) - set(_FUSED_PHASES) - {"start"}:
-            return                                  # an unknown structure: never fused
         phases["_ops"] = ops
         phases["_serial"] = next(_RECORDING_SERIAL)
         self.ctx.__dict__.setdefault("_phases", {})[cmd.value] = phases

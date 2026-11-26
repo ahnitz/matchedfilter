@@ -341,6 +341,72 @@ class BindingCache:
         return len(self.entries)
 
 
+#: Phases of forward and hierarchical recordings, in execution order. A fused batch runs
+#: every recording's work for a phase, then one barrier, then the next phase: the
+#: dispatches of a phase are independent across recordings and overlap on the device.
+#: A phase is ONE step of each recording: a fused batch emits every item's work for a phase
+#: and then the barrier, so a recording's barrier only separates its phases. Steps that
+#: depend on each other within a call (marking survivor blocks, then recomputing them) are
+#: therefore separate phases.
+FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1",
+                "refine_td", "mark", "recompute", "refine", "peaks")
+
+
+def list_phases(commands):
+    """A list's phases for fused batches: per STAMP-ended segment of its operations, in
+    order, (phase name, its work operations' indices, its barriers' indices) -- the indices
+    counting the list's operations from 0 -- or None when the list cannot be fused: a phase
+    with a barrier between two of its commands (a batch keeps a phase's barriers for its
+    end, so it would run them unordered), or a phase a batch does not know (FUSED_PHASES).
+    Operations after the last stamp belong to no phase. Stamps name phases as recorded,
+    except that the first coarse stamp is coarse0 and later ones coarse1, and compact is
+    compact0."""
+    out, cur, coarse = [], [], 0
+    for k, op in enumerate(commands.decode()):
+        if op[0] != "stamp":
+            if op[0] != "readback":
+                cur.append((op[0] == "barrier", k))
+            continue
+        label = op[1]
+        if label.startswith("coarse"):
+            name = "coarse%d" % min(coarse, 1)
+            coarse += 1
+        elif label == "compact":
+            name = "compact0"
+        else:
+            name = label
+        kinds = [b for b, _ in cur]
+        if any(b and not all(kinds[i + 1:]) for i, b in enumerate(kinds)):
+            return None
+        if name not in FUSED_PHASES and name != "start":
+            return None
+        out.append((name, [k2 for b, k2 in cur if not b], [k2 for b, k2 in cur if b]))
+        cur = []
+    return out
+
+
+def fusion_plan(items):
+    """The steps of one fused submission over `items`, each a {phase: (has work, has a
+    barrier)} for one recording: for each phase in FUSED_PHASES order, ("work", item index,
+    phase) for every item with work in it, then ("barrier", phase) once if any item has a
+    barrier there -- every list barrier is the same (CommandList.BARRIER), so one serves
+    them all. Each backend's fused emitter carries the steps out: Vulkan records them into
+    one command buffer."""
+    steps = []
+    for phase in FUSED_PHASES:
+        barrier = False
+        for i, phases in enumerate(items):
+            got = phases.get(phase)
+            if got is None:
+                continue
+            if got[0]:
+                steps.append(("work", i, phase))
+            barrier = barrier or got[1]
+        if barrier:
+            steps.append(("barrier", phase))
+    return steps
+
+
 #: ctypes array types the backends build calls with, made once (carray).
 _CARRAYS = {}
 

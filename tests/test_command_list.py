@@ -259,3 +259,47 @@ def test_lists_and_caches_make_no_reference_cycle_with_their_owner():
         assert ref() is None                    # reference counting alone frees it
     finally:
         gc.enable()
+
+
+def test_a_list_is_cut_into_the_phases_a_fused_batch_knows():
+    """list_phases: each stamp ends a phase -- the first coarse stamp coarse0, later ones
+    coarse1, compact as compact0 -- with its work and its trailing barriers; a barrier
+    between two of a phase's commands, or an unknown phase, makes the list unfusable."""
+    from matchedfilter._gpuhost import list_phases
+    cl = CommandList("t")
+    cl.dispatch(_K1, 4, [_B1])
+    cl.barrier()
+    cl.stamp("forward")
+    cl.dispatch(_K2, 2, [_B1])
+    cl.stamp("coarse")
+    cl.dispatch(_K2, 2, [_B2])
+    cl.barrier()
+    cl.stamp("coarse")
+    cl.readback(_B2, 16)
+    cl.stamp("compact")
+    cl.dispatch(_K1, 1, [_B2])                   # after the last stamp: no phase
+    assert list_phases(cl) == [("forward", [0], [1]), ("coarse0", [3], []),
+                               ("coarse1", [5], [6]), ("compact0", [], [])]
+    bad = CommandList("t")
+    bad.dispatch(_K1, 1, [_B1])
+    bad.barrier()
+    bad.dispatch(_K1, 1, [_B1])
+    bad.stamp("forward")
+    assert list_phases(bad) is None
+    odd = CommandList("t")
+    odd.dispatch(_K1, 1, [_B1])
+    odd.stamp("not a phase")
+    assert list_phases(odd) is None
+
+
+def test_the_fusion_plan_interleaves_by_phase_with_one_barrier_each():
+    """fusion_plan: in phase order, every item's work for the phase, then one barrier if any
+    item has one there; phases no item has are skipped."""
+    from matchedfilter._gpuhost import fusion_plan
+    a = {"forward": (True, True), "coarse0": (True, False), "refine": (True, True)}
+    b = {"forward": (True, True), "coarse0": (True, True)}
+    c = {"refine": (False, True)}
+    assert fusion_plan([a, b, c]) == [
+        ("work", 0, "forward"), ("work", 1, "forward"), ("barrier", "forward"),
+        ("work", 0, "coarse0"), ("work", 1, "coarse0"), ("barrier", "coarse0"),
+        ("work", 0, "refine"), ("barrier", "refine")]
