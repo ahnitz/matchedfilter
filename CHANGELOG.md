@@ -96,7 +96,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   running on. And one table in `_kernels` resolves a kernel role to the build a device can
   run, from the manifests and the device's limits; a kernel the device cannot run is
   reported, where each driver had returned a different substitute or a file that did not
-  exist.
+  exist. A kernel is resolved once per device for the process, not per context: resolving
+  and copying its record in each plan's context left about 80,000 more objects for the
+  cycle collector in the PyCBC job and made it about 1% slower.
 
 ### Performance
 

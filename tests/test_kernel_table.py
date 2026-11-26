@@ -176,3 +176,23 @@ def test_the_roofline_reads_the_fp16_tier_from_the_drivers_artifact_family(monke
     assert _roofline.tier_precision("gpu:0", 0, 256) == "fp16"
     assert _roofline.tier_precision("gpu:0", 0, 65536) == "fp32"
     assert _roofline.tier_precision("gpu:0", 1, 256) == "fp32"
+
+
+def test_a_devices_contexts_share_one_resolved_record_per_kernel():
+    """Every context on a device (one per plan: thousands in a pycbc job) gets the same
+    resolved record for a kernel, made once for the process: resolving and copying it per
+    context left ~40 cycle-tracked objects per plan alive (85,655 against 5,934 over 2,028
+    plans, device-free), which the real GPU job paid for in collections (about 1% of its
+    wall time)."""
+    from matchedfilter import _kernels
+    a, _ = _fake_driver("vulkan-radeon")
+    b, _ = _fake_driver("vulkan-radeon")
+    b.props = a.props
+    c = dict(stride=2048, rowwin=True, scale=3)          # constants that pick no build
+    assert a._kernel_record("tier1", 1024, c) is b._kernel_record("tier1", 1024, dict(c, stride=0))
+    assert "_resolved" not in a.__dict__ and "_resolved" not in b.__dict__
+    other, _ = _fake_driver("vulkan-32k")                # another device's limits
+    assert other._kernel_record("peaks", 16384)["stem"] == "tierb_16384_lds32"
+    assert a._kernel_record("peaks", 16384)["stem"] == "tierb_16384"
+    _kernels.clear()
+    assert not _kernels._RESOLVED

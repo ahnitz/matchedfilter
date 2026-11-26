@@ -974,7 +974,7 @@ class Context(KernelRoles, Executor, InputUploads):
         and ValueError for a name that is not a kernel.
         """
         c = consts or {}
-        rec = self._kernel_record(name, n, {k: c[k] for k in ("ppg", "tile", "twt", "gate") if k in c})
+        rec = self._kernel_record(name, n, c)
         # the fp16 tiers' twiddle source: the coarse layout's choice; the fp16 tier 1 takes
         # the table unless told otherwise
         twt = bool(c.get("twt")) if name == "coarse" else (

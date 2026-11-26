@@ -33,7 +33,7 @@ def set_folder(backend, path):
         _FOLDERS.pop(backend, None)
     else:
         _FOLDERS[backend] = pathlib.Path(path)
-    manifest.cache_clear()
+    clear()
 
 
 @lru_cache(maxsize=None)
@@ -74,8 +74,10 @@ def two_stage(backend, n):
 
 
 def clear():
-    """Forget the manifests read (a test that rebuilds an install)."""
+    """Forget the manifests read and the records resolved from them (a test that rebuilds
+    an install)."""
     manifest.cache_clear()
+    _RESOLVED.clear()
 
 
 # ---- kernel roles: one table every driver resolves through ---------------------------------
@@ -124,13 +126,13 @@ def fits(rec, limits):
             and int((rec.get("local_size") or [0])[0]) <= limits.max_threads)
 
 
-def _runnable_record(stem, limits):
-    """The record of stem's build that fits the device -- its own, else its 32 KB build --
-    with "stem" added, or None."""
+def _runnable_stem(stem, limits):
+    """The stem of stem's build that fits the device -- its own, else its 32 KB build -- or
+    None (no record is copied: has_kernel asks this per follow-up batch)."""
     for name in (stem, stem + "_lds32"):
         rec = record(limits.artifact_family, name)
         if rec is not None and fits(rec, limits):
-            return dict(rec, stem=name)
+            return name
     return None
 
 
@@ -166,9 +168,9 @@ def resolve(limits, role, n=0, consts=None):
     never replaced by another kernel -- and ValueError for a role that is not a kernel."""
     stems = _stems(role, n, consts, limits)
     for stem in stems:
-        rec = _runnable_record(stem, limits)
-        if rec is not None:
-            return rec
+        name = _runnable_stem(stem, limits)
+        if name is not None:
+            return dict(record(limits.artifact_family, name), stem=name)
     from ._errors import UnsupportedSize
     shipped_ = [s for s in stems if record(limits.artifact_family, s) or record(limits.artifact_family, s + "_lds32")]
     if shipped_:
@@ -191,12 +193,18 @@ def has_kernel(limits, name, n):
         stem = _ONE[_OPTIONAL[name]][0].format(n=n)
     else:
         raise ValueError(name)
-    return _runnable_record(stem, limits) is not None
+    return _runnable_stem(stem, limits) is not None
 
 
 def has_coarse(limits, band):
     """Whether the fp16 coarse builds shipped at this band (its untiled one runs here)."""
-    return _runnable_record("tierb_%d_c16" % band, limits) is not None
+    return _runnable_stem("tierb_%d_c16" % band, limits) is not None
+
+
+#: Resolved records for the process (KernelRoles._kernel_record): key -> (the properties
+#: record it was resolved under, held so its id cannot name another, the record).
+_RESOLVED = {}
+_NO_CONSTS = {}
 
 
 class KernelRoles:
@@ -206,13 +214,17 @@ class KernelRoles:
 
     def _kernel_record(self, name, n, consts=None):
         """The manifest record (with "stem") serving kernel role `name` at n (resolve), kept
-        per (role, n, constants, properties record)."""
+        for the process per (device properties, role, n, the constants that pick a build):
+        a device's contexts -- one per plan, thousands in a search -- share one record per
+        kernel instead of each resolving and copying it (that allocation, ~20,000 records in
+        a pycbc job, drove extra collections of the cycle collector over its whole heap)."""
         props = self.props
-        memo = self.__dict__.setdefault("_resolved", {})
-        key = (name, n, tuple(sorted((consts or {}).items())), id(props))
-        hit = memo.get(key)
+        c = consts or _NO_CONSTS
+        key = (id(props), name, n, c.get("ppg"), c.get("tile"), c.get("twt"), c.get("gate"))
+        hit = _RESOLVED.get(key)
         if hit is None or hit[0] is not props:
-            hit = memo[key] = (props, resolve(props, name, n, consts))
+            hit = _RESOLVED[key] = (props, resolve(
+                props, name, n, {k: c[k] for k in ("ppg", "tile", "twt", "gate") if k in c}))
         return hit[1]
 
     def _x_has_kernel(self, name, n):

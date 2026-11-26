@@ -1827,7 +1827,7 @@ class Context(KernelRoles, Executor, InputUploads):
         """
         c = consts or {}
         stride, rowwin = int(c.get("stride", 0) or 0), 1 if c.get("rowwin") else 0
-        rec = self._kernel_record(name, n, {k: c[k] for k in ("ppg", "tile", "twt", "gate") if k in c})
+        rec = self._kernel_record(name, n, c)
         filename = rec["file"]
         if name in ("peaks", "peaks1", "gate"):
             # fusedTierB; rowwin: each row's window and bin phase from the table (a phased

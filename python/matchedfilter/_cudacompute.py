@@ -1089,7 +1089,7 @@ class Context(KernelRoles, Executor, InputUploads):
         and ValueError for a name that is not a kernel.
         """
         c = consts or {}
-        rec = self._kernel_record(name, n, {k: c[k] for k in ("ppg", "tile", "twt", "gate") if k in c})
+        rec = self._kernel_record(name, n, c)
         fn, wg = self._kernel_function(rec)
         stride = int(c.get("stride") or 0)
         scale = (int(np.float32(2.0 ** int(c["scale"])).view(np.uint32))
