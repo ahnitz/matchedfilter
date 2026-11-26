@@ -1054,7 +1054,13 @@ class _VkNative:
             elif kind == "fill":
                 _, buf, word, offset, nbytes, rows, pitch = op
                 base = getattr(buf, "offset", 0) + offset
-                size = 0xFFFFFFFFFFFFFFFF if nbytes is None else nbytes
+                if nbytes is not None:
+                    size = nbytes
+                elif hasattr(buf, "base"):
+                    # a section ends where it ends, not where its buffer does
+                    size = buf.nbytes - offset
+                else:
+                    size = 0xFFFFFFFFFFFFFFFF          # VK_WHOLE_SIZE: to the buffer's end
                 for r in range(rows):
                     out.extend((6, _handle(buf.handle), base + r * pitch, size, word))
                 cur.append((False, start, len(out)))

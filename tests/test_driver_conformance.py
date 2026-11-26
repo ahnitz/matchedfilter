@@ -806,9 +806,6 @@ def test_sections_of_one_buffer_are_filled_updated_and_read_together(make):
     np.testing.assert_array_equal(_read(ctx, buf, np.uint32, 2, offset=2 * align), [7, 8])
 
 
-@known_gap("vulkan", "a fill of a section with nbytes=None fills to the end of the section's "
-                     "base buffer (_VkNative._emit passes VK_WHOLE_SIZE from the section's "
-                     "offset), past the section")
 def test_a_fill_without_a_size_ends_at_the_end_of_its_section(make):
     """fill(view, word) without nbytes fills to the end of the view it was given -- a section's
     own end, not its buffer's: the sections after it keep their words."""
