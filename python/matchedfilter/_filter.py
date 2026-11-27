@@ -432,7 +432,7 @@ class MatchedFilter:
         self._held = {}
         self._held_templates = None
         self._template_source = None
-        self.performance_stats = {
+        self._performance_stats = {
             "total_calls": 0,
             "timed_calls": 0,
             "total_time_s": 0.0,
@@ -440,6 +440,10 @@ class MatchedFilter:
             "max_batch_time_ms": None,
             "batch_times_ms": [],
         }
+        # The batch times the extension's step table records for this plan, not yet in
+        # performance_stats: [count, seconds, least, greatest, unused, unused] and the last
+        # _MAX_BATCH_TIMINGS of them by count (_core.HMFTable.run).
+        self._step_stats = np.zeros(6 + self._MAX_BATCH_TIMINGS, dtype=np.float64)
         self._in_series_call = False
         self._gpu = None
         self._gpairs = 0
@@ -451,6 +455,35 @@ class MatchedFilter:
         self._tdirty = True
 
     _MAX_BATCH_TIMINGS = 256
+
+    @property
+    def performance_stats(self):
+        """Dictionary of the plan's call counts and batch times: ``total_calls``,
+        ``timed_calls``, ``total_time_s``, ``min_batch_time_ms``, ``max_batch_time_ms`` and
+        ``batch_times_ms`` (the last ``_MAX_BATCH_TIMINGS`` batch times, a ring by call).
+
+        Batches the extension's step table ran for this plan are folded in when it is read,
+        as if each had been recorded when it ran."""
+        stats = self._performance_stats
+        pending = self._step_stats
+        n = int(pending[0])
+        if n:
+            cap = self._MAX_BATCH_TIMINGS
+            timed0 = stats.get("timed_calls", 0)
+            stats["total_calls"] = stats.get("total_calls", 0) + n
+            stats["timed_calls"] = timed0 + n
+            stats["total_time_s"] = stats.get("total_time_s", 0.0) + float(pending[1])
+            lo, hi = float(pending[2]) * 1000.0, float(pending[3]) * 1000.0
+            prev_min, prev_max = stats.get("min_batch_time_ms"), stats.get("max_batch_time_ms")
+            stats["min_batch_time_ms"] = lo if prev_min is None or lo < prev_min else prev_min
+            stats["max_batch_time_ms"] = hi if prev_max is None or hi > prev_max else prev_max
+            # the ring as recording them one by one leaves it: their last cap, by position
+            times = stats.setdefault("batch_times_ms", [])
+            times.extend([0.0] * (min(cap, len(times) + n) - len(times)))
+            for k in range(max(0, n - cap), n):
+                times[(timed0 + k) % cap] = float(pending[6 + k % cap]) * 1000.0
+            pending[:6] = 0.0
+        return stats
 
     def _record_batch_time(self, dt):
         stats = self.performance_stats

@@ -2105,13 +2105,10 @@ class TimeDomainFilterBank:
                 # one: 0.2 ms a call where the one-template plan below took 0.5-0.7.
                 g, _ = self._template_map[template_index]
                 if self._single_device(g, self._group_blocks(g, W, S, cache_key, True)[0].size)[0]:
-                    single_out = [None]
-                    if _batches._cpu_single_td_batch(
-                            [(self, series, dict(windows=windows, binsize=binsize,
-                                                 threshold=threshold,
-                                                 template_index=template_index))],
-                            single_out, force_cpu=True):
-                        return single_out[0]
+                    res = _batches._cpu_single_td_one(self, series, windows, binsize, threshold,
+                                                      template_index, force_cpu=True)
+                    if res is not None:
+                        return res
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
         if template_index is None and not getattr(self, '_defer', False) and self.engine == 'hier':

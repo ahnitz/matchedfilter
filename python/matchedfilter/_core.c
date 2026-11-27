@@ -1228,6 +1228,8 @@ typedef struct {
   int64_t *order;                /* [nblocks] output row of each computed row, or NULL */
   int64_t *ostarts;              /* [nblocks] block starts in output order */
   int64_t s_min, s_max;          /* least and greatest block start */
+  Py_buffer stats;               /* the plan's pending batch times (MatchedFilter._step_stats) */
+  int has_stats;
 } hmf_step;
 typedef struct {
   int64_t *win_starts; Py_ssize_t nwin;   /* the call's window starts, for merging bins */
@@ -1275,6 +1277,7 @@ static void hmf_table_free_contents(HMFTableObject *self){
       Py_XDECREF(s->hmf);
       PyMem_Free(s->starts); PyMem_Free(s->low); PyMem_Free(s->high); PyMem_Free(s->bin_phase);
       PyMem_Free(s->tmap); PyMem_Free(s->order); PyMem_Free(s->ostarts);
+      if(s->has_stats) PyBuffer_Release(&s->stats);
     }
     PyMem_Free(self->steps);
   }
@@ -1437,12 +1440,17 @@ static int HMFTable_init(HMFTableObject *self,PyObject *args,PyObject *kw){
   for(Py_ssize_t i=0;i<ns;i++){
     hmf_step *s=&self->steps[i];
     self->nsteps=(int)i+1;
-    PyObject *st,*lo,*hi,*ph,*prices,*tmap,*order,*ost; HMFObject *hmf;
+    PyObject *st,*lo,*hi,*ph,*prices,*tmap,*order,*ost,*stats=Py_None; HMFObject *hmf;
     int nt; Py_ssize_t binsize; double thr;
-    if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(steps,i),"O!iiiOOOOindOiiOOO",&HMFType,&hmf,
+    if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(steps,i),"O!iiiOOOOindOiiOOO|O",&HMFType,&hmf,
                          &s->slot,&s->real,&s->stride,&st,&lo,&hi,&ph,&nt,&binsize,&thr,&prices,
-                         &s->phase,&s->job,&tmap,&order,&ost))
+                         &s->phase,&s->job,&tmap,&order,&ost,&stats))
       goto done;
+    if(stats!=Py_None){
+      if(PyObject_GetBuffer(stats,&s->stats,PyBUF_C_CONTIGUOUS|PyBUF_WRITABLE)<0) goto done;
+      s->has_stats=1;
+      if(s->stats.len!=(6+256)*8){ PyErr_SetString(PyExc_ValueError,"HMFTable: a step's stats buffer has the wrong length"); goto done; }
+    }
     Py_INCREF(hmf); s->hmf=hmf;
     if(s->slot<0 || s->slot>=nslots || s->job<0 || s->job>=self->njobs
        || s->stride<1 || s->stride>2 || (!s->real && s->stride!=1) || binsize<1
@@ -1916,7 +1924,18 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
     for(int i=p0;i<p1;i++) self->steps[i].hmf->busy=0;
     if(rc<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
     kernel+=dt;
-    for(int i=p0;i<p1;i++){ seconds[i]=dt/(double)cnt; totals[i]=jobs[exec_of[i]].total; }
+    for(int i=p0;i<p1;i++){
+      seconds[i]=dt/(double)cnt; totals[i]=jobs[exec_of[i]].total;
+      /* the step's batch time, pending in its plan's stats (MatchedFilter.performance_stats) */
+      if(self->steps[i].has_stats){
+        double *ps=self->steps[i].stats.buf; const double t=seconds[i];
+        const int64_t k=(int64_t)ps[0];
+        ps[6+k%256]=t; ps[1]+=t;
+        if(!k || t<ps[2]) ps[2]=t;
+        if(!k || t>ps[3]) ps[3]=t;
+        ps[0]=(double)(k+1);
+      }
+    }
     p0=p1;
   }
   /* assembly: per job its steps' peaks in step order, block-major (output rows), then the

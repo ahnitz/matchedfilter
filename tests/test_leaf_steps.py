@@ -79,3 +79,35 @@ def test_compiled_steps_give_the_call_at_a_time_peaks(monkeypatch):
     want = [bank.filter_series(series, **kw) for bank, series, kw in jobs]
     for g, w in zip(got, want):
         _same(g, w)
+
+
+def test_a_plans_batch_times_from_table_runs_are_its_own(monkeypatch):
+    """The batch times the step table records for a plan (a gated call's steps) are in its
+    performance_stats, as if each had been recorded when it ran: folded into a plan that had
+    recorded batches of its own, the stats are those of recording them all one by one, ring
+    of the last _MAX_BATCH_TIMINGS included."""
+    from matchedfilter import MatchedFilter
+    times = [(k % 37 + 1) / 1024.0 for k in range(300)]
+    one_by_one, folded = MatchedFilter(64), MatchedFilter(64)
+    for f in (one_by_one, folded):
+        for t in times[:20]:
+            f._record_batch_time(t)
+    for t in times[20:]:
+        one_by_one._record_batch_time(t)
+    pending = folded._step_stats
+    for k, t in enumerate(times[20:]):
+        pending[6 + k % MatchedFilter._MAX_BATCH_TIMINGS] = t
+        pending[1] += t
+        pending[2] = t if k == 0 else min(pending[2], t)
+        pending[3] = t if k == 0 else max(pending[3], t)
+        pending[0] = k + 1
+    assert folded.performance_stats == one_by_one.performance_stats
+
+    # a gated call: each of its steps one batch of its plan
+    bank = _bank(np.random.default_rng(12))
+    x = np.random.default_rng(13).standard_normal(1 << 17).astype(np.float32)
+    plans = {id(g.plan): g.plan for g in bank._groups}
+    before = {k: p.performance_stats["timed_calls"] for k, p in plans.items()}
+    bank.filter_series(x, windows=[(5000, 60000), (70000, 120000)])
+    after = {k: p.performance_stats["timed_calls"] for k, p in plans.items()}
+    assert all(after[k] > before[k] for k in plans)

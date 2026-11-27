@@ -1755,7 +1755,8 @@ def _compile_leaf_steps(calls, split_modes=True):
                                   np.ascontiguousarray(g.template_indices, dtype=np.int64),
                                   None if layout.order is None
                                   else np.ascontiguousarray(layout.order, dtype=np.int64),
-                                  np.ascontiguousarray(sub_st, dtype=np.int64)))
+                                  np.ascontiguousarray(sub_st, dtype=np.int64),
+                                  plan._step_stats))
                 steps.append((index, g, sub_st, layout, plan, ep, nt, bs, float(eff_threshold),
                               real, stride))
         jobs.append((np.ascontiguousarray(W[:, 0], dtype=np.int64), tuple(merge_bs)))
@@ -1876,11 +1877,6 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
         plan._dataset = False
         if plan._data_ready:
             plan._data_ready = set()
-    totals = np.frombuffer(totals_b, np.intc)
-    seconds = np.frombuffer(seconds_b, np.float64)
-    for k, step in enumerate(compiled.steps):
-        step[4]._last_n_triggers = int(totals[k])
-        step[4]._record_batch_time(float(seconds[k]))
     global STEP_COMPUTE_SECONDS
     STEP_COMPUTE_SECONDS += kernel
     offs = np.frombuffer(offs_b, np.int64)
