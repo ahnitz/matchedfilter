@@ -40,6 +40,11 @@ from .device import parse as _parse_device
 #: Identifies one filter_series_many batch to the plans it defers.
 _BATCH_TOKEN = 0
 
+#: Seconds the process's compiled leaf steps have spent in the extension's batch runs
+#: (_cpu_sparse_batch and the tiled cascade's slabs): the compute side of the CPU leaf stage,
+#: which a caller reads as a difference around its calls (HierarchicalSearch.timings).
+LEAF_COMPUTE_SECONDS = 0.0
+
 
 def _fuse_close(jobs):
     """Fuse this batch's submissions (_gpuexec.fused) where it has GPU banks: the batch's
@@ -922,8 +927,10 @@ def _filter_ready_slabs(c_jobs, back_subs, kr, retain_radius, eff_ret_thr):
     if not c_jobs:
         return time.perf_counter() - t_f0, None
     peaks_by_q = None
+    global LEAF_COMPUTE_SECONDS
     c_out = back_subs[0][0].table.run_slices(c_jobs)
     dt_b = time.perf_counter() - t_f0
+    LEAF_COMPUTE_SECONDS += dt_b
     dt_each = dt_b / len(c_jobs)
     for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
         sub_rec.total += tot
@@ -1837,6 +1844,8 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
     for k, step in enumerate(compiled.steps):
         step[4]._last_n_triggers = int(totals[k])
         step[4]._record_batch_time(float(seconds[k]))
+    global LEAF_COMPUTE_SECONDS
+    LEAF_COMPUTE_SECONDS += kernel
     offs = np.frombuffer(offs_b, np.int64)
     columns = (np.frombuffer(ti_b, np.int64), np.frombuffer(si_b, np.int64),
                np.frombuffer(snr_b, np.complex64), np.frombuffer(bs_b, np.int64),

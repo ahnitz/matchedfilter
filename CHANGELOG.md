@@ -115,7 +115,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   laid out and configured once, and a call binds its series and runs them in one C call that
   also clusters them, assembles every call's peaks and merges their window bins. A window
   list given again as a new list reuses the steps. Results are unchanged, to the bit and in
-  order.
+  order. On the three capture tops (one Zen 5 core) a steady pass took 1.4-2.0% less time,
+  and the leaf stage's Python went from 3.6% to 1.7% of it.
+- `HierarchicalSearch.timings["leaf_compute"]`: of the leaf stage, the seconds the CPU leaf
+  steps spent in the extension; `tools/search_bench.py` prints it as the leaf stage's compute
+  fraction.
 - The calls a consumer's hooks make back into a hierarchical search, per trigger, repeat less
   work: a single-template follow-up (`PeaksContext.refilter`) runs its one job through the
   batched follow-up path without building a batch around it, and on a GPU bank whose call

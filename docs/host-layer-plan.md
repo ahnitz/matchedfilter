@@ -152,3 +152,10 @@ library chooses the execution.
   and replaces the cap by a measured choice between the tiled and untiled schedules.
   Before step 6 the goldens gain the retain modes of `correlate_and_filter_many` and
   record every tiling case under both schedules.
+- 2026-11-27: conversion step 2, gated leaf steps. `_core.HMFTable` keeps a call shape's
+  `ap_hmf_sparse_job`s, compiled once by `_batches._compile_leaf_steps`, and its `run` sets
+  plan modes, clusters by shared cache lines, runs each phase and assembles one peak arena;
+  the tiled cascade runs its slabs through the same table (`run_slices`). Goldens 0 differ
+  from a9f56245. Steady passes on the three capture tops 1.4-2.0% faster, injection-window
+  cases 0.4-3.6% faster; the leaf stage's Python share went from 3.6% to 1.7%.
+  `HierarchicalSearch.timings["leaf_compute"]` is the leaf stage's compute side.

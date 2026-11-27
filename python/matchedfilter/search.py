@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from . import _core, _gpuroot
+from . import _batches, _core, _gpuroot
 from ._errors import UnsupportedSize
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
                           _aligned_zeros, _normalize_windows, _page_aligned_empty,
@@ -594,7 +594,9 @@ class HierarchicalSearch:
         self.min_pad = int(min_pad)
         if self.min_pad < 0:
             raise ValueError("min_pad must be non-negative")
-        self.timings = dict(root=0.0, inner=0.0, leaf=0.0, hooks=0.0, setup=0.0)
+        # leaf_compute: of leaf, the seconds the CPU leaf steps spent in the extension
+        self.timings = dict(root=0.0, inner=0.0, leaf=0.0, leaf_compute=0.0, hooks=0.0,
+                            setup=0.0)
         # a GPU plan holds one calibration: there each profile has a leaf bank of its own
         self._bank_per_profile = _parse_device(self.leaf_options.get("device")).kind == "gpu"
         self._parent = {}
@@ -1081,6 +1083,7 @@ class HierarchicalSearch:
                 self.timings["inner"] += t_info["correlate"]
             return None
         t0 = time.perf_counter()
+        compute0 = _batches.LEAF_COMPUTE_SECONDS
         jobs, where = [], {}
         for lf in leaves:
             for c in step.active:
@@ -1120,6 +1123,7 @@ class HierarchicalSearch:
             # joint trial takes its rounds on real calls (time_domain._joint_round).
             results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
             self.timings["leaf"] += time.perf_counter() - t0
+        self.timings["leaf_compute"] += _batches.LEAF_COMPUTE_SECONDS - compute0
         return leaves, jobs, where, deferred, results
 
     def _finish_leaves(self, step, submitted):

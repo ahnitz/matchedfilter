@@ -172,6 +172,9 @@ def main():
     for k in ("root", "inner", "leaf", "hooks", "setup"):
         if k in stage:
             print("  %-6s %8.3f s/pass  %5.1f%%" % (k, stage[k], 100 * stage[k] / s))
+    if stage.get("leaf_compute") and stage.get("leaf"):
+        print("  leaf compute fraction (CPU leaf steps in the extension) %.3f s/pass = %.1f%% of leaf"
+              % (stage["leaf_compute"], 100 * stage["leaf_compute"] / stage["leaf"]))
     if "device_s" in tot:
         print("  device busy (MF_GPU_TIMING) %.3f s/pass = %.1f%% of steady wall"
               % (tot["device_s"], 100 * tot["device_s"] / s))

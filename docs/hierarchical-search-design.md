@@ -108,7 +108,9 @@ bank then holds a calibration for each channel's profile over one copy of its te
 `HierarchicalSearch.leaf_bank(root, leaf, channel)` returns a channel's bank.
 
 A chunk's leaf searches run as one batch (`TimeDomainFilterBank.filter_series_many`), and
-together with the inner correlations they read (`correlate_and_filter_many`).
+together with the inner correlations they read (`correlate_and_filter_many`). `HierarchicalSearch.timings` holds
+the seconds spent per stage (`root`, `inner`, `leaf`, `hooks`, `setup`) and, of `leaf`, the
+seconds the CPU leaf steps spent in the extension (`leaf_compute`).
 
 ## Exactness of the threshold envelope
 
