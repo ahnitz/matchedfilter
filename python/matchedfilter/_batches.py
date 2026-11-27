@@ -1341,12 +1341,14 @@ def _single_step(bank, g):
     """Template group g as a single-template step takes it, made once and kept by the group:
     the tuple ``_core.HMFTable`` compiles a single-template step from.
 
-    A template with taps (the bank's taps at the data's rate, as the group keeps them) has
-    its spectrum made from them in the extension when a call needs it, into a slot of the
-    group's store of template spectra (``min(T, 256)`` slots, the least recently used given
-    up first), which every table compiled from the group shares. Any other template's
-    spectrum (a resampled bank's, or one with no taps) is made here once, with the group's
-    full spectra.
+    The group's own arrays (its template indices, taps and counts) are referenced, not copied.
+    A template with taps (the bank's taps at the data's rate, as the group keeps them) has its
+    spectrum made from them in the extension when a call needs it, into a slot of the group's
+    store of template spectra (``_core.SpectrumStore``: up to ``min(T, 256)`` slots, each
+    allocated when a template first takes it, the least recently used given up first), which
+    every table compiled from the group shares; a template never asked for holds nothing. Any
+    other template's spectrum (a resampled bank's, or one whose taps do not fit a block) is
+    made here once, with the group's full spectra.
 
     Parameters
     ----------
@@ -1358,10 +1360,10 @@ def _single_step(bank, g):
     Returns
     -------
     tuple
-        ``(n, step, c_bad, template indices, taps, counts, spectra, spectrum rows, index,
-        store)``: the group's block geometry and its templates' indices in the bank's input;
-        its taps and their counts (or None); the spectra given (or None) and per template
-        its row in them (-1: made from taps); the store's index and slots (or None).
+        ``(n, step, c_bad, template indices, taps, counts, spectra, spectrum rows, store)``:
+        the group's block geometry and its templates' indices in the bank's input; its taps
+        and their counts (or None); the spectra given (or None) and per template its row in
+        them (-1: made from taps); the group's SpectrumStore (or None).
     """
     step = g.__dict__.get("_single_step")
     if step is not None:
@@ -1369,7 +1371,7 @@ def _single_step(bank, g):
     nt = len(g.template_indices)
     src = (g._row_source.__defaults__[0]
            if getattr(g._row_source, "__defaults__", None) else None)
-    taps = counts = spectra = spectrum_rows = index = store = None
+    taps = counts = spectra = spectrum_rows = store = None
     given = np.arange(nt)
     if (bank.rate_ratio == 1.0 and isinstance(src, dict) and "taps" in src
             and "counts" in src):
@@ -1380,17 +1382,14 @@ def _single_step(bank, g):
                 taps, dtype=np.complex64 if np.iscomplexobj(taps) else np.float32)
         # a template whose taps do not fit a block has its spectrum given
         given = np.flatnonzero((counts < 1) | (counts > g.n))
-        cap = min(nt, 256)
-        store = np.empty((cap, g.n), dtype=np.complex64)
-        index = np.zeros(nt + 3 * cap + 2, dtype=np.int64)
-        index[:nt + cap] = -1
+        store = _core.SpectrumStore(min(nt, 256), g.n)
     if given.size:
         spectra = np.array(g.full_spectra(given), dtype=np.complex64, copy=True, order="C")
         spectrum_rows = np.full(nt, -1, dtype=np.int64)
         spectrum_rows[given] = np.arange(given.size)
     step = g._single_step = (g.n, g.n_valid, g.c_bad,
                              np.ascontiguousarray(g.template_indices, dtype=np.int64), taps,
-                             counts, spectra, spectrum_rows, index, store)
+                             counts, spectra, spectrum_rows, store)
     return step
 
 

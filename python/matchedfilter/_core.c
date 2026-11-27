@@ -1235,18 +1235,65 @@ typedef struct {
   int64_t *win_starts; Py_ssize_t nwin;   /* the call's window starts, for merging bins */
   Py_ssize_t *merge_bs; int nmerge;       /* bin sizes whose partial bins merge, in order */
 } hmf_table_job;
+/* A template group's store of template spectra (SpectrumStore(slots, n)), shared by every
+   table compiled from the group: up to `slots` spectra of n bins, each slot allocated when a
+   template first takes it, the least recently used given up first. It holds nothing for a
+   template never asked for. */
+typedef struct {
+  PyObject_HEAD
+  int cap, nalloc;               /* slots allowed; slots allocated (0..nalloc-1) */
+  size_t n;
+  int *row_of;                   /* [cap] the row a slot holds */
+  int64_t *used;                 /* [cap] the slot's last use on clock */
+  char *ready;                   /* [cap] whether it holds that row's spectrum */
+  float **spec;                  /* [cap] its spectrum (2n floats, 64-byte aligned) */
+  int64_t clock;
+  int busy;                      /* a run holds the store (set and cleared with the GIL held) */
+} SpectrumStoreObject;
+static void SpectrumStore_dealloc(SpectrumStoreObject *self){
+  if(self->spec) for(int k=0;k<self->nalloc;k++) free(self->spec[k]);
+  PyMem_Free(self->spec); PyMem_Free(self->row_of); PyMem_Free(self->used); PyMem_Free(self->ready);
+  Py_TYPE(self)->tp_free((PyObject*)self);
+}
+static int SpectrumStore_init(SpectrumStoreObject *self,PyObject *args,PyObject *kw){
+  (void)kw; int cap; Py_ssize_t n;
+  if(!PyArg_ParseTuple(args,"in",&cap,&n)) return -1;
+  if(self->spec){ PyErr_SetString(PyExc_RuntimeError,"SpectrumStore: already initialised"); return -1; }
+  if(cap<1 || n<1){ PyErr_SetString(PyExc_ValueError,"SpectrumStore: slots and bins must be positive"); return -1; }
+  self->cap=cap; self->n=(size_t)n;
+  self->row_of=PyMem_Calloc((size_t)cap,sizeof(int)); self->used=PyMem_Calloc((size_t)cap,sizeof(int64_t));
+  self->ready=PyMem_Calloc((size_t)cap,1); self->spec=PyMem_Calloc((size_t)cap,sizeof(float*));
+  if(!self->row_of||!self->used||!self->ready||!self->spec){ PyErr_NoMemory(); return -1; }
+  return 0;
+}
+static PyObject *SpectrumStore_get_held(SpectrumStoreObject *self,void *closure){
+  (void)closure; return PyLong_FromLong(self->nalloc);
+}
+static PyGetSetDef SpectrumStore_getset[]={
+  {"held",(getter)SpectrumStore_get_held,NULL,"the slots allocated (spectra held or being made)",NULL},
+  {NULL,NULL,NULL,NULL,NULL}
+};
+static PyTypeObject SpectrumStoreType={
+  PyVarObject_HEAD_INIT(NULL,0)
+  .tp_name="matchedfilter._core.SpectrumStore", .tp_basicsize=sizeof(SpectrumStoreObject),
+  .tp_flags=Py_TPFLAGS_DEFAULT, .tp_new=PyType_GenericNew,
+  .tp_init=(initproc)SpectrumStore_init, .tp_dealloc=(destructor)SpectrumStore_dealloc,
+  .tp_getset=SpectrumStore_getset,
+  .tp_doc="a template group's store of template spectra: SpectrumStore(slots, n)",
+};
+
 /* A single-template step: a template group's templates as the follow-up kernel filters them.
    A template whose row of spectrum_rows is not negative has its spectrum given (spectra);
-   the others are made from their taps when a run needs them, into a slot of the group's store
-   (index: per row its slot or -1, per slot its row or -1, its last use and whether it holds
-   the spectrum, then the use clock and a busy flag; store: the slots' spectra). */
+   the others are made from their taps when a run needs them, into a slot of the group's
+   store (SpectrumStore). The arrays are the group's, held as views, not copied. */
 typedef struct {
-  Py_buffer taps, counts, spectra, spectrum_rows, index, store;
-  int held;                      /* the views held: 1 taps, 2 counts, 4 spectra, 8 rows, 16 index, 32 store */
-  int nt, cap, tr_cplx;
+  Py_buffer taps, counts, spectra, spectrum_rows, tmap_view;
+  int held;                      /* the views held: 1 taps, 2 counts, 4 spectra, 8 rows, 16 tmap */
+  SpectrumStoreObject *store;    /* a reference, or NULL */
+  int nt, tr_cplx;
   size_t n; int64_t step, c_bad;
   Py_ssize_t row_floats;         /* floats per row of taps */
-  int64_t *tmap;                 /* [nt] bank template index of each row, owned */
+  const int64_t *tmap;           /* [nt] bank template index of each row (tmap_view) */
 } hmf_single;
 typedef struct {
   PyObject_HEAD
@@ -1264,9 +1311,8 @@ static void hmf_table_free_contents(HMFTableObject *self){
       if(g->held&2) PyBuffer_Release(&g->counts);
       if(g->held&4) PyBuffer_Release(&g->spectra);
       if(g->held&8) PyBuffer_Release(&g->spectrum_rows);
-      if(g->held&16) PyBuffer_Release(&g->index);
-      if(g->held&32) PyBuffer_Release(&g->store);
-      PyMem_Free(g->tmap);
+      if(g->held&16) PyBuffer_Release(&g->tmap_view);
+      Py_XDECREF(g->store);
     }
     PyMem_Free(self->singles);
   }
@@ -1313,26 +1359,23 @@ static void *hmf_table_copy(PyObject *o,Py_ssize_t count,Py_ssize_t item,int all
   return out;
 }
 /* A single-template step from its tuple (n, step, c_bad, tmap, taps|None, counts|None,
-   spectra|None, spectrum_rows|None, index|None, store|None); see hmf_single. 0, or -1 with the
+   spectra|None, spectrum_rows|None, store|None); see hmf_single. 0, or -1 with the
    exception set. */
 static int hmf_single_init(hmf_single *g,PyObject *item){
-  Py_ssize_t n,step,c_bad; PyObject *tmap,*taps,*counts,*spectra,*rows,*index,*store; int failed;
+  Py_ssize_t n,step,c_bad; PyObject *tmap,*taps,*counts,*spectra,*rows,*store;
   memset(g,0,sizeof(*g));
-  if(!PyArg_ParseTuple(item,"nnnOOOOOOO",&n,&step,&c_bad,&tmap,&taps,&counts,&spectra,&rows,
-                       &index,&store)) return -1;
+  if(!PyArg_ParseTuple(item,"nnnOOOOOO",&n,&step,&c_bad,&tmap,&taps,&counts,&spectra,&rows,
+                       &store)) return -1;
   if(n<16 || (n&(n-1)) || !ap_supported((size_t)n) || step<1 || c_bad<0){
     PyErr_SetString(PyExc_ValueError,"HMFTable: a single-template step's block geometry is invalid");
     return -1;
   }
   g->n=(size_t)n; g->step=(int64_t)step; g->c_bad=(int64_t)c_bad;
-  Py_buffer bt;
-  if(PyObject_GetBuffer(tmap,&bt,PyBUF_C_CONTIGUOUS)<0) return -1;
-  const Py_ssize_t nt=bt.len/8;
-  PyBuffer_Release(&bt);
-  if(nt<1 || nt>INT_MAX){ PyErr_SetString(PyExc_ValueError,"HMFTable: a single-template step needs templates"); return -1; }
-  g->nt=(int)nt;
-  g->tmap=hmf_table_copy(tmap,nt,8,0,&failed);
-  if(failed) return -1;
+  if(PyObject_GetBuffer(tmap,&g->tmap_view,PyBUF_C_CONTIGUOUS)<0) return -1;
+  g->held|=16;
+  const Py_ssize_t nt=g->tmap_view.len/8;
+  if(nt<1 || nt>INT_MAX || g->tmap_view.len%8){ PyErr_SetString(PyExc_ValueError,"HMFTable: a single-template step needs templates"); return -1; }
+  g->nt=(int)nt; g->tmap=g->tmap_view.buf;
   const char *bad="HMFTable: a single-template step's templates are invalid";
   if(spectra!=Py_None){
     if(PyObject_GetBuffer(spectra,&g->spectra,PyBUF_C_CONTIGUOUS)<0) return -1;
@@ -1358,15 +1401,13 @@ static int hmf_single_init(hmf_single *g,PyObject *item){
     g->row_floats=g->taps.shape[1]*(g->taps.itemsize/4);
     if(PyObject_GetBuffer(counts,&g->counts,PyBUF_C_CONTIGUOUS)<0) return -1;
     g->held|=2;
-    if(PyObject_GetBuffer(store,&g->store,PyBUF_C_CONTIGUOUS|PyBUF_WRITABLE)<0) return -1;
-    g->held|=32;
-    if(PyObject_GetBuffer(index,&g->index,PyBUF_C_CONTIGUOUS|PyBUF_WRITABLE)<0) return -1;
-    g->held|=16;
-    if(g->counts.len!=nt*8 || g->store.len<n*8 || g->store.len%(n*8) || g->store.len/(n*8)>INT_MAX){
-      PyErr_SetString(PyExc_ValueError,bad); return -1;
+    if(!PyObject_TypeCheck(store,&SpectrumStoreType) || !((SpectrumStoreObject*)store)->spec
+       || ((SpectrumStoreObject*)store)->n!=(size_t)n){
+      PyErr_SetString(PyExc_ValueError,"HMFTable: a step with taps needs its group's SpectrumStore of n bins");
+      return -1;
     }
-    g->cap=(int)(g->store.len/(n*8));
-    if(g->index.len!=(nt+3*(Py_ssize_t)g->cap+2)*8){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
+    Py_INCREF(store); g->store=(SpectrumStoreObject*)store;
+    if(g->counts.len!=nt*8){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
     const int64_t *c=g->counts.buf, *r=(g->held&8)?g->spectrum_rows.buf:NULL;
     for(Py_ssize_t i=0;i<nt;i++)
       if((!r || r[i]<0) && (c[i]<1 || c[i]>n || c[i]>g->taps.shape[1])){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
@@ -1763,25 +1804,31 @@ static int hmf_run_singles(HMFTableObject *self,PyObject *calls_arg,hmf_single_o
     Py_ssize_t twin=-1;
     for(Py_ssize_t p=0;p<c;p++) if(jobs[p].rate_one && out->single[p]==si && out->row[p]==row){ twin=p; break; }
     if(twin>=0){ slot[c]=slot[twin]; jb->spec=jobs[twin].spec; jb->spec_ready=jobs[twin].spec_ready; continue; }
-    hmf_single *g=&self->singles[si];
-    int64_t *ix=g->index.buf, *slot_of=ix, *row_of=ix+g->nt, *used=row_of+g->cap,
-            *ready=used+g->cap, *clk=ready+g->cap;
+    SpectrumStoreObject *st=self->singles[si].store;
     if(!busy[si]){
-      if(clk[1]){ busy[si]=-1; }                      /* another run holds the store */
-      else { clk[1]=1; busy[si]=1; clock0[si]=clk[0]; }
+      if(st->busy){ busy[si]=-1; }                    /* another run holds the store */
+      else { st->busy=1; busy[si]=1; clock0[si]=st->clock; }
     }
     if(busy[si]<0){ slot[c]=-1; nmade++; continue; }
-    int k=(int)slot_of[row];
+    int k=-1;
+    for(int q=0;q<st->nalloc;q++) if(st->row_of[q]==row){ k=q; break; }
     if(k<0){
-      int best=0;
-      for(int q=1;q<g->cap;q++) if(used[q]<used[best]) best=q;
-      if(used[best]>clock0[si]){ slot[c]=-1; nmade++; continue; }   /* every slot serves this run */
-      if(row_of[best]>=0) slot_of[row_of[best]]=-1;
-      k=best; row_of[k]=row; slot_of[row]=k; ready[k]=0;
+      if(st->nalloc<st->cap){
+        /* a new slot, allocated now */
+        float *buf=(float*)ap_alloc64(2*st->n*sizeof(float));
+        if(!buf){ PyErr_NoMemory(); goto done; }
+        k=st->nalloc++; st->spec[k]=buf;
+      } else {
+        int best=0;
+        for(int q=1;q<st->cap;q++) if(st->used[q]<st->used[best]) best=q;
+        if(st->used[best]>clock0[si]){ slot[c]=-1; nmade++; continue; }   /* every slot serves this run */
+        k=best;
+      }
+      st->row_of[k]=row; st->ready[k]=0;
     }
-    used[k]=++clk[0];
+    st->used[k]=++st->clock;
     slot[c]=k;
-    jb->spec=(float*)g->store.buf+(size_t)k*2*g->n; jb->spec_ready=(int)ready[k];
+    jb->spec=st->spec[k]; jb->spec_ready=(int)st->ready[k];
   }
   if(nmade){
     size_t nmax=0;
@@ -1808,14 +1855,12 @@ static int hmf_run_singles(HMFTableObject *self,PyObject *calls_arg,hmf_single_o
   /* a slot whose spectrum the kernel made now holds it */
   for(Py_ssize_t c=0;c<nc;c++){
     if(slot[c]<0 || !jobs[c].spec_ready) continue;
-    hmf_single *g=&self->singles[out->single[c]];
-    int64_t *ready=(int64_t*)g->index.buf+g->nt+2*(Py_ssize_t)g->cap;
-    ready[slot[c]]=1;
+    self->singles[out->single[c]].store->ready[slot[c]]=1;
   }
   rc=0;
 done:
   if(busy) for(int i=0;i<self->nsingles;i++)
-    if(busy[i]>0) ((int64_t*)self->singles[i].index.buf)[self->singles[i].nt+3*(Py_ssize_t)self->singles[i].cap+1]=0;
+    if(busy[i]>0) self->singles[i].store->busy=0;
   if(views) for(Py_ssize_t c=0;c<nc;c++) if(views[c].held) PyBuffer_Release(&views[c].view);
   if(wins) for(Py_ssize_t c=0;c<nc;c++) if(wheld[c]) PyBuffer_Release(&wins[c]);
   if(ws) td_bscr_release(ws);
@@ -3873,11 +3918,13 @@ PyMODINIT_FUNC PyInit__core(void){
   if(PyType_Ready(&HMFType)<0) return NULL;
   if(PyType_Ready(&RootType)<0) return NULL;
   if(PyType_Ready(&HMFTableType)<0) return NULL;
+  if(PyType_Ready(&SpectrumStoreType)<0) return NULL;
   PyObject *m=PyModule_Create(&mod);
   if(!m) return NULL;
   Py_INCREF(&MFType);   PyModule_AddObject(m,"MF",(PyObject*)&MFType);
   Py_INCREF(&HMFType);  PyModule_AddObject(m,"HMF",(PyObject*)&HMFType);
   Py_INCREF(&RootType); PyModule_AddObject(m,"Root",(PyObject*)&RootType);
   Py_INCREF(&HMFTableType); PyModule_AddObject(m,"HMFTable",(PyObject*)&HMFTableType);
+  Py_INCREF(&SpectrumStoreType); PyModule_AddObject(m,"SpectrumStore",(PyObject*)&SpectrumStoreType);
   return m;
 }

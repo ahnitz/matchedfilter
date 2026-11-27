@@ -134,10 +134,7 @@ def test_the_spectrum_store_does_not_change_the_peaks():
 
     def stored(slots):
         """The group's step with an empty store of its own, of this many slots."""
-        nt = len(g.template_indices)
-        index = np.zeros(nt + 3 * slots + 2, np.int64)
-        index[:nt + slots] = -1
-        return step[:8] + (index, np.empty((slots, g.n), np.complex64))
+        return step[:8] + (_core.SpectrumStore(slots, g.n),)
     full = len(rows)
     cold = [_core.HMFTable((), (), 0, (stored(full),)).run((), (c,)) for c in calls]
     warm = _core.HMFTable((), (), 0, (stored(full),))

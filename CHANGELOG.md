@@ -124,8 +124,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   `PeaksContext.refilter`, and a batch's single-template jobs) run as single-template steps
   of the same step table as the gated leaf steps (`_core.HMFTable`), compiled once per
   template group; a call binds its template, series, windows, bin size and threshold. Each
-  group keeps a store of template spectra in the extension (256 slots at most), shared by
-  every table compiled from it, in place of the per-group cache of taps and spectra that
+  group keeps a store of template spectra in the extension (`_core.SpectrumStore`: up to 256
+  slots, each allocated when a template first takes it), shared by every table compiled from
+  it, in place of the per-group cache of taps and spectra that
   each call looked up in Python. `_core.td_followup_batch` is removed. Results are unchanged,
   to the bit and in order. A follow-up call runs about 7,000 fewer instructions (one Zen 5
   core: 0.8-1.6 us less Python a call, the extension's side unchanged).
