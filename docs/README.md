@@ -59,6 +59,8 @@ the tree before the first release. They remain in the repository history at the 
   constraint, verify every speedup.
 - [Test coverage](testing-coverage.md): what the tests cover by area, and the performance
   regression checks.
+- [Host-layer plan](host-layer-plan.md): the active plan for making a pass execute a plan
+  compiled at setup, its phases and its log.
 
 ## Measurements
 

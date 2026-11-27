@@ -120,3 +120,15 @@ library chooses the execution.
   order for phase 1: golden outputs and removal of the tiled cascade that production
   never runs; gated leaf steps; single-template steps; flat steps; correlation steps;
   one table per search chunk.
+- 2026-11-27: golden outputs (`tools/golden.py`): every result a caller is handed, on the
+  three capture tops (one with follow-ups and an envelope, one with split windows, one with
+  an injection job's windows), a small search and the low-level entry points, from a seeded
+  cost file with `MF_AUTOTUNE=0`. Two fresh runs of eda1da1a record the same 19,868 arrays,
+  and so does the run that seeded the cost file.
+- 2026-11-27: the tiled cascade of `correlate_and_filter_many` is not removed: production
+  reaches it. A full-data job never does (one middle row of two detectors over a 512-second
+  segment's analysed span is about 10 MB, over the 4 MB cap), but an injection job with an
+  injection window (`--injection-window 4.5`, as PyCBC's search configuration sets) searches
+  each block in a few seconds around each injection, and a top with at most four leaves live
+  there fits the cap. On the first capture top with one 9-second window per block it runs in
+  all six chunks with four leaves live, and not with eight. Its removal waits for a decision.

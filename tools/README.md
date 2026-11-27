@@ -15,6 +15,7 @@ some calibration tools need separately captured data.
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
 | Job setup | `setup_capture.py`, `setup_replay.py`, `setup_breakdown.py`, `setup_decisions_diff.py` | Capture a job's banks and references, replay its matchedfilter setup, charge its time by part, and diff two replays' decisions |
 | Gate validation | `fdr_audit.py`, `split_bias.py`, `audit_gate_model.py`, `audit_threshold.py`, `make_psd_profiles.py` | Measure gate chains' dismissal by injection against the flat filter, two-sided (`fdr_audit.py`, run by the gate), and the budget split's selection bias on independent model draws (`split_bias.py`); not part of normal installation |
+| Output identity | `golden.py` | Record every result the library hands a caller (capture tops, hooks with follow-ups, split windows, the low-level entry points) from a seeded cost file, and compare two records bitwise, order included; run before merging a change that must not change results |
 | Measured choices at production length | `prodlen.py` | Fresh ladder processes of two trees in ABBA order, with no MF_COST_FILE, as production runs: each measured decision's lock (a coordinate search counted once), the fine batch it locked at and how long it was open; steady, total, user and system time; run before merging a change to how choices are measured |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
@@ -49,6 +50,17 @@ load range: in a main-against-main run on dev2 (2026-10-29) the load rose from 8
 tree's two processes took 402 s and 898 s. Read the decisions per process: in a second such
 run, of four processes of one library one locked GPU-BATCH fuse=0 (in fine batch 16 of 756)
 and another VK-SUBGROUP 32.
+
+To check that a change leaves every result as it was, seed a cost file once, then record
+each tree from it (each run reads a private copy, with `MF_AUTOTUNE=0`) and compare:
+
+```bash
+python tools/golden.py record base.npz --costs seed.json     # cold: writes seed.json
+python tools/golden.py record base2.npz --costs seed.json    # the same tree again
+python tools/golden.py compare base.npz base2.npz            # reproducible: "N arrays; 0 differ"
+python tools/golden.py record new.npz --costs seed.json      # from the changed tree
+python tools/golden.py compare base.npz new.npz
+```
 
 The other `bench_*.py`, `audit_*.py`, `gpu_*.py` and `narrow_cpu/` programs are focused
 investigations. Their docstrings describe the question they answered. They are not a
