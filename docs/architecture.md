@@ -190,7 +190,13 @@ and whether a trial has locked its arm.
 `TimeDomainFilterBank.filter_series_many` runs a list of bank calls as one batch
 (`_batches._run_batch`): follow-up windows, single-template calls and sparse CPU jobs each
 go to a path that takes many at once, and the rest run in turn. On a GPU every call is
-submitted before any is collected. `TimeDomainFilterBank.correlate_and_filter_many` runs a
+submitted before any is collected. The gated CPU calls run as compiled leaf steps
+(`_batches._compile_leaf_steps`, `_core.HMFTable`): each template group's blocks of one bin
+count are a step on the plan of the call's profile, compiled once per call shape (the
+calls' banks, layouts, profiles, series lengths and kinds, windows, bin sizes and
+thresholds) and kept by the first call's bank; a run is one C call that sets each plan's
+series mode, clusters the steps whose series share cache lines, runs them and returns every
+call's peaks in one arena, window bins merged. `TimeDomainFilterBank.correlate_and_filter_many` runs a
 hierarchical search's middle correlations together with the leaf calls that read them: jobs
 on one middle bank and window layout form a cohort (the detectors of one search), which is
 correlated in cache-sized chunks into a scratch buffer that the leaf banks filter before

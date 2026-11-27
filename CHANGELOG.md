@@ -110,6 +110,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Gated CPU leaf calls (`filter_series` and `filter_series_many` on a hierarchical CPU bank,
+  and the leaves of a CPU search) run as compiled leaf steps: the steps of a call shape are
+  laid out and configured once, and a call binds its series and runs them in one C call that
+  also clusters them, assembles every call's peaks and merges their window bins. A window
+  list given again as a new list reuses the steps. Results are unchanged, to the bit and in
+  order.
 - The calls a consumer's hooks make back into a hierarchical search, per trigger, repeat less
   work: a single-template follow-up (`PeaksContext.refilter`) runs its one job through the
   batched follow-up path without building a batch around it, and on a GPU bank whose call

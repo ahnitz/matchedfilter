@@ -249,17 +249,19 @@ _TILED_LEAF_KEYS = frozenset(("windows", "binsize", "threshold", "template_index
 
 class _LeafSub:
     """One leaf plan's share of a tiled leaf job: a template group of the leaf bank, the
-    blocks it filters and the compiled plan that filters them. Compiling the cohort advances
-    `cursor` through its slabs; a run adds the peaks found, their count and the seconds
-    spent."""
+    blocks it filters and the compiled plan that filters them, which is step `step` of the
+    cohort's compiled leaf steps (`table`). Compiling the cohort advances `cursor` through
+    its slabs; a run adds the peaks found, their count and the seconds spent."""
     __slots__ = ("group", "starts", "slabs", "plan", "ep", "series", "ntemplates", "binsize",
-                 "threshold", "parts", "total", "seconds", "slab_info", "cursor")
+                 "threshold", "parts", "total", "seconds", "slab_info", "cursor", "table",
+                 "step")
 
     def __init__(self, group, starts, slabs, plan, ep, series, ntemplates, binsize, threshold,
-                 slab_info):
+                 slab_info, table, step):
         self.group, self.starts, self.slabs, self.plan, self.ep = group, starts, slabs, plan, ep
         self.series, self.ntemplates, self.binsize = series, ntemplates, binsize
         self.threshold, self.slab_info = threshold, slab_info
+        self.table, self.step = table, step
         self.parts, self.total, self.seconds, self.cursor = [], 0, 0.0, 0
 
 
@@ -482,9 +484,10 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
     threshold below the bank's, a plan that would have to switch its series mode within the
     cohort). Otherwise (subs by output row and detector, the assembly record of each leaf
     job, the leaf jobs with no window, every sub, the plans to check before reuse, the
-    banks to check before reuse)."""
+    banks to check before reuse, the compiled leaf steps' table or None). The leaf jobs are
+    compiled as every gated CPU call is (_compile_leaf_steps); each sub is one step."""
     D = len(members)
-    ep_modes = {}
+    calls, placed, series_of = [], {}, {}
     subs_by_row = [[[] for _ in range(D)] for _ in range(n_out_rows)]
     cohort_leaf_preps = []
     cohort_empty_leaves = []
@@ -535,60 +538,40 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
                 return None
 
             bank_refs.append((weakref.ref(l_bank), j))
+            series_of[j] = ser_t
             W_leaf, cache_key = l_bank._call_windows(l_kw.get("windows"), S)
             if W_leaf.shape[0] == 0:
                 cohort_empty_leaves.append(j)
                 continue
+            calls.append((j, l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr,
+                          l_kw.get("profile", _SAME_PROFILE)))
+            placed[j] = (d_idx, out_row)
 
-            prep = _prepare_cpu_sparse_job(
-                l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr,
-                l_kw.get("profile", _SAME_PROFILE))
-            if prep is None:
-                return None
-
-            W_p, merge_bs, entries = prep
-            job_subs = []
-            for g_f, sub_st, sl, _, _, active_plan, ser_in, bs, thr_f, plan_profile in entries:
-                active_plan.use_profile(plan_profile)
-                nt_f = active_plan.ntemplates
-                active_plan._require_templates(0, nt_f)
-                active_plan._dataset = False
-                active_plan._data_ready = set()
-                real = ser_in.dtype == np.float32
-                stride = 2 if real and ser_in.strides == (8,) else 1
-
-                ep_prev = getattr(active_plan, "_mf", None)
-                if (ep_prev is not None and id(ep_prev) in ep_modes
-                        and ep_modes[id(ep_prev)] != (real, stride)):
-                    return None
-                active_plan._want_real = real
-                ep = active_plan._execution_plan()
-                if id(ep) in ep_modes and ep_modes[id(ep)] != (real, stride):
-                    return None
-                held_mode = active_plan.__dict__.get("_ep_real")
-                if real or (held_mode is not None and held_mode[0] is ep and held_mode[1]):
-                    if not ep.set_real_series(real, stride) and real:
-                        return None
-                    active_plan._ep_real = (ep, real)
-                if (active_plan.__dict__.get("_applied_real") is not real
-                        and hasattr(active_plan, "_sync_direct_prices")):
-                    active_plan._sync_direct_prices(ep, real)
-                ep_modes[id(ep)] = (real, stride)
-                plan_checks.append((active_plan, ep, real, stride))
-
-                cser = (np.lib.stride_tricks.as_strided(
-                    ser_in, shape=(2 * ser_in.size - 1,), strides=(4,))
-                    if stride == 2 else ser_in)
-                dgroup = int(ep.series_group())
-                slab_info = _layout_slabs(sl, dgroup, g_f.n, S)
-                sub_rec = _LeafSub(g_f, sub_st, sl, active_plan, ep, cser, nt_f, bs,
-                                   float(thr_f), slab_info)
-                job_subs.append(sub_rec)
-                all_sub_recs.append(sub_rec)
-                subs_by_row[out_row][d_idx].append(sub_rec)
-            cohort_leaf_preps.append((j, W_p, merge_bs, job_subs))
+    # The leaf jobs' steps, compiled as every other gated CPU call's: a plan asked for two
+    # series modes within the cohort runs untiled.
+    if not calls:
+        return (subs_by_row, cohort_leaf_preps, cohort_empty_leaves, all_sub_recs, plan_checks,
+                bank_refs, None)
+    compiled = _compile_leaf_steps(calls, split_modes=False)
+    if compiled is None or len(compiled.calls) != len(calls):
+        return None
+    subs_of = {j: [] for j, _, _ in compiled.calls}
+    for k, (j, g_f, sub_st, sl, active_plan, ep, nt_f, bs, thr_f, real, stride) in enumerate(
+            compiled.steps):
+        active_plan._dataset = False
+        active_plan._data_ready = set()
+        plan_checks.append((active_plan, ep, real, stride))
+        slab_info = _layout_slabs(sl, int(ep.series_group()), g_f.n, S)
+        d_idx, out_row = placed[j]
+        sub_rec = _LeafSub(g_f, sub_st, sl, active_plan, ep, series_of[j], nt_f, bs, thr_f,
+                           slab_info, compiled.table, k)
+        subs_of[j].append(sub_rec)
+        all_sub_recs.append(sub_rec)
+        subs_by_row[out_row][d_idx].append(sub_rec)
+    for (j, _, _), (W_p, merge_bs) in zip(compiled.calls, compiled.merges):
+        cohort_leaf_preps.append((j, W_p, merge_bs, subs_of[j]))
     return (subs_by_row, cohort_leaf_preps, cohort_empty_leaves, all_sub_recs, plan_checks,
-            bank_refs)
+            bank_refs, compiled.table)
 
 
 def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
@@ -617,13 +600,7 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
                         r0 = 0 if s_cur == 0 else int(slab_r1[s_cur - 1])
                         r1 = int(slab_r1[s_next - 1])
                         sub_rec.cursor = s_next
-                        sl = sub_rec.slabs
-                        ph_slice = None if sl.phase is None else sl.phase[r0:r1]
-                        c_jobs.append((
-                            sub_rec.ep, sub_rec.series,
-                            sl.starts[r0:r1], sl.low[r0:r1], sl.high[r0:r1],
-                            0, sub_rec.ntemplates, sub_rec.binsize, sub_rec.threshold, None, ph_slice, cid,
-                        ))
+                        c_jobs.append((sub_rec.step, r0, r1, cid, sub_rec.series))
                         back_subs.append((sub_rec, q, r0, r1))
                     else:
                         _, _, sorted_r0, sorted_r1, sorted_req_end, _ = slab_info
@@ -634,7 +611,6 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
                         if s_next <= s_cur:
                             continue
                         sub_rec.cursor = s_next
-                        sl = sub_rec.slabs
                         run_r0 = int(sorted_r0[s_cur])
                         run_r1 = int(sorted_r1[s_cur])
                         slices = []
@@ -648,12 +624,7 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
                                 run_r0, run_r1 = nr0, nr1
                         slices.append((run_r0, run_r1))
                         for r0, r1 in slices:
-                            ph_slice = None if sl.phase is None else sl.phase[r0:r1]
-                            c_jobs.append((
-                                sub_rec.ep, sub_rec.series,
-                                sl.starts[r0:r1], sl.low[r0:r1], sl.high[r0:r1],
-                                0, sub_rec.ntemplates, sub_rec.binsize, sub_rec.threshold, None, ph_slice, cid,
-                            ))
+                            c_jobs.append((sub_rec.step, r0, r1, cid, sub_rec.series))
                             back_subs.append((sub_rec, q, r0, r1))
 
         min_fut = S
@@ -951,7 +922,7 @@ def _filter_ready_slabs(c_jobs, back_subs, kr, retain_radius, eff_ret_thr):
     if not c_jobs:
         return time.perf_counter() - t_f0, None
     peaks_by_q = None
-    c_out = _core.HMF.run_series_batch_sparse(c_jobs)
+    c_out = back_subs[0][0].table.run_slices(c_jobs)
     dt_b = time.perf_counter() - t_f0
     dt_each = dt_b / len(c_jobs)
     for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
@@ -1603,106 +1574,204 @@ def _cpu_single_td_one(bank, series, windows, binsize, threshold, ti, force_cpu=
                          np.frombuffer(bs_ba, dtype=np.int64), np.frombuffer(bl_ba, dtype=np.int64))
 
 
-def _prepare_cpu_sparse_job(bank, ser, W, cache_key, binsize, eff_threshold, profile=_SAME_PROFILE):
-    """Prepare group sub-tasks for a CPU hierarchical sparse filter_series call, or None.
-    Each entry ends with the name its plan holds the job's profile under: the plans are
-    configured after every job of a batch is prepared, when the bank may be on another."""
-    if profile is not _SAME_PROFILE:
-        bank.use_profile(profile)
-    plan_profile = bank._plan_profile(bank.__dict__.get("_profile"))
-    if (bank.engine != 'hier' or _parse_device(bank.device).kind != 'cpu'
-            or not np.isfinite(eff_threshold) or eff_threshold < bank.threshold
-            or eff_threshold <= 0.0):
-        return None
-    if binsize is not None and int(binsize) < 1:
-        return None
-    groups = bank._groups
-    for g in groups:
-        plan = g.plan
-        if (not g.is_hier or getattr(plan, '_gpu', None) is not None
-                or not getattr(plan, '_is_hierarchical', False)
-                or 'run_series' in plan.__dict__ or '_series_flags' in plan.__dict__
-                or getattr(type(plan).run_series, '__qualname__', '') != 'HierarchicalFilter.run_series'
-                or getattr(MatchedFilter.run_series, '__qualname__', '') != 'MatchedFilter.run_series'
-                or getattr(type(plan)._series_flags, '__qualname__', '') != 'MatchedFilter._series_flags'
-                or plan._plan_trial() is not None):
-            return None
+def _plan_is_gated_cpu(plan):
+    """Whether a template group's plan runs its series calls through the gated leaf steps: a
+    CPU hierarchical plan whose run_series and _series_flags are the library's own."""
+    return (getattr(plan, '_gpu', None) is None
+            and getattr(plan, '_is_hierarchical', False)
+            and 'run_series' not in plan.__dict__ and '_series_flags' not in plan.__dict__
+            and getattr(type(plan).run_series, '__qualname__', '') == 'HierarchicalFilter.run_series'
+            and getattr(type(plan)._series_flags, '__qualname__', '') == 'MatchedFilter._series_flags'
+            and plan._plan_trial() is None)
 
-    S = len(ser)
-    aligned = binsize is not None or bank.binsize is not None
-    merge_bs = []
-    entries = []
 
-    # Build or retrieve cached block layouts and grouped SeriesLayouts per template group.
-    for g in groups:
-        N = g.n
-        bstarts, bws, bwe = bank._group_blocks(g, W, S, cache_key)
-        if bstarts.size == 0:
+class _LeafSteps(NamedTuple):
+    """The gated leaf steps of a set of bank calls, compiled once (_compile_leaf_steps): the
+    extension's table (_core.HMFTable) and what a run checks and updates around it.
+
+    Each step is one template group's blocks of one bin count, on the compiled plan of the
+    call's profile; ``steps`` holds per step (call index, group, block starts in output order,
+    SeriesLayout, plan, compiled plan, templates, bin size, threshold, real, stride)."""
+    table: Any
+    calls: list          # per compiled call: (index in the caller's list, bank, profile given)
+    merges: list         # per compiled call: its windows and the bin sizes its peaks merge at
+    steps: list
+    plans: list          # distinct (plan, profile name, compiled plan, resolution) checked on reuse
+    banks: list          # (weak reference to a bank, its template groups) checked on reuse
+
+
+def _compile_leaf_steps(calls, split_modes=True):
+    """The gated leaf steps of bank calls, or None where a call cannot run as such.
+
+    The calls are compiled in order, each template group's blocks of one bin count a step,
+    exactly as the bank's assembly once laid them out call by call. Compiling configures each
+    plan as a call did (its profile, templates, compiled plan, series mode and direct prices),
+    and the table keeps that configuration per step, so a run sets a plan's mode again only
+    where another call left it otherwise. A plan asked for two series modes starts a new phase
+    (the steps before it run as one batch), as the per-call assembly flushed its batch.
+
+    Parameters
+    ----------
+    calls : sequence of tuple
+        ``(index, bank, series, W, cache_key, binsize, threshold, profile)`` per call (those
+        the steps do not run are left out of them, and of the result's ``calls``): the
+        series as the bank reads it (``_input_series``), the normalised windows and their key
+        (``_call_windows``), the bin size argument, the effective threshold, and the profile
+        argument.
+    split_modes : bool, optional
+        False refuses (None) where a plan would be asked for two series modes. Default True.
+
+    Returns
+    -------
+    _LeafSteps or None
+        The compiled steps; None where no call is one the steps run, or a plan cannot read
+        the real series it is given.
+    """
+    steps, step_args, jobs, plans, banks, compiled_calls, merges = [], [], [], {}, {}, [], []
+    modes = {}
+    phase = 0
+    series = []
+    for index, bank, ser, W, cache_key, binsize, eff_threshold, profile in calls:
+        if profile is not _SAME_PROFILE:
+            bank.use_profile(profile)
+        plan_profile = bank._plan_profile(bank.__dict__.get("_profile"))
+        # A call these steps do not run is left to the caller (filter_series' own path).
+        if (bank.engine != 'hier' or _parse_device(bank.device).kind != 'cpu'
+                or not np.isfinite(eff_threshold) or eff_threshold < bank.threshold
+                or eff_threshold <= 0.0 or (binsize is not None and int(binsize) < 1)):
             continue
+        groups = bank._groups
+        if not all(g.is_hier and _plan_is_gated_cpu(g.plan) for g in groups):
+            continue
+        slot = len(series)
+        series.append(ser)
+        banks[id(bank)] = (weakref.ref(bank), groups)
+        S = len(ser)
+        real = ser.dtype == np.float32
+        stride = 2 if real and ser.strides == (8,) else 1
+        aligned = binsize is not None or bank.binsize is not None
+        merge_bs = []
+        for g in groups:
+            N = g.n
+            bstarts, bws, bwe = bank._group_blocks(g, W, S, cache_key)
+            if bstarts.size == 0:
+                continue
+            bs = int(binsize) if binsize is not None else (bank.binsize or N)
+            bph = None
+            if aligned:
+                bph = _bin_phases(g, g.plan, W, cache_key, bs, bstarts, bws, bwe)
+                if bph is not None and bs not in merge_bs:
+                    merge_bs.append(bs)
+            for sub_st, sub_ws, sub_we, sub_ph in _blocks_by_bin_count(g.plan, N, bs, bstarts,
+                                                                       bws, bwe, bph):
+                layout = SeriesLayout(N, np.ascontiguousarray(sub_st, dtype=np.uintp),
+                                      np.ascontiguousarray(sub_ws, dtype=np.uintp),
+                                      np.ascontiguousarray(sub_we, dtype=np.uintp), bs,
+                                      ragged=False, phase=sub_ph)
+                layout.group(materialize=False)
+                plan = g.plan
+                plan.use_profile(plan_profile)
+                nt = plan.ntemplates
+                plan._require_templates(0, nt)
+                # The plan's series mode, as each call once set it: a mode another step of
+                # these calls set otherwise ends the phase.
+                previous = getattr(plan, '_mf', None)
+                if (previous is not None and id(previous) in modes
+                        and modes[id(previous)] != (real, stride)):
+                    if not split_modes:
+                        return None
+                    phase += 1
+                    modes.clear()
+                plan._want_real = real
+                ep = plan._execution_plan()
+                if id(ep) in modes and modes[id(ep)] != (real, stride):
+                    if not split_modes:
+                        return None
+                    phase += 1
+                    modes.clear()
+                held = plan.__dict__.get("_ep_real")
+                if real or (held is not None and held[0] is ep and held[1]):
+                    if not ep.set_real_series(real, stride) and real:
+                        return None              # a plan that cannot read a real series
+                    plan._ep_real = (ep, real)
+                if (plan.__dict__.get("_applied_real") is not real
+                        and hasattr(plan, "_sync_direct_prices")):
+                    plan._sync_direct_prices(ep, real)
+                modes[id(ep)] = (real, stride)
+                resolved = plan.__dict__.get("_resolved")
+                prices = None
+                if getattr(plan, "_taps", None) is not None and resolved is not None \
+                        and resolved.direct_hw is not None:
+                    st = ep.direct_stats()
+                    prices = (st["ticks_per_lag_tap"], st["ticks_per_fft_pair"])
+                plans[(id(plan), plan_profile)] = (plan, plan_profile, ep, resolved)
+                step_args.append((ep, slot, int(real), stride, layout.starts, layout.low,
+                                  layout.high, layout.phase, nt, bs, float(eff_threshold),
+                                  prices, phase, slot,
+                                  np.ascontiguousarray(g.template_indices, dtype=np.int64),
+                                  None if layout.order is None
+                                  else np.ascontiguousarray(layout.order, dtype=np.int64),
+                                  np.ascontiguousarray(sub_st, dtype=np.int64)))
+                steps.append((index, g, sub_st, layout, plan, ep, nt, bs, float(eff_threshold),
+                              real, stride))
+        jobs.append((np.ascontiguousarray(W[:, 0], dtype=np.int64), tuple(merge_bs)))
+        compiled_calls.append((index, bank, profile))
+        merges.append((W, merge_bs))
+    if not compiled_calls:
+        return None
+    table = _core.HMFTable(step_args, jobs, len(series))
+    return _LeafSteps(table, compiled_calls, merges, steps, list(plans.values()),
+                      list(banks.values()))
 
-        bs = int(binsize) if binsize is not None else (bank.binsize or N)
-        if bs < 1:
-            return None
-        bph = None
-        if aligned:
-            bph = _bin_phases(g, g.plan, W, cache_key, bs, bstarts, bws, bwe)
-            if bph is not None and bs not in merge_bs:
-                merge_bs.append(bs)
 
-        sl_memo = g.__dict__.setdefault('_cpu_series_layouts', {})
-        sl_key = (cache_key, bs, aligned)
-        sl_list = sl_memo.get(sl_key)
-        if sl_list is None:
-            if len(sl_memo) >= 16:
-                sl_memo.clear()
-            raw_parts = _blocks_by_bin_count(g.plan, N, bs, bstarts, bws, bwe, bph)
-            sl_list = []
-            for sub_st, sub_ws, sub_we, sub_ph in raw_parts:
-                st_u = np.ascontiguousarray(sub_st, dtype=np.uintp)
-                ws_u = np.ascontiguousarray(sub_ws, dtype=np.uintp)
-                we_u = np.ascontiguousarray(sub_we, dtype=np.uintp)
-                sl = SeriesLayout(N, st_u, ws_u, we_u, bs, ragged=False, phase=sub_ph)
-                sl.group(materialize=False)
-                sl_list.append((sub_st, sl, int(sl.starts.min()), int(sl.starts.max())))
-            sl_memo[sl_key] = sl_list
-
-        for sub_st, sl, s_min, s_max in sl_list:
-            entries.append((g, sub_st, sl, s_min, s_max, g.plan, ser, bs, eff_threshold, plan_profile))
-
-    return (W, merge_bs, entries)
+def _leaf_steps_valid(compiled):
+    """Whether compiled leaf steps still describe their banks and plans: the same template
+    groups, and each plan's compiled plan and resolution of the profile as when compiled."""
+    for ref, groups in compiled.banks:
+        bank = ref()
+        if bank is None or bank.__dict__.get("_built") is not groups:
+            return False
+    for plan, profile, ep, resolved in compiled.plans:
+        d = plan.__dict__
+        state = d if d.get("_profile") == profile else d.get("_profiles", {}).get(profile)
+        if (state is None or state.get("_mf") is not ep or resolved is None
+                or state.get("_resolved") is not resolved
+                or state.get("_applied_plan") is not ep or state.get("_applied_res") is not resolved):
+            return False
+    return True
 
 
 def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
-    """Execute eligible CPU hierarchical sparse jobs in one C batch call.
+    """Run the gated CPU hierarchical calls of a batch as compiled leaf steps, in one C call.
+
+    The calls' steps are compiled once per call shape (_compile_leaf_steps) and kept by the
+    first call's bank under a key of every call's bank, layout, profile, series length,
+    kind and stride, windows, bin size and threshold. A run binds the series, runs the
+    steps (_core.HMFTable.run) and hands each call the slice of the peak arena that is its
+    FilterResults.
 
     Parameters
     ----------
     jobs : sequence of tuple or None
-        Sequence of ``(bank, series, kwargs)`` batch items when ``pre_jobs`` is None.
+        ``(bank, series, kwargs)`` batch items when ``pre_jobs`` is None.
     out : list
-        Output result list populated at each handled job index.
+        Output results, written at each handled job's index.
     skip : set of int, optional
         Job indices already handled earlier in the batch.
     pre_jobs : list of tuple, optional
-        Pre-normalized ``(job_index, bank, ser, W, cache_key, binsize, eff_threshold)``
-        items from ``filter_series``.
+        ``(job_index, bank, ser, W, cache_key, binsize, eff_threshold)`` items normalised by
+        ``filter_series``.
 
     Returns
     -------
     set of int
-        Indices of jobs whose ``FilterResults`` were written into ``out``.
+        Indices of the jobs whose FilterResults were written into ``out``.
     """
-
     done = set()
-    prepared = []
-
-    # Normalize and screen candidate CPU hierarchical jobs.
+    calls = []
     if pre_jobs is not None:
         for j, bank, ser, W, cache_key, binsize, eff_threshold in pre_jobs:
-            prep = _prepare_cpu_sparse_job(
-                bank, ser, W, cache_key, binsize, eff_threshold)
-            if prep is not None:
-                prepared.append((j, prep))
+            calls.append((j, bank, ser, W, cache_key, binsize, eff_threshold, _SAME_PROFILE))
     else:
         skip = skip or set()
         for j, (bank, series, kw) in enumerate(jobs):
@@ -1721,149 +1790,62 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
             ser = bank._input_series(series)
             if ser.ndim != 1:
                 continue
-            S = len(ser)
-            W, cache_key = bank._call_windows(kw.get("windows"), S)
+            W, cache_key = bank._call_windows(kw.get("windows"), len(ser))
             if W.shape[0] == 0:
                 out[j] = _EMPTY_FILTER_RESULTS
                 done.add(j)
                 continue
-            prep = _prepare_cpu_sparse_job(
-                bank, ser, W, cache_key, kw.get("binsize"), eff_threshold,
-                kw.get("profile", _SAME_PROFILE))
-            if prep is not None:
-                prepared.append((j, prep))
-
-    if not prepared:
+            calls.append((j, bank, ser, W, cache_key, kw.get("binsize"), eff_threshold,
+                          kw.get("profile", _SAME_PROFILE)))
+    if not calls:
+        return done
+    if (getattr(MatchedFilter.run_series, '__qualname__', '') != 'MatchedFilter.run_series'):
         return done
 
-    # Ensure any device writes to shared host-readable buffers have completed once.
+    # The compiled steps of this call shape: kept by the first bank, checked before reuse.
+    key = tuple((id(bank), bank.__dict__.get("_layout_rank"),
+                 bank._plan_profile(bank.__dict__.get("_profile") if profile is _SAME_PROFILE
+                                    else profile),
+                 cache_key, ser.dtype.char, ser.strides, binsize, float(eff_threshold))
+                for _, bank, ser, _, cache_key, binsize, eff_threshold, profile in calls)
+    memo = calls[0][1].__dict__.setdefault("_leaf_steps", OrderedDict())
+    compiled = memo.get(key)
+    if compiled is not None and _leaf_steps_valid(compiled):
+        memo.move_to_end(key)
+        for _, bank, profile in compiled.calls:
+            if profile is not _SAME_PROFILE:
+                bank.use_profile(profile)
+    else:
+        compiled = _compile_leaf_steps(calls)
+        if compiled is None:
+            return done
+        memo[key] = compiled
+        while len(memo) > 8:
+            memo.popitem(last=False)
+
+    # Device writes to shared host-readable series must have landed.
     _settle_device_writes()
-
-    def flush_chunk(chunk):
-        if not chunk:
-            return
-        # Group sub-tasks whose series byte spans overlap on 64-byte cache lines.
-        n_sub = len(chunk)
-        order_by_addr = sorted(range(n_sub), key=lambda k: (chunk[k][10], chunk[k][11]))
-        clusters = []
-        cur_members = [order_by_addr[0]]
-        cur_end = chunk[order_by_addr[0]][11]
-        for idx_k in order_by_addr[1:]:
-            lo_k, hi_k = chunk[idx_k][10], chunk[idx_k][11]
-            if lo_k < cur_end:
-                cur_members.append(idx_k)
-                if hi_k > cur_end:
-                    cur_end = hi_k
-            else:
-                cur_members.sort()
-                clusters.append(cur_members)
-                cur_members = [idx_k]
-                cur_end = hi_k
-        cur_members.sort()
-        clusters.append(cur_members)
-        clusters.sort(key=lambda m: m[0])
-
-        c_jobs = []
-        back_map = []
-        for cluster_id, members in enumerate(clusters):
-            for idx_k in members:
-                sub = chunk[idx_k]
-                sl = sub[2]
-                c_jobs.append((sub[5], sub[6], sl.starts, sl.low, sl.high,
-                               0, sub[7], sub[8], sub[9], None, sl.phase, cluster_id))
-                back_map.append(idx_k)
-
-        t0 = time.perf_counter()
-        c_out = _core.HMF.run_series_batch_sparse(c_jobs)
-        dt_each = (time.perf_counter() - t0) / max(len(c_jobs), 1)
-        for res_tuple, idx_k in zip(c_out, back_map):
-            chunk[idx_k][12] = (res_tuple, dt_each)
-
-    # Configure execution plans and batch sub-tasks (flushing only if an HMF switches real mode).
-    all_job_subs = []
-    chunk = []
-    ep_modes = {}
-    for j, (W, merge_bs, entries) in prepared:
-        job_subs = []
-        for g, sub_st, sl, s_min, s_max, active_plan, ser_in, bs, eff_threshold, plan_profile in entries:
-            active_plan.use_profile(plan_profile)
-            nt = active_plan.ntemplates
-            active_plan._require_templates(0, nt)
-            active_plan._dataset = False
-            active_plan._data_ready = set()
-            ser_cur = ser_in
-            real = ser_cur.dtype == np.float32
-            stride = 2 if real and ser_cur.strides == (8,) else 1
-
-            # Flush pending chunk if the same HMF instance is reused with a different real/stride mode.
-            ep_prev = getattr(active_plan, '_mf', None)
-            if ep_prev is not None and id(ep_prev) in ep_modes and ep_modes[id(ep_prev)] != (real, stride):
-                flush_chunk(chunk)
-                chunk = []
-                ep_modes.clear()
-
-            active_plan._want_real = real
-            ep = active_plan._execution_plan()
-            if id(ep) in ep_modes and ep_modes[id(ep)] != (real, stride):
-                flush_chunk(chunk)
-                chunk = []
-                ep_modes.clear()
-            held = active_plan.__dict__.get("_ep_real")
-            if real or (held is not None and held[0] is ep and held[1]):
-                if not ep.set_real_series(real, stride) and real:
-                    ser_cur = np.ascontiguousarray(ser_cur, dtype=np.complex64)
-                    real, stride = False, 1
-                    active_plan._want_real = False
-                    ep.set_real_series(False)
-                active_plan._ep_real = (ep, real)
-            if (active_plan.__dict__.get("_applied_real") is not real
-                    and hasattr(active_plan, "_sync_direct_prices")):
-                active_plan._sync_direct_prices(ep, real)
-            ep_modes[id(ep)] = (real, stride)
-
-            cser = (np.lib.stride_tricks.as_strided(ser_cur, shape=(2 * ser_cur.size - 1,), strides=(4,))
-                    if stride == 2 else ser_cur)
-            base_addr = cser.ctypes.data
-            elem_step = 8 if (not real or stride == 2) else 4
-            elem_width = 4 if real else 8
-            byte_lo = (base_addr + s_min * elem_step) & ~63
-            byte_hi = (min(base_addr + cser.nbytes,
-                           base_addr + (s_max + g.n - 1) * elem_step + elem_width) + 63) & ~63
-
-            rec = [g, sub_st, sl, active_plan, None, ep, cser, nt, bs, float(eff_threshold),
-                   byte_lo, byte_hi, None]
-            chunk.append(rec)
-            job_subs.append(rec)
-        all_job_subs.append((j, W, merge_bs, job_subs))
-
-    flush_chunk(chunk)
-
-    # Assemble FilterResults per job in original group and block order.
-    for j, W, merge_bs, job_subs in all_job_subs:
-        lists = ([], [], [], [], [])
-        for rec in job_subs:
-            g, sub_st, sl, active_plan = rec[0], rec[1], rec[2], rec[3]
-            nt = rec[7]
-            (fl, ix, vl, tot), dt_each = rec[12]
-            active_plan._last_n_triggers = tot
-            active_plan._record_batch_time(dt_each)
-            if tot == 0:
-                continue
-            shape = (sl.starts.size, nt, sl.nbins)
-            sp = _SparsePeaks(shape, np.frombuffer(fl, np.int64),
-                              np.frombuffer(ix, np.int64), np.frombuffer(vl, np.complex64))
-            if sl.order is not None:
-                sp = _SparsePeaks.combine([(0, sp)], shape, sl.order)
-            _consume_into(lists, sp, None, sub_st, g, None, g.n, None)
-        if merge_bs and lists[0]:
-            cols = [np.concatenate(c) for c in lists]
-            for bs_m in merge_bs:
-                cols = list(_merge_window_bins(W, bs_m, *cols))
-            for lst, c in zip(lists, cols):
-                lst[:] = [c]
-        out[j] = _results_from(lists)
+    slot_of = {c[0]: c[2] for c in calls}
+    (offs_b, ti_b, si_b, snr_b, bs_b, bl_b, totals_b, seconds_b,
+     kernel) = compiled.table.run([slot_of[j] for j, _, _ in compiled.calls])
+    for plan, _, _, _ in compiled.plans:
+        plan._dataset = False
+        if plan._data_ready:
+            plan._data_ready = set()
+    totals = np.frombuffer(totals_b, np.intc)
+    seconds = np.frombuffer(seconds_b, np.float64)
+    for k, step in enumerate(compiled.steps):
+        step[4]._last_n_triggers = int(totals[k])
+        step[4]._record_batch_time(float(seconds[k]))
+    offs = np.frombuffer(offs_b, np.int64)
+    columns = (np.frombuffer(ti_b, np.int64), np.frombuffer(si_b, np.int64),
+               np.frombuffer(snr_b, np.complex64), np.frombuffer(bs_b, np.int64),
+               np.frombuffer(bl_b, np.int64))
+    for k, (j, _, _) in enumerate(compiled.calls):
+        p0, p1 = int(offs[k]), int(offs[k + 1])
+        out[j] = (_EMPTY_FILTER_RESULTS if p0 == p1
+                  else FilterResults(*(c[p0:p1] for c in columns)))
         done.add(j)
-
     return done
 
 
@@ -2011,7 +1993,7 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
             if bound is None:
                 _correlate_untiled([ci for ci, _ in members])
                 continue
-            subs_by_row, leaf_preps, empty_leaves, subs, plan_checks, bank_refs = bound
+            subs_by_row, leaf_preps, empty_leaves, subs, plan_checks, bank_refs, _ = bound
             groups, w_span = _compile_groups(corr_bank, members, pre_grp_batches,
                                              subs_by_row, S, W_corr, n_out_rows,
                                              eff_tile_bytes)
