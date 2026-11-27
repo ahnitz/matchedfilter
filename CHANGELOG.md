@@ -129,6 +129,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   each call looked up in Python. `_core.td_followup_batch` is removed. Results are unchanged,
   to the bit and in order. A follow-up call runs about 7,000 fewer instructions (one Zen 5
   core: 0.8-1.6 us less Python a call, the extension's side unchanged).
+- `HierarchicalSearch.timings["hooks_compute"]`: of the hooks, the seconds the steps their
+  refilter calls ran (single-template steps, and gated leaf steps for every template) spent in
+  the extension; `tools/search_bench.py --followups` makes pycbc_inspiral_fir's follow-ups in
+  its hooks (tools/golden.py's follow-up hook) and prints it as the hooks' compute fraction.
 - The calls a consumer's hooks make back into a hierarchical search, per trigger, repeat less
   work: a single-template follow-up (`PeaksContext.refilter`) runs its one job through the
   batched follow-up path without building a batch around it, and on a GPU bank whose call

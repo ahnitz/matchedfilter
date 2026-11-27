@@ -594,9 +594,11 @@ class HierarchicalSearch:
         self.min_pad = int(min_pad)
         if self.min_pad < 0:
             raise ValueError("min_pad must be non-negative")
-        # leaf_compute: of leaf, the seconds the CPU leaf steps spent in the extension
+        # leaf_compute: of leaf, the seconds the CPU leaf steps spent in the extension;
+        # hooks_compute: of hooks, the seconds the steps their calls back into the library
+        # ran (refilters: single-template and gated leaf steps) spent there
         self.timings = dict(root=0.0, inner=0.0, leaf=0.0, leaf_compute=0.0, hooks=0.0,
-                            setup=0.0)
+                            hooks_compute=0.0, setup=0.0)
         # a GPU plan holds one calibration: there each profile has a leaf bank of its own
         self._bank_per_profile = _parse_device(self.leaf_options.get("device")).kind == "gpu"
         self._parent = {}
@@ -1153,10 +1155,12 @@ class HierarchicalSearch:
         self.timings["leaf"] += time.perf_counter() - t0
         if step.on_peaks is not None:
             t0 = time.perf_counter()
+            compute0 = _batches.STEP_COMPUTE_SECONDS
             for lf, peaks, scales in found:
                 step.on_peaks(PeaksContext(self, step.root, lf, step.chunk, step.active,
                                            step.tags, peaks, step.held, scales, step.support))
             self.timings["hooks"] += time.perf_counter() - t0
+            self.timings["hooks_compute"] += _batches.STEP_COMPUTE_SECONDS - compute0
 
     def _span(self, node, channel, need, pads, out):
         """Append to out where node's output must be valid in channel: each leaf's windows

@@ -159,3 +159,13 @@ library chooses the execution.
   from a9f56245. Steady passes on the three capture tops 1.4-2.0% faster, injection-window
   cases 0.4-3.6% faster; the leaf stage's Python share went from 3.6% to 1.7%.
   `HierarchicalSearch.timings["leaf_compute"]` is the leaf stage's compute side.
+- 2026-11-27: conversion step 3, single-template steps. A single-template CPU call (a search's
+  refilter) is a single-template step of `_core.HMFTable`: a template group's step is compiled
+  once and kept by the group, and a call binds its template row, series, windows, bin size and
+  threshold; the follow-up kernel runs in the table's run. The per-group Python cache of taps
+  and spectra became the group's store of spectra in the extension (256 slots at most), shared
+  by every table compiled from the group; `_core.td_followup_batch` is removed. Goldens 0 differ
+  from 3ec9157d. About 7,000 fewer instructions a follow-up; the Python of one 0.8-1.6 us less
+  (4.0 us in `filter_series`, 16 us in `PeaksContext.refilter`, whose own checks are now most of
+  it). `HierarchicalSearch.timings["hooks_compute"]` is the compute side of the hooks' calls;
+  on the first capture top with follow-ups it is 75% of the hooks.

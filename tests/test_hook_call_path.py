@@ -206,3 +206,19 @@ def test_filter_spectra_keep_their_transform_per_block_length():
                     _core.taps_to_spectra(taps[t:t + 1], counts[t:t + 1], n, m, one, cplx)
                     np.testing.assert_array_equal(one[0], full[n][t])
         assert _core._t2s_plans() == made
+
+
+def test_the_hooks_refilters_are_accounted_as_compute():
+    """timings["hooks_compute"] holds the seconds the hooks' refilter calls spent in the
+    extension: none without refilters, and with them more than none and no more than the
+    hooks took."""
+    root, inputs, search = _search(np.random.default_rng(7))
+    search.run(inputs, on_peaks=lambda ctx: None)
+    assert search.timings["hooks_compute"] == 0.0
+
+    def on_peaks(ctx):
+        for k in range(3):
+            ctx.refilter("B", windows=slice(10000 + 500 * k, 11000 + 500 * k), binsize=64,
+                         threshold=0.0, template_index=k)
+    search.run(inputs, on_peaks=on_peaks)
+    assert 0.0 < search.timings["hooks_compute"] <= search.timings["hooks"]

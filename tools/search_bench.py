@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay captured HierarchicalSearch runs with no-op hooks, on any device.
+"""Replay captured HierarchicalSearch runs with no-op hooks (or follow-ups), on any device.
 
 A capture (one pickle per top template) holds what pycbc_inspiral_fir hands the search for one
 top: the tree (root spectrum, band and profile; middle taps; fine taps and lags), the search's
@@ -17,6 +17,12 @@ templates x analysed seconds x detectors / steady seconds per pass.
 
     python tools/search_bench.py CAPTURE_DIR --device gpu:0
     python tools/search_bench.py CAPTURE_DIR --device cpu --repeats 2
+    python tools/search_bench.py CAPTURE_DIR --device cpu --followups
+
+With --followups, on_peaks makes the follow-ups tools/golden.py records (pycbc_inspiral_fir's:
+each channel's three loudest peaks refiltered, template by template, in every other channel
+around their samples at threshold 0, and once per leaf every template there at the search's
+threshold), so the hooks' share and its compute (hooks_compute) are measured too.
 
 Captures come from pycbc_inspiral_fir run with a sitecustomize hook that pickles
 HierarchicalSearch.run's arguments (see the session notes that produced this tool).
@@ -107,6 +113,9 @@ def main():
     ap.add_argument("--json", default=None,
                     help="write the results (throughput, stages, host CPU time, per-label device "
                          "counts and time, roofline, device and kernel ids) to this file")
+    ap.add_argument("--followups", action="store_true",
+                    help="on_peaks refilters as pycbc_inspiral_fir's follow-ups do "
+                         "(tools/golden.py's follow-up hook) instead of doing nothing")
     ap.add_argument("--peaks", default=None,
                     help="also save every leaf's peaks from one extra (untimed) pass to this .npz, "
                          "to compare devices or builds")
@@ -115,6 +124,10 @@ def main():
     if a.limit:
         files = files[:a.limit]
     noop = lambda ctx: None
+    follow_up = None
+    if a.followups:
+        from golden import _follow_up
+        follow_up = _follow_up(205, 50)
     tot = {"setup_s": 0.0, "steady_s": 0.0, "work": 0.0}
     stage = {}
     kernels = {}
@@ -124,9 +137,14 @@ def main():
     for f in files:
         rec = pickle.load(open(f, "rb"))
         search, inputs, windows, nt, secs = build(rec, a.device)
+        on_peaks = noop
+        if follow_up is not None:
+            def on_peaks(ctx, threshold=search.threshold):
+                ctx.leaf_threshold = threshold
+                follow_up(ctx, None)
         t0 = time.perf_counter()
         for _ in range(max(1, a.warmup)):
-            search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
+            search.run(inputs, windows=windows, on_series=noop, on_peaks=on_peaks, on_chunk=noop)
         tot["setup_s"] += time.perf_counter() - t0
         base = dict(search.timings)
         if gputime.enabled():
@@ -138,7 +156,7 @@ def main():
         roots0 = {n: list(v) for n, v in getattr(search, "root_counts", {}).items()}
         t0, c0 = time.perf_counter(), time.process_time()
         for _ in range(a.repeats):
-            search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
+            search.run(inputs, windows=windows, on_series=noop, on_peaks=on_peaks, on_chunk=noop)
         dt = (time.perf_counter() - t0) / a.repeats
         tot["host_cpu_s"] = tot.get("host_cpu_s", 0.0) + (time.process_time() - c0) / a.repeats
         if a.roofline:
@@ -175,6 +193,9 @@ def main():
     if stage.get("leaf_compute") and stage.get("leaf"):
         print("  leaf compute fraction (CPU leaf steps in the extension) %.3f s/pass = %.1f%% of leaf"
               % (stage["leaf_compute"], 100 * stage["leaf_compute"] / stage["leaf"]))
+    if stage.get("hooks_compute") and stage.get("hooks"):
+        print("  hooks compute fraction (the refilters' steps in the extension) %.3f s/pass = "
+              "%.1f%% of hooks" % (stage["hooks_compute"], 100 * stage["hooks_compute"] / stage["hooks"]))
     if "device_s" in tot:
         print("  device busy (MF_GPU_TIMING) %.3f s/pass = %.1f%% of steady wall"
               % (tot["device_s"], 100 * tot["device_s"] / s))
