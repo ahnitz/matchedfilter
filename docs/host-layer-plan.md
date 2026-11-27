@@ -169,3 +169,16 @@ library chooses the execution.
   (4.0 us in `filter_series`, 16 us in `PeaksContext.refilter`, whose own checks are now most of
   it). `HierarchicalSearch.timings["hooks_compute"]` is the compute side of the hooks' calls;
   on the first capture top with follow-ups it is 75% of the hooks.
+- 2026-11-27: phase 0 baseline, compute over steady wall with hooks excluded. One CPU
+  core: pulsar pass 86% and 92% (3D and 5D shapes), PyCBC job 93%, search benchmark 97%.
+  Radeon 8060S (Vulkan): pulsar pass 51 to 68%, of which about 60% of the device time is
+  zero fills; PyCBC job 25%; search benchmark about 77%. Quadro RTX 6000 (CUDA): pulsar
+  pass 29 to 32%, 18 to 21% counting kernels only, with 367 submissions and 358 small
+  uploads per pass of the 3D shape. Causes: Python work per row and bank in the
+  correlation path; dispatch and allocation per call in the GPU leaf (about 37,000 buffer
+  allocations in a PyCBC job); device time that is not compute. On a GPU the per-plan
+  setup (`HierarchicalFilter._gpu_calibration`, 20.4 s over 1,994 plans) runs inside the
+  first leaf call and is booked as leaf time; the PyCBC job's steady time without it is
+  10.2 s against 31.3 s on one CPU core. To correct in the accounting: that booking, the
+  Vulkan device-busy counter that reads zero in the search benchmark, and the leaf split
+  of `tools/job_bench.py`.
