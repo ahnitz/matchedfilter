@@ -182,3 +182,16 @@ library chooses the execution.
   10.2 s against 31.3 s on one CPU core. To correct in the accounting: that booking, the
   Vulkan device-busy counter that reads zero in the search benchmark, and the leaf split
   of `tools/job_bench.py`.
+- 2026-11-27: a gated leaf run records each step's batch time into its plan's stats in the
+  extension (`MatchedFilter.performance_stats` folds them in when read), so a run does no
+  Python per step; a GPU bank's single-template call that runs on the CPU goes to the group's
+  single-template step directly. Goldens 0 differ.
+- 2026-11-27: the real PyCBC CPU job after step 3. A group's store of spectra had been
+  allocated whole at its first follow-up (1.4 GB of address space over the job, faulted in
+  huge pages, 2.5 s slower); slots are now allocated when a template takes one
+  (`_core.SpectrumStore`). Peak memory then still differed between trees by 80 to 180 MB,
+  and sampling it through the job showed why: both trees held 130 to 280 MB of dead leaf
+  banks a top until the cyclic collector ran, so the peak followed the collector's timing.
+  The cycle was step 2's: the compiled leaf steps a bank keeps held the banks of their batch.
+  They hold them by weak reference now, and the job's peak is 1.6 GB, as before step 2,
+  against 4.2 GB.

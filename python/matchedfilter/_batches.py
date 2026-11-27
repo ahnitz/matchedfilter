@@ -1634,9 +1634,14 @@ class _LeafSteps(NamedTuple):
 
     Each step is one template group's blocks of one bin count, on the compiled plan of the
     call's profile; ``steps`` holds per step (call index, group, block starts in output order,
-    SeriesLayout, plan, compiled plan, templates, bin size, threshold, real, stride)."""
+    SeriesLayout, plan, compiled plan, templates, bin size, threshold, real, stride).
+
+    The banks are held by weak reference: the first call's bank keeps its compiled steps, so
+    a strong reference to it from them would make a cycle, and a leaf bank would then live
+    until the cyclic collector ran (in a PyCBC job, 130 to 280 MB of dead banks a top)."""
     table: Any
-    calls: list          # per compiled call: (index in the caller's list, bank, profile given)
+    calls: list          # per compiled call: (index in the caller's list, weak reference to
+    #                      its bank, profile given)
     merges: list         # per compiled call: its windows and the bin sizes its peaks merge at
     steps: list
     plans: list          # distinct (plan, profile name, compiled plan, resolution) checked on reuse
@@ -1759,7 +1764,7 @@ def _compile_leaf_steps(calls, split_modes=True):
                 steps.append((index, g, sub_st, layout, plan, ep, nt, bs, float(eff_threshold),
                               real, stride))
         jobs.append((np.ascontiguousarray(W[:, 0], dtype=np.int64), tuple(merge_bs)))
-        compiled_calls.append((index, bank, profile))
+        compiled_calls.append((index, weakref.ref(bank), profile))
         merges.append((W, merge_bs))
     if not compiled_calls:
         return None
@@ -1856,9 +1861,9 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
     compiled = memo.get(key)
     if compiled is not None and _leaf_steps_valid(compiled):
         memo.move_to_end(key)
-        for _, bank, profile in compiled.calls:
+        for _, bank_ref, profile in compiled.calls:
             if profile is not _SAME_PROFILE:
-                bank.use_profile(profile)
+                bank_ref().use_profile(profile)
     else:
         compiled = _compile_leaf_steps(calls)
         if compiled is None:

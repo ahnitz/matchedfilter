@@ -14,6 +14,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- A PyCBC CPU job's peak memory is back to 1.6 GB from 4.2 GB. The compiled leaf steps a
+  bank keeps held every bank of their batch, the keeping bank among them, so each leaf bank
+  sat in a reference cycle once its top was done and was freed only when the cyclic collector
+  ran: 130 to 280 MB of dead banks a top, and up to about 2.5 GB at once. The steps now hold
+  their banks by weak reference.
 - The hierarchical gates no longer dismiss far more than their budget on a band that holds a
   small share of the signal. The gate model's signal law took the coarse lags it does not draw
   next to the signal as independent noise. A band whose power does not fill its bins has

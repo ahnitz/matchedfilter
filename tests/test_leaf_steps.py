@@ -111,3 +111,25 @@ def test_a_plans_batch_times_from_table_runs_are_its_own(monkeypatch):
     bank.filter_series(x, windows=[(5000, 60000), (70000, 120000)])
     after = {k: p.performance_stats["timed_calls"] for k, p in plans.items()}
     assert all(after[k] > before[k] for k in plans)
+
+
+def test_banks_with_compiled_steps_are_freed_without_the_cyclic_collector():
+    """The first bank of a batch keeps the batch's compiled steps; the steps must not hold
+    the banks, or a dead leaf bank waits in a reference cycle for the collector (in a PyCBC
+    job, hundreds of MB of dead banks at a time)."""
+    import gc
+    import weakref
+    rng = np.random.default_rng(14)
+    first, second = _bank(rng), _bank(rng, complex_taps=True)
+    x = rng.standard_normal(1 << 17).astype(np.float32)
+    got = TimeDomainFilterBank.filter_series_many(
+        [(first, x, dict(windows=[(4000, 50000)])), (second, x, dict())])
+    assert sum(len(r.snr) for r in got) > 0
+    assert len(first.__dict__["_leaf_steps"]) == 1
+    refs = [weakref.ref(first), weakref.ref(second)]
+    gc.disable()
+    try:
+        del first, second, got
+        assert [r() is None for r in refs] == [True, True]
+    finally:
+        gc.enable()
