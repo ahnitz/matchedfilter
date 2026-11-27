@@ -1198,6 +1198,577 @@ static PyTypeObject HMFType={
   .tp_methods=HMF_methods, .tp_getset=HMF_getset, .tp_doc="matchedfilter hierarchical matched filter (opaque)",
 };
 
+
+/* ---------------- gated leaf steps: a persistent table of sparse jobs ---------------- */
+/* HMFTable holds a call shape's gated (HMF) leaf work, compiled once: one ap_hmf_sparse_job
+   per step (a template group's blocks of one bin count, on one plan) with its block layout,
+   plus what each step needs to be set up and assembled. run() binds the jobs' series, sets
+   each plan to the step's series mode and direct prices, clusters the steps of each phase by
+   the bytes their series spans share (as the batch's caller once did in Python), runs every
+   phase with ap_hmf_run_series_batch_sparse, and assembles the peaks of each job (bank call)
+   into one arena: template index, sample, complex SNR, block start and block length, in the
+   order FilterResults had them, window bins merged. run_slices() runs block ranges of steps
+   with clusters the caller gives (the tiled middle-to-leaf cascade). */
+static inline int64_t wbk_bin_f(double a, double b);
+typedef struct {
+  HMFObject *hmf;
+  int slot, real, stride, phase, job, has_prices;
+  double lagtap, fftpair;
+  size_t *starts, *low, *high;   /* the job's block layout, owned */
+  unsigned *bin_phase;           /* owned, or NULL */
+  int nblocks, nt;
+  size_t nbins, binsize, block_len;
+  float threshold;
+  int64_t *tmap;                 /* [nt] bank template index of each plan template */
+  int64_t *order;                /* [nblocks] output row of each computed row, or NULL */
+  int64_t *ostarts;              /* [nblocks] block starts in output order */
+  int64_t s_min, s_max;          /* least and greatest block start */
+} hmf_step;
+typedef struct {
+  int64_t *win_starts; Py_ssize_t nwin;   /* the call's window starts, for merging bins */
+  Py_ssize_t *merge_bs; int nmerge;       /* bin sizes whose partial bins merge, in order */
+} hmf_table_job;
+typedef struct {
+  PyObject_HEAD
+  hmf_step *steps; int nsteps;
+  hmf_table_job *jobs; int njobs;
+  int nslots;
+} HMFTableObject;
+
+static void hmf_table_free_contents(HMFTableObject *self){
+  if(self->steps){
+    for(int i=0;i<self->nsteps;i++){
+      hmf_step *s=&self->steps[i];
+      Py_XDECREF(s->hmf);
+      PyMem_Free(s->starts); PyMem_Free(s->low); PyMem_Free(s->high); PyMem_Free(s->bin_phase);
+      PyMem_Free(s->tmap); PyMem_Free(s->order); PyMem_Free(s->ostarts);
+    }
+    PyMem_Free(self->steps);
+  }
+  if(self->jobs){
+    for(int j=0;j<self->njobs;j++){ PyMem_Free(self->jobs[j].win_starts); PyMem_Free(self->jobs[j].merge_bs); }
+    PyMem_Free(self->jobs);
+  }
+  self->steps=NULL; self->jobs=NULL; self->nsteps=self->njobs=0;
+}
+static void HMFTable_dealloc(HMFTableObject *self){
+  hmf_table_free_contents(self);
+  Py_TYPE(self)->tp_free((PyObject*)self);
+}
+/* A copy of a C-contiguous buffer of count elements of size item, or NULL with the exception
+   set. None gives NULL with no exception when allow_none. */
+static void *hmf_table_copy(PyObject *o,Py_ssize_t count,Py_ssize_t item,int allow_none,int *failed){
+  *failed=0;
+  if(o==Py_None){
+    if(allow_none) return NULL;
+    PyErr_SetString(PyExc_ValueError,"HMFTable: an array is required"); *failed=1; return NULL;
+  }
+  Py_buffer b;
+  if(PyObject_GetBuffer(o,&b,PyBUF_C_CONTIGUOUS)<0){ *failed=1; return NULL; }
+  if(b.len!=count*item){
+    PyBuffer_Release(&b);
+    PyErr_SetString(PyExc_ValueError,"HMFTable: an array has the wrong length"); *failed=1;
+    return NULL;
+  }
+  void *out=PyMem_Malloc(count*item>0?(size_t)(count*item):1);
+  if(!out){ PyBuffer_Release(&b); PyErr_NoMemory(); *failed=1; return NULL; }
+  if(count) memcpy(out,b.buf,(size_t)(count*item));
+  PyBuffer_Release(&b);
+  return out;
+}
+/* HMFTable(steps, jobs, nslots). Each step is (hmf, slot, real, stride, starts, low, high,
+   bin_phase|None, nt, binsize, threshold, prices|None, phase, job, tmap, order|None, ostarts):
+   uintp starts and windows, uint32 phases, int64 tmap, order and ostarts; prices are the
+   (lagtap, fftpair) the plan runs this series mode with, or None to leave them. Each job is
+   (window starts int64, merge bin sizes). */
+static int HMFTable_init(HMFTableObject *self,PyObject *args,PyObject *kw){
+  (void)kw;
+  PyObject *steps_arg,*jobs_arg; int nslots;
+  if(!PyArg_ParseTuple(args,"OOi",&steps_arg,&jobs_arg,&nslots)) return -1;
+  hmf_table_free_contents(self);
+  PyObject *steps=PySequence_Fast(steps_arg,"steps must be a sequence");
+  if(!steps) return -1;
+  PyObject *jobs=PySequence_Fast(jobs_arg,"jobs must be a sequence");
+  if(!jobs){ Py_DECREF(steps); return -1; }
+  const Py_ssize_t ns=PySequence_Fast_GET_SIZE(steps), nj=PySequence_Fast_GET_SIZE(jobs);
+  int rc=-1;
+  if(ns>INT_MAX || nj>INT_MAX || nslots<0){ PyErr_SetString(PyExc_ValueError,"HMFTable: too many steps"); goto done; }
+  self->steps=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_step));
+  self->jobs=PyMem_Calloc(nj?(size_t)nj:1,sizeof(hmf_table_job));
+  if(!self->steps||!self->jobs){ PyErr_NoMemory(); goto done; }
+  self->nslots=nslots;
+  for(Py_ssize_t j=0;j<nj;j++){
+    PyObject *w,*mb; int failed;
+    if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(jobs,j),"OO",&w,&mb)) goto done;
+    hmf_table_job *J=&self->jobs[j];
+    self->njobs=(int)j+1;
+    Py_buffer bw;
+    if(PyObject_GetBuffer(w,&bw,PyBUF_C_CONTIGUOUS)<0) goto done;
+    J->nwin=bw.len/8; PyBuffer_Release(&bw);
+    J->win_starts=hmf_table_copy(w,J->nwin,8,0,&failed);
+    if(failed) goto done;
+    PyObject *mbs=PySequence_Fast(mb,"merge bin sizes must be a sequence");
+    if(!mbs) goto done;
+    J->nmerge=(int)PySequence_Fast_GET_SIZE(mbs);
+    J->merge_bs=PyMem_Malloc((size_t)(J->nmerge?J->nmerge:1)*sizeof(Py_ssize_t));
+    if(!J->merge_bs){ Py_DECREF(mbs); PyErr_NoMemory(); goto done; }
+    for(int k=0;k<J->nmerge;k++){
+      J->merge_bs[k]=PyNumber_AsSsize_t(PySequence_Fast_GET_ITEM(mbs,k),PyExc_OverflowError);
+      if(J->merge_bs[k]<1){
+        Py_DECREF(mbs);
+        if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"HMFTable: a bin size below 1");
+        goto done;
+      }
+    }
+    Py_DECREF(mbs);
+  }
+  for(Py_ssize_t i=0;i<ns;i++){
+    hmf_step *s=&self->steps[i];
+    self->nsteps=(int)i+1;
+    PyObject *st,*lo,*hi,*ph,*prices,*tmap,*order,*ost; HMFObject *hmf;
+    int nt; Py_ssize_t binsize; double thr;
+    if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(steps,i),"O!iiiOOOOindOiiOOO",&HMFType,&hmf,
+                         &s->slot,&s->real,&s->stride,&st,&lo,&hi,&ph,&nt,&binsize,&thr,&prices,
+                         &s->phase,&s->job,&tmap,&order,&ost))
+      goto done;
+    Py_INCREF(hmf); s->hmf=hmf;
+    if(s->slot<0 || s->slot>=nslots || s->job<0 || s->job>=self->njobs
+       || s->stride<1 || s->stride>2 || (!s->real && s->stride!=1) || binsize<1
+       || nt<1 || nt>hmf->nt || (i && s->phase<self->steps[i-1].phase)
+       || (i && s->job<self->steps[i-1].job)){
+      PyErr_SetString(PyExc_ValueError,"HMFTable: a step's slot, job, phase, mode or shape is invalid");
+      goto done;
+    }
+    if(prices!=Py_None){
+      if(!PyArg_ParseTuple(prices,"dd",&s->lagtap,&s->fftpair)) goto done;
+      s->has_prices=1;
+    }
+    Py_buffer bst;
+    if(PyObject_GetBuffer(st,&bst,PyBUF_C_CONTIGUOUS)<0) goto done;
+    const Py_ssize_t nb=bst.len/(Py_ssize_t)sizeof(size_t);
+    PyBuffer_Release(&bst);
+    if(nb<1 || nb>INT_MAX){ PyErr_SetString(PyExc_ValueError,"HMFTable: a step needs blocks"); goto done; }
+    int failed;
+    s->nblocks=(int)nb; s->nt=nt; s->binsize=(size_t)binsize; s->threshold=(float)thr;
+    s->block_len=(size_t)hmf->n;
+    s->starts=hmf_table_copy(st,nb,sizeof(size_t),0,&failed); if(failed) goto done;
+    s->low=hmf_table_copy(lo,nb,sizeof(size_t),0,&failed); if(failed) goto done;
+    s->high=hmf_table_copy(hi,nb,sizeof(size_t),0,&failed); if(failed) goto done;
+    s->bin_phase=hmf_table_copy(ph,nb,sizeof(unsigned),1,&failed); if(failed) goto done;
+    s->tmap=hmf_table_copy(tmap,nt,8,0,&failed); if(failed) goto done;
+    s->order=hmf_table_copy(order,nb,8,1,&failed); if(failed) goto done;
+    s->ostarts=hmf_table_copy(ost,nb,8,0,&failed); if(failed) goto done;
+    s->s_min=s->s_max=(int64_t)s->starts[0];
+    for(int b=0;b<s->nblocks;b++){
+      size_t bins; Py_ssize_t ignored;
+      if(s->starts[b]>(size_t)INT64_MAX-(size_t)hmf->n || s->low[b]>(size_t)PY_SSIZE_T_MAX
+         || s->high[b]>(size_t)PY_SSIZE_T_MAX){
+        PyErr_SetString(PyExc_ValueError,"block offset or window overflows"); goto done;
+      }
+      if(!run_shape(hmf->n,1,hmf->nt,0,1,0,nt,binsize,(Py_ssize_t)s->low[b],
+                    (Py_ssize_t)s->high[b],&bins,&ignored)) goto done;
+      if(s->bin_phase){
+        if(s->bin_phase[b]>=(1u<<24)){ PyErr_SetString(PyExc_ValueError,"bin_phase must be below 2**24"); goto done; }
+        bins=ap_bin_count((size_t)binsize,s->low[b],s->high[b]>(size_t)hmf->n?(size_t)hmf->n:s->high[b],
+                          s->bin_phase[b]);
+      }
+      if(b && bins!=s->nbins){ PyErr_SetString(PyExc_ValueError,"block windows must have equal bin counts"); goto done; }
+      s->nbins=bins;
+      if((int64_t)s->starts[b]<s->s_min) s->s_min=(int64_t)s->starts[b];
+      if((int64_t)s->starts[b]>s->s_max) s->s_max=(int64_t)s->starts[b];
+      if(s->order && (s->order[b]<0 || s->order[b]>=nb)){
+        PyErr_SetString(PyExc_ValueError,"HMFTable: an output row is out of range"); goto done;
+      }
+    }
+    for(int t=0;t<nt;t++) if(s->tmap[t]<0){ PyErr_SetString(PyExc_ValueError,"HMFTable: a negative template index"); goto done; }
+  }
+  rc=0;
+done:
+  Py_DECREF(steps); Py_DECREF(jobs);
+  if(rc) hmf_table_free_contents(self);
+  return rc;
+}
+/* A slot's series as a step reads it: its first sample, its samples, and the bytes it spans
+   (a lane of a complex series spans to its last sample's float). */
+typedef struct { Py_buffer view; int held; const char *ptr; Py_ssize_t samples; int kind; } hmf_slot;
+/* kind: 0 complex64, 1 contiguous float32, 2 float32 lane of a complex64 series (stride 8). */
+static int hmf_slot_bind(PyObject *o,hmf_slot *sl){
+  sl->held=0;
+  if(PyObject_GetBuffer(o,&sl->view,PyBUF_STRIDES|PyBUF_FORMAT)<0) return -1;
+  sl->held=1;
+  const Py_buffer *v=&sl->view;
+  const char *f=v->format?v->format:"B";
+  if(*f=='<' || *f=='=' || *f=='@') f++;
+  if(v->ndim!=1){ PyErr_SetString(PyExc_ValueError,"HMFTable: a series must be one-dimensional"); return -1; }
+  sl->ptr=v->buf; sl->samples=v->shape[0];
+  if(!strcmp(f,"Zf") && v->itemsize==8 && v->strides[0]==8) sl->kind=0;
+  else if(!strcmp(f,"f") && v->itemsize==4 && v->strides[0]==4) sl->kind=1;
+  else if(!strcmp(f,"f") && v->itemsize==4 && v->strides[0]==8) sl->kind=2;
+  else { PyErr_SetString(PyExc_ValueError,"HMFTable: a series must be complex64, float32, or one "
+                         "float32 lane of a complex64 series"); return -1; }
+  return 0;
+}
+static int hmf_step_mode_ok(const hmf_step *s,const hmf_slot *sl){
+  return s->real ? (sl->kind==(s->stride==2?2:1)) : sl->kind==0;
+}
+/* Set a step's plan to its series mode and prices, where it is in another (another call
+   shape, or another table, ran it last). */
+static int hmf_step_set_mode(hmf_step *s){
+  HMFObject *h=s->hmf;
+  if(h->real!=s->real || (s->real && h->real_stride!=s->stride)){
+    if(ap_hmf_set_real_series(h->p,s->real) || ap_hmf_set_real_stride(h->p,(size_t)s->stride)){
+      PyErr_SetString(PyExc_RuntimeError,"HMFTable: a plan refused its series mode"); return -1;
+    }
+    h->real=s->real; h->real_stride=s->stride;
+  }
+  if(s->has_prices){
+    long pairs,lags,fft; double lt,fp;
+    ap_hmf_direct_stats(h->p,&pairs,&lags,&fft,&lt,&fp);
+    if(lt!=s->lagtap || fp!=s->fftpair) ap_hmf_set_direct_prices(h->p,s->lagtap,s->fftpair);
+  }
+  return 0;
+}
+static void hmf_job_bind(ap_hmf_sparse_job *jb,const hmf_step *s,const hmf_slot *sl,int b0,int b1,int cluster){
+  memset(jb,0,sizeof(*jb));
+  jb->p=s->hmf->p;
+  jb->series=(const float*)sl->ptr;
+  jb->nseries=(size_t)sl->samples;
+  jb->start=s->starts+b0; jb->win_start=s->low+b0; jb->win_end=s->high+b0;
+  jb->bin_phase=s->bin_phase?s->bin_phase+b0:NULL;
+  jb->nblocks=b1-b0; jb->t0=0; jb->nt=s->nt;
+  jb->binsize=s->binsize; jb->threshold=s->threshold; jb->counts=NULL; jb->cluster_id=cluster;
+}
+static double hmf_now(void){
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+  return (double)ts.tv_sec+1e-9*(double)ts.tv_nsec;
+}
+/* The bytes a step's blocks read of its series, widened to cache lines: the span the batch's
+   Python caller computed to cluster steps that share cache lines. */
+typedef struct { uintptr_t lo,hi; int idx; } hmf_span;
+static int hmf_span_cmp(const void *a,const void *b){
+  const hmf_span *x=a,*y=b;
+  if(x->lo!=y->lo) return x->lo<y->lo?-1:1;
+  if(x->hi!=y->hi) return x->hi<y->hi?-1:1;
+  return x->idx<y->idx?-1:(x->idx>y->idx);
+}
+static int hmf_int_cmp(const void *a,const void *b){
+  const int x=*(const int*)a,y=*(const int*)b; return (x>y)-(x<y);
+}
+typedef struct { int first; int *members; int count; } hmf_cluster;
+static int hmf_cluster_cmp(const void *a,const void *b){
+  const hmf_cluster *x=a,*y=b; return (x->first>y->first)-(x->first<y->first);
+}
+/* The window-bin merge of a job's peaks (time_domain._merge_window_bins with a float sample
+   column, as the bank's assembly had it): kept indices in order into keep, their count
+   returned; -2 on a peak before the first window. */
+typedef struct { int64_t t,w,b; float negm; double s; Py_ssize_t i; } hmf_mkey;
+static int hmf_mkey_cmp(const void *a,const void *b){
+  const hmf_mkey *x=a,*y=b;
+  if(x->t!=y->t) return x->t<y->t?-1:1;
+  if(x->w!=y->w) return x->w<y->w?-1:1;
+  if(x->b!=y->b) return x->b<y->b?-1:1;
+  if(x->negm!=y->negm) return x->negm<y->negm?-1:1;
+  if(x->s!=y->s) return x->s<y->s?-1:1;
+  return (x->i>y->i)-(x->i<y->i);
+}
+static int hmf_pidx_cmp(const void *a,const void *b){
+  const Py_ssize_t x=*(const Py_ssize_t*)a,y=*(const Py_ssize_t*)b; return (x>y)-(x<y);
+}
+static Py_ssize_t hmf_merge_bins(const int64_t *W,Py_ssize_t nw,int64_t binsize,const int64_t *t,
+                                 const double *s,const float *v,Py_ssize_t n,Py_ssize_t *keep){
+  if(n<2){ for(Py_ssize_t i=0;i<n;i++) keep[i]=i; return n; }
+  /* ordered by template then sample: adjacent runs (window_bin_keep) */
+  int ordered=1;
+  {
+    Py_ssize_t w=0,kept=0,best=-1; float bestm=0.f; int64_t kt=0,kw=0,kb=0;
+    for(Py_ssize_t i=0;i<n;i++){
+      const double x=s[i];
+      if(i>0 && (t[i]<t[i-1] || (t[i]==t[i-1] && s[i]<=s[i-1]))){ ordered=0; break; }
+      if(i==0 || t[i]!=t[i-1]) w=0;
+      while(w+1<nw && (double)W[w+1]<=x) w++;
+      if(!(x>=(double)W[w])) return -2;
+      const int64_t b=wbk_bin_f(x-(double)W[w],(double)binsize);
+      const float m=hypotf(v[2*i],v[2*i+1]);
+      if(i>0 && t[i]==kt && (int64_t)w==kw && b==kb){
+        if(m>bestm){ bestm=m; best=i; }
+        continue;
+      }
+      if(best>=0) keep[kept++]=best;
+      kt=t[i]; kw=w; kb=b; best=i; bestm=m;
+    }
+    if(ordered){ if(best>=0) keep[kept++]=best; return kept; }
+  }
+  /* otherwise numpy's: lexsort((s, -|v|, bin, window, template)), the first of each
+     (template, window, bin), kept in their original order */
+  hmf_mkey *k=PyMem_Malloc((size_t)n*sizeof(hmf_mkey));
+  if(!k) return -3;
+  for(Py_ssize_t i=0;i<n;i++){
+    Py_ssize_t lo=0,hi=nw;                 /* searchsorted(W, s, 'right') - 1 */
+    while(lo<hi){ const Py_ssize_t mid=(lo+hi)/2; if((double)W[mid]<=s[i]) lo=mid+1; else hi=mid; }
+    const Py_ssize_t wi=lo-1<0?nw-1:lo-1;  /* numpy's index -1 is the last window */
+    k[i].t=t[i]; k[i].w=wi; k[i].b=wbk_bin_f(s[i]-(double)W[wi],(double)binsize);
+    k[i].negm=-hypotf(v[2*i],v[2*i+1]); k[i].s=s[i]; k[i].i=i;
+  }
+  qsort(k,(size_t)n,sizeof(hmf_mkey),hmf_mkey_cmp);
+  Py_ssize_t kept=0;
+  for(Py_ssize_t i=0;i<n;i++)
+    if(i==0 || k[i].t!=k[i-1].t || k[i].w!=k[i-1].w || k[i].b!=k[i-1].b) keep[kept++]=k[i].i;
+  PyMem_Free(k);
+  qsort(keep,(size_t)kept,sizeof(Py_ssize_t),hmf_pidx_cmp);
+  return kept;
+}
+typedef struct { int64_t key; Py_ssize_t i; } hmf_flat;
+static int hmf_flat_cmp(const void *a,const void *b){
+  const hmf_flat *x=a,*y=b;
+  if(x->key!=y->key) return x->key<y->key?-1:1;
+  return (x->i>y->i)-(x->i<y->i);
+}
+static PyObject *hmf_bytes(const void *src,Py_ssize_t nbytes){
+  return PyBytes_FromStringAndSize(src?(const char*)src:"",src?nbytes:0);
+}
+/* run(series) -> (offsets, templates, samples, snr, block_starts, block_lengths, step totals,
+   step seconds, kernel seconds): series one per slot. */
+static PyObject *HMFTable_run(HMFTableObject *self,PyObject *series_arg){
+  PyObject *seq=PySequence_Fast(series_arg,"series must be a sequence");
+  if(!seq) return NULL;
+  PyObject *ret=NULL;
+  const int ns=self->nsteps;
+  hmf_slot *slots=NULL; ap_hmf_sparse_job *jobs=NULL; hmf_span *spans=NULL;
+  hmf_cluster *clusters=NULL; int *members=NULL, *exec_of=NULL, *totals=NULL;
+  double *seconds=NULL; double kernel=0.0;
+  int64_t *o_t=NULL,*o_bs=NULL,*o_bl=NULL,*offs=NULL; double *o_s=NULL; float *o_v=NULL;
+  Py_ssize_t *keep=NULL;
+  if(PySequence_Fast_GET_SIZE(seq)!=self->nslots){
+    PyErr_SetString(PyExc_ValueError,"HMFTable.run: one series per slot"); goto done;
+  }
+  slots=PyMem_Calloc(self->nslots?(size_t)self->nslots:1,sizeof(hmf_slot));
+  jobs=PyMem_Calloc(ns?(size_t)ns:1,sizeof(ap_hmf_sparse_job));
+  spans=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_span));
+  clusters=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_cluster));
+  members=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
+  exec_of=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
+  totals=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
+  seconds=PyMem_Calloc(ns?(size_t)ns:1,sizeof(double));
+  if(!slots||!jobs||!spans||!clusters||!members||!exec_of||!totals||!seconds){ PyErr_NoMemory(); goto done; }
+  for(int k=0;k<self->nslots;k++)
+    if(hmf_slot_bind(PySequence_Fast_GET_ITEM(seq,k),&slots[k])) goto done;
+  for(int i=0;i<ns;i++){
+    hmf_step *s=&self->steps[i];
+    if(!hmf_step_mode_ok(s,&slots[s->slot])){
+      PyErr_SetString(PyExc_ValueError,"HMFTable.run: a series is not of the kind its steps were compiled for");
+      goto done;
+    }
+    if(s->hmf->busy){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter in use by another thread; use one filter per thread"); goto done; }
+  }
+  /* each phase: modes, clusters, one batch */
+  for(int p0=0;p0<ns;){
+    int p1=p0+1;
+    while(p1<ns && self->steps[p1].phase==self->steps[p0].phase) p1++;
+    const int cnt=p1-p0;
+    for(int i=p0;i<p1;i++) if(hmf_step_set_mode(&self->steps[i])) goto done;
+    for(int i=p0;i<p1;i++){
+      const hmf_step *s=&self->steps[i]; const hmf_slot *sl=&slots[s->slot];
+      const uintptr_t base=(uintptr_t)sl->ptr;
+      const size_t step_b=(!s->real || s->stride==2)?8u:4u, width=s->real?4u:8u;
+      const size_t nbytes=s->real?(s->stride==2?(size_t)(2*sl->samples-1)*4u:(size_t)sl->samples*4u)
+                                 :(size_t)sl->samples*8u;
+      const uintptr_t hi_read=base+((size_t)s->s_max+s->block_len-1)*step_b+width;
+      spans[i-p0].lo=(base+(size_t)s->s_min*step_b)&~(uintptr_t)63;
+      spans[i-p0].hi=(((base+nbytes)<hi_read?(base+nbytes):hi_read)+63)&~(uintptr_t)63;
+      spans[i-p0].idx=i-p0;
+    }
+    qsort(spans,(size_t)cnt,sizeof(hmf_span),hmf_span_cmp);
+    int nc=0, nm=0;
+    clusters[0].members=members; clusters[0].count=1; members[nm++]=spans[0].idx;
+    uintptr_t cur_end=spans[0].hi; nc=1;
+    for(int k=1;k<cnt;k++){
+      if(spans[k].lo<cur_end){
+        clusters[nc-1].count++; members[nm++]=spans[k].idx;
+        if(spans[k].hi>cur_end) cur_end=spans[k].hi;
+      } else {
+        clusters[nc].members=members+nm; clusters[nc].count=1; members[nm++]=spans[k].idx;
+        cur_end=spans[k].hi; nc++;
+      }
+    }
+    for(int c=0;c<nc;c++){
+      qsort(clusters[c].members,(size_t)clusters[c].count,sizeof(int),hmf_int_cmp);
+      clusters[c].first=clusters[c].members[0];
+    }
+    qsort(clusters,(size_t)nc,sizeof(hmf_cluster),hmf_cluster_cmp);
+    int e=0;
+    for(int c=0;c<nc;c++)
+      for(int m=0;m<clusters[c].count;m++){
+        const int i=p0+clusters[c].members[m];
+        const hmf_step *s=&self->steps[i];
+        hmf_job_bind(&jobs[p0+e],s,&slots[s->slot],0,s->nblocks,c);
+        exec_of[i]=p0+e; e++;
+      }
+    for(int i=p0;i<p1;i++) self->steps[i].hmf->busy=1;
+    int rc;
+    const double t0=hmf_now();
+    Py_BEGIN_ALLOW_THREADS
+    rc=ap_hmf_run_series_batch_sparse(jobs+p0,cnt);
+    Py_END_ALLOW_THREADS
+    const double dt=hmf_now()-t0;
+    for(int i=p0;i<p1;i++) self->steps[i].hmf->busy=0;
+    if(rc<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
+    kernel+=dt;
+    for(int i=p0;i<p1;i++){ seconds[i]=dt/(double)cnt; totals[i]=jobs[exec_of[i]].total; }
+    p0=p1;
+  }
+  /* assembly: per job its steps' peaks in step order, block-major (output rows), then the
+     window-bin merges */
+  Py_ssize_t total=0;
+  for(int i=0;i<ns;i++) total+=(Py_ssize_t)jobs[exec_of[i]].out_count;
+  const size_t cap=total?(size_t)total:1;
+  o_t=PyMem_Malloc(cap*8); o_s=PyMem_Malloc(cap*8); o_v=PyMem_Malloc(cap*8);
+  o_bs=PyMem_Malloc(cap*8); o_bl=PyMem_Malloc(cap*8); keep=PyMem_Malloc(cap*sizeof(Py_ssize_t));
+  offs=PyMem_Malloc(((size_t)self->njobs+1)*8);
+  if(!o_t||!o_s||!o_v||!o_bs||!o_bl||!keep||!offs){ PyErr_NoMemory(); goto done; }
+  Py_ssize_t at=0; int i=0;
+  for(int j=0;j<self->njobs;j++){
+    offs[j]=at;
+    const Py_ssize_t job0=at;
+    for(;i<ns && self->steps[i].job==j;i++){
+      const hmf_step *s=&self->steps[i]; const ap_hmf_sparse_job *jb=&jobs[exec_of[i]];
+      const Py_ssize_t m=(Py_ssize_t)jb->out_count;
+      if(!jb->total || !m) continue;
+      const int64_t per_block=(int64_t)s->nt*(int64_t)s->nbins;
+      hmf_flat *ord=NULL;
+      if(s->order){
+        ord=PyMem_Malloc((size_t)m*sizeof(hmf_flat));
+        if(!ord){ PyErr_NoMemory(); goto done; }
+        for(Py_ssize_t q=0;q<m;q++){
+          const int64_t f=jb->out_flat[q];
+          ord[q].key=s->order[f/per_block]*per_block+f%per_block; ord[q].i=q;
+        }
+        qsort(ord,(size_t)m,sizeof(hmf_flat),hmf_flat_cmp);
+      }
+      for(Py_ssize_t q=0;q<m;q++){
+        const Py_ssize_t src=ord?ord[q].i:q;
+        const int64_t f=ord?ord[q].key:jb->out_flat[src];
+        const int64_t bi=f/per_block, rest=f%per_block;
+        o_t[at]=s->tmap[rest/(int64_t)s->nbins];
+        o_bs[at]=s->ostarts[bi];
+        o_s[at]=(double)s->ostarts[bi]+(double)jb->out_idx[src];
+        o_v[2*at]=jb->out_val[2*src]; o_v[2*at+1]=jb->out_val[2*src+1];
+        o_bl[at]=(int64_t)s->block_len;
+        at++;
+      }
+      PyMem_Free(ord);
+    }
+    const hmf_table_job *J=&self->jobs[j];
+    for(int k=0;k<J->nmerge && at>job0;k++){
+      const Py_ssize_t n=at-job0;
+      const Py_ssize_t kept=hmf_merge_bins(J->win_starts,J->nwin,(int64_t)J->merge_bs[k],o_t+job0,
+                                           o_s+job0,o_v+2*job0,n,keep);
+      if(kept==-2){ PyErr_SetString(PyExc_ValueError,"window_bin_keep: mismatched buffers, binsize < 1 or a peak before the first window"); goto done; }
+      if(kept<0){ PyErr_NoMemory(); goto done; }
+      for(Py_ssize_t q=0;q<kept;q++){
+        const Py_ssize_t src=job0+keep[q], dst=job0+q;
+        o_t[dst]=o_t[src]; o_s[dst]=o_s[src]; o_bs[dst]=o_bs[src]; o_bl[dst]=o_bl[src];
+        o_v[2*dst]=o_v[2*src]; o_v[2*dst+1]=o_v[2*src+1];
+      }
+      at=job0+kept;
+    }
+  }
+  offs[self->njobs]=at;
+  {
+    /* sample indices as int64, as FilterResults has them */
+    int64_t *o_si=(int64_t*)o_s;
+    for(Py_ssize_t q=0;q<at;q++) o_si[q]=(int64_t)o_s[q];
+  }
+  ret=Py_BuildValue("(NNNNNNNNd)",hmf_bytes(offs,((Py_ssize_t)self->njobs+1)*8),
+                    hmf_bytes(o_t,at*8),hmf_bytes(o_s,at*8),hmf_bytes(o_v,at*8),
+                    hmf_bytes(o_bs,at*8),hmf_bytes(o_bl,at*8),
+                    hmf_bytes(totals,(Py_ssize_t)ns*(Py_ssize_t)sizeof(int)),
+                    hmf_bytes(seconds,(Py_ssize_t)ns*8),kernel);
+done:
+  if(jobs) for(int k=0;k<ns;k++){ free(jobs[k].out_flat); free(jobs[k].out_idx); free(jobs[k].out_val); }
+  if(slots) for(int k=0;k<self->nslots;k++) if(slots[k].held) PyBuffer_Release(&slots[k].view);
+  PyMem_Free(slots); PyMem_Free(jobs); PyMem_Free(spans); PyMem_Free(clusters); PyMem_Free(members);
+  PyMem_Free(exec_of); PyMem_Free(totals); PyMem_Free(seconds);
+  PyMem_Free(o_t); PyMem_Free(o_s); PyMem_Free(o_v); PyMem_Free(o_bs); PyMem_Free(o_bl);
+  PyMem_Free(keep); PyMem_Free(offs);
+  Py_DECREF(seq);
+  return ret;
+}
+/* run_slices(items) -> [(flat, index, value, total), ...]: items (step, first block, end block,
+   cluster id, series), run as one batch in the order given, each step in its series mode. */
+static PyObject *HMFTable_run_slices(HMFTableObject *self,PyObject *items_arg){
+  PyObject *seq=PySequence_Fast(items_arg,"items must be a sequence");
+  if(!seq) return NULL;
+  const Py_ssize_t n=PySequence_Fast_GET_SIZE(seq);
+  PyObject *out=NULL;
+  hmf_slot *slots=PyMem_Calloc(n?(size_t)n:1,sizeof(hmf_slot));
+  ap_hmf_sparse_job *jobs=PyMem_Calloc(n?(size_t)n:1,sizeof(ap_hmf_sparse_job));
+  int *which=PyMem_Calloc(n?(size_t)n:1,sizeof(int));
+  if(!slots||!jobs||!which){ PyErr_NoMemory(); goto done; }
+  for(Py_ssize_t k=0;k<n;k++){
+    int step,b0,b1,cluster; PyObject *ser;
+    if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(seq,k),"iiiiO",&step,&b0,&b1,&cluster,&ser)) goto done;
+    if(step<0 || step>=self->nsteps || b0<0 || b1<=b0 || b1>self->steps[step].nblocks){
+      PyErr_SetString(PyExc_ValueError,"HMFTable.run_slices: a step or block range is out of range"); goto done;
+    }
+    hmf_step *s=&self->steps[step];
+    if(hmf_slot_bind(ser,&slots[k])) goto done;
+    if(!hmf_step_mode_ok(s,&slots[k])){
+      PyErr_SetString(PyExc_ValueError,"HMFTable.run_slices: a series is not of the kind its step was compiled for");
+      goto done;
+    }
+    if(s->hmf->busy){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter in use by another thread; use one filter per thread"); goto done; }
+    if(hmf_step_set_mode(s)) goto done;
+    hmf_job_bind(&jobs[k],s,&slots[k],b0,b1,cluster);
+    which[k]=step;
+  }
+  if(n){
+    for(Py_ssize_t k=0;k<n;k++) self->steps[which[k]].hmf->busy=1;
+    int rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc=ap_hmf_run_series_batch_sparse(jobs,(int)n);
+    Py_END_ALLOW_THREADS
+    for(Py_ssize_t k=0;k<n;k++) self->steps[which[k]].hmf->busy=0;
+    if(rc<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
+  }
+  out=PyList_New(n);
+  if(!out) goto done;
+  for(Py_ssize_t k=0;k<n;k++){
+    PyObject *tup=sparse_job_tuple(&jobs[k]);
+    if(!tup){ Py_CLEAR(out); goto done; }
+    PyList_SET_ITEM(out,k,tup);
+  }
+done:
+  if(jobs) for(Py_ssize_t k=0;k<n;k++){ free(jobs[k].out_flat); free(jobs[k].out_idx); free(jobs[k].out_val); }
+  if(slots) for(Py_ssize_t k=0;k<n;k++) if(slots[k].held) PyBuffer_Release(&slots[k].view);
+  PyMem_Free(slots); PyMem_Free(jobs); PyMem_Free(which);
+  Py_DECREF(seq);
+  return out;
+}
+static PyObject *HMFTable_get_steps(HMFTableObject *self,void *closure){
+  (void)closure; return PyLong_FromLong(self->nsteps);
+}
+static PyMethodDef HMFTable_methods[]={
+  {"run",(PyCFunction)HMFTable_run,METH_O,
+   "run(series) -> (offsets, templates, samples, snr, block_starts, block_lengths, step_totals, "
+   "step_seconds, kernel_seconds): every step on its slot's series, the peaks of each job"},
+  {"run_slices",(PyCFunction)HMFTable_run_slices,METH_O,
+   "run_slices(items) -> [(flat, index, value, total), ...]: (step, b0, b1, cluster, series) "
+   "items as one batch"},
+  {NULL,NULL,0,NULL}
+};
+static PyGetSetDef HMFTable_getset[]={
+  {"steps",(getter)HMFTable_get_steps,NULL,"the number of steps",NULL},
+  {NULL,NULL,NULL,NULL,NULL}
+};
+static PyTypeObject HMFTableType={
+  PyVarObject_HEAD_INIT(NULL,0)
+  .tp_name="matchedfilter._core.HMFTable", .tp_basicsize=sizeof(HMFTableObject),
+  .tp_flags=Py_TPFLAGS_DEFAULT, .tp_new=PyType_GenericNew,
+  .tp_init=(initproc)HMFTable_init, .tp_dealloc=(destructor)HMFTable_dealloc,
+  .tp_methods=HMFTable_methods, .tp_getset=HMFTable_getset,
+  .tp_doc="gated leaf steps compiled once: HMFTable(steps, jobs, nslots)",
+};
+
 static PyObject *M_series_group(PyObject *self,PyObject *args){
   (void)self; Py_ssize_t n; int req;
   if(!PyArg_ParseTuple(args,"ni",&n,&req)) return NULL;
@@ -3342,10 +3913,12 @@ PyMODINIT_FUNC PyInit__core(void){
   if(PyType_Ready(&MFType)<0) return NULL;
   if(PyType_Ready(&HMFType)<0) return NULL;
   if(PyType_Ready(&RootType)<0) return NULL;
+  if(PyType_Ready(&HMFTableType)<0) return NULL;
   PyObject *m=PyModule_Create(&mod);
   if(!m) return NULL;
   Py_INCREF(&MFType);   PyModule_AddObject(m,"MF",(PyObject*)&MFType);
   Py_INCREF(&HMFType);  PyModule_AddObject(m,"HMF",(PyObject*)&HMFType);
   Py_INCREF(&RootType); PyModule_AddObject(m,"Root",(PyObject*)&RootType);
+  Py_INCREF(&HMFTableType); PyModule_AddObject(m,"HMFTable",(PyObject*)&HMFTableType);
   return m;
 }
