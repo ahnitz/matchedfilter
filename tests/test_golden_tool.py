@@ -65,3 +65,73 @@ def test_order_and_missing_arrays_are_differences(tmp_path, capsys):
     assert golden.main(["compare", str(a), str(missing)]) == 1
     out = capsys.readouterr().out
     assert "different arrays" in out and "1 only in A" in out
+
+
+def _record_synthetic(tmp_path, name, seed, device):
+    """golden.py record --no-captures on `device` in a fresh process (record sets the cost-file
+    and autotune environment for the process it runs in)."""
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    env.pop("MF_COST_FILE", None)
+    root = Path(__file__).resolve().parents[1]
+    out = tmp_path / name
+    run = subprocess.run([sys.executable, str(root / "tools" / "golden.py"), "record", str(out),
+                          "--costs", str(seed), "--no-captures", "--device", device,
+                          "--tree", str(root / "python")],
+                         env=env, capture_output=True, text=True, timeout=900)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "device %s" % device in run.stdout
+    return out
+
+
+def test_device_option_defaults_to_the_cpu():
+    """A record made without --device is a CPU record, as it was before the option."""
+    seen = {}
+
+    def fake_record(args):
+        seen["device"] = args.device
+        seen["digest_above"] = args.digest_above
+        return 0
+    real = golden.record
+    golden.record = fake_record
+    try:
+        assert golden.main(["record", "x.npz", "--costs", "seed.json"]) == 0
+    finally:
+        golden.record = real
+    assert seen == {"device": "cpu", "digest_above": golden.DIGEST_ABOVE}
+
+
+def test_entry_point_banks_are_made_on_the_device_asked_for(monkeypatch):
+    """The entry-point cases make their banks on the device the record runs on."""
+    import matchedfilter
+
+    class Stop(Exception):
+        pass
+    devices = []
+
+    def spy(*args, **kwargs):
+        devices.append(kwargs.get("device"))
+        raise Stop()
+    monkeypatch.setattr(matchedfilter, "TimeDomainFilterBank", spy)
+    try:
+        golden._entry_point_cases(golden.Recorder(), "gpu:7")
+    except Stop:
+        pass
+    assert devices == ["gpu:7"]
+
+
+def test_a_gpu_record_is_reproducible_from_its_seed(tmp_path, capsys):
+    """Two GPU records of the synthetic cases from one seed are identical (the seeding run
+    and a fresh process reading a copy of the seed)."""
+    import pytest
+    from conftest import usable_gpu, usable_gpu_reason
+    device = usable_gpu()
+    if device is None:
+        pytest.skip(usable_gpu_reason())
+    seed = tmp_path / "seed.json"
+    a = _record_synthetic(tmp_path, "a.npz", seed, device)
+    b = _record_synthetic(tmp_path, "b.npz", seed, device)
+    assert golden.main(["compare", str(a), str(b)]) == 0
+    assert "0 differ" in capsys.readouterr().out

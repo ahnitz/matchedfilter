@@ -16,7 +16,8 @@ some calibration tools need separately captured data.
 | Job setup | `setup_capture.py`, `setup_replay.py`, `setup_breakdown.py`, `setup_decisions_diff.py` | Capture a job's banks and references, replay its matchedfilter setup, charge its time by part, and diff two replays' decisions |
 | Gate validation | `fdr_audit.py`, `split_bias.py`, `audit_gate_model.py`, `audit_threshold.py`, `make_psd_profiles.py` | Measure gate chains' dismissal by injection against the flat filter, two-sided (`fdr_audit.py`, run by the gate), and the budget split's selection bias on independent model draws (`split_bias.py`); not part of normal installation |
 | Follow-ups over many groups | `bench_followup_groups.py` | Many leaf banks, one or two single-template calls each (most calls a group's first, as in the PyCBC job): time of a bank's first call against later ones, and resident memory per bank |
-| Output identity | `golden.py` | Record every result the library hands a caller (capture tops, hooks with follow-ups, split windows, the low-level entry points) from a seeded cost file, and compare two records bitwise, order included; run before merging a change that must not change results |
+| Output identity | `golden.py` | Record every result the library hands a caller (capture tops, hooks with follow-ups, split windows, the low-level entry points) from a seeded cost file, on the CPU or a GPU (`--device`), and compare two records bitwise, order included; run before merging a change that must not change results |
+| Device memory by role | `gpu_alloc_trace.py` | Run a program (a pycbc job, `search_bench.py`) with every Vulkan allocation traced by role (workspace slots, record buffers, inner rows, templates, ...), whether it was ever touched, and the breakdown at the peak of live memory; run before merging a change to what the GPU paths allocate |
 | Measured choices at production length | `prodlen.py` | Fresh ladder processes of two trees in ABBA order, with no MF_COST_FILE, as production runs: each measured decision's lock (a coordinate search counted once), the fine batch it locked at and how long it was open; steady, total, user and system time; run before merging a change to how choices are measured |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
@@ -62,6 +63,24 @@ python tools/golden.py compare base.npz base2.npz            # reproducible: "N 
 python tools/golden.py record new.npz --costs seed.json      # from the changed tree
 python tools/golden.py compare base.npz new.npz
 ```
+
+On a GPU, give every run `--device gpu:0` and a seed of that device's own (a device's measured
+choices are not the CPU's, and a record compares only with records of its device). From one
+seed, fresh processes on the Radeon 8060S record identical results (19,868 arrays; three runs,
+2026-11-27). Two seeds recorded by two cold runs can differ in the lowest bits of some SNRs,
+because the seeds hold different measured choices (coarse kernel layouts, the direct-refine
+price): always compare records made from the same seed. Make the seeding run the device's first
+run after a build, since it may compile kernels for minutes. `--digest-above N` keeps arrays of
+up to N elements whole instead of their digests, to see how two records differ.
+
+To see what a GPU job holds in device memory, and how much of it no kernel ever touched:
+
+```bash
+python tools/gpu_alloc_trace.py trace.json tools/search_bench.py research/captures/tops --device gpu:0
+```
+
+On the 171,828-template PyCBC job (Radeon 8060S, 2026-11-27) 2,129 MB of the 3,240 MB live at
+the peak were never touched: seven of the eight spectra slots each plan makes.
 
 The other `bench_*.py`, `audit_*.py`, `gpu_*.py` and `narrow_cpu/` programs are focused
 investigations. Their docstrings describe the question they answered. They are not a

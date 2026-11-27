@@ -37,7 +37,13 @@ trials). ``--costs`` names the seed: when it does not exist the run is cold and 
 when it exists the run reads a private copy and reports whether the run added to it (a
 measurement the seed did not hold, made in this process: such a run is not reproducible).
 Record a seed once, then record each tree from it. Run on one thread
-(OMP_NUM_THREADS=1 and the BLAS equivalents), on the CPU.
+(OMP_NUM_THREADS=1 and the BLAS equivalents).
+
+``--device`` runs every case on that device (``cpu``, the default, or a GPU such as
+``gpu:0``): the searches' leaves, the banks of the entry points and the correlation banks.
+A device's measured choices differ from the CPU's, so each device has a seed of its own; a
+record compares only with records of the same device. A device's first run after a new
+build also compiles its kernels (minutes on RADV): make the seeding run that one.
 
 The tool imports the matchedfilter package of its own checkout (``--tree`` names another
 checkout's python/ directory). An array of more than ``DIGEST_ABOVE`` elements is stored as
@@ -257,9 +263,9 @@ def _injection_windows(search, inputs, live_leaves=4, half_width=int(4.5 * 2048)
     return windows
 
 
-def _capture_cases(rec, tops):
+def _capture_cases(rec, tops, device):
     """Every capture top, then the first again with follow-ups, with split windows and with
-    an injection job's windows."""
+    an injection job's windows, each searched on `device`."""
     sys.path.insert(0, str(ROOT / "tools"))
     import search_bench
     for i, path in enumerate(tops):
@@ -271,7 +277,7 @@ def _capture_cases(rec, tops):
             variants += [("followup", _envelope_of, _follow_up(205, 50)),
                          ("split", None, None), ("injection", _envelope_of, _follow_up(205, 50))]
         for variant, envelope, refilter in variants:
-            search, inputs, windows, _, _ = search_bench.build(capture, "cpu")
+            search, inputs, windows, _, _ = search_bench.build(capture, device)
             search_threshold = search.threshold
             if variant == "split":
                 windows = _split_windows(windows, inputs)
@@ -314,10 +320,10 @@ def _chirps(n_templates, counts, complex_taps, seed):
     return taps, counts
 
 
-def _synthetic_search_case(rec):
+def _synthetic_search_case(rec, device):
     """A small search (one root, four inner nodes, a 12-template leaf under each, two
     channels, two chunks) with an envelope and follow-ups: small enough that every
-    middle-to-leaf path the library has runs on it."""
+    middle-to-leaf path the library has runs on it. Its leaves run on `device`."""
     from matchedfilter.search import BlockInput, HierarchicalSearch, Inner, Leaf, Root
     rng = np.random.default_rng(777)
     n = 131072
@@ -346,7 +352,7 @@ def _synthetic_search_case(rec):
         return [(28000 - extra, 40000 + extra), (44000 - extra, 52000 + extra)]
     search = HierarchicalSearch([root], threshold=3.6, envelope_floor=1.0, context=256,
                                 min_pad=2048,
-                                leaf_options=dict(engine="hier", device="cpu", binsize=2048,
+                                leaf_options=dict(engine="hier", device=device, binsize=2048,
                                                   false_dismissal=1e-2))
 
     def hooks(r):
@@ -361,8 +367,8 @@ def _synthetic_search_case(rec):
     _search_case(rec, "synthetic.search", search, inputs, windows, hooks)
 
 
-def _entry_point_cases(rec):
-    """The low-level entry points on small synthetic inputs."""
+def _entry_point_cases(rec, device):
+    """The low-level entry points on small synthetic inputs, with every bank on `device`."""
     from matchedfilter import TimeDomainFilterBank
     rng = np.random.default_rng(2026)
     w, df = _reference()
@@ -374,11 +380,11 @@ def _entry_point_cases(rec):
 
     rec.case = "entry.filter_series"
     hier = TimeDomainFilterBank(ftaps, fcounts, engine="hier", threshold=3.8,
-                                false_dismissal=1e-2, device="cpu")
+                                false_dismissal=1e-2, device=device)
     hier.set_reference(w, delta_f=df)
     flat = TimeDomainFilterBank(_chirps(10, rng.integers(100, 600, size=10), True, 4)[0],
                                 rng.integers(100, 600, size=10), engine="flat", threshold=4.0,
-                                device="cpu")
+                                device=device)
     for bank_name, bank, series in (("hier", hier, x), ("flat", flat, xc)):
         calls = [dict(),
                  dict(windows=[(5000, 30000), (31000, 90000), (100000, 120000)], binsize=300),
@@ -401,9 +407,9 @@ def _entry_point_cases(rec):
 
     rec.case = "entry.correlate_series"
     mtaps, mcounts = _chirps(6, [701, 851, 1201, 1501, 2001, 3001], False, 7)
-    corr = TimeDomainFilterBank(mtaps, mcounts, engine="corr", device="cpu")
+    corr = TimeDomainFilterBank(mtaps, mcounts, engine="corr", device=device)
     ctaps, ccounts = _chirps(5, [300, 500, 700, 1100, 1700], True, 9)
-    corr_c = TimeDomainFilterBank(ctaps, ccounts, engine="corr", device="cpu")
+    corr_c = TimeDomainFilterBank(ctaps, ccounts, engine="corr", device=device)
     scales = np.linspace(0.5, 2.0, 6).astype(np.float32)
     rec.add("real.all", corr.correlate_series(x))
     rec.add("real.windows", corr.correlate_series(x, windows=[(4000, 40000), (60000, 90000)]))
@@ -464,10 +470,10 @@ def _entry_point_cases(rec):
     # is below the 4 MB tiling cap and the large one's above it.
     leaf_taps, leaf_counts = _chirps(12, rng.integers(180, 300, size=12), True, 11)
     leaf = TimeDomainFilterBank(leaf_taps, leaf_counts, engine="hier", threshold=3.6,
-                                false_dismissal=1e-2, device="cpu", binsize=2048)
+                                false_dismissal=1e-2, device=device, binsize=2048)
     leaf.set_reference(w, delta_f=df)
     lane_leaf = TimeDomainFilterBank(leaf_taps[:8], leaf_counts[:8], engine="hier",
-                                     threshold=3.6, false_dismissal=1e-2, device="cpu")
+                                     threshold=3.6, false_dismissal=1e-2, device=device)
     lane_leaf.set_reference(w, delta_f=df)
     for series_name, pair in (("small", (x[:65536].copy(), y[:65536].copy())),
                               ("large", (np.tile(x, 4), np.tile(y, 4)))):
@@ -525,15 +531,15 @@ def record(args):
             print("warning: %s is not 1" % var)
     sys.path.insert(0, str(Path(args.tree).resolve() if args.tree else ROOT / "python"))
     import matchedfilter
-    print("matchedfilter from %s, cost file %s (%s)"
-          % (matchedfilter.__file__, cost_file, "cold: writing the seed" if cold else "copy"),
-          flush=True)
-    rec = Recorder()
+    print("matchedfilter from %s, device %s, cost file %s (%s)"
+          % (matchedfilter.__file__, args.device, cost_file,
+             "cold: writing the seed" if cold else "copy"), flush=True)
+    rec = Recorder(digest_above=args.digest_above)
     if not args.no_captures:
-        _capture_cases(rec, args.tops)
-    _synthetic_search_case(rec)
+        _capture_cases(rec, args.tops, args.device)
+    _synthetic_search_case(rec, args.device)
     print("recorded synthetic.search (%d arrays so far)" % len(rec.arrays), flush=True)
-    _entry_point_cases(rec)
+    _entry_point_cases(rec, args.device)
     rec.save(args.out)
     print("%d arrays recorded to %s" % (len(rec.arrays), args.out))
     if not cold:
@@ -598,6 +604,12 @@ def main(argv=None):
                          "of research/captures/tops)")
     rp.add_argument("--no-captures", action="store_true",
                     help="only the synthetic cases (for a quick check)")
+    rp.add_argument("--device", default="cpu",
+                    help="the device every case runs on: cpu (default) or a GPU, e.g. gpu:0")
+    rp.add_argument("--digest-above", type=int, default=DIGEST_ABOVE,
+                    help="arrays with more elements are stored as their SHA-256 digest "
+                         "(default %d); a large value keeps them whole, to see how two "
+                         "records differ" % DIGEST_ABOVE)
     rp.add_argument("--tree", default=None,
                     help="another checkout's python/ directory to import matchedfilter from "
                          "(default: this checkout's)")
