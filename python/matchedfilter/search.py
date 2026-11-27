@@ -1083,7 +1083,7 @@ class HierarchicalSearch:
                 self.timings["inner"] += t_info["correlate"]
             return None
         t0 = time.perf_counter()
-        compute0 = _batches.LEAF_COMPUTE_SECONDS
+        compute0 = _batches.STEP_COMPUTE_SECONDS
         jobs, where = [], {}
         for lf in leaves:
             for c in step.active:
@@ -1123,7 +1123,7 @@ class HierarchicalSearch:
             # joint trial takes its rounds on real calls (time_domain._joint_round).
             results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
             self.timings["leaf"] += time.perf_counter() - t0
-        self.timings["leaf_compute"] += _batches.LEAF_COMPUTE_SECONDS - compute0
+        self.timings["leaf_compute"] += _batches.STEP_COMPUTE_SECONDS - compute0
         return leaves, jobs, where, deferred, results
 
     def _finish_leaves(self, step, submitted):

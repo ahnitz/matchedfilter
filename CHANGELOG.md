@@ -120,6 +120,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 - `HierarchicalSearch.timings["leaf_compute"]`: of the leaf stage, the seconds the CPU leaf
   steps spent in the extension; `tools/search_bench.py` prints it as the leaf stage's compute
   fraction.
+- Single-template CPU calls (`filter_series(template_index=...)`, a search's
+  `PeaksContext.refilter`, and a batch's single-template jobs) run as single-template steps
+  of the same step table as the gated leaf steps (`_core.HMFTable`), compiled once per
+  template group; a call binds its template, series, windows, bin size and threshold. Each
+  group keeps a store of template spectra in the extension (256 slots at most), shared by
+  every table compiled from it, in place of the per-group cache of taps and spectra that
+  each call looked up in Python. `_core.td_followup_batch` is removed. Results are unchanged,
+  to the bit and in order. A follow-up call runs about 7,000 fewer instructions (one Zen 5
+  core: 0.8-1.6 us less Python a call, the extension's side unchanged).
 - The calls a consumer's hooks make back into a hierarchical search, per trigger, repeat less
   work: a single-template follow-up (`PeaksContext.refilter`) runs its one job through the
   batched follow-up path without building a batch around it, and on a GPU bank whose call

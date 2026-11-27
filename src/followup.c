@@ -1,6 +1,4 @@
-/* The follow-up batch kernel: see followup.h. Moved from _core.c unchanged but for the
-   pools' lock (a pthread mutex, as matchfilt.c's) and the job record's Python buffers,
-   which the binding keeps beside it. */
+/* The follow-up kernel of the single-template steps: see followup.h. */
 #include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -270,7 +268,7 @@ static void td_bscr_free(TdBatchScratch *ws){
   free(ws->ents);
   free(ws->u_first);
   free(ws->seen_specs);
-  free(ws->bufs);
+  free(ws->made_specs);
   memset(ws, 0, sizeof(*ws));
 }
 
@@ -882,4 +880,144 @@ int td_followup_run(TdBatchScratch *ws, TdJob *jobs, size_t nj, TdNGroup *ngroup
   }
   *total_kept_out = total_kept;
   return run_err;
+}
+
+float *td_bscr_spectra(TdBatchScratch *ws, size_t count, size_t n){
+  const size_t want = count * 2 * n;
+  if(ws->made_cap >= want && ws->made_specs) return ws->made_specs;
+  size_t nc = ws->made_cap ? ws->made_cap : 2 * n;
+  while(nc < want) nc *= 2u;
+  float *nb = (float*)ap_alloc64(nc * sizeof(float));
+  if(!nb) return NULL;
+  free(ws->made_specs);
+  ws->made_specs = nb;
+  ws->made_cap = nc;
+  return nb;
+}
+
+int td_followup_exec(TdBatchScratch *ws, TdJob *jobs, size_t nj, int64_t *offs,
+                     int64_t **si_out, float **snr_out, int64_t **bs_out, size_t *total_kept){
+  *si_out = NULL; *snr_out = NULL; *bs_out = NULL; *total_kept = 0;
+  /* Each job's block count and lags over its windows, and its mode: the time-domain
+     correlation for a narrow window of a template with taps, else transforms. */
+  size_t total_blks = 0;
+  for(size_t j = 0; j < nj; j++){
+    TdJob *jb = &jobs[j];
+    size_t nblk = 0;
+    uint64_t tlags = 0;
+    for(size_t w = 0; w < jb->nw; w++){
+      const int64_t v0 = jb->W[2 * w], v1 = jb->W[2 * w + 1];
+      if(v0 < 0 || v1 <= v0 || v1 > jb->S) continue;
+      const int64_t fidx = v0 > jb->c_bad ? (v0 - jb->c_bad) / jb->step : 0;
+      const int64_t fts = fidx * jb->step;
+      const int64_t lim = jb->S < (v1 - jb->c_bad) ? jb->S : (v1 - jb->c_bad);
+      if(fts >= lim) continue;
+      const int64_t nb_w = (lim - 1 - fts) / jb->step + 1;
+      const int64_t lts = fts + (nb_w - 1) * jb->step;
+      const int64_t rs0 = v0 > (fts + jb->c_bad) ? v0 : (fts + jb->c_bad);
+      const int64_t re_last = v1 < (lts + jb->c_bad + jb->step) ? v1 : (lts + jb->c_bad + jb->step);
+      nblk += (size_t)nb_w;
+      if(re_last > rs0) tlags += (uint64_t)(re_last - rs0);
+    }
+    jb->blk0 = total_blks;
+    jb->nblocks = nblk;
+    jb->total_lags = tlags;
+    jb->mode_td = (jb->rate_one && jb->tr != NULL && jb->L >= 1 && (size_t)jb->L <= jb->n
+                   && (int64_t)(jb->L / 2) <= jb->c_bad
+                   && jb->c_bad + jb->step <= (int64_t)jb->n
+                   && tlags > 0 && tlags * (uint64_t)jb->L <= 32768ULL) ? 1 : 0;
+    total_blks += nblk;
+  }
+
+  if(total_blks && td_grow_raw((void**)&ws->blks, &ws->blks_cap, total_blks, sizeof(TdBlk)) < 0)
+    return -1;
+  if(nj && (nj > ws->ng_cap || !ws->ngroups || !ws->jidx)){
+    size_t nc = ws->ng_cap ? ws->ng_cap : 64u;
+    while(nc < nj) nc *= 2u;
+    TdNGroup *ng = (TdNGroup*)malloc(nc * sizeof(TdNGroup));
+    size_t *ji = (size_t*)malloc(nc * sizeof(size_t));
+    if(!ng || !ji){ free(ng); free(ji); return -1; }
+    free(ws->ngroups); free(ws->jidx);
+    ws->ngroups = ng; ws->jidx = ji; ws->ng_cap = nc;
+  }
+  TdBlk *blks = ws->blks;
+
+  /* Each job's blocks, and each block's peak slots: by bin count where the bins are the
+     block's own (no phase), so a job's peaks come out as one call per bin count gives them. */
+  size_t total_pk_slots = 0;
+  size_t max_job_blks = 0;
+  for(size_t j = 0; j < nj; j++){
+    TdJob *jb = &jobs[j];
+    ws->ngroups[j] = (TdNGroup){jb->n, j};
+    if(jb->nblocks > max_job_blks) max_job_blks = jb->nblocks;
+    size_t cur = jb->blk0;
+    int any_ph = 0;
+    for(size_t w = 0; w < jb->nw; w++){
+      const int64_t v0 = jb->W[2 * w], v1 = jb->W[2 * w + 1];
+      if(v0 < 0 || v1 <= v0 || v1 > jb->S) continue;
+      const int64_t fidx = v0 > jb->c_bad ? (v0 - jb->c_bad) / jb->step : 0;
+      const int64_t fts = fidx * jb->step;
+      const int64_t lim = jb->S < (v1 - jb->c_bad) ? jb->S : (v1 - jb->c_bad);
+      if(fts >= lim) continue;
+      const int64_t nb_w = (lim - 1 - fts) / jb->step + 1;
+      for(int64_t bi = 0; bi < nb_w; bi++){
+        const int64_t ts = fts + bi * jb->step;
+        const int64_t bvt0 = ts + jb->c_bad;
+        const int64_t rs = v0 > bvt0 ? v0 : bvt0;
+        const int64_t re = v1 < (bvt0 + jb->step) ? v1 : (bvt0 + jb->step);
+        size_t ws_b = (size_t)(rs - ts);
+        size_t we_b = (size_t)(re - ts);
+        if(ws_b > jb->n) ws_b = jb->n;
+        if(we_b > jb->n) we_b = jb->n;
+        const uint32_t ph = jb->aligned ? (uint32_t)((uint64_t)(rs - v0) % (uint64_t)jb->bs) : 0u;
+        if(ph) any_ph = 1;
+        const size_t nb = we_b > ws_b ? (we_b - ws_b + (size_t)ph + jb->bs - 1u) / jb->bs : 0u;
+        blks[cur++] = (TdBlk){ts, ws_b, we_b, ph, nb, w, 0};
+      }
+    }
+    jb->nblocks = cur - jb->blk0;
+    jb->any_ph = any_ph;
+    jb->pk_off = total_pk_slots;
+    size_t pko = total_pk_slots;
+    if(!any_ph && jb->bs < jb->n && jb->nblocks > 1){
+      TdBlkOrd stack_ord[64];
+      TdBlkOrd *ord = jb->nblocks <= 64 ? stack_ord
+          : (TdBlkOrd*)malloc(jb->nblocks * sizeof(TdBlkOrd));
+      if(!ord) return -1;
+      for(size_t b = 0; b < jb->nblocks; b++) ord[b] = (TdBlkOrd){blks[jb->blk0 + b].nb, b};
+      qsort(ord, jb->nblocks, sizeof(TdBlkOrd), cmp_blk_ord);
+      for(size_t s = 0; s < jb->nblocks; s++){
+        TdBlk *bk = &blks[jb->blk0 + ord[s].idx];
+        bk->pk_dst = pko;
+        pko += bk->nb;
+      }
+      if(ord != stack_ord) free(ord);
+    } else {
+      for(size_t b = 0; b < jb->nblocks; b++){
+        TdBlk *bk = &blks[jb->blk0 + b];
+        bk->pk_dst = pko;
+        pko += bk->nb;
+      }
+    }
+    jb->pk_cnt = pko - total_pk_slots;
+    total_pk_slots = pko;
+  }
+
+  if((total_pk_slots && td_grow_raw((void**)&ws->peaks, &ws->peaks_cap, total_pk_slots, sizeof(ap_peak)) < 0)
+     || (max_job_blks && td_grow_raw((void**)&ws->ord, &ws->ord_cap, max_job_blks, sizeof(size_t)) < 0))
+    return -1;
+  /* the kept peaks' columns in one block (si owns it), and the jobs' ready flags */
+  const size_t cap = total_pk_slots ? total_pk_slots : 1u;
+  int64_t *si = (int64_t*)malloc(cap * 4 * sizeof(int64_t));
+  unsigned char few_ready[64];
+  unsigned char *ready = nj <= 64 ? few_ready : (unsigned char*)malloc(nj);
+  if(!si || !ready){ free(si); if(ready != few_ready) free(ready); return -1; }
+  int64_t *bs = si + cap;
+  float *snr = (float*)(si + 2 * cap);
+  const int rc = td_followup_run(ws, jobs, nj, ws->ngroups, ws->jidx, blks, total_blks, ws->peaks,
+                                 ws->ord, offs, ready, si, snr, bs, total_kept);
+  if(ready != few_ready) free(ready);
+  if(rc){ free(si); *total_kept = 0; return -1; }
+  *si_out = si; *snr_out = snr; *bs_out = bs;
+  return 0;
 }

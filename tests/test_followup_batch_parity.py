@@ -118,13 +118,18 @@ def test_cpu_followup_batch_narrow_and_wide_parity(monkeypatch, complex_taps, en
     series_pool = [cplx_pair, f32_contig, cplx_pair.real, cplx_pair.imag]
 
     # Build mixed batch with narrow windows (Direct TD) and overlapping wide windows (Batched FFT).
+    # Every run of a table of single-template steps, by its number of bound calls.
     batch_calls = []
-    orig_td_batch = _core.td_followup_batch
-    monkeypatch.setattr(
-        _core,
-        "td_followup_batch",
-        lambda c_jobs: batch_calls.append(len(c_jobs)) or orig_td_batch(c_jobs),
-    )
+    table_type = _core.HMFTable
+
+    class CountedTable:
+        def __init__(self, *args):
+            self.table = table_type(*args)
+
+        def run(self, series, calls=()):
+            batch_calls.append(len(calls))
+            return self.table.run(series, calls)
+    monkeypatch.setattr(_core, "HMFTable", CountedTable)
 
     jobs = []
     for k in range(24):

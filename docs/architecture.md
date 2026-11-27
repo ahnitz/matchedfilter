@@ -86,7 +86,7 @@ Highway's `foreach_target.h`, so one build holds a copy per SIMD target and
 | `kernel_avx1.cc`, `simd-avx1.h` | The `AVX` back end: SSE4's kernels with the float paths at 8 lanes, for CPUs with AVX but not AVX2. |
 | `gauss.cc` | Counter-based normal draws for the gate model's simulation, identical on every ISA. |
 | `simulate.c`, `records.cc` | The gate model's simulation: the rows' transforms (`simulate.c`, behind `simulate.h`) and the power and running-maximum kernels (`records.cc`). |
-| `followup.c` | Single-template follow-up calls of the time-domain banks, many at once: the plan and scratch pools, the per-length kernel and the compaction of peaks (behind `followup.h`). |
+| `followup.c` | The single-template steps of the time-domain banks (follow-up calls), many at once: the plan and scratch pools, the block layout, the per-length kernel and the compaction of peaks (behind `followup.h`). |
 | `tier0.cc`, `tier0_mwu.cc`, `tier0_pass.cc`, `tier0_match.cc` | Shared-screener clustering: pairing a band's vectors, merging groups and synthesising each group's screener. The last three reproduce NumPy's arithmetic operation for operation and are built without floating-point contraction. |
 
 CI checks that the generated codelet headers match their generators (`generated-files` job
@@ -102,8 +102,9 @@ here: `simulate` (the one simulation, below; its kernel is `src/simulate.c`),
 `gatechain._chain_candidates` is its reference, selected by `gatechain._C_SEARCH`),
 `plan_best` (a chain's candidate plans priced on a cost model; reference in
 `gatechain.plan_chain`, selected by `gatechain._C_PRICING`), the shared-screener routines
-(`tier0_match`, `tier0_pair_level`, `tier0_pass`, `tier0_mwu`), `gauss_fill`, and the
-single-template follow-up batch (`td_followup_batch`; its kernel is `src/followup.c`). Buffers are checked at
+(`tier0_match`, `tier0_pair_level`, `tier0_pass`, `tier0_mwu`), `gauss_fill`, and the step
+table `HMFTable` (gated leaf steps, run with `ap_hmf_run_series_batch_sparse`, and
+single-template steps, run with the follow-up kernel of `src/followup.c`). Buffers are checked at
 the boundary independently of the Python API. `MF` and `HMF` share one implementation of
 ingest, `run` and `run_series` (`bind_set`, `bind_set_batch`, `bind_run`,
 `bind_run_series`, reading a `filter_view` of the object); every buffer a binding takes is
@@ -196,7 +197,16 @@ count are a step on the plan of the call's profile, compiled once per call shape
 calls' banks, layouts, profiles, series lengths and kinds, windows, bin sizes and
 thresholds) and kept by the first call's bank; a run is one C call that sets each plan's
 series mode, clusters the steps whose series share cache lines, runs them and returns every
-call's peaks in one arena, window bins merged. `TimeDomainFilterBank.correlate_and_filter_many` runs a
+call's peaks in one arena, window bins merged. Single-template CPU calls (`template_index`,
+a search's follow-ups) are single-template steps of the same table type: a template group's
+step (its block geometry, its templates' taps and bank indices, and the group's store of
+template spectra, `_batches._single_step`) is compiled once and kept by the group, or for a
+batch over several groups by the first call's bank; a call binds its template, series,
+windows, bin size and threshold and runs in the same C call, which lays its blocks out,
+correlates (time-domain for a narrow window, else by transforms), bins and merges in C. A
+template's spectrum is made from its taps when a call first needs it and kept in a slot of
+the group's store (256 slots at most, the least recently used given up first).
+`TimeDomainFilterBank.correlate_and_filter_many` runs a
 hierarchical search's middle correlations together with the leaf calls that read them: jobs
 on one middle bank and window layout form a cohort (the detectors of one search), which is
 correlated in cache-sized chunks into a scratch buffer that the leaf banks filter before

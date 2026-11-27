@@ -1199,16 +1199,21 @@ static PyTypeObject HMFType={
 };
 
 
-/* ---------------- gated leaf steps: a persistent table of sparse jobs ---------------- */
-/* HMFTable holds a call shape's gated (HMF) leaf work, compiled once: one ap_hmf_sparse_job
-   per step (a template group's blocks of one bin count, on one plan) with its block layout,
-   plus what each step needs to be set up and assembled. run() binds the jobs' series, sets
-   each plan to the step's series mode and direct prices, clusters the steps of each phase by
-   the bytes their series spans share (as the batch's caller once did in Python), runs every
-   phase with ap_hmf_run_series_batch_sparse, and assembles the peaks of each job (bank call)
+/* ---------------- the step table: gated leaf steps and single-template steps ---------------- */
+/* HMFTable holds a call shape's leaf work, compiled once. A gated step is one
+   ap_hmf_sparse_job (a template group's blocks of one bin count, on one plan) with its block
+   layout, plus what it needs to be set up and assembled. A single-template step is one
+   template group as a follow-up filters it, one template at a time (src/followup.c): its
+   block geometry, its templates' taps (or spectra) and bank indices, and the group's store of
+   template spectra, which every table compiled from the group shares. run() binds the gated
+   steps' series, sets each plan to the step's series mode and direct prices, clusters the
+   steps of each phase by the bytes their series spans share (as the batch's caller once did
+   in Python), runs every phase with ap_hmf_run_series_batch_sparse; then runs the calls bound
+   to the single-template steps (a template, a series, windows, a bin size and a threshold per
+   call) together, with the follow-up kernel; and assembles the peaks of each job (bank call)
    into one arena: template index, sample, complex SNR, block start and block length, in the
-   order FilterResults had them, window bins merged. run_slices() runs block ranges of steps
-   with clusters the caller gives (the tiled middle-to-leaf cascade). */
+   order FilterResults had them, window bins merged. run_slices() runs block ranges of gated
+   steps with clusters the caller gives (the tiled middle-to-leaf cascade). */
 static inline int64_t wbk_bin_f(double a, double b);
 typedef struct {
   HMFObject *hmf;
@@ -1228,14 +1233,42 @@ typedef struct {
   int64_t *win_starts; Py_ssize_t nwin;   /* the call's window starts, for merging bins */
   Py_ssize_t *merge_bs; int nmerge;       /* bin sizes whose partial bins merge, in order */
 } hmf_table_job;
+/* A single-template step: a template group's templates as the follow-up kernel filters them.
+   A template whose row of spectrum_rows is not negative has its spectrum given (spectra);
+   the others are made from their taps when a run needs them, into a slot of the group's store
+   (index: per row its slot or -1, per slot its row or -1, its last use and whether it holds
+   the spectrum, then the use clock and a busy flag; store: the slots' spectra). */
+typedef struct {
+  Py_buffer taps, counts, spectra, spectrum_rows, index, store;
+  int held;                      /* the views held: 1 taps, 2 counts, 4 spectra, 8 rows, 16 index, 32 store */
+  int nt, cap, tr_cplx;
+  size_t n; int64_t step, c_bad;
+  Py_ssize_t row_floats;         /* floats per row of taps */
+  int64_t *tmap;                 /* [nt] bank template index of each row, owned */
+} hmf_single;
 typedef struct {
   PyObject_HEAD
   hmf_step *steps; int nsteps;
   hmf_table_job *jobs; int njobs;
   int nslots;
+  hmf_single *singles; int nsingles;
 } HMFTableObject;
 
 static void hmf_table_free_contents(HMFTableObject *self){
+  if(self->singles){
+    for(int i=0;i<self->nsingles;i++){
+      hmf_single *g=&self->singles[i];
+      if(g->held&1) PyBuffer_Release(&g->taps);
+      if(g->held&2) PyBuffer_Release(&g->counts);
+      if(g->held&4) PyBuffer_Release(&g->spectra);
+      if(g->held&8) PyBuffer_Release(&g->spectrum_rows);
+      if(g->held&16) PyBuffer_Release(&g->index);
+      if(g->held&32) PyBuffer_Release(&g->store);
+      PyMem_Free(g->tmap);
+    }
+    PyMem_Free(self->singles);
+  }
+  self->singles=NULL; self->nsingles=0;
   if(self->steps){
     for(int i=0;i<self->nsteps;i++){
       hmf_step *s=&self->steps[i];
@@ -1276,16 +1309,95 @@ static void *hmf_table_copy(PyObject *o,Py_ssize_t count,Py_ssize_t item,int all
   PyBuffer_Release(&b);
   return out;
 }
-/* HMFTable(steps, jobs, nslots). Each step is (hmf, slot, real, stride, starts, low, high,
-   bin_phase|None, nt, binsize, threshold, prices|None, phase, job, tmap, order|None, ostarts):
-   uintp starts and windows, uint32 phases, int64 tmap, order and ostarts; prices are the
-   (lagtap, fftpair) the plan runs this series mode with, or None to leave them. Each job is
-   (window starts int64, merge bin sizes). */
+/* A single-template step from its tuple (n, step, c_bad, tmap, taps|None, counts|None,
+   spectra|None, spectrum_rows|None, index|None, store|None); see hmf_single. 0, or -1 with the
+   exception set. */
+static int hmf_single_init(hmf_single *g,PyObject *item){
+  Py_ssize_t n,step,c_bad; PyObject *tmap,*taps,*counts,*spectra,*rows,*index,*store; int failed;
+  memset(g,0,sizeof(*g));
+  if(!PyArg_ParseTuple(item,"nnnOOOOOOO",&n,&step,&c_bad,&tmap,&taps,&counts,&spectra,&rows,
+                       &index,&store)) return -1;
+  if(n<16 || (n&(n-1)) || !ap_supported((size_t)n) || step<1 || c_bad<0){
+    PyErr_SetString(PyExc_ValueError,"HMFTable: a single-template step's block geometry is invalid");
+    return -1;
+  }
+  g->n=(size_t)n; g->step=(int64_t)step; g->c_bad=(int64_t)c_bad;
+  Py_buffer bt;
+  if(PyObject_GetBuffer(tmap,&bt,PyBUF_C_CONTIGUOUS)<0) return -1;
+  const Py_ssize_t nt=bt.len/8;
+  PyBuffer_Release(&bt);
+  if(nt<1 || nt>INT_MAX){ PyErr_SetString(PyExc_ValueError,"HMFTable: a single-template step needs templates"); return -1; }
+  g->nt=(int)nt;
+  g->tmap=hmf_table_copy(tmap,nt,8,0,&failed);
+  if(failed) return -1;
+  const char *bad="HMFTable: a single-template step's templates are invalid";
+  if(spectra!=Py_None){
+    if(PyObject_GetBuffer(spectra,&g->spectra,PyBUF_C_CONTIGUOUS)<0) return -1;
+    g->held|=4;
+    if(PyObject_GetBuffer(rows,&g->spectrum_rows,PyBUF_C_CONTIGUOUS)<0) return -1;
+    g->held|=8;
+    if(g->spectrum_rows.len!=nt*8 || g->spectra.len%(n*8)){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
+    const int64_t *r=g->spectrum_rows.buf; const Py_ssize_t ns=g->spectra.len/(n*8);
+    for(Py_ssize_t i=0;i<nt;i++)
+      if(r[i]>=ns || (r[i]<0 && taps==Py_None)){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
+  }
+  if(taps!=Py_None){
+    if(PyObject_GetBuffer(taps,&g->taps,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return -1;
+    g->held|=1;
+    const char *f=g->taps.format?g->taps.format:"B";
+    if(*f=='<' || *f=='=' || *f=='@') f++;
+    if(g->taps.ndim!=2 || g->taps.shape[0]!=nt || !(( !strcmp(f,"f") && g->taps.itemsize==4)
+                                                      || (!strcmp(f,"Zf") && g->taps.itemsize==8))){
+      PyErr_SetString(PyExc_ValueError,"HMFTable: taps must be (templates, taps) float32 or complex64");
+      return -1;
+    }
+    g->tr_cplx=g->taps.itemsize==8;
+    g->row_floats=g->taps.shape[1]*(g->taps.itemsize/4);
+    if(PyObject_GetBuffer(counts,&g->counts,PyBUF_C_CONTIGUOUS)<0) return -1;
+    g->held|=2;
+    if(PyObject_GetBuffer(store,&g->store,PyBUF_C_CONTIGUOUS|PyBUF_WRITABLE)<0) return -1;
+    g->held|=32;
+    if(PyObject_GetBuffer(index,&g->index,PyBUF_C_CONTIGUOUS|PyBUF_WRITABLE)<0) return -1;
+    g->held|=16;
+    if(g->counts.len!=nt*8 || g->store.len<n*8 || g->store.len%(n*8) || g->store.len/(n*8)>INT_MAX){
+      PyErr_SetString(PyExc_ValueError,bad); return -1;
+    }
+    g->cap=(int)(g->store.len/(n*8));
+    if(g->index.len!=(nt+3*(Py_ssize_t)g->cap+2)*8){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
+    const int64_t *c=g->counts.buf, *r=(g->held&8)?g->spectrum_rows.buf:NULL;
+    for(Py_ssize_t i=0;i<nt;i++)
+      if((!r || r[i]<0) && (c[i]<1 || c[i]>n || c[i]>g->taps.shape[1])){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
+  } else if(spectra==Py_None){
+    PyErr_SetString(PyExc_ValueError,bad); return -1;
+  }
+  for(Py_ssize_t i=0;i<nt;i++) if(g->tmap[i]<0){ PyErr_SetString(PyExc_ValueError,bad); return -1; }
+  return 0;
+}
+/* HMFTable(steps, jobs, nslots, singles=()). Each step is (hmf, slot, real, stride, starts, low,
+   high, bin_phase|None, nt, binsize, threshold, prices|None, phase, job, tmap, order|None,
+   ostarts): uintp starts and windows, uint32 phases, int64 tmap, order and ostarts; prices are
+   the (lagtap, fftpair) the plan runs this series mode with, or None to leave them. Each job is
+   (window starts int64, merge bin sizes). Each single is a single-template step's tuple
+   (hmf_single_init). */
 static int HMFTable_init(HMFTableObject *self,PyObject *args,PyObject *kw){
   (void)kw;
-  PyObject *steps_arg,*jobs_arg; int nslots;
-  if(!PyArg_ParseTuple(args,"OOi",&steps_arg,&jobs_arg,&nslots)) return -1;
+  PyObject *steps_arg,*jobs_arg,*singles_arg=NULL; int nslots;
+  if(!PyArg_ParseTuple(args,"OOi|O",&steps_arg,&jobs_arg,&nslots,&singles_arg)) return -1;
   hmf_table_free_contents(self);
+  if(singles_arg){
+    PyObject *singles=PySequence_Fast(singles_arg,"singles must be a sequence");
+    if(!singles) return -1;
+    const Py_ssize_t ng=PySequence_Fast_GET_SIZE(singles);
+    self->singles=PyMem_Calloc(ng?(size_t)ng:1,sizeof(hmf_single));
+    if(!self->singles){ Py_DECREF(singles); PyErr_NoMemory(); return -1; }
+    for(Py_ssize_t i=0;i<ng && i<INT_MAX;i++){
+      self->nsingles=(int)i+1;
+      if(hmf_single_init(&self->singles[i],PySequence_Fast_GET_ITEM(singles,i))){
+        Py_DECREF(singles); hmf_table_free_contents(self); return -1;
+      }
+    }
+    Py_DECREF(singles);
+  }
   PyObject *steps=PySequence_Fast(steps_arg,"steps must be a sequence");
   if(!steps) return -1;
   PyObject *jobs=PySequence_Fast(jobs_arg,"jobs must be a sequence");
@@ -1526,11 +1638,195 @@ static int hmf_flat_cmp(const void *a,const void *b){
 static PyObject *hmf_bytes(const void *src,Py_ssize_t nbytes){
   return PyBytes_FromStringAndSize(src?(const char*)src:"",src?nbytes:0);
 }
-/* run(series) -> (offsets, templates, samples, snr, block_starts, block_lengths, step totals,
-   step seconds, kernel seconds): series one per slot. */
-static PyObject *HMFTable_run(HMFTableObject *self,PyObject *series_arg){
+/* The calls bound to a table's single-template steps, run together: per call its step, row
+   (template), series, windows and the peaks the follow-up kernel kept. */
+typedef struct {
+  Py_ssize_t ncalls;
+  int *single, *row;
+  int64_t *offs;                 /* [ncalls + 1] into si, snr, bs */
+  int64_t *si, *bs; float *snr;  /* malloc'd by td_followup_exec */
+  size_t kept;
+  double seconds;
+  int few;                       /* single, row and offs are the few_ arrays below */
+  int few_single[8], few_row[8];
+  int64_t few_offs[9];
+} hmf_single_out;
+static void hmf_single_out_free(hmf_single_out *o){
+  if(!o->few){ PyMem_Free(o->single); PyMem_Free(o->row); PyMem_Free(o->offs); }
+  free(o->si);
+  memset(o,0,sizeof(*o));
+}
+/* Bind each call (single, series, row, windows, binsize, aligned, threshold) to its step, give
+   each template a spectrum (given; held in the group's store; or made in the scratch), and run
+   every call with the follow-up kernel. 0, or -1 with the exception set. */
+static int hmf_run_singles(HMFTableObject *self,PyObject *calls_arg,hmf_single_out *out){
+  memset(out,0,sizeof(*out));
+  PyObject *calls=PySequence_Fast(calls_arg,"calls must be a sequence");
+  if(!calls) return -1;
+  const Py_ssize_t nc=PySequence_Fast_GET_SIZE(calls);
+  out->ncalls=nc;
+  int rc=-1;
+  hmf_slot *views=NULL; Py_buffer *wins=NULL; char *wheld=NULL; int *slot=NULL, *busy=NULL;
+  int64_t *clock0=NULL;
+  TdBatchScratch *ws=NULL;
+  /* per call: its step and row, offsets (out), its series and windows views, its store slot;
+     per step: whether this run holds its store, and the store's clock when it took it. A
+     run of a few calls on a few steps (a follow-up's) keeps these on the stack. */
+  enum { HMF_FEW=8 };
+  int few_slot[HMF_FEW], few_busy[HMF_FEW];
+  int64_t few_clock[HMF_FEW];
+  hmf_slot few_views[HMF_FEW]; Py_buffer few_wins[HMF_FEW]; char few_wheld[HMF_FEW];
+  const size_t cnt=nc?(size_t)nc:1, ng=self->nsingles?(size_t)self->nsingles:1;
+  out->few=cnt<=HMF_FEW;
+  if(out->few){
+    out->single=out->few_single; out->row=out->few_row; out->offs=out->few_offs;
+    memset(out->few_offs,0,sizeof(out->few_offs));
+    views=few_views; wins=few_wins;
+    wheld=few_wheld; slot=few_slot;
+    memset(few_views,0,sizeof(few_views)); memset(few_wheld,0,sizeof(few_wheld));
+  } else {
+    out->single=PyMem_Calloc(cnt,sizeof(int)); out->row=PyMem_Calloc(cnt,sizeof(int));
+    out->offs=PyMem_Calloc(cnt+1,sizeof(int64_t));
+    views=PyMem_Calloc(cnt,sizeof(hmf_slot)); wins=PyMem_Calloc(cnt,sizeof(Py_buffer));
+    wheld=PyMem_Calloc(cnt,1); slot=PyMem_Calloc(cnt,sizeof(int));
+  }
+  if(ng<=HMF_FEW){
+    busy=few_busy; clock0=few_clock; memset(few_busy,0,sizeof(few_busy));
+  } else {
+    busy=PyMem_Calloc(ng,sizeof(int)); clock0=PyMem_Calloc(ng,sizeof(int64_t));
+  }
+  if(!out->single||!out->row||!out->offs||!views||!wins||!wheld||!slot||!busy||!clock0){ PyErr_NoMemory(); goto done; }
+  if(!nc){ rc=0; goto done; }
+  ws=td_bscr_acquire();
+  if(!ws){ PyErr_NoMemory(); goto done; }
+  if(td_grow_raw((void**)&ws->jobs,&ws->jobs_cap,(size_t)nc,sizeof(TdJob))<0){ PyErr_NoMemory(); goto done; }
+  TdJob *jobs=ws->jobs;
+  memset(jobs,0,(size_t)nc*sizeof(TdJob));
+  /* each call's step, series, windows and template */
+  for(Py_ssize_t c=0;c<nc;c++){
+    int si,aligned; Py_ssize_t row,binsize; PyObject *ser,*win; float thr;
+    if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(calls,c),"iOnOnpf",&si,&ser,&row,&win,&binsize,
+                         &aligned,&thr)) goto done;
+    if(si<0 || si>=self->nsingles || row<0 || row>=self->singles[si].nt || binsize<1){
+      PyErr_SetString(PyExc_ValueError,"HMFTable.run: a call's step, template or bin size is out of range");
+      goto done;
+    }
+    const hmf_single *g=&self->singles[si];
+    out->single[c]=si; out->row[c]=(int)row; slot[c]=-1;
+    if(hmf_slot_bind(ser,&views[c])) goto done;
+    TdJob *jb=&jobs[c];
+    const hmf_slot *sv=&views[c];
+    jb->ser_f=(const float*)sv->ptr; jb->s_kind=sv->kind; jb->S=(int64_t)sv->samples;
+    jb->cser_floats=sv->kind==2?(sv->samples>0?(size_t)(2*sv->samples-1):0u)
+                   :(size_t)sv->samples*(sv->kind==0?2u:1u);
+    if(PyTuple_CheckExact(win) && PyTuple_GET_SIZE(win)==2){
+      const long long v0=PyLong_AsLongLong(PyTuple_GET_ITEM(win,0));
+      const long long v1=PyLong_AsLongLong(PyTuple_GET_ITEM(win,1));
+      if(PyErr_Occurred()) goto done;
+      jb->single_w[0]=(int64_t)v0; jb->single_w[1]=(int64_t)v1;
+      jb->W=jb->single_w; jb->nw=(v0<v1)?1u:0u;
+    } else {
+      if(PyObject_GetBuffer(win,&wins[c],PyBUF_C_CONTIGUOUS)<0) goto done;
+      wheld[c]=1;
+      if(wins[c].len%(2*(Py_ssize_t)sizeof(int64_t))){
+        PyErr_SetString(PyExc_ValueError,"HMFTable.run: windows must be (K, 2) int64"); goto done;
+      }
+      jb->W=(const int64_t*)wins[c].buf; jb->nw=(size_t)(wins[c].len/(2*(Py_ssize_t)sizeof(int64_t)));
+    }
+    jb->n=g->n; jb->step=g->step; jb->c_bad=g->c_bad; jb->bs=(size_t)binsize;
+    jb->aligned=aligned?1:0; jb->thr=thr; memcpy(&jb->thr_bits,&thr,sizeof(uint32_t));
+    jb->global_ti=g->tmap[row];
+    const int64_t given=(g->held&8)?((const int64_t*)g->spectrum_rows.buf)[row]:-1;
+    if(given>=0){
+      jb->spec=(float*)g->spectra.buf+(size_t)given*2*g->n; jb->spec_ready=1;
+    } else {
+      jb->rate_one=1; jb->L=(int)((const int64_t*)g->counts.buf)[row]; jb->tr_cplx=g->tr_cplx;
+      jb->tr=(const float*)g->taps.buf+(size_t)row*(size_t)g->row_floats;
+    }
+  }
+  /* the spectra made from taps: a slot of the group's store (least recently used first; a
+     store another run holds is not used), or the scratch; a template given twice is one
+     spectrum, as the kernel shares it */
+  size_t nmade=0;
+  for(Py_ssize_t c=0;c<nc;c++){
+    TdJob *jb=&jobs[c];
+    if(!jb->rate_one) continue;
+    const int si=out->single[c], row=out->row[c];
+    Py_ssize_t twin=-1;
+    for(Py_ssize_t p=0;p<c;p++) if(jobs[p].rate_one && out->single[p]==si && out->row[p]==row){ twin=p; break; }
+    if(twin>=0){ slot[c]=slot[twin]; jb->spec=jobs[twin].spec; jb->spec_ready=jobs[twin].spec_ready; continue; }
+    hmf_single *g=&self->singles[si];
+    int64_t *ix=g->index.buf, *slot_of=ix, *row_of=ix+g->nt, *used=row_of+g->cap,
+            *ready=used+g->cap, *clk=ready+g->cap;
+    if(!busy[si]){
+      if(clk[1]){ busy[si]=-1; }                      /* another run holds the store */
+      else { clk[1]=1; busy[si]=1; clock0[si]=clk[0]; }
+    }
+    if(busy[si]<0){ slot[c]=-1; nmade++; continue; }
+    int k=(int)slot_of[row];
+    if(k<0){
+      int best=0;
+      for(int q=1;q<g->cap;q++) if(used[q]<used[best]) best=q;
+      if(used[best]>clock0[si]){ slot[c]=-1; nmade++; continue; }   /* every slot serves this run */
+      if(row_of[best]>=0) slot_of[row_of[best]]=-1;
+      k=best; row_of[k]=row; slot_of[row]=k; ready[k]=0;
+    }
+    used[k]=++clk[0];
+    slot[c]=k;
+    jb->spec=(float*)g->store.buf+(size_t)k*2*g->n; jb->spec_ready=(int)ready[k];
+  }
+  if(nmade){
+    size_t nmax=0;
+    for(Py_ssize_t c=0;c<nc;c++) if(jobs[c].rate_one && slot[c]<0 && jobs[c].n>nmax) nmax=jobs[c].n;
+    float *made=td_bscr_spectra(ws,nmade,nmax);
+    if(!made){ PyErr_NoMemory(); goto done; }
+    size_t m=0;
+    for(Py_ssize_t c=0;c<nc;c++){
+      if(!jobs[c].rate_one || slot[c]>=0 || jobs[c].spec) continue;
+      jobs[c].spec=made+m*2*nmax; m++;
+      for(Py_ssize_t q=c+1;q<nc;q++)
+        if(jobs[q].rate_one && slot[q]<0 && !jobs[q].spec && out->single[q]==out->single[c]
+           && out->row[q]==out->row[c]) jobs[q].spec=jobs[c].spec;
+    }
+  }
+  /* the kernel */
+  int err;
+  const double t0=hmf_now();
+  Py_BEGIN_ALLOW_THREADS
+  err=td_followup_exec(ws,jobs,(size_t)nc,out->offs,&out->si,&out->snr,&out->bs,&out->kept);
+  Py_END_ALLOW_THREADS
+  out->seconds=hmf_now()-t0;
+  if(err){ PyErr_SetString(PyExc_RuntimeError,"HMFTable.run: the follow-up kernel failed"); goto done; }
+  /* a slot whose spectrum the kernel made now holds it */
+  for(Py_ssize_t c=0;c<nc;c++){
+    if(slot[c]<0 || !jobs[c].spec_ready) continue;
+    hmf_single *g=&self->singles[out->single[c]];
+    int64_t *ready=(int64_t*)g->index.buf+g->nt+2*(Py_ssize_t)g->cap;
+    ready[slot[c]]=1;
+  }
+  rc=0;
+done:
+  if(busy) for(int i=0;i<self->nsingles;i++)
+    if(busy[i]>0) ((int64_t*)self->singles[i].index.buf)[self->singles[i].nt+3*(Py_ssize_t)self->singles[i].cap+1]=0;
+  if(views) for(Py_ssize_t c=0;c<nc;c++) if(views[c].held) PyBuffer_Release(&views[c].view);
+  if(wins) for(Py_ssize_t c=0;c<nc;c++) if(wheld[c]) PyBuffer_Release(&wins[c]);
+  if(ws) td_bscr_release(ws);
+  if(cnt>HMF_FEW){ PyMem_Free(views); PyMem_Free(wins); PyMem_Free(wheld); PyMem_Free(slot); }
+  if(ng>HMF_FEW){ PyMem_Free(busy); PyMem_Free(clock0); }
+  Py_DECREF(calls);
+  if(rc) hmf_single_out_free(out);
+  return rc;
+}
+/* run(series, calls=()) -> (offsets, templates, samples, snr, block_starts, block_lengths,
+   step totals, step seconds, kernel seconds): series one per slot of the gated steps; calls
+   (single, series, row, windows, binsize, aligned, threshold) bound to the single-template
+   steps, each a job after the table's own. */
+static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
+  PyObject *series_arg,*calls_arg=NULL;
+  if(!PyArg_ParseTuple(args,"O|O",&series_arg,&calls_arg)) return NULL;
   PyObject *seq=PySequence_Fast(series_arg,"series must be a sequence");
   if(!seq) return NULL;
+  hmf_single_out sing; memset(&sing,0,sizeof(sing));
   PyObject *ret=NULL;
   const int ns=self->nsteps;
   hmf_slot *slots=NULL; ap_hmf_sparse_job *jobs=NULL; hmf_span *spans=NULL;
@@ -1541,15 +1837,22 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *series_arg){
   if(PySequence_Fast_GET_SIZE(seq)!=self->nslots){
     PyErr_SetString(PyExc_ValueError,"HMFTable.run: one series per slot"); goto done;
   }
-  slots=PyMem_Calloc(self->nslots?(size_t)self->nslots:1,sizeof(hmf_slot));
-  jobs=PyMem_Calloc(ns?(size_t)ns:1,sizeof(ap_hmf_sparse_job));
-  spans=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_span));
-  clusters=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_cluster));
-  members=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
-  exec_of=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
-  totals=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
-  seconds=PyMem_Calloc(ns?(size_t)ns:1,sizeof(double));
-  if(!slots||!jobs||!spans||!clusters||!members||!exec_of||!totals||!seconds){ PyErr_NoMemory(); goto done; }
+  /* the calls bound to the single-template steps */
+  if(calls_arg && hmf_run_singles(self,calls_arg,&sing)) goto done;
+  const Py_ssize_t nsc=sing.ncalls, nout=ns+nsc;
+  kernel+=sing.seconds;
+  totals=PyMem_Calloc(nout?(size_t)nout:1,sizeof(int));
+  seconds=PyMem_Calloc(nout?(size_t)nout:1,sizeof(double));
+  if(!totals||!seconds){ PyErr_NoMemory(); goto done; }
+  if(self->nslots || ns){
+    slots=PyMem_Calloc(self->nslots?(size_t)self->nslots:1,sizeof(hmf_slot));
+    jobs=PyMem_Calloc(ns?(size_t)ns:1,sizeof(ap_hmf_sparse_job));
+    spans=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_span));
+    clusters=PyMem_Calloc(ns?(size_t)ns:1,sizeof(hmf_cluster));
+    members=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
+    exec_of=PyMem_Calloc(ns?(size_t)ns:1,sizeof(int));
+    if(!slots||!jobs||!spans||!clusters||!members||!exec_of){ PyErr_NoMemory(); goto done; }
+  }
   for(int k=0;k<self->nslots;k++)
     if(hmf_slot_bind(PySequence_Fast_GET_ITEM(seq,k),&slots[k])) goto done;
   for(int i=0;i<ns;i++){
@@ -1620,11 +1923,16 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *series_arg){
      window-bin merges */
   Py_ssize_t total=0;
   for(int i=0;i<ns;i++) total+=(Py_ssize_t)jobs[exec_of[i]].out_count;
+  total+=(Py_ssize_t)sing.kept;
   const size_t cap=total?(size_t)total:1;
-  o_t=PyMem_Malloc(cap*8); o_s=PyMem_Malloc(cap*8); o_v=PyMem_Malloc(cap*8);
-  o_bs=PyMem_Malloc(cap*8); o_bl=PyMem_Malloc(cap*8); keep=PyMem_Malloc(cap*sizeof(Py_ssize_t));
-  offs=PyMem_Malloc(((size_t)self->njobs+1)*8);
-  if(!o_t||!o_s||!o_v||!o_bs||!o_bl||!keep||!offs){ PyErr_NoMemory(); goto done; }
+  /* the arena's columns in one block, then the offsets */
+  o_t=PyMem_Malloc(cap*5*8+((size_t)self->njobs+(size_t)nsc+1)*8);
+  if(!o_t){ PyErr_NoMemory(); goto done; }
+  o_s=(double*)(o_t+cap); o_v=(float*)(o_t+2*cap); o_bs=o_t+3*cap; o_bl=o_t+4*cap; offs=o_t+5*cap;
+  if(self->njobs){
+    keep=PyMem_Malloc(cap*sizeof(Py_ssize_t));
+    if(!keep){ PyErr_NoMemory(); goto done; }
+  }
   Py_ssize_t at=0; int i=0;
   for(int j=0;j<self->njobs;j++){
     offs[j]=at;
@@ -1672,24 +1980,37 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *series_arg){
       at=job0+kept;
     }
   }
-  offs[self->njobs]=at;
   {
     /* sample indices as int64, as FilterResults has them */
     int64_t *o_si=(int64_t*)o_s;
     for(Py_ssize_t q=0;q<at;q++) o_si[q]=(int64_t)o_s[q];
+    /* then each single-template call's peaks, as the follow-up kernel kept them */
+    for(Py_ssize_t c=0;c<nsc;c++){
+      const hmf_single *g=&self->singles[sing.single[c]];
+      offs[self->njobs+c]=at;
+      const int64_t gti=g->tmap[sing.row[c]];
+      for(int64_t q=sing.offs[c];q<sing.offs[c+1];q++){
+        o_t[at]=gti; o_si[at]=sing.si[q]; o_bs[at]=sing.bs[q]; o_bl[at]=(int64_t)g->n;
+        o_v[2*at]=sing.snr[2*q]; o_v[2*at+1]=sing.snr[2*q+1];
+        at++;
+      }
+      totals[ns+c]=(int)(sing.offs[c+1]-sing.offs[c]);
+      seconds[ns+c]=sing.seconds/(double)nsc;
+    }
   }
-  ret=Py_BuildValue("(NNNNNNNNd)",hmf_bytes(offs,((Py_ssize_t)self->njobs+1)*8),
+  offs[self->njobs+nsc]=at;
+  ret=Py_BuildValue("(NNNNNNNNd)",hmf_bytes(offs,((Py_ssize_t)self->njobs+nsc+1)*8),
                     hmf_bytes(o_t,at*8),hmf_bytes(o_s,at*8),hmf_bytes(o_v,at*8),
                     hmf_bytes(o_bs,at*8),hmf_bytes(o_bl,at*8),
-                    hmf_bytes(totals,(Py_ssize_t)ns*(Py_ssize_t)sizeof(int)),
-                    hmf_bytes(seconds,(Py_ssize_t)ns*8),kernel);
+                    hmf_bytes(totals,nout*(Py_ssize_t)sizeof(int)),
+                    hmf_bytes(seconds,nout*8),kernel);
 done:
+  hmf_single_out_free(&sing);
   if(jobs) for(int k=0;k<ns;k++){ free(jobs[k].out_flat); free(jobs[k].out_idx); free(jobs[k].out_val); }
   if(slots) for(int k=0;k<self->nslots;k++) if(slots[k].held) PyBuffer_Release(&slots[k].view);
   PyMem_Free(slots); PyMem_Free(jobs); PyMem_Free(spans); PyMem_Free(clusters); PyMem_Free(members);
   PyMem_Free(exec_of); PyMem_Free(totals); PyMem_Free(seconds);
-  PyMem_Free(o_t); PyMem_Free(o_s); PyMem_Free(o_v); PyMem_Free(o_bs); PyMem_Free(o_bl);
-  PyMem_Free(keep); PyMem_Free(offs);
+  PyMem_Free(o_t); PyMem_Free(keep);
   Py_DECREF(seq);
   return ret;
 }
@@ -1748,9 +2069,11 @@ static PyObject *HMFTable_get_steps(HMFTableObject *self,void *closure){
   (void)closure; return PyLong_FromLong(self->nsteps);
 }
 static PyMethodDef HMFTable_methods[]={
-  {"run",(PyCFunction)HMFTable_run,METH_O,
-   "run(series) -> (offsets, templates, samples, snr, block_starts, block_lengths, step_totals, "
-   "step_seconds, kernel_seconds): every step on its slot's series, the peaks of each job"},
+  {"run",(PyCFunction)HMFTable_run,METH_VARARGS,
+   "run(series, calls=()) -> (offsets, templates, samples, snr, block_starts, block_lengths, "
+   "step_totals, step_seconds, kernel_seconds): every gated step on its slot's series and every "
+   "call (single, series, row, windows, binsize, aligned, threshold) bound to a single-template "
+   "step, the peaks of each job (the table's, then one per call)"},
   {"run_slices",(PyCFunction)HMFTable_run_slices,METH_O,
    "run_slices(items) -> [(flat, index, value, total), ...]: (step, b0, b1, cluster, series) "
    "items as one batch"},
@@ -1766,7 +2089,7 @@ static PyTypeObject HMFTableType={
   .tp_flags=Py_TPFLAGS_DEFAULT, .tp_new=PyType_GenericNew,
   .tp_init=(initproc)HMFTable_init, .tp_dealloc=(destructor)HMFTable_dealloc,
   .tp_methods=HMFTable_methods, .tp_getset=HMFTable_getset,
-  .tp_doc="gated leaf steps compiled once: HMFTable(steps, jobs, nslots)",
+  .tp_doc="leaf steps compiled once: HMFTable(steps, jobs, nslots, singles=())",
 };
 
 static PyObject *M_series_group(PyObject *self,PyObject *args){
@@ -3477,388 +3800,6 @@ static PyObject *M_tier0_mwu(PyObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
-/* A follow-up job's Python buffers, beside its TdJob (followup.h); pooled in the scratch. */
-typedef struct {
-  Py_buffer bser, bw, btr, bti, bspec;
-  int has_bw, has_tr, has_ti;
-} TdJobIn;
-
-static void td_release_job_buffers(TdJobIn *jobs, size_t count){
-  for(size_t i = 0; i < count; i++){
-    if(jobs[i].has_tr) PyBuffer_Release(&jobs[i].btr);
-    if(jobs[i].has_ti) PyBuffer_Release(&jobs[i].bti);
-    PyBuffer_Release(&jobs[i].bspec);
-    if(jobs[i].has_bw) PyBuffer_Release(&jobs[i].bw);
-    PyBuffer_Release(&jobs[i].bser);
-  }
-}
-
-static PyObject *M_td_followup_batch(PyObject *self, PyObject *args){
-  (void)self;
-  PyObject *seq_obj;
-  if(!PyArg_ParseTuple(args, "O", &seq_obj)) return NULL;
-  PyObject *seq = PySequence_Fast(seq_obj, "td_followup_batch expects a sequence of job tuples");
-  if(!seq) return NULL;
-  const Py_ssize_t nj_ss = PySequence_Fast_GET_SIZE(seq);
-  const size_t nj = (size_t)nj_ss;
-
-  TdBatchScratch *ws = td_bscr_acquire();
-  if(!ws){ Py_DECREF(seq); return PyErr_NoMemory(); }
-  if(nj && td_grow_raw((void**)&ws->jobs, &ws->jobs_cap, nj, sizeof(TdJob)) < 0){
-    td_bscr_release(ws);
-    Py_DECREF(seq);
-    return PyErr_NoMemory();
-  }
-  if(nj && td_grow_raw(&ws->bufs, &ws->bufs_cap, nj, sizeof(TdJobIn)) < 0){
-    td_bscr_release(ws);
-    Py_DECREF(seq);
-    return PyErr_NoMemory();
-  }
-  TdJob *jobs = ws->jobs;
-  TdJobIn *jins = (TdJobIn*)ws->bufs;
-  if(nj){ memset(jobs, 0, nj * sizeof(TdJob)); memset(jins, 0, nj * sizeof(TdJobIn)); }
-
-  size_t parsed = 0;
-  size_t total_blks = 0;
-  int ok = 1;
-  for(size_t j = 0; j < nj; j++){
-    PyObject *item = PySequence_Fast_GET_ITEM(seq, (Py_ssize_t)j);
-    PyObject *oser, *ow, *otr, *oti, *ospec;
-    int s_kind = 0, aligned = 0, rate_one = 0, L = 0, spec_ready = 0;
-    Py_ssize_t S_ss = 0, n_ss = 0, step_ss = 0, cbad_ss = 0, bs_ss = 0;
-    float thr = 0.f;
-    long long global_ti = 0;
-    if(!PyArg_ParseTuple(item, "OinOnnnnpfpiOOOpL",
-                         &oser, &s_kind, &S_ss, &ow, &n_ss, &step_ss, &cbad_ss, &bs_ss,
-                         &aligned, &thr, &rate_one, &L, &otr, &oti, &ospec, &spec_ready,
-                         &global_ti)){
-      ok = 0; break;
-    }
-    TdJob *jb = &jobs[j];
-    TdJobIn *ji = &jins[j];
-    const int ser_flags = (s_kind == 2) ? PyBUF_STRIDES : PyBUF_C_CONTIGUOUS;
-    if(PyObject_GetBuffer(oser, &ji->bser, ser_flags) < 0){ ok = 0; break; }
-    if(PyTuple_CheckExact(ow) && PyTuple_GET_SIZE(ow) == 2){
-      const long long v0 = PyLong_AsLongLong(PyTuple_GET_ITEM(ow, 0));
-      const long long v1 = PyLong_AsLongLong(PyTuple_GET_ITEM(ow, 1));
-      if(PyErr_Occurred()){ PyBuffer_Release(&ji->bser); ok = 0; break; }
-      jb->single_w[0] = (int64_t)v0;
-      jb->single_w[1] = (int64_t)v1;
-      jb->W = jb->single_w;
-      jb->nw = (v0 < v1) ? 1u : 0u;
-      ji->has_bw = 0;
-    } else {
-      if(PyObject_GetBuffer(ow, &ji->bw, PyBUF_C_CONTIGUOUS) < 0){
-        PyBuffer_Release(&ji->bser); ok = 0; break;
-      }
-      ji->has_bw = 1;
-    }
-    if(PyObject_GetBuffer(ospec, &ji->bspec, PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS) < 0){
-      if(ji->has_bw) PyBuffer_Release(&ji->bw);
-      PyBuffer_Release(&ji->bser);
-      ok = 0; break;
-    }
-    if(otr != Py_None){
-      if(PyObject_GetBuffer(otr, &ji->btr, PyBUF_C_CONTIGUOUS) < 0){
-        PyBuffer_Release(&ji->bspec);
-        if(ji->has_bw) PyBuffer_Release(&ji->bw);
-        PyBuffer_Release(&ji->bser);
-        ok = 0; break;
-      }
-      ji->has_tr = 1;
-    }
-    if(oti != Py_None){
-      if(PyObject_GetBuffer(oti, &ji->bti, PyBUF_C_CONTIGUOUS) < 0){
-        if(ji->has_tr) PyBuffer_Release(&ji->btr);
-        PyBuffer_Release(&ji->bspec);
-        if(ji->has_bw) PyBuffer_Release(&ji->bw);
-        PyBuffer_Release(&ji->bser);
-        ok = 0; break;
-      }
-      ji->has_ti = 1;
-    }
-    parsed = j + 1;
-
-    if(n_ss < 16 || (n_ss & (n_ss - 1)) || !ap_supported((size_t)n_ss)
-       || S_ss < 0 || step_ss < 1 || cbad_ss < 0 || bs_ss < 1
-       || (s_kind < 0 || s_kind > 2)
-       || (ji->has_bw && (ji->bw.len % (2 * (Py_ssize_t)sizeof(int64_t)) != 0))
-       || ji->bspec.len < n_ss * 2 * (Py_ssize_t)sizeof(float)){
-      PyErr_SetString(PyExc_ValueError, "td_followup_batch: invalid parameters or buffer sizes");
-      ok = 0; break;
-    }
-    if(s_kind == 2){
-      if(ji->bser.ndim != 1 || ji->bser.itemsize != 4 || !ji->bser.strides
-         || (ji->bser.strides[0] != 8 && ji->bser.strides[0] != 4)){
-        PyErr_SetString(PyExc_ValueError, "td_followup_batch: invalid stride-2 float32 series view");
-        ok = 0; break;
-      }
-      if(ji->bser.strides[0] == 8){
-        if(!ji->bser.shape || ji->bser.shape[0] < S_ss){
-          PyErr_SetString(PyExc_ValueError, "td_followup_batch: series buffer too small");
-          ok = 0; break;
-        }
-        jb->cser_floats = S_ss > 0 ? (size_t)(2 * S_ss - 1) : 0u;
-      } else {
-        const Py_ssize_t min_bytes = S_ss > 0 ? (2 * S_ss - 1) * 4 : 0;
-        if(ji->bser.len < min_bytes){
-          PyErr_SetString(PyExc_ValueError, "td_followup_batch: series buffer too small");
-          ok = 0; break;
-        }
-        jb->cser_floats = (size_t)(ji->bser.len / (Py_ssize_t)sizeof(float));
-      }
-    } else {
-      const Py_ssize_t min_ser_bytes = S_ss == 0 ? 0 : (s_kind == 0 ? S_ss * 8 : S_ss * 4);
-      if(ji->bser.len < min_ser_bytes){
-        PyErr_SetString(PyExc_ValueError, "td_followup_batch: series buffer too small");
-        ok = 0; break;
-      }
-      jb->cser_floats = (size_t)(ji->bser.len / (Py_ssize_t)sizeof(float));
-    }
-    const int tr_cplx = (ji->has_tr && !ji->has_ti && ji->btr.itemsize == 8) ? 1 : 0;
-    const Py_ssize_t min_tr_bytes = (Py_ssize_t)L * (tr_cplx ? 8 : 4);
-    if(!spec_ready && (!rate_one || !ji->has_tr || L < 1
-       || ji->btr.len < min_tr_bytes
-       || (ji->has_ti && ji->bti.len < (Py_ssize_t)L * 4))){
-      PyErr_SetString(PyExc_ValueError, "td_followup_batch: unready spectrum requires valid taps");
-      ok = 0; break;
-    }
-    if(ji->has_tr && ji->btr.len < min_tr_bytes){
-      PyErr_SetString(PyExc_ValueError, "td_followup_batch: tr buffer too small");
-      ok = 0; break;
-    }
-    if(ji->has_ti && ji->bti.len < (Py_ssize_t)L * 4){
-      PyErr_SetString(PyExc_ValueError, "td_followup_batch: ti buffer too small");
-      ok = 0; break;
-    }
-
-    jb->ser_f = (const float*)ji->bser.buf;
-    jb->s_kind = s_kind;
-    jb->S = (int64_t)S_ss;
-    if(ji->has_bw){
-      jb->W = (const int64_t*)ji->bw.buf;
-      jb->nw = (size_t)(ji->bw.len / (2 * (Py_ssize_t)sizeof(int64_t)));
-    }
-    jb->n = (size_t)n_ss;
-    jb->step = (int64_t)step_ss;
-    jb->c_bad = (int64_t)cbad_ss;
-    jb->bs = (size_t)bs_ss;
-    jb->aligned = aligned ? 1 : 0;
-    jb->thr = thr;
-    memcpy(&jb->thr_bits, &thr, sizeof(uint32_t));
-    jb->rate_one = rate_one ? 1 : 0;
-    jb->L = L;
-    jb->tr_cplx = tr_cplx;
-    jb->tr = ji->has_tr ? (const float*)ji->btr.buf : NULL;
-    jb->ti = ji->has_ti ? (const float*)ji->bti.buf : NULL;
-    jb->spec = (float*)ji->bspec.buf;
-    jb->spec_ready = spec_ready ? 1 : 0;
-    jb->global_ti = (int64_t)global_ti;
-
-    size_t nblk = 0;
-    uint64_t tlags = 0;
-    for(size_t w = 0; w < jb->nw; w++){
-      const int64_t v0 = jb->W[2 * w], v1 = jb->W[2 * w + 1];
-      if(v0 < 0 || v1 <= v0 || v1 > jb->S) continue;
-      const int64_t fidx = v0 > jb->c_bad ? (v0 - jb->c_bad) / jb->step : 0;
-      const int64_t fts = fidx * jb->step;
-      const int64_t lim = jb->S < (v1 - jb->c_bad) ? jb->S : (v1 - jb->c_bad);
-      if(fts >= lim) continue;
-      const int64_t nb_w = (lim - 1 - fts) / jb->step + 1;
-      const int64_t lts = fts + (nb_w - 1) * jb->step;
-      const int64_t rs0 = v0 > (fts + jb->c_bad) ? v0 : (fts + jb->c_bad);
-      const int64_t re_last = v1 < (lts + jb->c_bad + jb->step) ? v1 : (lts + jb->c_bad + jb->step);
-      nblk += (size_t)nb_w;
-      if(re_last > rs0) tlags += (uint64_t)(re_last - rs0);
-    }
-    jb->blk0 = total_blks;
-    jb->nblocks = nblk;
-    jb->total_lags = tlags;
-    jb->mode_td = (jb->rate_one && jb->tr != NULL && jb->L >= 1 && (size_t)jb->L <= jb->n
-                   && (int64_t)(jb->L / 2) <= jb->c_bad
-                   && jb->c_bad + jb->step <= (int64_t)jb->n
-                   && tlags > 0 && tlags * (uint64_t)jb->L <= 32768ULL) ? 1 : 0;
-    total_blks += nblk;
-  }
-
-  if(!ok){
-    td_release_job_buffers(jins, parsed);
-    td_bscr_release(ws);
-    Py_DECREF(seq);
-    return NULL;
-  }
-
-  if(total_blks && td_grow_raw((void**)&ws->blks, &ws->blks_cap, total_blks, sizeof(TdBlk)) < 0){
-    td_release_job_buffers(jins, parsed);
-    td_bscr_release(ws);
-    Py_DECREF(seq);
-    return PyErr_NoMemory();
-  }
-  if(nj && (nj > ws->ng_cap || !ws->ngroups || !ws->jidx)){
-    size_t nc = ws->ng_cap ? ws->ng_cap : 64u;
-    while(nc < nj) nc *= 2u;
-    TdNGroup *ng = (TdNGroup*)malloc(nc * sizeof(TdNGroup));
-    size_t *ji = (size_t*)malloc(nc * sizeof(size_t));
-    if(!ng || !ji){
-      free(ng); free(ji);
-      td_release_job_buffers(jins, parsed);
-      td_bscr_release(ws);
-      Py_DECREF(seq);
-      return PyErr_NoMemory();
-    }
-    free(ws->ngroups); free(ws->jidx);
-    ws->ngroups = ng; ws->jidx = ji; ws->ng_cap = nc;
-  }
-  TdBlk *blks = ws->blks;
-  TdNGroup *ngroups = ws->ngroups;
-  size_t *jidx_buf = ws->jidx;
-
-  /* Populate per-job block layouts and compute total peak slots before releasing GIL. */
-  size_t total_pk_slots = 0;
-  size_t max_job_blks = 0;
-  for(size_t j = 0; j < nj; j++){
-    TdJob *jb = &jobs[j];
-    ngroups[j] = (TdNGroup){jb->n, j};
-    if(jb->nblocks > max_job_blks) max_job_blks = jb->nblocks;
-    size_t cur = jb->blk0;
-    int any_ph = 0;
-    for(size_t w = 0; w < jb->nw; w++){
-      const int64_t v0 = jb->W[2 * w], v1 = jb->W[2 * w + 1];
-      if(v0 < 0 || v1 <= v0 || v1 > jb->S) continue;
-      const int64_t fidx = v0 > jb->c_bad ? (v0 - jb->c_bad) / jb->step : 0;
-      const int64_t fts = fidx * jb->step;
-      const int64_t lim = jb->S < (v1 - jb->c_bad) ? jb->S : (v1 - jb->c_bad);
-      if(fts >= lim) continue;
-      const int64_t nb_w = (lim - 1 - fts) / jb->step + 1;
-      for(int64_t bi = 0; bi < nb_w; bi++){
-        const int64_t ts = fts + bi * jb->step;
-        const int64_t bvt0 = ts + jb->c_bad;
-        const int64_t rs = v0 > bvt0 ? v0 : bvt0;
-        const int64_t re = v1 < (bvt0 + jb->step) ? v1 : (bvt0 + jb->step);
-        size_t ws_b = (size_t)(rs - ts);
-        size_t we_b = (size_t)(re - ts);
-        if(ws_b > jb->n) ws_b = jb->n;
-        if(we_b > jb->n) we_b = jb->n;
-        const uint32_t ph = jb->aligned ? (uint32_t)((uint64_t)(rs - v0) % (uint64_t)jb->bs) : 0u;
-        if(ph) any_ph = 1;
-        const size_t nb = we_b > ws_b ? (we_b - ws_b + (size_t)ph + jb->bs - 1u) / jb->bs : 0u;
-        blks[cur++] = (TdBlk){ts, ws_b, we_b, ph, nb, w, 0};
-      }
-    }
-    jb->nblocks = cur - jb->blk0;
-    jb->any_ph = any_ph;
-    jb->pk_off = total_pk_slots;
-    if(!any_ph && jb->bs < jb->n && jb->nblocks > 1){
-      TdBlkOrd stack_ord[64];
-      TdBlkOrd *ord = jb->nblocks <= 64 ? stack_ord
-          : (TdBlkOrd*)malloc(jb->nblocks * sizeof(TdBlkOrd));
-      if(!ord){
-        td_release_job_buffers(jins, parsed);
-        td_bscr_release(ws);
-        Py_DECREF(seq);
-        return PyErr_NoMemory();
-      }
-      for(size_t b = 0; b < jb->nblocks; b++) ord[b] = (TdBlkOrd){blks[jb->blk0 + b].nb, b};
-      qsort(ord, jb->nblocks, sizeof(TdBlkOrd), cmp_blk_ord);
-      size_t pko = total_pk_slots;
-      for(size_t s = 0; s < jb->nblocks; s++){
-        TdBlk *bk = &blks[jb->blk0 + ord[s].idx];
-        bk->pk_dst = pko;
-        pko += bk->nb;
-      }
-      jb->pk_cnt = pko - total_pk_slots;
-      total_pk_slots = pko;
-      if(ord != stack_ord) free(ord);
-    } else {
-      size_t pko = total_pk_slots;
-      for(size_t b = 0; b < jb->nblocks; b++){
-        TdBlk *bk = &blks[jb->blk0 + b];
-        bk->pk_dst = pko;
-        pko += bk->nb;
-      }
-      jb->pk_cnt = pko - total_pk_slots;
-      total_pk_slots = pko;
-    }
-  }
-
-  if((total_pk_slots && td_grow_raw((void**)&ws->peaks, &ws->peaks_cap, total_pk_slots, sizeof(ap_peak)) < 0)
-     || (max_job_blks && td_grow_raw((void**)&ws->ord, &ws->ord_cap, max_job_blks, sizeof(size_t)) < 0)){
-    td_release_job_buffers(jins, parsed);
-    td_bscr_release(ws);
-    Py_DECREF(seq);
-    return PyErr_NoMemory();
-  }
-  ap_peak *all_peaks = ws->peaks;
-  size_t *ord_scratch = ws->ord;
-
-  /* Pre-allocate output bytearrays at upper-bound capacity so compaction writes in-place. */
-  PyObject *offs_ba = PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)((nj + 1) * sizeof(int64_t)));
-  PyObject *rdy_ba = PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)nj);
-  PyObject *si_ba = PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)(total_pk_slots * sizeof(int64_t)));
-  PyObject *snr_ba = PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)(total_pk_slots * 2 * sizeof(float)));
-  PyObject *bs_ba = PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)(total_pk_slots * sizeof(int64_t)));
-  if(!offs_ba || !rdy_ba || !si_ba || !snr_ba || !bs_ba){
-    Py_XDECREF(offs_ba); Py_XDECREF(rdy_ba); Py_XDECREF(si_ba);
-    Py_XDECREF(snr_ba); Py_XDECREF(bs_ba);
-    td_release_job_buffers(jins, parsed);
-    td_bscr_release(ws);
-    Py_DECREF(seq);
-    return NULL;
-  }
-  int64_t *offs_p = (int64_t*)PyByteArray_AS_STRING(offs_ba);
-  unsigned char *rdy_p = (unsigned char*)PyByteArray_AS_STRING(rdy_ba);
-  int64_t *si_base = (int64_t*)PyByteArray_AS_STRING(si_ba);
-  float *snr_base = (float*)PyByteArray_AS_STRING(snr_ba);
-  int64_t *bs_base = (int64_t*)PyByteArray_AS_STRING(bs_ba);
-
-  int run_err = 0;
-  size_t total_kept = 0;
-
-  Py_BEGIN_ALLOW_THREADS
-  run_err = td_followup_run(ws, jobs, nj, ngroups, jidx_buf, blks, total_blks, all_peaks,
-                            ord_scratch, offs_p, rdy_p, si_base, snr_base, bs_base, &total_kept);
-  Py_END_ALLOW_THREADS
-
-  PyObject *ret = NULL;
-  if(run_err){
-    PyErr_SetString(PyExc_RuntimeError, "td_followup_batch: kernel execution or allocation failed");
-  } else {
-    int rsz_ok = 1;
-    if(total_kept != total_pk_slots){
-      if(PyByteArray_Resize(si_ba, (Py_ssize_t)(total_kept * sizeof(int64_t))) < 0
-         || PyByteArray_Resize(snr_ba, (Py_ssize_t)(total_kept * 2 * sizeof(float))) < 0
-         || PyByteArray_Resize(bs_ba, (Py_ssize_t)(total_kept * sizeof(int64_t))) < 0){
-        rsz_ok = 0;
-      }
-    }
-    PyObject *ti_ba = rsz_ok ? PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)(total_kept * sizeof(int64_t))) : NULL;
-    PyObject *bl_ba = rsz_ok ? PyByteArray_FromStringAndSize(NULL, (Py_ssize_t)(total_kept * sizeof(int64_t))) : NULL;
-    if(rsz_ok && ti_ba && bl_ba){
-      int64_t *ti_p = (int64_t*)PyByteArray_AS_STRING(ti_ba);
-      int64_t *bl_p = (int64_t*)PyByteArray_AS_STRING(bl_ba);
-      for(size_t j = 0; j < nj; j++){
-        const TdJob *jb = &jobs[j];
-        const int64_t gti = jb->global_ti;
-        const int64_t blen = (int64_t)jb->n;
-        for(size_t k = 0; k < jb->hit_cnt; k++){
-          ti_p[jb->hit_off + k] = gti;
-          bl_p[jb->hit_off + k] = blen;
-        }
-      }
-      ret = PyTuple_Pack(7, offs_ba, ti_ba, si_ba, snr_ba, bs_ba, bl_ba, rdy_ba);
-    }
-    Py_XDECREF(ti_ba);
-    Py_XDECREF(bl_ba);
-  }
-  Py_DECREF(offs_ba); Py_DECREF(rdy_ba); Py_DECREF(si_ba);
-  Py_DECREF(snr_ba); Py_DECREF(bs_ba);
-
-  td_release_job_buffers(jins, parsed);
-  td_bscr_release(ws);
-  Py_DECREF(seq);
-  return ret;
-}
-
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless, dsets) -> [(earlier thresholds, earlier reach, lasts)]: gatechain._chain_candidates's search"},
@@ -3871,7 +3812,6 @@ static PyMethodDef methods[]={
   {"tier0_pass",M_tier0_pass,METH_VARARGS,"tier0_pass(...) -> (count, reach): one pass of the shared-screener merging, a level's clusters and candidate merges in, the next level out"},
   {"tier0_pair_level",M_tier0_pair_level,METH_VARARGS,"tier0_pair_level(...) -> (nc, reach): the first level of the shared-screener merging, the templates' coherent pairs made clusters of two"},
   {"tier0_mwu",M_tier0_mwu,METH_VARARGS,"tier0_mwu(U, counts, ref, w, steps, c_out, ov_out, plain=0): each group's shared screener (mean or minimax) and its members' overlaps"},
-  {"td_followup_batch",M_td_followup_batch,METH_VARARGS,"td_followup_batch(jobs) -> (offs, ti, si, snr, bs, bl, spec_ready): batched single-template CPU follow-ups"},
   {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"xxh64",M_xxh64,METH_VARARGS,"xxh64(buffer, seed=0) -> int: XXH64 of a C-contiguous buffer's bytes"},

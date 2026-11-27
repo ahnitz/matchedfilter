@@ -1,6 +1,8 @@
-/* Single-template follow-up calls of the time-domain banks (_core.td_followup_batch): the
-   records the binding fills, the plan and scratch pools, and the kernel. Nothing here uses
-   Python; the binding parses the jobs, holds their buffers and builds the result. */
+/* The single-template steps of the time-domain banks (_core.HMFTable's single steps): the
+   job record a run fills per bound call, the plan and scratch pools, and the kernel, which
+   lays out each job's blocks, correlates (time-domain or by transforms), bins, merges partial
+   window bins and compacts the peaks. Nothing here uses Python; the binding fills the jobs
+   from a table's steps and a run's bound arguments, and builds the result. */
 #ifndef AP_FOLLOWUP_H
 #define AP_FOLLOWUP_H
 #include <stddef.h>
@@ -83,8 +85,8 @@ typedef struct {
   size_t e_cap;
   float **seen_specs;
   size_t specs_cap;
-  void *bufs;            /* the caller's per-job records (the binding's Python buffers) */
-  size_t bufs_cap;
+  float *made_specs;     /* template spectra made without a store slot (td_bscr_spectra) */
+  size_t made_cap;
 } TdBatchScratch;
 
 /* The batch scratch, from a pool of one (a second caller at once gets a temporary). */
@@ -100,5 +102,13 @@ int td_followup_run(TdBatchScratch *ws, TdJob *jobs, size_t nj, TdNGroup *ngroup
                     size_t *jidx_buf, TdBlk *blks, size_t total_blks, ap_peak *all_peaks,
                     size_t *ord_scratch, int64_t *offs_p, unsigned char *rdy_p,
                     int64_t *si_base, float *snr_base, int64_t *bs_base, size_t *total_kept);
+/* count template spectra of n bins in the scratch (64-byte aligned), or NULL. */
+float *td_bscr_spectra(TdBatchScratch *ws, size_t count, size_t n);
+/* Lay out the jobs (their input fields set: series, windows, block geometry, bins, threshold,
+   template) and run them (td_followup_run): offs (nj + 1) and, in one block allocated here
+   that the caller frees (free(*si)), per kept peak its sample, snr pair and block start. 0, or -1 when a plan
+   or buffer could not be made. */
+int td_followup_exec(TdBatchScratch *ws, TdJob *jobs, size_t nj, int64_t *offs,
+                     int64_t **si, float **snr, int64_t **bs, size_t *total_kept);
 
 #endif

@@ -40,10 +40,11 @@ from .device import parse as _parse_device
 #: Identifies one filter_series_many batch to the plans it defers.
 _BATCH_TOKEN = 0
 
-#: Seconds the process's compiled leaf steps have spent in the extension's batch runs
-#: (_cpu_sparse_batch and the tiled cascade's slabs): the compute side of the CPU leaf stage,
-#: which a caller reads as a difference around its calls (HierarchicalSearch.timings).
-LEAF_COMPUTE_SECONDS = 0.0
+#: Seconds the process's compiled steps have spent in the extension's runs of them: the
+#: gated leaf steps (_cpu_sparse_batch and the tiled cascade's slabs) and the single-template
+#: steps (_cpu_single_td_one and _cpu_single_td_batch). A caller reads it as a difference
+#: around its calls (HierarchicalSearch.timings).
+STEP_COMPUTE_SECONDS = 0.0
 
 
 def _fuse_close(jobs):
@@ -927,10 +928,10 @@ def _filter_ready_slabs(c_jobs, back_subs, kr, retain_radius, eff_ret_thr):
     if not c_jobs:
         return time.perf_counter() - t_f0, None
     peaks_by_q = None
-    global LEAF_COMPUTE_SECONDS
+    global STEP_COMPUTE_SECONDS
     c_out = back_subs[0][0].table.run_slices(c_jobs)
     dt_b = time.perf_counter() - t_f0
-    LEAF_COMPUTE_SECONDS += dt_b
+    STEP_COMPUTE_SECONDS += dt_b
     dt_each = dt_b / len(c_jobs)
     for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
         sub_rec.total += tot
@@ -1336,8 +1337,66 @@ def _items_batch(jobs, out):
     return done
 
 
+def _single_step(bank, g):
+    """Template group g as a single-template step takes it, made once and kept by the group:
+    the tuple ``_core.HMFTable`` compiles a single-template step from.
+
+    A template with taps (the bank's taps at the data's rate, as the group keeps them) has
+    its spectrum made from them in the extension when a call needs it, into a slot of the
+    group's store of template spectra (``min(T, 256)`` slots, the least recently used given
+    up first), which every table compiled from the group shares. Any other template's
+    spectrum (a resampled bank's, or one with no taps) is made here once, with the group's
+    full spectra.
+
+    Parameters
+    ----------
+    bank : TimeDomainFilterBank
+        The bank that owns the group.
+    g : _TemplateGroup
+        The template group.
+
+    Returns
+    -------
+    tuple
+        ``(n, step, c_bad, template indices, taps, counts, spectra, spectrum rows, index,
+        store)``: the group's block geometry and its templates' indices in the bank's input;
+        its taps and their counts (or None); the spectra given (or None) and per template
+        its row in them (-1: made from taps); the store's index and slots (or None).
+    """
+    step = g.__dict__.get("_single_step")
+    if step is not None:
+        return step
+    nt = len(g.template_indices)
+    src = (g._row_source.__defaults__[0]
+           if getattr(g._row_source, "__defaults__", None) else None)
+    taps = counts = spectra = spectrum_rows = index = store = None
+    given = np.arange(nt)
+    if (bank.rate_ratio == 1.0 and isinstance(src, dict) and "taps" in src
+            and "counts" in src):
+        counts = np.ascontiguousarray(src["counts"], dtype=np.int64)
+        taps = src["taps"]
+        if taps.dtype not in (np.float32, np.complex64) or not taps.flags.c_contiguous:
+            taps = np.ascontiguousarray(
+                taps, dtype=np.complex64 if np.iscomplexobj(taps) else np.float32)
+        # a template whose taps do not fit a block has its spectrum given
+        given = np.flatnonzero((counts < 1) | (counts > g.n))
+        cap = min(nt, 256)
+        store = np.empty((cap, g.n), dtype=np.complex64)
+        index = np.zeros(nt + 3 * cap + 2, dtype=np.int64)
+        index[:nt + cap] = -1
+    if given.size:
+        spectra = np.array(g.full_spectra(given), dtype=np.complex64, copy=True, order="C")
+        spectrum_rows = np.full(nt, -1, dtype=np.int64)
+        spectrum_rows[given] = np.arange(given.size)
+    step = g._single_step = (g.n, g.n_valid, g.c_bad,
+                             np.ascontiguousarray(g.template_indices, dtype=np.int64), taps,
+                             counts, spectra, spectrum_rows, index, store)
+    return step
+
+
 def _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu):
-    """One single-template follow-up as the C batch (_core.td_followup_batch) takes it.
+    """One single-template call as a single-template step binds it: the call's arguments,
+    checked and normalised; nothing is compiled.
 
     Parameters
     ----------
@@ -1350,14 +1409,15 @@ def _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu):
     ti : int
         The template, as indexed in the bank's input.
     force_cpu : bool
-        True runs a GPU bank's job too (its call shape's lock chose the CPU side).
+        True runs a GPU bank's call too (its call shape's lock chose the CPU side).
 
     Returns
     -------
     tuple or FilterResults or None
-        ``(c_job, entry)``: the job's tuple for the C batch and its template's cache entry
-        (whose spectrum-ready flag the batch's result updates); the empty result when the
-        window holds no sample; None when the batch does not run this job.
+        ``(g, call)``: the template's group and the call's bound arguments ``(series, row,
+        windows, binsize, aligned, threshold)``, which ``_core.HMFTable.run`` takes after the
+        step's index; the empty result when the window holds no sample; None when a
+        single-template step does not run this call.
     """
     if bank.engine not in ("hier", "flat"):
         return None
@@ -1367,11 +1427,11 @@ def _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu):
     if ti < 0 or ti >= bank.n_templates:
         return None
     thr = float(bank.threshold if threshold is None else threshold)
-    if not np.isfinite(thr):
+    if not math.isfinite(thr):
         return None
 
     bank._groups
-    g, ti_local = bank._template_map[ti]
+    g, row = bank._template_map[ti]
     if bank.engine == "flat":
         p_flat = g._plan
         if p_flat is not None and (
@@ -1384,25 +1444,19 @@ def _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu):
     if bs < 1:
         return None
 
-    # Preserve 1-D float32 and contiguous complex64 series without full-segment widening.
-    if (isinstance(series, np.ndarray) and series.ndim == 1
-            and series.dtype == np.float32 and series.strides in ((4,), (8,))):
-        ser = series
-        s_kind = 1 if ser.strides == (4,) else 2
-    elif (isinstance(series, np.ndarray) and series.ndim == 1
-          and series.dtype == np.complex64 and series.flags.c_contiguous):
-        ser = series
-        s_kind = 0
-    else:
-        ser = bank._input_series(series)
-        if ser.ndim != 1:
+    # A float32 series (contiguous, or one lane of a complex one) and a contiguous complex64
+    # one are read in place; anything else as the bank reads it.
+    if not (isinstance(series, np.ndarray) and series.ndim == 1
+            and ((series.dtype == np.float32 and series.strides in ((4,), (8,)))
+                 or (series.dtype == np.complex64 and series.flags.c_contiguous))):
+        series = bank._input_series(series)
+        if series.ndim != 1:
             return None
-        if ser.dtype == np.float32:
-            s_kind = 2 if ser.strides == (8,) else 1
-        else:
-            s_kind = 0
+        if not (series.flags.c_contiguous
+                or (series.dtype == np.float32 and series.strides == (8,))):
+            series = np.ascontiguousarray(series)
 
-    S = int(ser.size)
+    S = int(series.size)
     if windows is None:
         if S <= 0:
             return _EMPTY_FILTER_RESULTS
@@ -1418,48 +1472,16 @@ def _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu):
         W = _normalize_windows(windows, S)
         if W.shape[0] == 0:
             return _EMPTY_FILTER_RESULTS
-
-    cser = (ser if (s_kind == 2 or ser.flags.c_contiguous)
-            else np.ascontiguousarray(ser))
-
-    # Fetch or populate per-template tap/spectrum cache on the group.
-    tcache = g.__dict__.get("_td_single_cache")
-    if tcache is None:
-        tcache = g._td_single_cache = OrderedDict()
-    entry = tcache.get(ti_local)
-    if entry is not None:
-        tcache.move_to_end(ti_local)
-    else:
-        src = (g._row_source.__defaults__[0]
-               if getattr(g._row_source, "__defaults__", None) else None)
-        L = int(src["counts"][ti_local]) if (
-            bank.rate_ratio == 1.0 and isinstance(src, dict)
-            and "taps" in src and "counts" in src
-        ) else 0
-        if 1 <= L <= g.n:
-            raw = src["taps"][ti_local, :L]
-            if raw.dtype not in (np.float32, np.complex64) or not raw.flags.c_contiguous:
-                raw = np.ascontiguousarray(
-                    raw, dtype=np.complex64 if np.iscomplexobj(raw) else np.float32)
-            spec_buf = np.empty(g.n, dtype=np.complex64)
-            entry = [True, L, raw, None, spec_buf, False]
-        else:
-            spec_buf = np.array(
-                g.full_spectra(slice(ti_local, ti_local + 1))[0],
-                dtype=np.complex64, copy=True, order="C",
-            )
-            entry = [False, 0, None, None, spec_buf, True]
-        tcache[ti_local] = entry
-        while len(tcache) > 256:
-            tcache.popitem(last=False)
-
-    return (cser, s_kind, S, W, g.n, g.n_valid, g.c_bad, bs,
-            aligned, thr, entry[0], entry[1], entry[2], entry[3],
-            entry[4], entry[5], ti), entry
+    return g, (series, row, W, bs, aligned, thr)
 
 
 def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
-    """Execute eligible single-template CPU follow-up jobs in one C batch call.
+    """Run a batch's single-template CPU calls as the single-template steps of one table, in
+    one C call.
+
+    The table has a step per template group the calls filter, compiled once per set of groups
+    (a group's own table for one group, else kept by the first call's bank); each call binds
+    its template, series, windows, bin size and threshold.
 
     Parameters
     ----------
@@ -1482,10 +1504,9 @@ def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
 
     done = set()
     skip = skip or set()
-    c_jobs = []
-    job_meta = []
+    calls, call_jobs, sources, step_of = [], [], [], {}
 
-    # Screen candidate single-template follow-up jobs and resolve cached tap/spectrum views.
+    # Each call's arguments, bound to its group's step.
     for j, (bank, series, kw) in enumerate(jobs):
         if j in skip:
             continue
@@ -1501,49 +1522,61 @@ def _cpu_single_td_batch(jobs, out, skip=None, force_cpu=False):
             out[j] = job
             done.add(j)
             continue
-        c_jobs.append(job[0])
-        job_meta.append((j, job[1]))
-
-    # One eligible job is still a batch: a call at a time takes this path too
-    # (filter_series), so a job gives the same peaks alone, among other kinds of job, or
-    # with others like it.
-    if not c_jobs:
+        g, call = job
+        step = step_of.get(id(g))
+        if step is None:
+            step = step_of[id(g)] = len(sources)
+            sources.append((bank, g))
+        calls.append((step,) + call)
+        call_jobs.append(j)
+    # One call is still a batch: a call at a time takes this path too (filter_series), so a
+    # call gives the same peaks alone, among other kinds of call, or with others like it.
+    if not calls:
         return done
+
+    # The table: a lone group's own, else one kept by the first bank for this set of groups.
+    if len(sources) == 1:
+        bank, g = sources[0]
+        table = g.__dict__.get("_single_table")
+        if table is None:
+            table = g._single_table = _core.HMFTable((), (), 0, (_single_step(bank, g),))
+    else:
+        key = tuple(step_of)
+        memo = sources[0][0].__dict__.setdefault("_single_tables", OrderedDict())
+        held = memo.get(key)
+        if held is not None and all(ref() is g for ref, (_, g) in zip(held[1], sources)):
+            memo.move_to_end(key)
+            table = held[0]
+        else:
+            table = _core.HMFTable((), (), 0, tuple(_single_step(b, g) for b, g in sources))
+            memo[key] = (table, [weakref.ref(g) for _, g in sources])
+            while len(memo) > 8:
+                memo.popitem(last=False)
 
     # Settle any pending device writes once before reading host/shared buffers in C.
     _settle_device_writes()
-
-    offs_ba, ti_ba, si_ba, snr_ba, bs_ba, bl_ba, rdy_ba = _core.td_followup_batch(c_jobs)
-    offs = np.frombuffer(offs_ba, dtype=np.int64)
-    ti_all = np.frombuffer(ti_ba, dtype=np.int64)
-    si_all = np.frombuffer(si_ba, dtype=np.int64)
-    snr_all = np.frombuffer(snr_ba, dtype=np.complex64)
-    bs_all = np.frombuffer(bs_ba, dtype=np.int64)
-    bl_all = np.frombuffer(bl_ba, dtype=np.int64)
-    rdy_all = np.frombuffer(rdy_ba, dtype=np.uint8)
-
-    # Update lazy spectrum readiness flags and slice per-job FilterResults views.
-    for k, (j, entry) in enumerate(job_meta):
-        if rdy_all[k]:
-            entry[5] = True
-        p0 = int(offs[k])
-        p1 = int(offs[k + 1])
-        if p0 == p1:
-            out[j] = _EMPTY_FILTER_RESULTS
-        else:
-            out[j] = FilterResults(
-                ti_all[p0:p1], si_all[p0:p1], snr_all[p0:p1],
-                bs_all[p0:p1], bl_all[p0:p1],
-            )
+    offs_b, ti_b, si_b, snr_b, bs_b, bl_b, _, _, kernel = table.run((), calls)
+    global STEP_COMPUTE_SECONDS
+    STEP_COMPUTE_SECONDS += kernel
+    offs = np.frombuffer(offs_b, dtype=np.int64)
+    columns = (np.frombuffer(ti_b, dtype=np.int64), np.frombuffer(si_b, dtype=np.int64),
+               np.frombuffer(snr_b, dtype=np.complex64), np.frombuffer(bs_b, dtype=np.int64),
+               np.frombuffer(bl_b, dtype=np.int64))
+    for k, j in enumerate(call_jobs):
+        p0, p1 = int(offs[k]), int(offs[k + 1])
+        out[j] = (_EMPTY_FILTER_RESULTS if p0 == p1
+                  else FilterResults(*(c[p0:p1] for c in columns)))
         done.add(j)
-
     return done
 
 
 def _cpu_single_td_one(bank, series, windows, binsize, threshold, ti, force_cpu=False):
-    """One single-template follow-up through the C batch, as a batch of one: what
-    :func:`_cpu_single_td_batch` gives for the one job, without building a batch around it
-    (a search's follow-ups come one call at a time: PeaksContext.refilter).
+    """One single-template call as its group's single-template step, without building a
+    batch around it (a search's follow-ups come one call at a time: PeaksContext.refilter):
+    what :func:`_cpu_single_td_batch` gives for the one call.
+
+    The group's table is compiled at its first call and kept by the group; a call binds its
+    template, series, windows, bin size and threshold and runs it.
 
     Parameters
     ----------
@@ -1556,29 +1589,33 @@ def _cpu_single_td_one(bank, series, windows, binsize, threshold, ti, force_cpu=
     ti : int
         The template, as indexed in the bank's input.
     force_cpu : bool, optional
-        True runs a GPU bank's job too (its call shape's lock chose the CPU side). Default
+        True runs a GPU bank's call too (its call shape's lock chose the CPU side). Default
         False.
 
     Returns
     -------
     FilterResults or None
-        The peaks, or None when the batch does not run this job.
+        The peaks, or None when a single-template step does not run this call.
     """
     if getattr(MatchedFilter.run_series, "__qualname__", "") != "MatchedFilter.run_series":
         return None
     job = _single_td_job(bank, series, windows, binsize, threshold, ti, force_cpu)
     if job is None or job is _EMPTY_FILTER_RESULTS:
         return job
-    c_job, entry = job
+    g, (ser, row, W, bs, aligned, thr) = job
+    table = g.__dict__.get("_single_table")
+    if table is None:
+        table = g._single_table = _core.HMFTable((), (), 0, (_single_step(bank, g),))
     _settle_device_writes()
-    offs_ba, ti_ba, si_ba, snr_ba, bs_ba, bl_ba, rdy_ba = _core.td_followup_batch([c_job])
-    if rdy_ba[0]:
-        entry[5] = True
-    if not len(si_ba):
+    _, ti_b, si_b, snr_b, bs_b, bl_b, _, _, kernel = table.run(
+        (), ((0, ser, row, W, bs, aligned, thr),))
+    global STEP_COMPUTE_SECONDS
+    STEP_COMPUTE_SECONDS += kernel
+    if not si_b:
         return _EMPTY_FILTER_RESULTS
-    return FilterResults(np.frombuffer(ti_ba, dtype=np.int64), np.frombuffer(si_ba, dtype=np.int64),
-                         np.frombuffer(snr_ba, dtype=np.complex64),
-                         np.frombuffer(bs_ba, dtype=np.int64), np.frombuffer(bl_ba, dtype=np.int64))
+    return FilterResults(np.frombuffer(ti_b, dtype=np.int64), np.frombuffer(si_b, dtype=np.int64),
+                         np.frombuffer(snr_b, dtype=np.complex64),
+                         np.frombuffer(bs_b, dtype=np.int64), np.frombuffer(bl_b, dtype=np.int64))
 
 
 def _plan_is_gated_cpu(plan):
@@ -1844,8 +1881,8 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
     for k, step in enumerate(compiled.steps):
         step[4]._last_n_triggers = int(totals[k])
         step[4]._record_batch_time(float(seconds[k]))
-    global LEAF_COMPUTE_SECONDS
-    LEAF_COMPUTE_SECONDS += kernel
+    global STEP_COMPUTE_SECONDS
+    STEP_COMPUTE_SECONDS += kernel
     offs = np.frombuffer(offs_b, np.int64)
     columns = (np.frombuffer(ti_b, np.int64), np.frombuffer(si_b, np.int64),
                np.frombuffer(snr_b, np.complex64), np.frombuffer(bs_b, np.int64),
