@@ -4,6 +4,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+### Added
+
+- `tools/golden.py` records every result the library hands a caller on fixed inputs (the
+  capture tops, a search with follow-ups, one with split windows and one with an injection
+  job's windows, and the low-level entry points), in the order it hands them, from a seeded
+  cost file, and compares two records bitwise. Two fresh runs of one tree record identical
+  results (19,868 arrays).
+
 ### Fixed
 
 - The hierarchical gates no longer dismiss far more than their budget on a band that holds a
@@ -181,11 +189,6 @@ each entry (measurements, commits, studies) is in the repository history at the 
 
 ### Added
 
-- `tools/golden.py` records every result the library hands a caller on fixed inputs (the
-  capture tops, a search with follow-ups, one with split windows and one with an injection
-  job's windows, and the low-level entry points), in the order it hands them, from a seeded
-  cost file, and compares two records bitwise. Two fresh runs of one tree record identical
-  results (19,868 arrays).
 - Several noise profiles over one set of templates. A `HierarchicalFilter` holds one
   calibration per profile (`use_profile(name)`) over a single copy of the templates, and a
   `TimeDomainFilterBank` takes a reference under a name (`set_reference(..., profile=name)`)

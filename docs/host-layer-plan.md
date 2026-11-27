@@ -131,4 +131,24 @@ library chooses the execution.
   injection window (`--injection-window 4.5`, as PyCBC's search configuration sets) searches
   each block in a few seconds around each injection, and a top with at most four leaves live
   there fits the cap. On the first capture top with one 9-second window per block it runs in
-  all six chunks with four leaves live, and not with eight. Its removal waits for a decision.
+  all six chunks with four leaves live, and not with eight. It is kept. Tiled execution (middle
+  correlation and leaf filtering interleaved per time tile, so the middle rows stay in
+  cache) is functionality; what is debt is its separate Python compiler. On the
+  injection-window shapes its time in C equals the ordinary path's and results are
+  identical on two machines; the two paths differ by under 1% either way, from Python
+  preparation the cascade caches and the ordinary path redoes.
+- 2026-11-27: tiling becomes a schedule of the one table. The cascade's compiled form
+  holds the same information as the step table (leaf jobs, correlation calls per chunk,
+  zeroing runs, scales, assembly records, a compile key); what is its own is an ordering
+  of steps and buffer roles (a scratch slot per tile, a carry slot for collars, copy
+  steps). The 4 MB cap is a disabled path standing in for a tuning decision: forced
+  tiling was slower on full-data shapes because the cascade calls the per-block product
+  kernel on at most 8 templates per chunk and copies through a scratch, not because
+  tiling is. Revised conversion order for phase 1: (1) goldens, done; (2) gated leaf
+  steps, with the cascade's leaf binding on the same compiler; (3) single-template
+  steps; (4) flat steps; (5) correlation steps, including the cascade's per-chunk
+  middle calls, with zeroing and scales in C; (6) one table per search chunk with
+  tiling as a schedule, which deletes the cascade's Python compiler in the same merge
+  and replaces the cap by a measured choice between the tiled and untiled schedules.
+  Before step 6 the goldens gain the retain modes of `correlate_and_filter_many` and
+  record every tiling case under both schedules.
