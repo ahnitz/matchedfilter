@@ -44,12 +44,30 @@ replaces. No path is kept beside its replacement.
    table. The GPU executor is one recorded command list, replayed with the pass's
    data bound, through the shared command list all backends use. A backend differs
    from another only by properties it reports.
-4. **Data-dependent work stays below Python.** Survivor lists, follow-up filtering and
-   peak collection run in C or on the device. Python receives the peaks.
-5. **Tuning acts at setup.** Trials choose among plans before the steady state, never
-   inside a pass.
+4. **Data-dependent work stays below Python.** Survivor lists, window-bin merging and
+   peak collection run in C or on the device. Python receives the peaks in their final
+   order. Work a caller decides in its own code, such as PyCBC's follow-up filtering
+   from a hook, enters at a callback boundary as a one-step plan.
+5. **Tuning chooses among plans.** A trial runs alternative plans on the first passes
+   of real data, because synthetic setup trials have mispriced production calls. No
+   decision is taken inside the execution of a plan.
 6. **Accounting is part of the result.** Every pass reports compute time and host
    time. Benchmarks print the compute fraction and the merge gate checks it.
+
+## What exists to grow from
+
+A study of the code at 45328962 found that the CPU leaf path already has the right
+shape: `ap_hmf_sparse_job` with `ap_hmf_run_series_batch_sparse` is an array of jobs
+walked by one C call, and `td_followup_batch` does layout, merging and compaction in
+C. Both are rebuilt from Python tuples on every call. On a production capture the
+PyCBC pass on a CPU is one leaf call per chunk and 92 to 96% of its time is in C.
+The table of phase 1 is these structures made persistent and extended to the
+correlation and root steps, not a new layer beside them. On a GPU the structures to
+grow are the shared `CommandList` and the call-plan replay, which today exist per
+context and per plan instead of per pass.
+
+A search with hooks runs one executor call per chunk and then the hooks. A consumer
+without hooks can run one call per pass.
 
 ## Phases
 
@@ -94,3 +112,11 @@ library chooses the execution.
 ## Log
 
 - 2026-11-27: plan recorded. Phase 0 accounting started.
+- 2026-11-27: design study. The CPU table grows from the sparse-job batch and the
+  follow-up batch. Design points 4 and 5 reworded: caller-decided follow-ups stay at a
+  callback boundary, and trials run alternative plans on first passes. The PyCBC CPU
+  pass is already 92 to 96% in C on a capture, so phase 1's gain on a CPU is the
+  correlation path (the pulsar pass, 76% in C) and the table phase 2 needs. Conversion
+  order for phase 1: golden outputs and removal of the tiled cascade that production
+  never runs; gated leaf steps; single-template steps; flat steps; correlation steps;
+  one table per search chunk.
