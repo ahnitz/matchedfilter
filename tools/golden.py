@@ -25,6 +25,10 @@ The cases:
   windows and with the injection job's) through correlate_and_filter_many, untiled and tiled
   at a 4 MB tile;
 - a small synthetic search with an envelope and refilter calls;
+- a search whose inner nodes have inner children (three inner levels: packed real pairs read
+  through their real and imaginary lanes, complex rows of a real series, a real filter on
+  the real part of a complex row, complex filters), with an envelope, refilter calls and
+  hooks that read every inner ancestor's series of each leaf;
 - the low-level entry points on small synthetic inputs: filter_series (every template, a
   window list with a bin size, one template, a threshold below the bank's), on a gated and
   an ungated bank; filter_series_many over mixed jobs; correlate_series of a real and a
@@ -406,6 +410,78 @@ def _synthetic_search_case(rec, device):
     _search_case(rec, "synthetic.search", search, inputs, windows, hooks)
 
 
+def _nested_search_case(rec, device):
+    """A search whose inner nodes have inner children (three inner levels below the root, two
+    channels, two chunks) with an envelope, follow-ups and hooks that read every ancestor's
+    series of each leaf: the root's inner children A and B are a packed pair of real filters;
+    A's children are a real filter A1, a complex filter A2 and a leaf (complex rows of a real
+    series), B's are two real filters B1 and B2 (packed, real lanes); A1 and A2 each filter one
+    more inner node, A1x (real taps on the real part of A1's complex row) and A2x (complex),
+    and every inner node of the lowest levels has a leaf. Its leaves run on `device`."""
+    from matchedfilter.search import BlockInput, HierarchicalSearch, Inner, Leaf, Root
+    rng = np.random.default_rng(4242)
+    n = 65536
+    nb = n // 2 + 1
+    w, df = _reference()
+    spec = np.zeros(nb, dtype=np.complex64)
+    spec[64:10000] = rng.standard_normal(9936) + 1j * rng.standard_normal(9936)
+    spec /= np.float32(np.linalg.norm(spec))
+    leaf_id = iter(range(100))
+
+    def leaf():
+        k = next(leaf_id)
+        taps, counts = _chirps(8, rng.integers(150, 260, size=8), True, 5 * k)
+        return Leaf(taps, counts, lags=rng.integers(-20, 20, size=8), node_id="leaf%d" % k)
+
+    def inner(name, count, complex_taps, children):
+        taps, counts = _chirps(1, [count], complex_taps, count)
+        return Inner(taps[0], int(counts[0]), children=children, node_id=name)
+    a1 = inner("A1", 201, False, [inner("A1x", 101, False, [leaf()])])
+    a2 = inner("A2", 251, True, [inner("A2x", 121, True, [leaf()]), leaf()])
+    a = inner("A", 301, False, [a1, a2, leaf()])
+    b = inner("B", 401, False, [inner("B1", 151, False, [leaf()]),
+                                inner("B2", 181, False, [leaf()])])
+    root = Root(spec, band=(64, 10000), children=[a, b, leaf()], profile=(w, df),
+                node_id="root")
+    inputs = {c: BlockInput([(rng.standard_normal(nb) + 1j * rng.standard_normal(nb))
+                             .astype(np.complex64) for _ in range(2)],
+                            [(8192, n - 8192), (16384, 40000)], root_scale=lambda r, k: 25.0)
+              for c in ("H1", "L1")}
+
+    def windows(lf, chunk, channel, extra):
+        if chunk == 0:
+            return None
+        if lf.node_id == "leaf1" and channel == "L1":
+            return []
+        return [(18000 - extra, 24000 + extra), (27000 - extra, 36000 + extra)]
+    search = HierarchicalSearch([root], threshold=3.6, envelope_floor=1.0, context=256,
+                                min_pad=2048,
+                                leaf_options=dict(engine="hier", device=device, binsize=2048,
+                                                  false_dismissal=1e-2))
+
+    def hooks(r):
+        h = _record_hooks(r, search, _envelope_of, _follow_up(256, 2))
+        on_peaks = h["on_peaks"]
+
+        def with_ancestors(ctx):
+            ctx.leaf_threshold = 3.6
+            on_peaks(ctx)
+            # every inner ancestor's series over its support, not only the parent's
+            node = search._parent[id(ctx.leaf)]
+            while r is not None and not isinstance(node, Root):
+                for c in ctx.channels:
+                    support = ctx.support(c, node)
+                    ser = ctx.series(c, node)
+                    tag = "chunk%d.%s.%s.%s" % (ctx.chunk, ctx.leaf.node_id, node.node_id, c)
+                    r.add(tag + ".support", np.asarray(support, dtype=np.int64).reshape(-1, 2))
+                    r.add(tag + ".series", np.concatenate([ser[a:b] for a, b in support])
+                          if support else ser[:0])
+                node = search._parent[id(node)]
+        h["on_peaks"] = with_ancestors
+        return h
+    _search_case(rec, "nested.search", search, inputs, windows, hooks)
+
+
 def _entry_point_cases(rec, device):
     """The low-level entry points on small synthetic inputs, with every bank on `device`."""
     from matchedfilter import TimeDomainFilterBank
@@ -595,6 +671,8 @@ def record(args):
         _capture_cases(rec, args.tops, args.device)
     _synthetic_search_case(rec, args.device)
     print("recorded synthetic.search (%d arrays so far)" % len(rec.arrays), flush=True)
+    _nested_search_case(rec, args.device)
+    print("recorded nested.search (%d arrays so far)" % len(rec.arrays), flush=True)
     _entry_point_cases(rec, args.device)
     rec.save(args.out)
     print("%d arrays recorded to %s" % (len(rec.arrays), args.out))

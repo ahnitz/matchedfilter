@@ -18,7 +18,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   capture top tiled, `correlate_and_filter_many`'s small and large cohorts and each retain
   mode of the cascade untiled; 24,593 arrays), and `golden.py schedules` checks that the two
   schedules of a record gave the same peaks, hook series and, where both wrote it, the same
-  middle output. With `--device gpu:0` it records the same cases on a GPU,
+  middle output. It records a search whose inner nodes have inner children (three inner
+  levels: packed real pairs read through their real and imaginary lanes, complex rows of a
+  real series, a real filter on the real part of a complex row, complex filters), with hooks
+  that read every inner ancestor's series of each leaf (23,541 arrays; two runs from one seed
+  identical). With `--device gpu:0` it records the same cases on a GPU,
   from a seed of that device's own; on a Radeon 8060S three fresh runs from one seed record
   identical results. `--digest-above` keeps large arrays whole, to see how two records differ.
 - `tools/gpu_alloc_trace.py` runs a program with every Vulkan device allocation traced by
