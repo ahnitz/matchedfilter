@@ -505,6 +505,10 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     allocations every segment allocate nothing: a group's record (per shape and place in its
     batch) binds its templates and series per run, so no record or buffer is made again, and
     no descriptor pool is left behind."""
+    # An earlier test's bank still waiting for the collector may own the device's follow-up
+    # records; when it is freed mid-test the records pass to another context and are made
+    # again there. Free it first.
+    gc.collect()
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
     rng, banks = _setup(monkeypatch, nbanks=1, seed=83, replay=False)
     # Several template groups of one block length (they share workspaces), so jobs move
@@ -581,3 +585,80 @@ def test_more_batches_than_slots(monkeypatch):
     for _ in range(3):
         _fill(rng, rows, S)
         _check(jobs)
+
+
+def _slots_made(banks):
+    """Per plan with a series workspace, the slots whose spectra and starts exist."""
+    made = []
+    for b, _, _ in banks:
+        for g in b._groups:
+            ws = g.plan.__dict__.get("_series_workspace")
+            if ws is not None:
+                assert [s is None for s in ws[2]] == [s is None for s in ws[3]]
+                made.append(tuple(k for k, s in enumerate(ws[3]) if s is not None))
+    return made
+
+
+def test_workspace_slots_are_made_when_first_used(monkeypatch):
+    """A slot's spectra and starts are made when a batch first uses the slot: a caller that
+    collects each batch before the next uses slot 0 alone and has no other slot's buffers. A
+    second batch in flight takes the other half's slot, made then; the first slot's buffers
+    stay, so its call plans still replay, and both batches return what serial calls do."""
+    monkeypatch.setenv("MF_GPU_QUEUE_AHEAD", "8")
+    rng, banks = _setup(monkeypatch, nbanks=2, seed=87)
+    S = 1 << 17
+    sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(2)]
+
+    def jobs(rows):
+        return [(b, rows[i], dict(windows=slice(3000, S - 3000)))
+                for i, (b, _, _) in enumerate(banks)]
+    # Collected before the next batch: slot 0 alone.
+    for _ in range(2):
+        _fill(rng, sets[0], S)
+        _check(jobs(sets[0]))
+    made = _slots_made(banks)
+    assert made and all(m == (0,) for m in made), made
+    plans = [g.plan for b, _, _ in banks for g in b._groups]
+    first = [(p._series_workspace[2][0], p._series_workspace[3][0]) for p in plans]
+    replays = _replays(banks)
+    # Two batches in flight: the second starts at slot 4, made now.
+    for rows in sets:
+        _fill(rng, rows, S)
+    in_flight = [(rows, TimeDomainFilterBank.filter_series_many(jobs(rows), wait=False))
+                 for rows in sets]
+    assert all(m == (0, 4) for m in _slots_made(banks)), _slots_made(banks)
+    for rows, futures in in_flight:
+        got = [f.result() for f in futures]
+        want = [b.filter_series(x, **kw) for b, x, kw in jobs(rows)]
+        for r1, r2 in zip(want, got):
+            for f in r1._fields:
+                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+    assert all(p._series_workspace[2][0] is spec and p._series_workspace[3][0] is starts
+               for p, (spec, starts) in zip(plans, first))
+    assert _replays(banks) > replays, "the first slot's call plans no longer replay"
+
+
+def test_slot_buffers_are_freed_with_their_bank_without_the_collector(monkeypatch):
+    """The slot buffers made on first use belong to their plan's workspace alone: dropping
+    the bank frees them by reference counting, with the garbage collector off."""
+    import weakref
+    monkeypatch.setenv("MF_GPU_QUEUE_AHEAD", "8")
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=88)
+    S = 1 << 17
+    sets = [banks[0][0].empty_shared((1, S)) for _ in range(2)]
+    for rows in sets:
+        _fill(rng, rows, S)
+    jobs = [[(banks[0][0], rows[0], dict(windows=slice(3000, S - 3000)))] for rows in sets]
+    in_flight = [TimeDomainFilterBank.filter_series_many(j, wait=False) for j in jobs]
+    [f.result() for fs in in_flight for f in fs]
+    assert all(m == (0, 4) for m in _slots_made(banks)), _slots_made(banks)
+    held = [weakref.ref(a) for g in banks[0][0]._groups
+            for pool in g.plan._series_workspace[2:4] for a in pool if a is not None]
+    held.append(weakref.ref(banks[0][0]))
+    gc.collect()
+    gc.disable()
+    try:
+        del banks, jobs, in_flight
+        assert [r() is None for r in held] == [True] * len(held)
+    finally:
+        gc.enable()

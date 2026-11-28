@@ -124,6 +124,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- A GPU plan makes the spectra and block starts of a pipelining slot when a call first uses
+  the slot, not all eight at its first call. A search collects every leaf call before its next
+  chunk, so its plans use slot 0 alone, and seven of every eight slots were never touched. On
+  the 171,828-template PyCBC job (Radeon 8060S) the device memory the job holds at its peak
+  (VRAM and GTT above idle) went from 3.29-3.34 GB to 1.17-1.25 GB, and its allocations from
+  74,511 to 46,595. Results are unchanged, to the bit.
 - Gated CPU leaf calls (`filter_series` and `filter_series_many` on a hierarchical CPU bank,
   and the leaves of a CPU search) run as compiled leaf steps: the steps of a call shape are
   laid out and configured once, and a call binds its series and runs them in one C call that

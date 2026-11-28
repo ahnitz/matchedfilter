@@ -8,7 +8,8 @@ every device buffer the Vulkan backend allocates (``matchedfilter._vkcompute._Bu
 writes OUT.json when the program exits. Per allocation it records:
 
 - its role, read from the call stack: ``spectra slot k`` and ``starts slot k`` (a plan's series
-  workspace, ``MatchedFilter._series_call``), ``series source``, ``<record>:<buffer>`` for a
+  workspace, made by ``MatchedFilter._series_submit`` when a batch first uses slot k), ``series
+  source``, ``<record>:<buffer>`` for a
   record's own buffers (``hier:cval1``, ``forward:starts``, ``followups:tab``, ...), ``inner
   rows``, ``middle workspace``, ``templates``, ``tap table``, the root's buffers, calibration
   probes, or ``other:<file>:<function>``;
@@ -47,11 +48,10 @@ ABORT_CODE = 70
 INFO = {}
 LIVE = set()
 STATE = dict(live=0, peak=0, peak_t=0.0, snapshot_at=-1, snapshot=None)
-#: One {"spectra": k, "starts": k} per MatchedFilter._series_call in progress.
-SERIES_CALLS = []
 SAMPLES = []
 T0 = time.perf_counter()
-#: The source lines of _series_call that allocate the workspace pools.
+#: The source lines that allocate a plan's workspace: a slot's spectra and starts
+#: (MatchedFilter._series_submit) and the series source (MatchedFilter._series_call).
 LINES = {}
 DEVICES = []
 #: A new snapshot of the live set is taken when the peak grows by this much.
@@ -141,16 +141,14 @@ def role_of(frame):
             if kind == "<lambda>":
                 kind = caller.f_back.f_code.co_name
             return "%s:%s" % (RECORD_KINDS.get(kind, kind), frame.f_locals.get("name"))
-        if name == "_series_call" and code.co_filename.endswith("_filter.py"):
+        if name == "_series_submit" and code.co_filename.endswith("_filter.py"):
             line = frame.f_lineno
-            top = SERIES_CALLS[-1] if SERIES_CALLS else None
             for what in ("spectra", "starts"):
                 if line == LINES.get(what):
-                    slot = -1
-                    if top is not None:
-                        slot = top[what]
-                        top[what] += 1
-                    return "%s slot %d" % (what, slot)
+                    return "%s slot %d" % (what, frame.f_locals.get("slot", -1))
+            return "series submit:%d" % line
+        if name == "_series_call" and code.co_filename.endswith("_filter.py"):
+            line = frame.f_lineno
             if line == LINES.get("source"):
                 return "series source"
             return "series call:%d" % line
@@ -204,18 +202,21 @@ def note_free(serial):
 
 def install():
     """Wrap the Vulkan backend's buffer constructor and destroy, its host writes, descriptor
-    sets, recordings' fills and updates, and MatchedFilter._series_call, by delegation."""
+    sets, and recordings' fills and updates, by delegation."""
     from matchedfilter import _vkcompute, _filter, _gpuhost
+    source, first = inspect.getsourcelines(_filter.MatchedFilter._series_submit)
+    for i, text in enumerate(source):
+        if "c.spectra_pool[slot] = " in text:
+            LINES["spectra"] = first + i
+        elif "c.starts_pool[slot] = " in text:
+            LINES["starts"] = first + i
     source, first = inspect.getsourcelines(_filter.MatchedFilter._series_call)
     for i, text in enumerate(source):
-        if "spectra_pool = [" in text:
-            LINES["spectra"] = first + i
-        elif "starts_pool = [" in text:
-            LINES["starts"] = first + i
-        elif "src = sources[slot0] =" in text:
+        if "src = sources[slot0] =" in text:
             LINES["source"] = first + i
     if len(LINES) != 3:
-        _abort("could not find the workspace lines of _series_call: %r" % LINES)
+        _abort("could not find the workspace lines of _series_submit and _series_call: %r"
+               % LINES)
 
     buffer_type = _vkcompute._Buffer
     init, destroy, write = buffer_type.__init__, buffer_type.destroy, buffer_type.write
@@ -274,16 +275,6 @@ def install():
                 _mark(buf, 6)
         return resolve(self, *args, **kwargs)
     _vkcompute._VkNative._resolve = traced_resolve
-
-    series_call = _filter.MatchedFilter._series_call
-
-    def traced_series_call(self, *args, **kwargs):
-        SERIES_CALLS.append({"spectra": 0, "starts": 0})
-        try:
-            return series_call(self, *args, **kwargs)
-        finally:
-            SERIES_CALLS.pop()
-    _filter.MatchedFilter._series_call = traced_series_call
 
     def sample():
         while True:

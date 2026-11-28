@@ -231,3 +231,7 @@ library chooses the execution.
   extension; 5d 379-403 -> 366-374 ms, 91.1-91.4% -> 97.2-97.5%. The PyCBC job is unchanged
   (it was already one middle call per chunk and detector). CORR and leaf steps of a chunk are
   still two tables and two C calls: one table per chunk is step 6.
+- 2026-11-27: GPU step 1, item 1: a plan's pipelining slot gets its spectra and starts when a
+  call first uses it (`_series_submit`), not eight slots at the first call. On the Vulkan
+  PyCBC job peak live device memory 3,240 MB to 1,133 MB (none untouched, against 2,129 MB),
+  allocations 74,511 to 46,595; triggers and GPU and CPU goldens identical to d6e7a585.

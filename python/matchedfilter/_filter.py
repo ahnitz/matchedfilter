@@ -1926,6 +1926,10 @@ class MatchedFilter:
         # block count, and reallocating would also discard every recording built on them.
         # Capacity in both batch and slots: a call alternating unpipelined (K=1) and pipelined
         # (K=8) groups reallocated every call, and recordings are keyed on these buffers.
+        # A slot's spectra and starts are made when a batch first uses the slot
+        # (_series_submit), not here: a search collects every call before its next chunk, so
+        # its plans use slot 0 alone, and the seven slots made beside it were two thirds of
+        # a Vulkan job's device memory. Its entry is None until then.
         workspace = getattr(self, "_series_workspace", None)
         if (workspace is None or workspace[0][1] != n or workspace[0][0] < batch
                 or workspace[0][2] < K):
@@ -1936,9 +1940,9 @@ class MatchedFilter:
             self._settle_deferred()
             cap_b = (batch if workspace is None or workspace[0][1] != n else max(batch, workspace[0][0])) + 16
             cap_k = K if workspace is None or workspace[0][1] != n else max(K, workspace[0][2])
-            spectra_pool = [self._gpu.empty_shared((cap_b, n)) for _ in range(cap_k)]
-            starts_pool = [self._gpu.empty_shared(cap_b, np.uint32) for _ in range(cap_k)]
-            workspace = ((cap_b, n, cap_k), None if workspace is None else workspace[1],
+            spectra_pool = [None] * cap_k
+            starts_pool = [None] * cap_k
+            workspace =((cap_b, n, cap_k), None if workspace is None else workspace[1],
                          spectra_pool, starts_pool)
         _, source, c.spectra_pool, c.starts_pool = workspace
         if not defer:
@@ -2010,8 +2014,15 @@ class MatchedFilter:
 
     def _series_submit(self, c, slot_idx, begin, count, rebased, **forward_kw):
         """A batch's slot and spectra, with its block starts written and its forward submitted
-        (deferred: the dispatch that reads the spectra takes it)."""
+        (deferred: the dispatch that reads the spectra takes it). The slot's buffers are made
+        here when no batch has used the slot before, at the workspace's capacity; the pools
+        are filled in place, so the call plans and records built on the other slots stay
+        valid, and each new buffer has an allocation serial of its own."""
         slot = slot_idx % c.K
+        if c.starts_pool[slot] is None:
+            capacity, n = c.workspace[0][0], c.workspace[0][1]
+            c.spectra_pool[slot] = self._gpu.empty_shared((capacity, n))
+            c.starts_pool[slot] = self._gpu.empty_shared(capacity, np.uint32)
         starts = c.starts_pool[slot]
         spec = c.spectra_pool[slot][:count]
         starts[:count] = rebased

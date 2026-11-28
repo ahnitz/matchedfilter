@@ -80,7 +80,9 @@ python tools/gpu_alloc_trace.py trace.json tools/search_bench.py research/captur
 ```
 
 On the 171,828-template PyCBC job (Radeon 8060S, 2026-11-27) 2,129 MB of the 3,240 MB live at
-the peak were never touched: seven of the eight spectra slots each plan makes.
+the peak were never touched: seven of the eight spectra slots each plan made at its first call.
+With a slot's buffers made when a call first uses it, 1,133 MB are live at the peak and none of
+it is untouched.
 
 The other `bench_*.py`, `audit_*.py`, `gpu_*.py` and `narrow_cpu/` programs are focused
 investigations. Their docstrings describe the question they answered. They are not a
