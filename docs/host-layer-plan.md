@@ -405,3 +405,17 @@ library chooses the execution.
   alternated pairs): setup 18.88 to 18.36 s, wall 68.63 to 68.42 s, peak RSS 1.61 GB; chain
   record, triggers and goldens identical. Radeon 8060S job (three pairs): setup
   16.73/17.56/17.10 to 17.07/16.48/16.73 s.
+- 2026-11-28: GPU step 4: a GPU leaf call's peaks are assembled by the step table's C assembly
+  (`_core.assemble_peaks`, sharing `hmf_append_peaks` and the window-bin merge with
+  `HMFTable.run`); a batch's jobs in one call. A hierarchical GPU call returns its parts, and
+  the assembly reads each run's readback buffers in place where the device reports unified
+  memory (the page-locked copy on CUDA); host results of the general loop are parts of the
+  same assembly. Deleted: `_consume_into`, `_results_from`, `_RaggedSplit`, filter_series'
+  build, the replay's `finish_grouped`, `_hier_result`'s NumPy reading. Goldens 0 differ on
+  the GPU (20,283 arrays) and the CPU (22,707). Capture tops (8060S): steady 0.058-0.064 ->
+  0.052-0.056 s a pass, device compute fraction 76% -> 83-85%. PyCBC GPU job: collection
+  Python 43 -> 15 us a leaf call (0.85 -> 0.31 s a job), function calls 105 -> 35 a call; the
+  job's leaf time (6.7-9.1 s either tree at load 2-5) does not resolve it. The phase-0 ledger's
+  2 s summed cumulative times that nest (build holds finish_grouped holds _hier_result); the
+  old collection measured whole is 0.85 s real. What remains per call is the fence wait and
+  the Pending (step 3) and the readback's take.

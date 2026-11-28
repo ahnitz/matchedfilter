@@ -256,6 +256,20 @@ slices' peaks and are assembled with the others. Its results equal the untiled s
 Tiling is not the default: on the shapes measured it did not pay (docs/host-layer-plan.md,
 2026-11-28); `tools/schedule_bench.py` measures it on other machines.
 
+The calls the steps do not take (GPU calls, and CPU plans the steps decline) are assembled by
+the same C functions (`_core.assemble_peaks`, sharing `hmf_append_peaks` and the window-bin
+merge with `HMFTable.run`). `filter_series` records each call it makes as the bank index of
+each template of its result, the blocks' starts in output order, each block's bin count where
+one ragged call computed several, the block length and the result (`_results._PeaksJob`); a
+`filter_series_many` batch's jobs are assembled in one extension call by whichever is asked
+first, and handed back as slices of one arena. A hierarchical GPU call with sparse peaks
+returns its parts (`_results._CallParts`: per batch of blocks its first block and its
+in-flight result), and the assembly reads each run's readback buffers where the device wrote
+them (`_gpuhier._readback`: views made once per record, the buffers themselves where the
+device reports unified memory, the page-locked copy on CUDA), adding each run's work counts to
+its plan's counters (`MatchedFilter._gwork`). Host results (dense lags and values, or
+`_SparsePeaks`) are parts of the same assembly.
+
 A CPU search runs each chunk's inner correlations (of inner nodes whose children are leaves)
 and its leaf searches as the steps of one table, one C call (`HierarchicalSearch._cpu_chunk`,
 `_batches._chunk_steps`). The table is compiled the first time the chunk's shape is seen: the

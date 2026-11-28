@@ -193,6 +193,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- A GPU leaf call's peaks are assembled in C, by the assembly the CPU step table uses, and a
+  `filter_series_many` batch's jobs in one call: the device's readback buffers (the counts,
+  the survivor rows' bins or the compacted list) are read where the device wrote them on
+  Vulkan and Metal, and from the page-locked copy on CUDA, into one arena of peaks, in the
+  order the Python assembly gave (layout order, bin counts, window-bin merges). Results are
+  unchanged, to the bit and in order. On the Radeon 8060S the capture tops' steady pass took
+  0.052-0.056 s against 0.058-0.064 s, with the device busy 83-85% of it against 76%; in the
+  PyCBC job the Python collecting a leaf call went from 43 to 15 us (0.85 to 0.31 s a job),
+  which the job's wall time does not resolve.
 - A GPU plan makes the spectra and block starts of a pipelining slot when a call first uses
   the slot, not all eight at its first call. A search collects every leaf call before its next
   chunk, so its plans use slot 0 alone, and seven of every eight slots were never touched. On
