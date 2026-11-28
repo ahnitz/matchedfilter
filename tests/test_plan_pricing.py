@@ -195,3 +195,31 @@ def test_a_gpu_choice_is_the_counts_own_at_every_template_count(feed, forced, sh
     if feed is not None and not shared:
         # the feed is priced: some chain's plan, or the choice, moves with the count
         assert len({tuple(fresh[nt][1]) for nt in counts}) > 1
+
+
+@pytest.mark.parametrize("in_c", [True, False])
+def test_a_chain_search_leaves_no_cyclic_garbage(in_c, empty_model, monkeypatch):
+    """A chain's candidate search (_chain_candidates, in C or in its Python reference) leaves
+    nothing for the collector: the Python search's recursive function referred to itself
+    through its closure, holding a copy of the noise columns with it, on every call, also
+    where the C search ran instead."""
+    import gc as collector
+    monkeypatch.setattr(gc, "_C_SEARCH", in_c)
+    p = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    collector.collect()
+    collector.disable()
+    try:
+        collector.set_debug(collector.DEBUG_SAVEALL)
+        best, every = gc.choose_chain(p, N, SNR, 1e-3, cost=_model(False, False, False),
+                                      max_tiers=3)
+        assert best is not None and len(every) >= 5
+        del best, every
+        collector.collect()
+        left = sorted({getattr(o, "__qualname__", type(o).__qualname__)
+                       for o in collector.garbage
+                       if getattr(o, "__module__", None) == "matchedfilter.gatechain"})
+    finally:
+        collector.garbage.clear()
+        collector.set_debug(0)
+        collector.enable()
+    assert left == [], left

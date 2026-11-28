@@ -649,6 +649,34 @@ def test_steady_runs_allocate_nothing_and_leave_no_cyclic_garbage(make, wait):
     w.check()
 
 
+def test_a_new_context_and_its_recordings_leave_no_cyclic_garbage(make):
+    """Making a context (its device queries), recording a list (a kernel, a descriptor set),
+    running it and dropping the recording leave no reference cycle of the library's for the
+    collector. On Vulkan each ctypes.cast of a structure or array to a pointer made one (the
+    source and the keep-alive dict it shares with the cast), in the device queries, every
+    pipeline and every descriptor set: 260 to 470 objects a top template in a PyCBC job."""
+    gc.collect()
+    gc.disable()
+    try:
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        ctx = make()
+        w = Writer(make, ctx, np.random.default_rng(13), passes=0)
+        ctx._x_run(w.native, True)
+        ctx.settle_writes()
+        w.check()
+        ctx._x_release(w.native, done=True)
+        del w, ctx
+        gc.collect()
+        kinds = sorted({"%s.%s" % (type(o).__module__, type(o).__qualname__)
+                        for o in gc.garbage
+                        if str(type(o).__module__).startswith("matchedfilter")})
+    finally:
+        gc.garbage.clear()
+        gc.set_debug(0)
+        gc.enable()
+    assert kinds == [], kinds
+
+
 _UNPOOLED_METAL = ("Metal makes every buffer with newBufferWithLength and releases it at "
                    "once: no allocation pool (audit section 3.2, plan step 5)")
 

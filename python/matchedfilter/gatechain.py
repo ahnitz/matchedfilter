@@ -846,6 +846,20 @@ def _chain_candidates(S, noise, cols, K, prune, dead):
     else:
         Nc = np.ascontiguousarray(noise[:, cols].T)
 
+    if _C_SEARCH and all(len(o) == K + 1 for o in low) and len(last_order) == K + 1:
+        shape = _shape_only(M, k) if isinstance(S, _Columns) else np.ascontiguousarray(S, np.float32)
+        return _core.chain_candidates(shape, Nc, tuple(low),
+                                      tuple(np.ascontiguousarray(v, np.float32) for v in low_val),
+                                      np.ascontiguousarray(last_order, np.int64),
+                                      np.ascontiguousarray(last_val, np.float32),
+                                      tuple(float(a) for a in splits), int(K), int(Nn), bool(prune),
+                                      float(_USELESS_PASS),
+                                      tuple(np.ascontiguousarray(d, np.int64) for d in dead))
+
+    # The reference search in Python, defined only where it runs: rec calls itself, so it
+    # refers to itself through its closure, a reference cycle that held what it closes over
+    # (Nc, a copy of the noise columns, among it) until the collector ran. The name is
+    # rebound on return, which breaks the cycle.
     def consider(prefix, ndead, alive, fracs):
         """Given thresholds for tiers 0..k-2, the last uses the remaining budget: ndead draws
         are dismissed (marked), alive the noise blocks passing every earlier tier (None: all
@@ -901,16 +915,8 @@ def _chain_candidates(S, noise, cols, K, prune, dead):
                 fracs + [int(np.count_nonzero(an)) / Nn])
             marks[new] = 0
 
-    if _C_SEARCH and all(len(o) == K + 1 for o in low) and len(last_order) == K + 1:
-        shape = _shape_only(M, k) if isinstance(S, _Columns) else np.ascontiguousarray(S, np.float32)
-        return _core.chain_candidates(shape, Nc, tuple(low),
-                                      tuple(np.ascontiguousarray(v, np.float32) for v in low_val),
-                                      np.ascontiguousarray(last_order, np.int64),
-                                      np.ascontiguousarray(last_val, np.float32),
-                                      tuple(float(a) for a in splits), int(K), int(Nn), bool(prune),
-                                      float(_USELESS_PASS),
-                                      tuple(np.ascontiguousarray(d, np.int64) for d in dead))
     rec(0, [], 1.0, 0, None, [])
+    rec = None
     return out
 
 

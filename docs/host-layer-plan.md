@@ -366,3 +366,13 @@ library chooses the execution.
   cost model's unrounded direct-refine fraction (99 values in the job; a CPU plan's is
   rounded to a twentieth): rounding it gives 4,847 evaluations but moves one plan's
   thresholds, so it is not done (notes/host-layer/phase2-design-study.md, Step 2b results).
+- 2026-11-28: GPU step 2b, item 2: in the Vulkan PyCBC job no reference cycle of the library's
+  keeps a bank, plan, context, record, call plan or search alive: with the collector off,
+  every top's plans after the first go with their last holder. The first top's whole search
+  (34 plans, 37 contexts, 73 records; 95 MB of host memory) waits for a full collection
+  because PyCBC's `scheme._scheming_function` keeps the exceptions of its failed imports in a
+  local list (traceback, frame, list, exception), and those frames hold the search's own
+  frames; with PyCBC's `sigmasq` method, its cycles are what a collection frees each later top
+  (6.4-7.3 MB). The library's own cycles were small and are gone: `ctypes.cast` of structures
+  and arrays in the Vulkan backend (descriptor sets, pipelines, device queries), ctypes types
+  made per call, and the chain search's self-referring helper. Goldens and triggers identical.

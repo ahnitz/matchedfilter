@@ -55,6 +55,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- The Vulkan backend and the chain search leave no reference cycles for the collector. Each
+  `ctypes.cast` of a structure or array to a pointer made one (the source and the keep-alive
+  dictionary it shares with the result): in every descriptor set, pipeline and device query,
+  holding SPIR-V copies, specialization data and query structures until a collection; so did
+  ctypes array and structure types made per call, and the chain search's recursive helper,
+  which referred to itself and held a copy of the noise columns, made on every search even
+  where the C search ran. A GPU search built, run and dropped with the collector off now
+  leaves nothing of the library's for it. Results are unchanged.
 - A GPU process no longer ends with "Exception ignored in `_Allocation.__del__`" (four at the
   end of every Vulkan PyCBC job). The device root, which the library holds for the process,
   was freed while the interpreter cleared modules, and its buffers' destroy() called a backend

@@ -215,6 +215,10 @@ _ExtProps = _struct("VkExtensionProperties", ("extensionName", ctypes.c_char * 2
 _PhysicalDeviceProperties2 = _struct("VkPhysicalDeviceProperties2",
                                     ("sType", _u32), ("pNext", _vp),
                                     ("properties", ctypes.c_ubyte * 2048))
+#: The head of a VkPhysicalDeviceProperties2 that queries one extension structure
+#: (_Device._properties2), made once: a structure type made per call is a reference cycle.
+_Properties2Head = _struct("VkPhysicalDeviceProperties2", ("sType", _u32), ("pNext", _vp),
+                           ("props", ctypes.c_ubyte * 1024))
 _ComputePipelineCreate = _struct("VkComputePipelineCreateInfo",
                                  ("sType", _u32), ("pNext", _vp), ("flags", _u32),
                                  ("stage", _StageCreate), ("layout", _vp),
@@ -790,10 +794,10 @@ class _Device:
         # the kernels are specialized on it (constant 74), and RADV may otherwise pick
         # wave32 or wave64 per pipeline.
         ssc_feat, ext_names = self._subgroup_control_features()
-        dci = _DeviceCreate(3, ctypes.cast(ctypes.pointer(ssc_feat), _vp) if ssc_feat else None,
+        dci = _DeviceCreate(3, ctypes.addressof(ssc_feat) if ssc_feat else None,
                             0, 1, ctypes.pointer(qci), 0, None,
                             len(ext_names) if ext_names else 0,
-                            ctypes.cast(ext_names, _vp) if ext_names else None, None)
+                            ctypes.addressof(ext_names) if ext_names else None, None)
         self.device = _vp()
         _check(vk.vkCreateDevice(self.physical, ctypes.byref(dci), None,
                                  ctypes.byref(self.device)), "vkCreateDevice")
@@ -819,7 +823,7 @@ class _Device:
         # 32 KB -- so the size has to be asked for rather than assumed. A
         # software rasteriser will not reveal the mistake: llvmpipe reports
         # 32 KB and runs a 64 KB kernel regardless.
-        props = (ctypes.c_ubyte * 2048)()
+        props = carray(ctypes.c_ubyte, 2048)()
         vk.vkGetPhysicalDeviceProperties(self.physical, ctypes.byref(props))
         # Whether native trig is accurate enough is measured when the first context attaches
         # (Context._probe_trig); until then the probe's own pipelines use native trig.
@@ -869,13 +873,13 @@ class _Device:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
                 ssc_props = _SSCProperties(1000225000, None, 0, 0, 0, 0)
                 sub_props = _SubgroupProperties(
-                    1000094000, ctypes.cast(ctypes.pointer(ssc_props), _vp)
+                    1000094000, ctypes.addressof(ssc_props)
                     if getattr(self, "subgroup_control", False) else None,
                     0, 0, 0, 0)
                 props2 = _PhysicalDeviceProperties2(
                     1000059001,
-                    ctypes.cast(ctypes.pointer(sub_props), _vp),
-                    (ctypes.c_ubyte * 2048)()
+                    ctypes.addressof(sub_props),
+                    carray(ctypes.c_ubyte, 2048)()
                 )
                 vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
                 vk.vkGetPhysicalDeviceProperties2.restype = None
@@ -914,13 +918,13 @@ class _Device:
             vk.vkEnumerateDeviceExtensionProperties.argtypes = [_vp, _vp, ctypes.POINTER(_u32), _vp]
             n = _u32()
             vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), None)
-            exts = (_ExtProps * n.value)()
+            exts = carray(_ExtProps, n.value)()
             vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), exts)
             have = {e.extensionName for e in exts}
             ssc = _SSCFeatures(1000225002, None, 0, 0)
             hqr = _HQRFeatures(1000261000, None, 0)
-            ssc.pNext = ctypes.cast(ctypes.pointer(hqr), _vp)
-            f2 = _Features2(1000059000, ctypes.cast(ctypes.pointer(ssc), _vp), (ctypes.c_ubyte * 256)())
+            ssc.pNext = ctypes.addressof(hqr)
+            f2 = _Features2(1000059000, ctypes.addressof(ssc), carray(ctypes.c_ubyte, 256)())
             vk.vkGetPhysicalDeviceFeatures2.argtypes = [_vp, _vp]
             vk.vkGetPhysicalDeviceFeatures2.restype = None
             vk.vkGetPhysicalDeviceFeatures2(self.physical, ctypes.byref(f2))
@@ -934,9 +938,9 @@ class _Device:
             if not chain:
                 return None, None
             for a, b in zip(chain, chain[1:]):
-                a.pNext = ctypes.cast(ctypes.pointer(b), _vp)
+                a.pNext = ctypes.addressof(b)
             chain[-1].pNext = None
-            self._ssc_keep = (chain[0], (ctypes.c_char_p * len(names))(*names), chain)
+            self._ssc_keep = (chain[0], carray(ctypes.c_char_p, len(names))(*names), chain)
             self.subgroup_control = _SSC_EXT in names
             return self._ssc_keep[:2]
         except Exception:
@@ -951,7 +955,7 @@ class _Device:
         count = _u32(0)
         self.vk.vkGetPhysicalDeviceQueueFamilyProperties(
             self.physical, ctypes.byref(count), None)
-        families = (_QueueFamily * count.value)()
+        families = carray(_QueueFamily, count.value)()
         self.vk.vkGetPhysicalDeviceQueueFamilyProperties(
             self.physical, ctypes.byref(count), families)
         # Dedicated compute queues with multiple hardware queues
@@ -1416,8 +1420,8 @@ class Context(KernelRoles, Executor, InputUploads):
         vk = self.vk
         blob = (_SPIRV / filename).read_bytes()
         nbind = max(nbind, _module_bindings(blob))
-        code = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
-        sm_info = _ShaderModule(16, None, 0, len(blob), ctypes.cast(code, _vp))
+        code = carray(ctypes.c_ubyte, len(blob)).from_buffer_copy(blob)
+        sm_info = _ShaderModule(16, None, 0, len(blob), ctypes.addressof(code))
         module = _vp()
         _check(vk.vkCreateShaderModule(self.device, ctypes.byref(sm_info), None,
                                        ctypes.byref(module)), "vkCreateShaderModule")
@@ -1438,7 +1442,7 @@ class Context(KernelRoles, Executor, InputUploads):
         # the shader never reads.
         push = _PushRange(_STAGE_COMPUTE, 0, push_bytes)
         layouts = carray(_vp, 1)(set_layout)
-        pl_info = _PipelineLayoutCreate(30, None, 0, 1, ctypes.cast(layouts, _vp),
+        pl_info = _PipelineLayoutCreate(30, None, 0, 1, ctypes.addressof(layouts),
                                         1 if push_bytes else 0,
                                         ctypes.pointer(push) if push_bytes else None)
         layout = _vp()
@@ -1483,8 +1487,8 @@ class Context(KernelRoles, Executor, InputUploads):
         c_data = carray(_u32, len(data_vals))(*data_vals)
         spec_info = _SpecializationInfo(len(entries), c_entries,
                                         ctypes.sizeof(c_data),
-                                        ctypes.cast(ctypes.pointer(c_data), _vp))
-        special = ctypes.cast(ctypes.pointer(spec_info), _vp)
+                                        ctypes.addressof(c_data))
+        special = ctypes.addressof(spec_info)
         req = None
         stage_flags = 0
         if getattr(self, "subgroup_range", None):
@@ -1495,7 +1499,7 @@ class Context(KernelRoles, Executor, InputUploads):
             inv = self._invocations(filename)
             if getattr(self, "full_subgroups", False) and inv and inv % sg == 0:
                 stage_flags = 2
-        stage = _StageCreate(18, ctypes.cast(ctypes.pointer(req), _vp) if req else None,
+        stage = _StageCreate(18, ctypes.addressof(req) if req else None,
                              stage_flags, _STAGE_COMPUTE, module,
                              b"main", special)
         cp_info = _ComputePipelineCreate(29, None, 0, stage, layout, None, 0)
@@ -1549,7 +1553,7 @@ class Context(KernelRoles, Executor, InputUploads):
                                              ctypes.byref(pool)),
                    "vkCreateDescriptorPool")
             layouts = carray(_vp, 1)(set_layout)
-            da = _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))
+            da = _DescSetAlloc(34, None, pool, 1, ctypes.addressof(layouts))
             dset = _vp()
             try:
                 _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(da),
@@ -2064,7 +2068,7 @@ class Context(KernelRoles, Executor, InputUploads):
         vk.vkEnumerateDeviceExtensionProperties.argtypes = [_vp, _vp, ctypes.POINTER(_u32), _vp]
         n = _u32()
         vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), None)
-        exts = (_ExtProps * n.value)()
+        exts = carray(_ExtProps, n.value)()
         vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), exts)
         return {e.extensionName for e in exts}
 
@@ -2075,10 +2079,7 @@ class Context(KernelRoles, Executor, InputUploads):
         if not hasattr(vk, "vkGetPhysicalDeviceProperties2"):
             return False
 
-        class Props2(ctypes.Structure):
-            _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
-                        ("props", ctypes.c_ubyte * 1024)]
-        p2 = Props2(1000059001, ctypes.cast(ctypes.pointer(ext), ctypes.c_void_p))
+        p2 = _Properties2Head(1000059001, ctypes.addressof(ext))
         vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(p2))
         return True
