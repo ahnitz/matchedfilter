@@ -680,6 +680,11 @@ def test_a_gpu_call_compacting_more_records_than_are_mirrored_gives_the_rows_pea
     X = np.fft.fft(rng.standard_normal(S))
     X[S // 2:] = 0
     x[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
+    # The plan's first call resolves it, and in a process that has not calibrated this
+    # device's GPU cost model yet that times dense calls of its own
+    # (_hierarchical._gpu_calibration, calibrate_costs_gpu): made here, before the readbacks
+    # are watched, so the calls below are the leaf call alone whatever ran before.
+    bank.filter_series(x)
     seen, got = [], {}
     _watch_readbacks(monkeypatch, seen)
     for way in ("rows", "compact"):
