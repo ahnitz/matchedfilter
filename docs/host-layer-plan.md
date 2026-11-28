@@ -335,3 +335,15 @@ library chooses the execution.
   explicit-only their callers are tools/ladder.py (`LADDER_TILE_BYTES`), the tests and
   golden.py (schedule_bench.py compiles once and reruns); PyCBC never calls it directly. No
   kept plan is added for them.
+- 2026-11-27: GPU step 2, one buffer arena per device for a search's scratch
+  (`_gpuhost.Arena`): a search's run leases it, its plans' record buffers and slot spectra and
+  starts are sections laid out as first asked, the search keeps the lease between runs, and
+  the next search's lease reuses the blocks after releasing what the previous one's plans
+  built on them. Every section has a serial of its own. Device-only scratch everywhere;
+  host-read, host-written and host-addressed buffers only where the host sees device memory
+  in place (not CUDA). Vulkan PyCBC job: 46,595 device buffers to 4,742, peak live 1,133 to
+  1,116 MB, wall median 51.1 to 49.4 s, leaf 8.4 to 6.8 s; triggers and GPU and CPU goldens
+  identical; host peak RSS 5-15 MB higher, equal with a collection forced after each search
+  (collector timing). In the same job the GPU cost model's feed is 0 for every chosen chain,
+  and no choice changes with the template count dropped or rounded
+  (notes/host-layer/phase2-design-study.md, Step 2 results).
