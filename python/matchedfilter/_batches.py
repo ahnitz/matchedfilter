@@ -23,12 +23,13 @@ from . import _settings
 from . import _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, playing
 from ._filter import _from_any, MatchedFilter
-from ._results import FilterResults, _Deferred, _EMPTY_FILTER_RESULTS
-from ._windows import _merge_window_bins, _normalize_windows, _window_bin_phases
+from ._results import (FilterResults, _Deferred, _EMPTY_FILTER_RESULTS, _PeaksBatch,
+                       _PeaksJob, _assemble_jobs)
+from ._windows import _normalize_windows, _window_bin_phases
 from .time_domain import (
     TimeDomainFilterBank, _SAME_PROFILE, _aligned_zeros, _bin_phases, _blocks_by_bin_count,
-    _consume_into, _host_copy, _intersect_runs, _interval_runs, _results_from,
-    _settle_device_writes, _stored_bins, _trial_key,
+    _host_copy, _intersect_runs, _interval_runs, _settle_device_writes, _stored_bins,
+    _trial_key,
 )
 from . import _gpuhost
 from ._gpuexec import fused
@@ -841,6 +842,11 @@ def _run_batch(jobs, wait, corr=None):
     finally:
         if close is not None:
             close()
+    # The jobs whose peaks the extension assembles when asked: all in one call, by whichever
+    # is asked first (_results._PeaksBatch).
+    assembled = [r for r in out if isinstance(r, _PeaksJob)]
+    if len(assembled) > 1:
+        _PeaksBatch(assembled)
     if not wait:
         return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
     return [r.result() if isinstance(r, _Deferred) else r for r in out]
@@ -958,27 +964,25 @@ def _items_batch(jobs, out):
                               bs, thr, wait=False) if hasattr(plan, "_items_gpu") else None
         if res is not None:
             submitted.append((bs, members, res))
+    # Every member's peaks assembled in one extension call (_core.assemble_peaks): a member
+    # without bin phases as one call per bin count gives them (each count's blocks in turn,
+    # in increasing count); a phased window as one filter_series call, peaks by block then
+    # bin, its partial bins merged into their window bins.
+    assembled = []
     for bs, members, res in submitted:
         res = res()
         for (j, bank, g, ser, st, ws, we, tl, ti, W, ph), (idx, val) in zip(members, res):
-            lists = ([], [], [], [], [])
-            if ph is None:
-                # Peaks in the order one call per bin count gives them.
-                counts = ((we - ws + bs - 1) // bs).astype(np.int64)
-                for u in np.unique(counts):
-                    m = counts == u
-                    _consume_into(lists, idx[m][:, :, :u], val[m][:, :, :u], st[m], g,
-                                  (tl, 1), g.n, ti)
-            else:
-                # A phased window is one filter_series call: peaks by block, then bin
-                # (bins a block does not have are empty).
-                _consume_into(lists, idx, val, st, g, (tl, 1), g.n, ti)
-            res_j = _results_from(lists)
-            if ph is not None:
-                # Partial bins (a block edge inside a window bin) into their window bins.
-                res_j = FilterResults(*_merge_window_bins(W, bs, *res_j))
-            out[j] = res_j
+            counts = ((we - ws + bs - 1) // bs).astype(np.int64) if ph is None else None
+            job = _PeaksJob([(np.array([ti], np.int64), st, counts, g.n,
+                              (np.ascontiguousarray(idx), np.ascontiguousarray(val)))],
+                            None if ph is None else np.ascontiguousarray(W[:, 0], np.int64),
+                            () if ph is None else (bs,))
+            assembled.append((j, job))
             done.add(j)
+    if assembled:
+        _assemble_jobs([job for _, job in assembled])
+        for j, job in assembled:
+            out[j] = job._value
     return done
 
 

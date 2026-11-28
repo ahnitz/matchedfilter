@@ -273,7 +273,6 @@ class HierarchicalFilter(MatchedFilter):
         self._chosen_csig = ()
         self._synced_t0 = None
         self._synced_t1 = None
-        self._gt0_checked = 0
         # The joint-trial arm this plan runs (_trial): DEFAULT, a lock, or a trial's arm. A plan
         # inside a bank is governed by the bank's trial and runs none of its own.
         self._arm, self._governed, self._forced = _trial.DEFAULT, False, False
@@ -308,7 +307,7 @@ class HierarchicalFilter(MatchedFilter):
     # reads the first one's template storage (_core.HMF(share=)).
     _PROFILE_STATE = ("_profile_class", "_cal_thr", "_resolved", "_mf", "_q15", "_tier0_clusters",
                       "_tier0_cand_cache", "_tier1_clusters", "_chosen_csig", "_synced_t0",
-                      "_synced_t1", "_gt0_checked", "_forced", "_model_chain", "_chain",
+                      "_synced_t1", "_forced", "_model_chain", "_chain",
                       "autotune_info", "_choice_key", "_plan_halfwidth", "_refine_reach",
                       "_execution_policy", "_applied_plan", "_applied_res", "_applied_real",
                       "_ep_real")
@@ -345,7 +344,7 @@ class HierarchicalFilter(MatchedFilter):
         if state is None:
             state = dict(_profile_class=None, _cal_thr=None, _resolved=None, _mf=None, _q15=False,
                          _tier0_clusters={}, _tier0_cand_cache={}, _tier1_clusters={},
-                         _chosen_csig=(), _synced_t0=None, _synced_t1=None, _gt0_checked=0,
+                         _chosen_csig=(), _synced_t0=None, _synced_t1=None,
                          _forced=False, _model_chain=None, _chain=self._pinned,
                          autotune_info={"status": "pinned" if self._pinned else "uninitialized",
                                         "trials": 0})
@@ -1575,7 +1574,7 @@ class HierarchicalFilter(MatchedFilter):
     def direct_stats(self):
         """Direct-refine counters of the plan ({} on CPU before one exists)."""
         if self._gpu is not None:
-            return dict(pairs=int(self._gdirect), fft=int(self._gfft))
+            return dict(pairs=int(self._gwork[3]), fft=int(self._gwork[4]))
         return self._mf.direct_stats() if self._mf is not None else {}
 
     def set_hermitian(self, hermitian: bool):
@@ -1765,7 +1764,10 @@ class HierarchicalFilter(MatchedFilter):
                                            direct=self._gpu_direct_arg(H),
                                            **extra, **kw)
         if kw.get("async_submit"):
-            return lambda: self._account(res())
+            # A call read back for the extension's assembly (_series_flags readback) counts its
+            # results when they are assembled (_results._CallParts.take, _core.assemble_peaks).
+            return (res if self._want_readback and kw.get("sparse")
+                    else (lambda: self._account(res())))
         return self._account(res)
 
     def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
@@ -1781,15 +1783,15 @@ class HierarchicalFilter(MatchedFilter):
             direct=self._gpu_direct_arg(H), **extra, **kw)
         self._ddirty = self._tdirty = False
         if async_submit:
-            return lambda: self._account(res())
+            return (res if self._want_readback and kw.get("sparse")
+                    else (lambda: self._account(res())))
         return self._account(res)
 
     def _account(self, r):
-        pairs_before = self._gpairs
+        pairs_before = int(self._gwork[0])
         r = super()._account(r)
-        batch_pairs = self._gpairs - pairs_before
-        t0_checked = getattr(self._gpu, "last_tier0_checked", 0) or batch_pairs
-        self._gt0_checked += int(t0_checked)
+        batch_pairs = int(self._gwork[0]) - pairs_before
+        self._gwork[5] += int(getattr(self._gpu, "last_tier0_checked", 0) or batch_pairs)
         return r
 
     # ---- reporting -----------------------------------------------------------
@@ -1812,7 +1814,7 @@ class HierarchicalFilter(MatchedFilter):
     def stats(self):
         """``(pairs, refined)`` accumulated since construction."""
         if self._gpu is not None:
-            return (self._gpairs, self._gtrig)
+            return (int(self._gwork[0]), int(self._gwork[1]))
         return self._ensure().stats()
 
     def work_counts(self):
@@ -1824,14 +1826,15 @@ class HierarchicalFilter(MatchedFilter):
         chain come from the backend's last_tier1_survivors; ticks are None there."""
         chain = tuple(self._chain) if self._chain else ()
         if self._gpu is not None:
-            passed = ([self._gt1] if len(chain) == 2 else []) + [self._gtrig]
+            pairs, refined, tier1, _, _, tier0_checked = (int(x) for x in self._gwork)
+            passed = ([tier1] if len(chain) == 2 else []) + [refined]
             checked = (
-                [self._gt0_checked, self._gt1]
+                [tier0_checked, tier1]
                 if len(chain) == 2
-                else ([self._gt0_checked] if len(chain) == 1 else [])
+                else ([tier0_checked] if len(chain) == 1 else [])
             )
-            return dict(backend="gpu", chain=chain, pairs=self._gpairs, passed=passed,
-                        checked=checked, refined=self._gtrig, q15=None, ticks=None,
+            return dict(backend="gpu", chain=chain, pairs=pairs, passed=passed,
+                        checked=checked, refined=refined, q15=None, ticks=None,
                         ident=id(self))
         mf = getattr(self, "_mf", None)
         if mf is None:

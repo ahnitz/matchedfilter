@@ -560,3 +560,12 @@ def pytest_terminal_summary(terminalreporter):
         tail = tail.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
         title = rep.nodeid.replace(",", ";").replace("::", " ")[:200]
         terminalreporter.write_line("::error title=%s::%s" % (title, tail[:3000]))
+
+
+def collected_parts(parts):
+    """A hierarchical GPU call's parts (_results._CallParts, what a call read back for the
+    extension's assembly returns) collected into one _SparsePeaks of the call's shape, in
+    output order: each part collected on the host, then combined (_SparsePeaks.combine)."""
+    from matchedfilter._results import _SparsePeaks
+    return _SparsePeaks.combine([(b0, item() if callable(item) else item)
+                                 for b0, item in parts.parts], parts.shape, parts.order)

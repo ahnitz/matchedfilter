@@ -3,8 +3,8 @@
 Covers:
 1. Scalar (nbins <= 4) and 64-bit bitmask (nbins > 4) multi-bin peak reduction.
 2. COARSE16 subgroup-shuffle transpose and barrier-free peakTwoWave across layouts.
-3. Multi-batch grouped deferral, _SparsePeaks.combine empty fast-path, and
-   _Deferred.empty propagation (both initial grouped calls and call-plan replays).
+3. Multi-batch grouped deferral, _SparsePeaks.combine empty fast-path, and empty parts
+   (both an initial grouped call read back for the assembly and its call-plan replay).
 4. GPU direct time-domain FIR refinement (refine_td.slang) across real/complex
    taps and series, 1-tier and 2-tier chains, template sub-slices, sparse modes,
    TimeDomainFilterBank end-to-end, and per-survivor FFT fallback paths.
@@ -175,8 +175,9 @@ def test_gpu_c16_shuffle_transpose_and_peak_two_wave(dev, band, monkeypatch):
 
 
 def test_gpu_deferred_grouped_multibatch_and_empty_flag(dev):
-    """Verify multi-batch grouped deferral, _SparsePeaks.combine empty fast-path, and
-    deferred.empty on both initial grouped calls and call-plan replays."""
+    """Verify multi-batch grouped deferral, _SparsePeaks.combine's empty fast path, and empty
+    parts on both an initial grouped call read back for the assembly and its call-plan
+    replay."""
     from matchedfilter.benchmark import _inspiral_power
     rng = np.random.default_rng(77)
     n, nt, nblocks = 1024, 16, 20
@@ -214,21 +215,22 @@ def test_gpu_deferred_grouped_multibatch_and_empty_flag(dev):
     shared_ser = hf.empty_shared((total,), dtype=np.complex64)
     shared_ser[:] = quiet
 
-    # First deferred call records the call plan and marks deferred.empty = True on 0 refinements.
-    with hf._series_flags(defer="tok_h1", sparse=True):
+    # A deferred call read back for the extension's assembly records the call plan; with 0
+    # refinements its parts hold no peaks.
+    from conftest import collected_parts
+    from matchedfilter._results import _CallParts
+    with hf._series_flags(defer="tok_h1", sparse=True, readback=True):
         d1 = hf.run_series(shared_ser, starts, ws, we, binsize=n, threshold=6.0, raw=True)
-    assert isinstance(d1, _Deferred)
+    assert isinstance(d1, _CallParts) and len(d1.parts) > 1
     assert hf._last_series_batch < nblocks
-    r1 = d1.result()
-    assert d1.empty is True
+    r1 = collected_parts(d1)
     assert isinstance(r1, _SparsePeaks) and r1.flat.size == 0
 
-    # Second deferred call on the same shared buffer replays the call plan and also marks empty.
-    with hf._series_flags(defer="tok_h2", sparse=True):
+    # Second deferred call on the same shared buffer replays the call plan, also empty.
+    with hf._series_flags(defer="tok_h2", sparse=True, readback=True):
         d2 = hf.run_series(shared_ser, starts, ws, we, binsize=n, threshold=6.0, raw=True)
     assert getattr(hf, "call_plan_replays", 0) >= 1
-    r2 = d2.result()
-    assert d2.empty is True
+    r2 = collected_parts(d2)
     assert isinstance(r2, _SparsePeaks) and r2.flat.size == 0
 
     # Injecting a loud signal into shared_ser in-place must produce triggers and empty == False.

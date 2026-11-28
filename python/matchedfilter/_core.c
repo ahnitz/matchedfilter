@@ -2708,6 +2708,525 @@ done:
   free(pos);
   return rc;
 }
+/* The window-bin merges of one job's peaks, arena entries [job0, at): for each bin size of
+   merge_bs in order, the partial bins of a window bin merged into one (hmf_merge_bins), the
+   kept entries moved down in order. keep holds at least at - job0 entries. Returns the job's
+   new end, or -1 with the exception set. Shared by HMFTable.run and assemble_peaks. */
+static Py_ssize_t hmf_job_merge(const int64_t *win_starts,Py_ssize_t nwin,const Py_ssize_t *merge_bs,
+                                int nmerge,int64_t *o_t,double *o_s,float *o_v,int64_t *o_bs,
+                                int64_t *o_bl,Py_ssize_t job0,Py_ssize_t at,Py_ssize_t *keep){
+  for(int k=0;k<nmerge && at>job0;k++){
+    const Py_ssize_t kept=hmf_merge_bins(win_starts,nwin,(int64_t)merge_bs[k],o_t+job0,o_s+job0,
+                                         o_v+2*job0,at-job0,keep);
+    if(kept==-2){ PyErr_SetString(PyExc_ValueError,"window_bin_keep: mismatched buffers, binsize < 1 or a peak before the first window"); return -1; }
+    if(kept<0){ PyErr_NoMemory(); return -1; }
+    for(Py_ssize_t q=0;q<kept;q++){
+      const Py_ssize_t src=job0+keep[q], dst=job0+q;
+      o_t[dst]=o_t[src]; o_s[dst]=o_s[src]; o_bs[dst]=o_bs[src]; o_bl[dst]=o_bl[src];
+      o_v[2*dst]=o_v[2*src]; o_v[2*dst+1]=o_v[2*src+1];
+    }
+    at=job0+kept;
+  }
+  return at;
+}
+/* The arena's sample column, assembled as doubles (the merge compares them as the bank's
+   Python assembly did), rewritten in place as int64, as FilterResults has it. */
+static void hmf_samples_to_int(double *o_s,Py_ssize_t count){
+  int64_t *o_si=(int64_t*)o_s;
+  for(Py_ssize_t q=0;q<count;q++) o_si[q]=(int64_t)o_s[q];
+}
+
+/* ---------------- device readbacks, assembled as the table assembles its steps ----------------
+   A GPU call's peaks arrive as the buffers its recording reads back (_gpuhier.Readback: the
+   counts words, the survivor rows, the dense lags and values, or the compacted list), one part
+   per batch of blocks. assemble_peaks reads every part of every call of every job of a batch,
+   and assembles each job's peaks into one arena with the functions HMFTable.run uses
+   (hmf_append_peaks, hmf_job_merge), in the order filter_series' Python assembly gave them:
+   each call's peaks block-major in output rows (the layout's order), then template, then bin;
+   for a call whose blocks have different bin counts, the blocks of each count in increasing
+   count, each block's bins past its count dropped (one run_series call per count gave them
+   so); a job's calls in order, then its window-bin merges. A part that was already read into
+   host arrays (a result collected early, or a result of a call the device path does not read
+   back: a _SparsePeaks, or dense (lags, values) arrays) is read from those. */
+
+/* A call's peaks gathered from its parts: per peak the flat (row, template, bin) index over the
+   call's computed rows, the lag in its block and the value (re, im). malloc'd. */
+typedef struct { int64_t *flat, *idx; float *val; size_t n, cap; } hmf_gather;
+static int hmf_gather_room(hmf_gather *g,size_t more){
+  const size_t need=g->n+more;
+  if(need<=g->cap) return 0;
+  size_t c=g->cap?g->cap:256; while(c<need) c*=2;
+  int64_t *f=realloc(g->flat,c*8); if(!f){ PyErr_NoMemory(); return -1; } g->flat=f;
+  int64_t *i=realloc(g->idx,c*8); if(!i){ PyErr_NoMemory(); return -1; } g->idx=i;
+  float *v=realloc(g->val,c*8); if(!v){ PyErr_NoMemory(); return -1; } g->val=v;
+  g->cap=c; return 0;
+}
+/* Sort g's entries [from, n) by flat index (distinct within a part), in place. 0, or -1 with
+   MemoryError set. */
+static int hmf_gather_sort(hmf_gather *g,size_t from){
+  const size_t m=g->n-from;
+  int sorted=1;
+  for(size_t q=from+1;q<g->n && sorted;q++) if(g->flat[q]<=g->flat[q-1]) sorted=0;
+  if(sorted) return 0;
+  hmf_flat *ord=PyMem_Malloc(m*sizeof(hmf_flat));
+  int64_t *ti=PyMem_Malloc(m*8); float *tv=PyMem_Malloc(m*8);
+  if(!ord||!ti||!tv){ PyMem_Free(ord); PyMem_Free(ti); PyMem_Free(tv); PyErr_NoMemory(); return -1; }
+  for(size_t q=0;q<m;q++){ ord[q].key=g->flat[from+q]; ord[q].i=(Py_ssize_t)q; }
+  qsort(ord,m,sizeof(hmf_flat),hmf_flat_cmp);
+  for(size_t q=0;q<m;q++){
+    const size_t src=from+(size_t)ord[q].i;
+    ti[q]=g->idx[src]; tv[2*q]=g->val[2*src]; tv[2*q+1]=g->val[2*src+1];
+  }
+  for(size_t q=0;q<m;q++){
+    g->flat[from+q]=ord[q].key; g->idx[from+q]=ti[q];
+    g->val[2*(from+q)]=tv[2*q]; g->val[2*(from+q)+1]=tv[2*q+1];
+  }
+  PyMem_Free(ord); PyMem_Free(ti); PyMem_Free(tv);
+  return 0;
+}
+/* A readable C-contiguous view of o of at least nbytes (any length when nbytes < 0). 0, or -1
+   with the exception set. */
+static int hmf_view_of(PyObject *o,Py_buffer *b,Py_ssize_t nbytes,const char *what){
+  if(PyObject_GetBuffer(o,b,PyBUF_C_CONTIGUOUS)<0) return -1;
+  if(nbytes>=0 && b->len<nbytes){
+    PyBuffer_Release(b);
+    PyErr_Format(PyExc_ValueError,"assemble_peaks: the %s readback is shorter than its count",what);
+    return -1;
+  }
+  return 0;
+}
+/* The counters of one device readback (the counts words its compaction kernels wrote):
+   refined (the last tier's survivors), tier-1 passes (a cascade's tier 0), direct and
+   transform refines, and the count of compacted peaks. */
+typedef struct { int64_t pairs, refined, tier1, direct, fft, listed, t0_checked; int device; } hmf_rb_counts;
+static int hmf_i64_cmp(const void *a,const void *b){
+  const int64_t x=*(const int64_t*)a,y=*(const int64_t*)b; return (x>y)-(x<y);
+}
+/* Read one part into g, its flat indices offset by base (the flat index of its first row in
+   the call), in flat order. The part is a device readback, a tuple
+   (way, rows, templates, bins, counts, w_refined, w_listed, w_fft, w_tier1, t0_checked,
+   survivors, lags, values, list): way 0 dense (every bin of the lags and values; -1 in an
+   empty bin), 1 the survivor rows' bins, 2 the compacted (position, lag, re, im) records;
+   counts the counts words (uint32) and w_* the word of each counter (-1: none); or a
+   _SparsePeaks (flat, idx, val); or dense (lags, values) of shape (rows, templates, bins).
+   nt and nbins are the call's: a part of another shape is an error. With rc given, a device
+   readback's counters are written there (zeros for the other forms). 0, or -1 with the
+   exception set. */
+static int hmf_read_part(PyObject *part,int64_t base,int64_t nt,int64_t nbins,hmf_gather *g,
+                         hmf_rb_counts *rc){
+  hmf_rb_counts zero={0,0,0,0,0,0,0,0};
+  if(rc) *rc=zero;
+  const int64_t per_block=nt*nbins;
+  if(PyTuple_Check(part) && PyTuple_GET_SIZE(part)==14 && PyLong_Check(PyTuple_GET_ITEM(part,0))){
+    long long way,nd,pnt,pnb,w_ref,w_list,w_fft,w_t1,t0c;
+    PyObject *counts,*surv,*lags,*vals,*list;
+    if(!PyArg_ParseTuple(part,"LLLLOLLLLLOOOO",&way,&nd,&pnt,&pnb,&counts,&w_ref,&w_list,&w_fft,
+                         &w_t1,&t0c,&surv,&lags,&vals,&list)) return -1;
+    if(pnt!=nt || pnb!=nbins || nd<0 || way<0 || way>2){
+      PyErr_SetString(PyExc_ValueError,"assemble_peaks: a readback's shape is not its call's");
+      return -1;
+    }
+    Py_buffer bc;
+    if(hmf_view_of(counts,&bc,-1,"counts")) return -1;
+    const uint32_t *w=(const uint32_t*)bc.buf; const Py_ssize_t nw=bc.len/4;
+    if(w_ref<0 || w_ref>=nw || w_list>=nw || w_fft>=nw || w_t1>=nw){
+      PyBuffer_Release(&bc);
+      PyErr_SetString(PyExc_ValueError,"assemble_peaks: a counter word is outside the counts");
+      return -1;
+    }
+    hmf_rb_counts c;
+    c.device=1; c.pairs=nd*nt; c.refined=w[w_ref]; c.tier1=w_t1>=0?w[w_t1]:0; c.listed=w_list>=0?w[w_list]:0;
+    c.t0_checked=t0c;
+    if(w_fft>=0){ const int64_t fb=w[w_fft]; c.fft=fb; c.direct=c.refined>fb?c.refined-fb:0; }
+    else { c.fft=c.refined; c.direct=0; }
+    PyBuffer_Release(&bc);
+    if(rc) *rc=c;
+    const int64_t pairs=nd*nt, out=pairs*nbins;
+    if(!g || c.refined==0) return 0;
+    const size_t from=g->n;
+    if(way==2){
+      Py_buffer bl;
+      if(hmf_view_of(list,&bl,(Py_ssize_t)c.listed*16,"list")) return -1;
+      const uint32_t *r=(const uint32_t*)bl.buf;
+      if(hmf_gather_room(g,(size_t)c.listed)){ PyBuffer_Release(&bl); return -1; }
+      for(int64_t q=0;q<c.listed;q++){
+        const int64_t pos=r[4*q];
+        if(pos>=out){ PyBuffer_Release(&bl); PyErr_SetString(PyExc_ValueError,"assemble_peaks: a listed peak is outside its readback"); return -1; }
+        g->flat[g->n]=pos+base; g->idx[g->n]=(int32_t)r[4*q+1];
+        memcpy(&g->val[2*g->n],&r[4*q+2],8); g->n++;
+      }
+      PyBuffer_Release(&bl);
+    } else {
+      Py_buffer bi,bv,bs; int held_s=0;
+      if(hmf_view_of(lags,&bi,out*4,"lags")) return -1;
+      if(hmf_view_of(vals,&bv,out*8,"values")){ PyBuffer_Release(&bi); return -1; }
+      const int32_t *ix=(const int32_t*)bi.buf; const float *vv=(const float*)bv.buf;
+      int fail=0;
+      if(way==0){
+        for(int64_t f=0;f<out && !fail;f++)
+          if(ix[f]>=0){
+            if(hmf_gather_room(g,1)){ fail=1; break; }
+            g->flat[g->n]=f+base; g->idx[g->n]=ix[f];
+            g->val[2*g->n]=vv[2*f]; g->val[2*g->n+1]=vv[2*f+1]; g->n++;
+          }
+      } else if(hmf_view_of(surv,&bs,(Py_ssize_t)c.refined*4,"survivors")) fail=1;
+      else {
+        held_s=1;
+        const uint32_t *rows=(const uint32_t*)bs.buf;
+        for(int64_t q=0;q<c.refined && !fail;q++){
+          const int64_t r=rows[q];
+          if(r>=pairs){ PyErr_SetString(PyExc_ValueError,"assemble_peaks: a survivor row is outside its readback"); fail=1; break; }
+          for(int64_t b=0;b<nbins;b++){
+            const int64_t f=r*nbins+b;
+            if(ix[f]<0) continue;
+            if(hmf_gather_room(g,1)){ fail=1; break; }
+            g->flat[g->n]=f+base; g->idx[g->n]=ix[f];
+            g->val[2*g->n]=vv[2*f]; g->val[2*g->n+1]=vv[2*f+1]; g->n++;
+          }
+        }
+      }
+      if(held_s) PyBuffer_Release(&bs);
+      PyBuffer_Release(&bi); PyBuffer_Release(&bv);
+      if(fail) return -1;
+    }
+    return hmf_gather_sort(g,from);
+  }
+  if(!g) return 0;
+  if(PyTuple_Check(part) && PyTuple_GET_SIZE(part)==2){
+    /* dense (lags, values): lags int32 or int64, -1 in an empty bin */
+    Py_buffer bi,bv;
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(part,0),&bi,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return -1;
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(part,1),&bv,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&bi); return -1; }
+    int ok=bi.ndim==3 && bv.ndim==3 && (bi.itemsize==4 || bi.itemsize==8) && bv.itemsize==8
+           && bi.shape[1]==nt && bi.shape[2]==nbins && bv.shape[0]==bi.shape[0]
+           && bv.shape[1]==nt && bv.shape[2]==nbins;
+    if(!ok){
+      PyBuffer_Release(&bi); PyBuffer_Release(&bv);
+      PyErr_SetString(PyExc_ValueError,"assemble_peaks: a dense part is not (rows, templates, bins) lags and complex64 values of its call's shape");
+      return -1;
+    }
+    const int64_t out=(int64_t)bi.shape[0]*per_block;
+    const float *vv=(const float*)bv.buf; int fail=0;
+    for(int64_t f=0;f<out;f++){
+      const int64_t lag=bi.itemsize==4?(int64_t)((const int32_t*)bi.buf)[f]:((const int64_t*)bi.buf)[f];
+      if(lag<0) continue;
+      if(hmf_gather_room(g,1)){ fail=1; break; }
+      g->flat[g->n]=f+base; g->idx[g->n]=lag;
+      g->val[2*g->n]=vv[2*f]; g->val[2*g->n+1]=vv[2*f+1]; g->n++;
+    }
+    PyBuffer_Release(&bi); PyBuffer_Release(&bv);
+    return fail?-1:0;
+  }
+  /* a _SparsePeaks: flat indices over its shape, lags, values, in flat order */
+  PyObject *shape=PyObject_GetAttrString(part,"shape");
+  if(!shape) return -1;
+  long long snd=0,snt=0,snb=0;
+  const int shaped=PyArg_ParseTuple(shape,"LLL",&snd,&snt,&snb);
+  Py_DECREF(shape);
+  if(!shaped) return -1;
+  if(snt!=nt || snb!=nbins){
+    PyErr_SetString(PyExc_ValueError,"assemble_peaks: a sparse part's shape is not its call's");
+    return -1;
+  }
+  PyObject *fo=PyObject_GetAttrString(part,"flat"),*io=PyObject_GetAttrString(part,"idx"),
+           *vo=PyObject_GetAttrString(part,"val");
+  int rcode=-1;
+  Py_buffer bf,bi,bv; int held=0;
+  if(!fo||!io||!vo) goto sparse_done;
+  if(PyObject_GetBuffer(fo,&bf,PyBUF_C_CONTIGUOUS)<0) goto sparse_done;
+  held=1;
+  if(PyObject_GetBuffer(io,&bi,PyBUF_C_CONTIGUOUS)<0) goto sparse_done;
+  held=2;
+  if(PyObject_GetBuffer(vo,&bv,PyBUF_C_CONTIGUOUS)<0) goto sparse_done;
+  held=3;
+  {
+    const Py_ssize_t m=bf.len/8;
+    if(bi.len!=m*8 || bv.len!=m*8){
+      PyErr_SetString(PyExc_ValueError,"assemble_peaks: a sparse part's columns differ in length");
+      goto sparse_done;
+    }
+    if(hmf_gather_room(g,(size_t)m)) goto sparse_done;
+    const int64_t *ff=bf.buf,*ii=bi.buf; const float *vv=bv.buf;
+    for(Py_ssize_t q=0;q<m;q++){
+      if(ff[q]<0 || ff[q]>=snd*per_block){
+        PyErr_SetString(PyExc_ValueError,"assemble_peaks: a sparse peak is outside its part");
+        goto sparse_done;
+      }
+      g->flat[g->n]=ff[q]+base; g->idx[g->n]=ii[q];
+      g->val[2*g->n]=vv[2*q]; g->val[2*g->n+1]=vv[2*q+1]; g->n++;
+    }
+  }
+  rcode=0;
+sparse_done:
+  if(held>=3) PyBuffer_Release(&bv);
+  if(held>=2) PyBuffer_Release(&bi);
+  if(held>=1) PyBuffer_Release(&bf);
+  Py_XDECREF(fo); Py_XDECREF(io); Py_XDECREF(vo);
+  return rcode;
+}
+/* Append one call's gathered peaks (entries [from, to) of g, flat over its computed rows) to
+   the arena at `at`, in the order described above: rows mapped to output rows by order (NULL:
+   the computed order), (row, template, bin) order; with row_bins, each bin count's rows in
+   increasing count, bins past a row's count dropped. Returns the new end, or -1 with the
+   exception set. */
+static Py_ssize_t hmf_append_call(int64_t *o_t,double *o_s,float *o_v,int64_t *o_bs,int64_t *o_bl,
+                                  Py_ssize_t at,const hmf_gather *g,size_t from,size_t to,
+                                  const int64_t *tmap,const int64_t *ostarts,const int64_t *order,
+                                  const int64_t *row_bins,int64_t nrows,int64_t nt,int64_t nbins,
+                                  size_t block_len){
+  const int64_t per_block=nt*nbins;
+  const Py_ssize_t m=(Py_ssize_t)(to-from);
+  const int64_t *flat=g->flat+from,*idx=g->idx+from; const float *val=g->val+2*from;
+  int sorted=1;
+  for(Py_ssize_t q=0;q<m;q++){
+    if(flat[q]<0 || flat[q]>=nrows*per_block){
+      PyErr_SetString(PyExc_ValueError,"assemble_peaks: a peak's block is outside its call"); return -1;
+    }
+    if(q && flat[q]<=flat[q-1]) sorted=0;
+  }
+  if(order) for(int64_t r=0;r<nrows;r++) if(order[r]<0 || order[r]>=nrows){
+    PyErr_SetString(PyExc_ValueError,"assemble_peaks: a call's order is not a row permutation"); return -1;
+  }
+  if(!row_bins){
+    int64_t *ident=NULL;
+    if(!order && !sorted){
+      ident=PyMem_Malloc((size_t)(nrows?nrows:1)*8);
+      if(!ident){ PyErr_NoMemory(); return -1; }
+      for(int64_t r=0;r<nrows;r++) ident[r]=r;
+    }
+    at=hmf_append_peaks(o_t,o_s,o_v,o_bs,o_bl,at,tmap,ostarts,order?order:ident,nt,nbins,
+                        block_len,m,flat,idx,val);
+    PyMem_Free(ident);
+    return at;
+  }
+  /* the output-ordered peaks, then each bin count's rows (rank and start) and peaks */
+  Py_ssize_t ret=-1;
+  hmf_flat *key=PyMem_Malloc((size_t)(m?m:1)*sizeof(hmf_flat));
+  int64_t *us=PyMem_Malloc((size_t)(nrows?nrows:1)*8), *rank=PyMem_Malloc((size_t)(nrows?nrows:1)*8);
+  int64_t *gst=PyMem_Malloc((size_t)(nrows?nrows:1)*8), *gflat=PyMem_Malloc((size_t)(m?m:1)*8);
+  int64_t *gidx=PyMem_Malloc((size_t)(m?m:1)*8); float *gval=PyMem_Malloc((size_t)(m?m:1)*8);
+  if(!key||!us||!rank||!gst||!gflat||!gidx||!gval){ PyErr_NoMemory(); goto bins_done; }
+  for(Py_ssize_t q=0;q<m;q++){
+    const int64_t f=flat[q];
+    key[q].key=order?order[f/per_block]*per_block+f%per_block:f; key[q].i=q;
+  }
+  if(order || !sorted) qsort(key,(size_t)m,sizeof(hmf_flat),hmf_flat_cmp);
+  int64_t nu=0;
+  for(int64_t r=0;r<nrows;r++) us[nu++]=row_bins[r];
+  qsort(us,(size_t)nu,8,hmf_i64_cmp);
+  {
+    int64_t k=0;
+    for(int64_t q=0;q<nu;q++) if(!q || us[q]!=us[q-1]) us[k++]=us[q];
+    nu=k;
+  }
+  for(int64_t ui=0;ui<nu;ui++){
+    const int64_t u=us[ui];
+    int64_t nr=0;
+    for(int64_t r=0;r<nrows;r++) if(row_bins[r]==u){ rank[r]=nr; gst[nr]=ostarts[r]; nr++; }
+    Py_ssize_t gm=0;
+    for(Py_ssize_t q=0;q<m;q++){
+      const int64_t f=key[q].key, r=f/per_block, rest=f%per_block, t=rest/nbins, b=rest%nbins;
+      if(row_bins[r]!=u || b>=u) continue;
+      gflat[gm]=(rank[r]*nt+t)*u+b; gidx[gm]=idx[key[q].i];
+      gval[2*gm]=val[2*key[q].i]; gval[2*gm+1]=val[2*key[q].i+1]; gm++;
+    }
+    at=hmf_append_peaks(o_t,o_s,o_v,o_bs,o_bl,at,tmap,gst,NULL,nt,u,block_len,gm,gflat,gidx,gval);
+    if(at<0) goto bins_done;
+  }
+  ret=at;
+bins_done:
+  PyMem_Free(key); PyMem_Free(us); PyMem_Free(rank); PyMem_Free(gst); PyMem_Free(gflat);
+  PyMem_Free(gidx); PyMem_Free(gval);
+  return ret;
+}
+/* A call's geometry, (templates, block starts, order, row bin counts, nt, nbins, block length,
+   counters): templates int64 [nt] the bank index of each template of the result; block starts
+   int64 [rows] in output order; order int64 [rows] the output row of each computed row, or
+   None; row bin counts int64 [rows], or None; counters int64 [6] (pairs, refined, tier-0
+   passes, direct refines, transform refines, tier-0 pairs checked) the device readbacks'
+   counts are added to, or None. */
+typedef struct {
+  Py_buffer tmap, ostarts, order, row_bins, counters; int held;
+  long long nt, nbins, block_len, nrows;
+} hmf_call_geom;
+static void hmf_geom_release(hmf_call_geom *c){
+  if(c->held&1) PyBuffer_Release(&c->tmap);
+  if(c->held&2) PyBuffer_Release(&c->ostarts);
+  if(c->held&4) PyBuffer_Release(&c->order);
+  if(c->held&8) PyBuffer_Release(&c->row_bins);
+  if(c->held&16) PyBuffer_Release(&c->counters);
+  c->held=0;
+}
+static int hmf_geom_bind(PyObject *o,hmf_call_geom *c){
+  memset(c,0,sizeof(*c));
+  PyObject *tm,*st,*od,*rb,*ct;
+  if(!PyArg_ParseTuple(o,"OOOOLLLO",&tm,&st,&od,&rb,&c->nt,&c->nbins,&c->block_len,&ct)) return -1;
+  if(c->nt<1 || c->nbins<1 || c->block_len<1){
+    PyErr_SetString(PyExc_ValueError,"assemble_peaks: a call's templates, bins and block length must be positive"); return -1;
+  }
+  if(PyObject_GetBuffer(tm,&c->tmap,PyBUF_C_CONTIGUOUS)<0) return -1;
+  c->held|=1;
+  if(PyObject_GetBuffer(st,&c->ostarts,PyBUF_C_CONTIGUOUS)<0) goto fail;
+  c->held|=2;
+  c->nrows=c->ostarts.len/8;
+  if(c->tmap.len!=c->nt*8 || c->ostarts.len!=c->nrows*8){
+    PyErr_SetString(PyExc_ValueError,"assemble_peaks: a call's templates or block starts are not 8-byte integers of its shape"); goto fail;
+  }
+  if(od!=Py_None){
+    if(PyObject_GetBuffer(od,&c->order,PyBUF_C_CONTIGUOUS)<0) goto fail;
+    c->held|=4;
+    if(c->order.len!=c->nrows*8){ PyErr_SetString(PyExc_ValueError,"assemble_peaks: a call's order is not one int64 per block"); goto fail; }
+  }
+  if(rb!=Py_None){
+    if(PyObject_GetBuffer(rb,&c->row_bins,PyBUF_C_CONTIGUOUS)<0) goto fail;
+    c->held|=8;
+    if(c->row_bins.len!=c->nrows*8){ PyErr_SetString(PyExc_ValueError,"assemble_peaks: a call's bin counts are not one int64 per block"); goto fail; }
+  }
+  if(ct!=Py_None){
+    if(PyObject_GetBuffer(ct,&c->counters,PyBUF_C_CONTIGUOUS|PyBUF_WRITABLE)<0) goto fail;
+    c->held|=16;
+    if(c->counters.len!=6*8){ PyErr_SetString(PyExc_ValueError,"assemble_peaks: counters must be int64 [6]"); goto fail; }
+  }
+  return 0;
+fail:
+  hmf_geom_release(c);
+  return -1;
+}
+/* assemble_peaks(jobs) -> (offsets, templates, samples, snr, block_starts, block_lengths). */
+static PyObject *M_assemble_peaks(PyObject *self,PyObject *jobs_arg){
+  (void)self;
+  PyObject *jobs=PySequence_Fast(jobs_arg,"jobs must be a sequence");
+  if(!jobs) return NULL;
+  const Py_ssize_t nj=PySequence_Fast_GET_SIZE(jobs);
+  PyObject *ret=NULL;
+  hmf_gather g; memset(&g,0,sizeof(g));
+  size_t *bounds=NULL; Py_ssize_t ncalls=0, cap_calls=0;
+  int64_t *o_t=NULL; Py_ssize_t *keep=NULL;
+  /* every part of every call read, the calls' entry ranges kept */
+  for(Py_ssize_t j=0;j<nj;j++){
+    PyObject *job=PySequence_Fast_GET_ITEM(jobs,j);
+    if(!PyTuple_Check(job) || PyTuple_GET_SIZE(job)!=3){
+      PyErr_SetString(PyExc_ValueError,"assemble_peaks: a job is (calls, window starts, merge bin sizes)"); goto done;
+    }
+    PyObject *calls=PySequence_Fast(PyTuple_GET_ITEM(job,0),"a job's calls must be a sequence");
+    if(!calls) goto done;
+    for(Py_ssize_t c=0;c<PySequence_Fast_GET_SIZE(calls);c++){
+      PyObject *call=PySequence_Fast_GET_ITEM(calls,c);
+      PyObject *geom,*parts;
+      if(!PyArg_ParseTuple(call,"OO",&geom,&parts)){ Py_DECREF(calls); goto done; }
+      hmf_call_geom cg;
+      if(hmf_geom_bind(geom,&cg)){ Py_DECREF(calls); goto done; }
+      PyObject *ps=PySequence_Fast(parts,"a call's parts must be a sequence");
+      int fail=!ps;
+      const size_t from=g.n;
+      for(Py_ssize_t p=0;!fail && p<PySequence_Fast_GET_SIZE(ps);p++){
+        long long b0; PyObject *part; hmf_rb_counts rc;
+        if(!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(ps,p),"LO",&b0,&part)
+           || b0<0 || b0>cg.nrows){ if(!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"assemble_peaks: a part's first block is outside its call"); fail=1; break; }
+        if(hmf_read_part(part,b0*cg.nt*cg.nbins,cg.nt,cg.nbins,&g,&rc)){ fail=1; break; }
+        if((cg.held&16) && rc.device){
+          int64_t *w=cg.counters.buf;
+          w[0]+=rc.pairs; w[1]+=rc.refined; w[2]+=rc.tier1; w[3]+=rc.direct; w[4]+=rc.fft;
+          w[5]+=rc.t0_checked;
+        }
+      }
+      Py_XDECREF(ps);
+      hmf_geom_release(&cg);
+      if(fail){ Py_DECREF(calls); goto done; }
+      if(ncalls+1>cap_calls){
+        cap_calls=cap_calls?2*cap_calls:64;
+        size_t *nb=realloc(bounds,(size_t)cap_calls*2*sizeof(size_t));
+        if(!nb){ PyErr_NoMemory(); Py_DECREF(calls); goto done; }
+        bounds=nb;
+      }
+      bounds[2*ncalls]=from; bounds[2*ncalls+1]=g.n; ncalls++;
+    }
+    Py_DECREF(calls);
+  }
+  /* the arena: each job's calls appended in order, then its merges */
+  const size_t cap=g.n?g.n:1;
+  o_t=PyMem_Malloc(cap*5*8+((size_t)nj+1)*8);
+  keep=PyMem_Malloc(cap*sizeof(Py_ssize_t));
+  if(!o_t||!keep){ PyErr_NoMemory(); goto done; }
+  double *o_s=(double*)(o_t+cap); float *o_v=(float*)(o_t+2*cap);
+  int64_t *o_bs=o_t+3*cap, *o_bl=o_t+4*cap, *offs=o_t+5*cap;
+  Py_ssize_t at=0, ci=0;
+  for(Py_ssize_t j=0;j<nj;j++){
+    PyObject *job=PySequence_Fast_GET_ITEM(jobs,j);
+    offs[j]=at;
+    const Py_ssize_t job0=at;
+    PyObject *calls=PySequence_Fast(PyTuple_GET_ITEM(job,0),"a job's calls must be a sequence");
+    if(!calls) goto done;
+    for(Py_ssize_t c=0;c<PySequence_Fast_GET_SIZE(calls);c++,ci++){
+      hmf_call_geom cg;
+      if(hmf_geom_bind(PyTuple_GET_ITEM(PySequence_Fast_GET_ITEM(calls,c),0),&cg)){ Py_DECREF(calls); goto done; }
+      if(bounds[2*ci+1]>bounds[2*ci])
+        at=hmf_append_call(o_t,o_s,o_v,o_bs,o_bl,at,&g,bounds[2*ci],bounds[2*ci+1],cg.tmap.buf,
+                           cg.ostarts.buf,(cg.held&4)?cg.order.buf:NULL,
+                           (cg.held&8)?cg.row_bins.buf:NULL,cg.nrows,cg.nt,cg.nbins,
+                           (size_t)cg.block_len);
+      hmf_geom_release(&cg);
+      if(at<0){ Py_DECREF(calls); goto done; }
+    }
+    Py_DECREF(calls);
+    PyObject *ws=PyTuple_GET_ITEM(job,1), *mb=PyTuple_GET_ITEM(job,2);
+    if(ws!=Py_None && at>job0){
+      PyObject *mbs=PySequence_Fast(mb,"merge bin sizes must be a sequence");
+      if(!mbs) goto done;
+      const Py_ssize_t nm=PySequence_Fast_GET_SIZE(mbs);
+      Py_ssize_t sizes[16];
+      if(nm>16){ Py_DECREF(mbs); PyErr_SetString(PyExc_ValueError,"assemble_peaks: at most 16 merge bin sizes"); goto done; }
+      for(Py_ssize_t k=0;k<nm;k++) sizes[k]=PyLong_AsSsize_t(PySequence_Fast_GET_ITEM(mbs,k));
+      Py_DECREF(mbs);
+      if(PyErr_Occurred()) goto done;
+      Py_buffer bw;
+      if(PyObject_GetBuffer(ws,&bw,PyBUF_C_CONTIGUOUS)<0) goto done;
+      at=hmf_job_merge(bw.buf,bw.len/8,sizes,(int)nm,o_t,o_s,o_v,o_bs,o_bl,job0,at,keep);
+      PyBuffer_Release(&bw);
+      if(at<0) goto done;
+    }
+  }
+  offs[nj]=at;
+  hmf_samples_to_int(o_s,at);
+  ret=Py_BuildValue("(NNNNNN)",hmf_bytes(offs,(nj+1)*8),hmf_bytes(o_t,at*8),hmf_bytes(o_s,at*8),
+                    hmf_bytes(o_v,at*8),hmf_bytes(o_bs,at*8),hmf_bytes(o_bl,at*8));
+done:
+  free(g.flat); free(g.idx); free(g.val); free(bounds);
+  PyMem_Free(o_t); PyMem_Free(keep);
+  Py_DECREF(jobs);
+  return ret;
+}
+/* device_peaks(readback, peaks=True) -> (flat, lags, values, refined, tier1, direct, fft,
+   t0_checked): one device readback read into host arrays (bytearrays: int64 flat indices over
+   its (rows, templates, bins), int64 lags, complex64 values, in flat order; None without
+   peaks) and its counters, by the reader assemble_peaks uses. */
+static PyObject *M_device_peaks(PyObject *self,PyObject *args){
+  (void)self;
+  PyObject *part; int peaks=1;
+  if(!PyArg_ParseTuple(args,"O|p",&part,&peaks)) return NULL;
+  if(!PyTuple_Check(part) || PyTuple_GET_SIZE(part)!=14){
+    PyErr_SetString(PyExc_ValueError,"device_peaks: a device readback tuple is required"); return NULL;
+  }
+  const long long nt=PyLong_AsLongLong(PyTuple_GET_ITEM(part,2)), nb=PyLong_AsLongLong(PyTuple_GET_ITEM(part,3));
+  if(PyErr_Occurred()) return NULL;
+  hmf_gather g; memset(&g,0,sizeof(g)); hmf_rb_counts rc;
+  if(hmf_read_part(part,0,nt,nb,peaks?&g:NULL,&rc)){ free(g.flat); free(g.idx); free(g.val); return NULL; }
+  PyObject *ret;
+  if(peaks){
+    PyObject *f=PyByteArray_FromStringAndSize(g.n?(const char*)g.flat:"",(Py_ssize_t)g.n*8);
+    PyObject *i=PyByteArray_FromStringAndSize(g.n?(const char*)g.idx:"",(Py_ssize_t)g.n*8);
+    PyObject *v=PyByteArray_FromStringAndSize(g.n?(const char*)g.val:"",(Py_ssize_t)g.n*8);
+    if(f&&i&&v)
+      ret=Py_BuildValue("(NNNLLLLL)",f,i,v,(long long)rc.refined,(long long)rc.tier1,
+                        (long long)rc.direct,(long long)rc.fft,(long long)rc.t0_checked);
+    else { Py_XDECREF(f); Py_XDECREF(i); Py_XDECREF(v); ret=NULL; }
+  } else {
+    ret=Py_BuildValue("(OOOLLLLL)",Py_None,Py_None,Py_None,(long long)rc.refined,(long long)rc.tier1,
+                      (long long)rc.direct,(long long)rc.fft,(long long)rc.t0_checked);
+  }
+  free(g.flat); free(g.idx); free(g.val);
+  return ret;
+}
 static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
   PyObject *series_arg,*calls_arg=NULL,*outs_arg=NULL,*scales_arg=NULL,*tiles_arg=NULL;
   if(!PyArg_ParseTuple(args,"O|OOOO",&series_arg,&calls_arg,&outs_arg,&scales_arg,&tiles_arg))
@@ -2986,24 +3505,13 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
       if(at<0) goto done;
     }
     const hmf_table_job *J=&self->jobs[j];
-    for(int k=0;k<J->nmerge && at>job0;k++){
-      const Py_ssize_t n=at-job0;
-      const Py_ssize_t kept=hmf_merge_bins(J->win_starts,J->nwin,(int64_t)J->merge_bs[k],o_t+job0,
-                                           o_s+job0,o_v+2*job0,n,keep);
-      if(kept==-2){ PyErr_SetString(PyExc_ValueError,"window_bin_keep: mismatched buffers, binsize < 1 or a peak before the first window"); goto done; }
-      if(kept<0){ PyErr_NoMemory(); goto done; }
-      for(Py_ssize_t q=0;q<kept;q++){
-        const Py_ssize_t src=job0+keep[q], dst=job0+q;
-        o_t[dst]=o_t[src]; o_s[dst]=o_s[src]; o_bs[dst]=o_bs[src]; o_bl[dst]=o_bl[src];
-        o_v[2*dst]=o_v[2*src]; o_v[2*dst+1]=o_v[2*src+1];
-      }
-      at=job0+kept;
-    }
+    at=hmf_job_merge(J->win_starts,J->nwin,J->merge_bs,J->nmerge,o_t,o_s,o_v,o_bs,o_bl,job0,at,keep);
+    if(at<0) goto done;
   }
   {
     /* sample indices as int64, as FilterResults has them */
     int64_t *o_si=(int64_t*)o_s;
-    for(Py_ssize_t q=0;q<at;q++) o_si[q]=(int64_t)o_s[q];
+    hmf_samples_to_int(o_s,at);
     /* then each single-template call's peaks, as the follow-up kernel kept them */
     for(Py_ssize_t c=0;c<nsc;c++){
       const hmf_single *g=&self->singles[sing.single[c]];
@@ -4826,6 +5334,8 @@ static PyMethodDef methods[]={
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
+  {"assemble_peaks",M_assemble_peaks,METH_O,"assemble_peaks(jobs) -> (offsets, templates, samples, snr, block_starts, block_lengths): every job's peaks in one arena, from its calls' parts (device readbacks or host results), job by job ((calls, window starts or None, merge bin sizes); a call is (geometry, ((first block, part), ...))), with HMFTable.run's assembly"},
+  {"device_peaks",M_device_peaks,METH_VARARGS,"device_peaks(readback, peaks=True) -> (flat, lags, values, refined, tier1, direct, fft, t0_checked): one device readback's peaks (bytearrays, flat order) and counters"},
   {"window_bin_keep",M_window_bin_keep,METH_VARARGS,"window_bin_keep(win_starts, binsize, t, s, v, keep, is_float) -> kept count, or -1 when not ordered by template then sample"},
   {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra, complex=False)"},
   {"_t2s_plans",M_t2s_plans,METH_NOARGS,"_t2s_plans() -> FFT plans taps_to_spectra has made (it keeps them per block length)"},

@@ -1,8 +1,11 @@
 """The result containers every layer hands back: the structured peak dtype, a sparse
 peak table, and a submitted-but-uncollected result."""
+import weakref
 from typing import NamedTuple
 
 import numpy as np
+
+from . import _core
 
 
 #: dtype of the arrays returned by :meth:`MatchedFilter.run`.
@@ -85,6 +88,130 @@ class _Deferred:
         if not self._done:
             self._value, self._finish, self._done = self._finish(), None, True
         return self._value
+
+
+class _CallParts:
+    """A hierarchical GPU call's result as its parts, for the extension's assembly
+    (_core.assemble_peaks): per batch of blocks its first block and its result in flight (a
+    Pending, whose readback the assembly reads where the device wrote it) or already
+    collected. A filter_series call holds one per call; a deferred call is also the owner of
+    the plan's slots it used (MatchedFilter._slot_owner), so a later call collects it before
+    reusing them. order and shape are the call's: its layout's block order (the output row of
+    each computed row) or None, and (blocks, templates, bins). The plan is held by weak
+    reference (its slot owners hold this: a strong one made a cycle that kept a dropped bank's
+    plans and their device buffers until the collector ran) and its work counters directly."""
+    __slots__ = ("parts", "plan", "work", "order", "shape")
+
+    def __init__(self, parts, plan, order, shape):
+        self.parts, self.plan, self.work = parts, weakref.ref(plan), plan._gwork
+        self.order, self.shape = order, shape
+
+    @property
+    def _done(self):
+        """Whether every part has been collected (MatchedFilter._next_batch_base)."""
+        return all(getattr(item, "done", True) for _, item in self.parts)
+
+    def result(self):
+        """Collect every part still in flight into host arrays, as a later call on the same
+        slots needs (their buffers are about to be reused); the parts stay for take()."""
+        for _, item in self.parts:
+            if not getattr(item, "done", True):
+                item()
+
+    def take(self):
+        """The parts as assemble_peaks reads them, once: [(first block, part)], a part the
+        readback tuple of a run collected now, or the host result of one collected earlier,
+        whose counts are added to the plan's work counters here (the assembly adds a
+        readback's). Returns the list."""
+        out = []
+        for b0, item in self.parts:
+            take = getattr(item, "take", None)
+            if take is not None:
+                live, value = take()
+            elif callable(item):
+                live, value = False, item()     # a collector without a readback (split bins)
+            else:
+                out.append((b0, item))          # a synchronous result, already counted
+                continue
+            plan = self.plan()
+            if not live and plan is not None:
+                plan._account(value)
+            out.append((b0, value))
+        self.parts = ()
+        return out
+
+
+class _PeaksJob(_Deferred):
+    """A filter_series call's peaks, assembled in the extension when first asked for
+    (_core.assemble_peaks, the step table's assembly): its calls, each (the bank index of each
+    template of its result, the blocks' starts in output order, each block's bin count where
+    one call computed several or None, the block length, the result: _CallParts, a deferred
+    result, or a host result), the window starts and the bin sizes whose partial bins
+    merge. The jobs of one batch (filter_series_many) share a _PeaksBatch: the first
+    job asked assembles them all in one extension call."""
+    __slots__ = ("calls", "win_starts", "merge_bs", "batch")
+
+    def __init__(self, calls, win_starts, merge_bs):
+        super().__init__(None)
+        self.calls, self.win_starts, self.merge_bs, self.batch = calls, win_starts, merge_bs, None
+
+    def spec(self):
+        """The job as assemble_peaks takes it, its parts taken (once): (calls, window starts,
+        merge bin sizes)."""
+        calls = []
+        for templates, starts, row_bins, block_len, res in self.calls:
+            if isinstance(res, _CallParts):
+                calls.append(((templates, starts, res.order, row_bins, res.shape[1], res.shape[2],
+                               block_len, res.work), res.take()))
+                continue
+            if isinstance(res, _Deferred):
+                res = res.result()
+            shape = res.shape if isinstance(res, _SparsePeaks) else res[0].shape
+            calls.append(((templates, starts, None, row_bins, shape[1], shape[2], block_len, None),
+                          ((0, res),)))
+        self.calls = ()
+        return calls, self.win_starts, self.merge_bs
+
+    def result(self):
+        if not self._done:
+            if self.batch is not None:
+                self.batch.collect()
+            else:
+                _assemble_jobs([self])
+        return self._value
+
+
+class _PeaksBatch:
+    """The jobs of one filter_series_many batch, assembled together (_PeaksJob)."""
+    __slots__ = ("jobs",)
+
+    def __init__(self, jobs):
+        self.jobs = jobs
+        for job in jobs:
+            job.batch = self
+
+    def collect(self):
+        """Assemble every job not yet assembled, in one extension call."""
+        jobs = [job for job in self.jobs if not job._done]
+        self.jobs = ()
+        _assemble_jobs(jobs)
+
+
+def _assemble_jobs(jobs):
+    """Assemble jobs (_PeaksJob) in one extension call: each job's FilterResults, slices of one
+    arena (the empty result for a job without peaks), becomes its value. Returns nothing."""
+    offsets, *columns = _core.assemble_peaks([job.spec() for job in jobs])
+    offsets = np.frombuffer(offsets, np.int64)
+    columns = [np.frombuffer(c, d) for c, d in zip(columns, _ARENA_DTYPES)]
+    for k, job in enumerate(jobs):
+        lo, hi = int(offsets[k]), int(offsets[k + 1])
+        job._value = (FilterResults(*(c[lo:hi] for c in columns)) if hi > lo
+                      else _EMPTY_FILTER_RESULTS)
+        job._done = True
+
+
+#: The arena's columns (_core.assemble_peaks, _core.HMFTable.run), as FilterResults has them.
+_ARENA_DTYPES = (np.int64, np.int64, np.complex64, np.int64, np.int64)
 
 
 class FilterResults(NamedTuple):

@@ -143,10 +143,10 @@ def test_explicit_gate_thresholds_invalidate(monkeypatch):
     assert _replays([(bank, w, df)]) > 0
 
 
-def test_ragged_split_sparse_matches_dense():
-    """_RaggedSplit.parts on a sparse result is the sparse form of the dense per-count split,
-    and _SparsePeaks.blocks of one part."""
-    from matchedfilter.time_domain import _RaggedSplit
+def test_sparse_blocks_match_dense():
+    """_SparsePeaks.blocks of a sparse result is the sparse form of the dense blocks' first
+    bins. (The split of a ragged result by bin count is the extension's assembly now:
+    tests/test_device_assembly.py.)"""
     from matchedfilter._results import _SparsePeaks
     rng = np.random.default_rng(5)
     idx = np.where(rng.random((7, 3, 4)) < 0.3, rng.integers(0, 99, (7, 3, 4)), -1)
@@ -158,12 +158,6 @@ def test_ragged_split_sparse_matches_dense():
         di, dv = sp.blocks(m, u).dense()
         np.testing.assert_array_equal(di, np.where(idx[m][:, :, :u] >= 0, idx[m][:, :, :u], -1))
         np.testing.assert_array_equal(dv, val[m][:, :, :u])
-    bc = np.array([4, 2, 4, 1, 2, 4, 3])
-    split = _RaggedSplit(bc)
-    for got, (di, dv) in zip(split.parts(sp), split.parts((idx, val))):
-        gi, gv = got.dense()
-        np.testing.assert_array_equal(gi, np.where(di >= 0, di, -1))
-        np.testing.assert_array_equal(gv, dv)
 
 
 def test_pooled_follow_up_workspaces_in_flight(monkeypatch):

@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from conftest import fix_gpu_costs, usable_gpu, usable_gpu_reason
+from conftest import collected_parts, fix_gpu_costs, usable_gpu, usable_gpu_reason
 from spectral_profiles import binomtest
 
 import matchedfilter as mf
@@ -189,9 +189,8 @@ def test_gpu_clustered_tier0_arities_windows_and_feeds(profile_name, monkeypatch
         token = object()
         close = fused()
         try:
-            with hf_ser._series_flags(defer=token, sparse=True), hf_ser2._series_flags(
-                defer=token, sparse=True
-            ):
+            with hf_ser._series_flags(defer=token, sparse=True, readback=True), \
+                    hf_ser2._series_flags(defer=token, sparse=True, readback=True):
                 d1 = hf_ser.run_series(
                     series, starts=starts, win_start=win_s, win_end=win_e,
                     binsize=256, threshold=6.5, raw=True,
@@ -202,8 +201,8 @@ def test_gpu_clustered_tier0_arities_windows_and_feeds(profile_name, monkeypatch
                 )
         finally:
             close()
-        r1 = d1.result()
-        r2 = d2.result()
+        r1 = collected_parts(d1)
+        r2 = collected_parts(d2)
         idx1, _ = r1.dense() if hasattr(r1, "dense") else r1
         idx2, _ = r2.dense() if hasattr(r2, "dense") else r2
         np.testing.assert_array_equal(idx1[2, 3][v_mask], ref_s[2, 3]["index"][v_mask])

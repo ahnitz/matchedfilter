@@ -215,11 +215,12 @@ def _allocation(buf):
 class Record:
     """A cached recording of one operation shape: the buffers it binds (`owned` are the
     context's, freed with it; the rest are callers' shared allocations) and the driver's
-    native recording."""
-    __slots__ = ("buffers", "owned", "native")
+    native recording, and the tuple naming the buffers its result is read from
+    (`readback`, made by its first collection; _gpuhier's Readback)."""
+    __slots__ = ("buffers", "owned", "native", "readback")
 
     def __init__(self):
-        self.buffers, self.owned, self.native = {}, set(), None
+        self.buffers, self.owned, self.native, self.readback = {}, set(), None, None
 
 
 _STARTS, _SERIES, _SPECTRA = Arg("starts"), Arg("series"), Arg("spectra")

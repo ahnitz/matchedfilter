@@ -154,12 +154,12 @@ def test_flat_steps_give_the_call_at_a_time_peaks(monkeypatch):
             (hier_bank, z, dict(windows=[(20000, 30000), (31000, 90000)], binsize=512,
                                 threshold=0.0)),
             (hier_bank, x, dict(windows=[(20000, 70000)], threshold=3.0))]
-    consume_into = time_domain._consume_into
-    consumed = []
-    monkeypatch.setattr(time_domain, "_consume_into",
-                        lambda *a: consumed.append(1) or consume_into(*a))
+    peaks_job = time_domain._PeaksJob
+    general = []
+    monkeypatch.setattr(time_domain, "_PeaksJob",
+                        lambda *a: general.append(1) or peaks_job(*a))
     got = TimeDomainFilterBank.filter_series_many(jobs)
-    assert not consumed                         # no call was assembled in Python
+    assert not general                          # no call took filter_series' general loop
     assert [len(r.snr) > 0 for r in got] == [True] * len(jobs)
     flat_steps = [len(c.flat_plans) for c in flat_bank.__dict__["_compiled_steps"].values()]
     assert flat_steps and all(n > 0 for n in flat_steps)

@@ -11,7 +11,7 @@ import numpy as np
 
 from . import _config
 from . import _core
-from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks
+from ._results import PEAK_DTYPE, _CallParts, _Deferred, _SparsePeaks
 from ._settings import fingerprint
 from ._execution_policy import select
 from ._series import SeriesLayout
@@ -166,8 +166,9 @@ class _SeriesOutput:
 
     def take(self, b_start, b_end, r):
         """Store one batch's result (a grouped call: always several batches' tables); sparse
-        pieces are kept aside (see finish)."""
-        if isinstance(r, _SparsePeaks):
+        pieces, and every batch of a call read back for the extension's assembly (its result
+        in flight, or collected), are kept aside (see finish)."""
+        if self.c.readback or isinstance(r, _SparsePeaks):
             self.sparse_parts.append((b_start, r))
             return
         gi, gv = r
@@ -181,8 +182,12 @@ class _SeriesOutput:
     def take_one(self, b_start, b_end, r, final=False):
         """Store one batch's result of a call by window group; a single batch's result is
         returned as the call's own (formatted). final: collected when the call finishes,
-        where a deferred single batch gets tables of its own."""
+        where a deferred single batch gets tables of its own. A call read back for the
+        extension's assembly keeps every batch (see finish)."""
         c = self.c
+        if c.readback:
+            self.sparse_parts.append((b_start, r))
+            return None
         if isinstance(r, _SparsePeaks):
             if c.single:
                 return r
@@ -209,8 +214,11 @@ class _SeriesOutput:
         return None
 
     def finish(self):
-        """The call's result from every batch taken."""
+        """The call's result from every batch taken: for a call read back for the
+        extension's assembly, its parts (_CallParts)."""
         c = self.c
+        if c.readback:
+            return _CallParts(self.sparse_parts, self.plan, c.layout.order, self.shape)
         if not c.raw:
             return _format_result(None, None, raw=False, order=c.layout.order, out=self.peaks)
         if self.sparse_parts:
@@ -378,9 +386,11 @@ class MatchedFilter:
 
     #: The series-call flags, set only around a call by _series_flags: the batch's token
     #: when the call is to be deferred (TimeDomainFilterBank.filter_series_many), and whether
-    #: it is to return sparse peaks (_SparsePeaks) where it can.
+    #: it is to return sparse peaks (_SparsePeaks) where it can, and whether a hierarchical
+    #: GPU call is to return its parts for the extension's assembly (_results._CallParts).
     _defer_series = False
     _want_sparse = False
+    _want_readback = False
 
     #: Class-level so subclasses with their own __init__ -- HierarchicalFilter
     #: -- inherit the CPU default instead of raising on first use.
@@ -446,11 +456,11 @@ class MatchedFilter:
         self._step_stats = np.zeros(6 + self._MAX_BATCH_TIMINGS, dtype=np.float64)
         self._in_series_call = False
         self._gpu = None
-        self._gpairs = 0
-        self._gtrig = 0
-        self._gt1 = 0          # GPU: pairs tier 0 passed (cascade chains), for _roofline
-        self._gdirect = 0
-        self._gfft = 0
+        # GPU work counters, int64: (block, template) pairs, refines, pairs tier 0 passed (a
+        # cascade's; for _roofline), direct refines, transform refines, tier-0 pairs checked.
+        # _account adds a result collected in Python; the extension's assembly adds the
+        # readbacks it reads (_core.assemble_peaks).
+        self._gwork = np.zeros(6, np.int64)
         self._ddirty = True
         self._tdirty = True
 
@@ -801,11 +811,12 @@ class MatchedFilter:
         (block, template) pairs, and the refinements and tier-0 survivors the backend counted
         for the call (HierarchicalFilter.stats, work_counts). Returns r."""
         shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
-        self._gpairs += shp[0] * shp[1]
-        self._gtrig += self._gpu.last_refinements
-        self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
-        self._gdirect += getattr(self._gpu, "last_direct_refinements", 0) or 0
-        self._gfft += getattr(self._gpu, "last_fft_refinements", 0) or 0
+        gpu, work = self._gpu, self._gwork
+        work[0] += shp[0] * shp[1]
+        work[1] += gpu.last_refinements
+        work[2] += getattr(gpu, "last_tier1_survivors", 0) or 0
+        work[3] += getattr(gpu, "last_direct_refinements", 0) or 0
+        work[4] += getattr(gpu, "last_fft_refinements", 0) or 0
         return r
 
     # ---- run ----------------------------------------------------------------
@@ -1669,11 +1680,14 @@ class MatchedFilter:
         backend's forward and hierarchical records (handles). A repeat with the same state
         (_call_plan_state), the same series memory and the same slot skips layout, policy,
         source resolution and key building: it rewrites the starts, re-queues the records and
-        returns the same kind of deferred result. The backend checks each handle (record
-        identity, resident input signatures) before anything is submitted; any stale handle
-        falls back to the full path, which records afresh."""
+        returns the call's parts (_CallParts), which the caller assembles in the extension:
+        only calls read back for that assembly record a plan (_series_flags readback). The
+        backend checks each handle (record identity, resident input signatures) before
+        anything is submitted; any stale handle falls back to the full path, which records
+        afresh."""
         plans = self.__dict__.get("_call_plans")
-        if not plans or not raw or self._tdirty or not self._defer_series:
+        if (not plans or not raw or self._tdirty or not self._defer_series
+                or not self._want_readback):
             return None
         d = self.__dict__
         vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
@@ -1718,7 +1732,6 @@ class MatchedFilter:
             prev = owners.pop(lo + (slot0 + k - lo) % span, None)
             if prev is not None:
                 prev.result()
-        shape = (layout.starts.size, nt, layout.nbins)
         self._last_series_batch = entry["batch"]
         starts_pool = entry["starts_pool"]
         in_flight = []
@@ -1731,38 +1744,13 @@ class MatchedFilter:
             res = gpu.hier_replay(hh, slot, True, validated=True)
             if res is None:
                 raise RuntimeError("a validated call plan part was refused")
-            in_flight.append((begin, end, res))
-        sparse_parts = []
-
-        def finish_grouped():
-            # As the full path's finish_grouped/take_dense/finish_raw for a grouped call.
-            idx = val = None
-            refined = 0
-            for b_start, b_end, item in in_flight:
-                r = self._account(item())
-                refined += getattr(gpu, "last_refinements", 1)
-                if isinstance(r, _SparsePeaks):
-                    sparse_parts.append((b_start, r))
-                else:
-                    if idx is None:
-                        idx = np.empty(shape, dtype=np.int64)
-                        val = np.empty(shape, dtype=np.complex64)
-                    idx[b_start:b_end], val[b_start:b_end] = r
-            in_flight.clear()
-            if refined == 0:
-                deferred.empty = True
-            if sparse_parts:
-                return _SparsePeaks.combine(sparse_parts, shape, layout.order)
-            if idx is None:
-                idx = np.full(shape, -1, dtype=np.int64)
-                val = np.zeros(shape, dtype=np.complex64)
-            return _format_result(idx, val, raw=True, order=layout.order)
+            in_flight.append((begin, res))
         self._defer_slot = slot_idx
-        deferred = _Deferred(finish_grouped)
+        parts = _CallParts(in_flight, self, layout.order, (layout.starts.size, nt, layout.nbins))
         for k in range(slot0, slot_idx):
-            owners[lo + (k - lo) % span] = deferred
+            owners[lo + (k - lo) % span] = parts
         self.call_plan_replays = getattr(self, "call_plan_replays", 0) + 1
-        return deferred
+        return parts
 
     def _record_call_plan(self, ser, layout, binsize, threshold, t0, nt, K, batch, slot0,
                           whole, parts, starts_pool):
@@ -1783,19 +1771,23 @@ class MatchedFilter:
         entry["slots"][slot0] = parts
 
     @contextmanager
-    def _series_flags(self, defer=False, sparse=False, queue_offset=0):
+    def _series_flags(self, defer=False, sparse=False, queue_offset=0, readback=False):
         """Set the series-call flags for the calls made inside the block and clear them (to
         False) when the block ends, however it ends. defer, the batch's token
         (TimeDomainFilterBank.filter_series_many), asks for deferred results, with the GPU
         context's compute queues offset by queue_offset (the offset stays set until the next
-        deferred call); sparse asks for sparse peaks where the call can return them. A false
-        flag is left as it is. Yields nothing."""
+        deferred call); sparse asks for sparse peaks where the call can return them; readback
+        asks a hierarchical GPU call with sparse peaks for its parts (_results._CallParts),
+        which the caller assembles in the extension. A false flag is left as it is. Yields
+        nothing."""
         if defer:
             self._defer_series = defer
             if self._gpu is not None:
                 self._gpu._queue_offset = queue_offset
         if sparse:
             self._want_sparse = True
+        if readback:
+            self._want_readback = True
         try:
             yield
         finally:
@@ -1803,6 +1795,8 @@ class MatchedFilter:
                 self._defer_series = False
             if sparse:
                 self._want_sparse = False
+            if readback:
+                self._want_readback = False
 
     def _fast_series(self, ser, layout, binsize, threshold):
         """A repeated deferred series call straight from its call plan (_replay_call_plan),
@@ -1874,6 +1868,9 @@ class MatchedFilter:
         sparse = bool(raw and threshold > 0 and self._want_sparse)
         c.skw = {"sparse": True} if sparse else {}
         c.is_hier = self._is_hierarchical
+        # Its parts for the extension's assembly (_results._CallParts), when the caller asks
+        # (filter_series): a hierarchical call with sparse peaks.
+        c.readback = bool(sparse and c.is_hier and self._want_readback)
         # A declared capability, not a probe for one backend's internals.
         can_pipeline = self._gpu.cache_limit_bytes > 1024 * 1024
         # A phased call (bin_phase) reads every row's window and bin phase from a row table,
@@ -2050,9 +2047,10 @@ class MatchedFilter:
 
     def _series_deferred(self, c, slot_idx, finish):
         """A deferred call's result: its next slot kept for the next call, and every slot it
-        used owned by it until it is collected."""
+        used owned by it until it is collected. A call read back for the extension's assembly
+        returns its parts (finish() submits nothing and waits for nothing there)."""
         self._defer_slot = slot_idx
-        deferred = _Deferred(finish)
+        deferred = finish() if c.readback else _Deferred(finish)
         owners = self.__dict__.setdefault("_slot_owner", {})
         for k in range(c.slot0, slot_idx):
             owners[k % c.K] = deferred
@@ -2086,7 +2084,7 @@ class MatchedFilter:
         # (_replay_call_plan): every batch's forward and hierarchical record handles.
         # Read in place means a row of an allocation (contained) or a whole one -- not a
         # host array viewed for this call (series_owner).
-        record = (c.defer and c.is_hier and c.raw and c.pipelined
+        record = (c.defer and c.readback and c.pipelined
                   and (c.contained is not None or (c.source_shared and not c.viewed)))
         recorded = []
         for begin, end, count, groups, rebased, phase in plan_b[1]:
@@ -2114,13 +2112,17 @@ class MatchedFilter:
             if len(in_flight) >= c.K:
                 collected_early[0] = True
                 b_start, b_end, item = in_flight.pop(0)
-                out.take(b_start, b_end, item() if callable(item) else item)
+                r = item() if callable(item) else item
+                out.take(b_start, b_end, item if c.readback else r)
 
         refined = [0]
 
         def finish_grouped():
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
+                if c.readback:
+                    out.take(b_start, b_end, item)      # read when the call is assembled
+                    continue
                 r = item() if callable(item) else item
                 if c.is_hier:
                     refined[0] += getattr(self._gpu, "last_refinements", 1)
@@ -2138,7 +2140,8 @@ class MatchedFilter:
             if c.is_hier and refined[0] == 0 and not collected_early[0]:
                 deferred.empty = True
             return value
-        deferred = self._series_deferred(c, slot_idx, finish_marking)
+        deferred = self._series_deferred(c, slot_idx,
+                                         finish_grouped if c.readback else finish_marking)
         return deferred
 
     def _series_by_group(self, c, out):
@@ -2167,7 +2170,8 @@ class MatchedFilter:
                 if len(in_flight) >= c.K:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
-                    r = out.take_one(b_start, b_end, item() if callable(item) else item)
+                    r = item() if callable(item) else item
+                    r = out.take_one(b_start, b_end, item if c.readback else r)
                     if r is not None:
                         return r
         refined = [0]
@@ -2175,6 +2179,9 @@ class MatchedFilter:
         def finish():
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
+                if c.readback:
+                    out.take_one(b_start, b_end, item)  # read when the call is assembled
+                    continue
                 r = item() if callable(item) else item
                 if c.is_hier:
                     refined[0] += getattr(self._gpu, "last_refinements", 1)
@@ -2193,7 +2200,7 @@ class MatchedFilter:
             if c.is_hier and refined[0] == 0 and not collected_early[0]:
                 deferred.empty = True
             return value
-        deferred = self._series_deferred(c, slot_idx, finish_marking)
+        deferred = self._series_deferred(c, slot_idx, finish if c.readback else finish_marking)
         return deferred
 
     def wait(self):

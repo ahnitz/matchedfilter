@@ -11,27 +11,33 @@ class Pending:
     cached buffers can finish them first -- a result is read from those
     buffers, and reading one after its release reads freed memory.
     """
-    __slots__ = ("ctx", "fn", "result", "done", "stats", "owner")
+    __slots__ = ("ctx", "fn", "result", "done", "stats", "owner", "live")
 
     #: Per-dispatch statistics a finish leaves on the context (last_refinements, ...). A
     #: result can be materialised early -- _drain from timings(), a cache eviction, a slot
     #: reuse -- and in any order, while callers read these attributes when THEY collect
     #: it: each result restores its own values whenever it is returned. Read stale, a
     #: deferred hierarchical call counted 0 refinements and marked itself empty.
-    STATS = ("last_refinements", "last_tier1_survivors")
+    STATS = ("last_refinements", "last_tier1_survivors", "last_direct_refinements",
+             "last_fft_refinements", "last_tier0_checked")
 
-    def __init__(self, ctx, fn, owner=None):
+    def __init__(self, ctx, fn, owner=None, live=None):
         self.ctx, self.fn, self.result, self.done = ctx, fn, None, False
         self.stats = None
         self.owner = owner
+        self.live = live
+
+    def _forget(self):
+        """No longer in flight: off the context's lists."""
+        self.done = True
+        self.ctx._inflight.pop(id(self), None)
+        if self.owner is not None and self.ctx.__dict__.get("_owned", {}).get(self.owner) is self:
+            del self.ctx._owned[self.owner]
 
     def __call__(self):
         if not self.done:
-            self.done = True
-            self.ctx._inflight.pop(id(self), None)
-            if self.owner is not None and self.ctx.__dict__.get("_owned", {}).get(self.owner) is self:
-                del self.ctx._owned[self.owner]
-            fn, self.fn = self.fn, None
+            self._forget()
+            fn, self.fn, self.live = self.fn, None, None
             self.result = fn()
             self.stats = {k: getattr(self.ctx, k) for k in self.STATS if hasattr(self.ctx, k)}
         else:
@@ -39,13 +45,26 @@ class Pending:
                 setattr(self.ctx, k, v)
         return self.result
 
+    def take(self):
+        """What an assembly in the extension reads (_results._CallParts.take): (True, the
+        run's readback tuple) when the result has a readback (live: a function that waits
+        for the run and returns it) and nothing collected it before; else (False, the
+        result, collected now if it was not). Taking a readback leaves no result here: the
+        buffers it names are read by the caller before anything reuses them."""
+        if self.done or self.live is None:
+            return False, self()
+        self._forget()
+        live, self.fn, self.live = self.live, None, None
+        return True, live()
+
 
 class InputUploads:
-    def _track(self, fn, owner=None):
+    def _track(self, fn, owner=None, live=None):
         """Register an in-flight readback; see Pending. owner: the output buffers the readback
-        reads, so a later call that reuses them collects this result first (_claim)."""
+        reads, so a later call that reuses them collects this result first (_claim). live: a
+        function that waits for the run and returns its readback tuple (Pending.take)."""
         inflight = self.__dict__.setdefault("_inflight", {})
-        pending = Pending(self, fn, None if owner is None else id(owner))
+        pending = Pending(self, fn, None if owner is None else id(owner), live)
         inflight[id(pending)] = pending
         if owner is not None:
             self.__dict__.setdefault("_owned", {})[id(owner)] = pending

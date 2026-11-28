@@ -15,12 +15,12 @@ from . import _settings, _trial
 from ._choice import (_AUTOTUNE_LOCK, TIE as _TIE, _autotune_enabled, held, playing,
                       _log_autotune)
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
-from ._windows import _normalize_windows, _window_layout, _merge_window_bins, _window_bin_phases
+from ._windows import _normalize_windows, _window_layout, _window_bin_phases
 # The bank's layout planning lives in _layout.
 from ._layout import _corr_partition, _partition_templates
 from . import _core, _choice
 from ._hierarchical import _record_cpu_trial
-from ._results import _SparsePeaks, _Deferred
+from ._results import _CallParts, _PeaksJob, _Deferred
 from ._filter import _from_any, _automatic_series_layout
 from ._shared import containing_samples, shared_buffer, shared_view
 from . import _layout, gatechain
@@ -52,46 +52,6 @@ def _settle_device_writes():
         mod = sys.modules.get(__package__ + name)
         if mod is not None and hasattr(mod, 'settle_all'):
             mod.settle_all()
-
-
-class _RaggedSplit:
-    """A ragged result's per-bin-count parts, in the order per-count calls give them: part i
-    is the blocks with the i-th smallest bin count, with that many bins. Computed once per
-    result (one pass over a sparse result's entries) and shared by every part."""
-
-    def __init__(self, bc):
-        bc = np.asarray(bc, np.int64)
-        self.bc = bc
-        self.us = [int(u) for u in np.unique(bc)]
-        self.masks = [bc == u for u in self.us]
-        self.rank = np.zeros(bc.size, np.int64)
-        for m in self.masks:
-            self.rank[m] = np.arange(int(m.sum()))
-
-    def parts(self, r):
-        if not isinstance(r, _SparsePeaks):
-            return [(r[0][m][:, :, :u], r[1][m][:, :, :u]) for m, u in zip(self.masks, self.us)]
-        nt, nb = r.shape[1], r.shape[2]
-        b, rest = np.divmod(r.flat, nt * nb)
-        t, k = np.divmod(rest, nb)
-        cb = self.bc[b]
-        out = []
-        for m, u in zip(self.masks, self.us):
-            sel = (cb == u) & (k < u)
-            out.append(_SparsePeaks((int(m.sum()), nt, u),
-                                    (self.rank[b[sel]] * nt + t[sel]) * u + k[sel],
-                                    r.idx[sel], r.val[sel]))
-        return out
-
-    def deferred(self, d):
-        """One _Deferred per part of the deferred result d, sharing one split."""
-        cell = []
-
-        def part(i):
-            if not cell:
-                cell.append(self.parts(d.result()))
-            return cell[0][i]
-        return [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
 
 
 def _page_aligned_empty(shape, dtype=np.complex64, page: int = 16384) -> np.ndarray:
@@ -2134,12 +2094,17 @@ class TimeDomainFilterBank:
             ):
                 return single_out[0]
 
-        # The peaks' columns, filled by _consume_into and read by _results_from.
-        lists = ([], [], [], [], [])
+        # Every call's peaks are assembled in the extension, as the step table assembles its
+        # steps' (_results._PeaksJob, _core.assemble_peaks): per call the bank index of each
+        # template of its result, the blocks' starts in output order, each block's bin count
+        # where one ragged call computed several, the block length, and the call's result: its
+        # parts (a hierarchical GPU call's readbacks, read where the device wrote them), a
+        # deferred result, or a host result.
+        calls = []
         # A bin size the caller (or the bank) gives is each window's: its bins start at the
         # window's start, wherever the blocks fall (_window_bin_phases). A bin a block edge
-        # cuts comes back as two partial bins, merged in build(). Without one, a bin is the
-        # block's span (the documented default, one bin per block).
+        # cuts comes back as two partial bins, merged in the assembly. Without one, a bin is
+        # the block's span (the documented default, one bin per block).
         aligned = binsize is not None or self.binsize is not None
         merge_bs = []
 
@@ -2152,7 +2117,6 @@ class TimeDomainFilterBank:
 
         # In a batch (filter_series_many): its token, and this job's compute queue offset.
         defer, queue_offset = getattr(self, '_defer', False), getattr(self, '_queue_offset', 0)
-        pending = []
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
             timed = False
@@ -2178,6 +2142,8 @@ class TimeDomainFilterBank:
             bstarts, bws, bwe = self._group_blocks(g, W, S, cache_key, tmpl_arg is not None)
             if bstarts.size == 0:
                 continue
+            tmap = (np.array([template_index], np.int64) if tmpl_arg is not None
+                    else g.template_indices)
 
             data_in = ser
 
@@ -2200,103 +2166,69 @@ class TimeDomainFilterBank:
                 hit = fast.get(fast_key) if fast else None
                 if hit is not None and hit[0] is active_plan:
                     with active_plan._series_flags(defer=call_defer, sparse=True,
-                                                   queue_offset=queue_offset):
+                                                   queue_offset=queue_offset, readback=True):
                         res = active_plan._fast_series(data_in, hit[1], bs, eff_threshold)
                     if res is not None:
-                        if hit[2] is None:
-                            pending.append((res, bstarts, g, tmpl_arg, N))
-                        else:
-                            split, starts_parts = hit[2]
-                            for d, st_part in zip(split.deferred(res), starts_parts):
-                                pending.append((d, st_part, g, tmpl_arg, N))
+                        calls.append((tmap, bstarts, hit[2], N, res))
                         continue
             groups_bins = _blocks_by_bin_count(active_plan, N, bs, bstarts, bws, bwe, bph)
 
             # Every bin count in one GPU submission where the backend can, instead of a
             # submission and a wait per count (see MatchedFilter._run_series_ragged).
-            work = [(gb, None) for gb in groups_bins]
             if (len(groups_bins) > 1 and getattr(active_plan, '_gpu', None) is not None
                     and not getattr(active_plan, '_bandlimited', False)
                     and hasattr(active_plan, '_run_series_ragged')):
                 # A hierarchical ragged call reads back sparse, as its per-count calls would.
                 with active_plan._series_flags(
                         defer=call_defer, sparse=getattr(active_plan, '_is_hierarchical', False),
-                        queue_offset=queue_offset):
+                        queue_offset=queue_offset, readback=True):
                     res = active_plan._run_series_ragged(
                         data_in, bstarts, bws, bwe, binsize=bs,
                         threshold=eff_threshold, templates=plan_templates,
                         **({} if bph is None else {'bin_phase': bph}))
                 if res is not None:
-                    # Split back into the per-count groups, in their order, so the result
-                    # is the one per-count calls give (peak order included).
+                    # The assembly gives each bin count's blocks in turn, in increasing count,
+                    # as per-count calls would (peak order included).
                     bc = ((bwe.astype(np.int64) - bws.astype(np.int64)
                            + (0 if bph is None else bph.astype(np.int64)) + bs - 1) // bs)
-                    split = _RaggedSplit(bc)
-                    subs = [(bstarts[m], bws[m], bwe[m], None if bph is None else bph[m])
-                            for m in split.masks]
-                    if fast_key is not None and isinstance(res, _Deferred):
+                    if fast_key is not None and isinstance(res, _CallParts):
                         g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
-                            active_plan, getattr(active_plan, '_last_layout', None),
-                            (split, [sb[0] for sb in subs]))
-                    parts = (split.deferred(res) if isinstance(res, _Deferred)
-                             else split.parts(res))
-                    work = list(zip(subs, parts))
-            for (sub_starts, sub_bws, sub_bwe, sub_ph), res in work:
-                if res is None:
-                    run_in, run_starts = data_in, sub_starts
-                    if data_in.dtype == np.float32 and not _reads_real(active_plan):
-                        # A plan without a real-series path (the ungated single-template plan
-                        # of a follow-up) widens to complex only the span its blocks read --
-                        # not the whole series, which was 4.7 s of copies over a test27 job.
-                        lo = int(sub_starts.min())
-                        hi = min(S, int(sub_starts.max()) + N)
-                        run_in = _host_copy(data_in[lo:hi], np.complex64)
-                        run_starts = (sub_starts - lo).astype(sub_starts.dtype)
-                    with active_plan._series_flags(defer=call_defer, sparse=True,
-                                                   queue_offset=queue_offset):
-                        res = active_plan.run_series(
-                            run_in, run_starts, sub_bws, sub_bwe, binsize=bs,
-                            threshold=eff_threshold, templates=plan_templates, raw=True,
-                            **({} if sub_ph is None else {'bin_phase': sub_ph})
-                        )
-                if isinstance(res, _Deferred):
-                    pending.append((res, sub_starts, g, tmpl_arg, N))
-                    if fast_key is not None and len(work) == 1:
-                        g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
-                            active_plan, getattr(active_plan, '_last_layout', None), None)
+                            active_plan, getattr(active_plan, '_last_layout', None), bc)
+                    calls.append((tmap, bstarts, bc, N, res))
                     continue
-                aidx, aval = (res, None) if isinstance(res, _SparsePeaks) else res
-                if getattr(active_plan, '_last_n_triggers', None) == 0:
-                    continue
-                if pending:
-                    # Keep the call's order: parts already deferred are consumed at build().
+            for sub_starts, sub_bws, sub_bwe, sub_ph in groups_bins:
+                run_in, run_starts = data_in, sub_starts
+                if data_in.dtype == np.float32 and not _reads_real(active_plan):
+                    # A plan without a real-series path (the ungated single-template plan
+                    # of a follow-up) widens to complex only the span its blocks read --
+                    # not the whole series, which was 4.7 s of copies over a test27 job.
+                    lo = int(sub_starts.min())
+                    hi = min(S, int(sub_starts.max()) + N)
+                    run_in = _host_copy(data_in[lo:hi], np.complex64)
+                    run_starts = (sub_starts - lo).astype(sub_starts.dtype)
+                with active_plan._series_flags(defer=call_defer, sparse=True,
+                                               queue_offset=queue_offset, readback=True):
+                    res = active_plan.run_series(
+                        run_in, run_starts, sub_bws, sub_bwe, binsize=bs,
+                        threshold=eff_threshold, templates=plan_templates, raw=True,
+                        **({} if sub_ph is None else {'bin_phase': sub_ph})
+                    )
+                if (fast_key is not None and len(groups_bins) == 1
+                        and isinstance(res, _CallParts)):
+                    g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
+                        active_plan, getattr(active_plan, '_last_layout', None), None)
+                if defer and isinstance(res, tuple):
                     # A synchronous result may be the plan's reused output buffers (_sbuf):
-                    # held until build(), a later call of the same shape on this plan (the
-                    # next follow-up of a batch) overwrote it, and this call returned that
-                    # call's peaks. Own a copy.
-                    if aval is not None:
-                        aidx, aval = np.array(aidx), np.array(aval)
-                    pending.append((_Deferred(lambda r=(aidx, aval): r), sub_starts, g,
-                                    tmpl_arg, N))
-                    continue
-                _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index)
+                    # held until the job is assembled, a later call of the same shape on this
+                    # plan (the next follow-up of a batch) would overwrite it. Own a copy.
+                    res = (np.array(res[0]), np.array(res[1]))
+                calls.append((tmap, sub_starts, None, N, res))
 
-        def build():
-            for d, sub_starts, g, tmpl_arg, N in pending:
-                res = d.result()
-                if not d.empty:
-                    _consume_into(lists, *((res, None) if isinstance(res, _SparsePeaks) else res),
-                                  sub_starts, g, tmpl_arg, N, template_index)
-            if merge_bs and lists[0]:
-                # Partial bins (a block edge inside a window bin) into their window bins.
-                cols = [np.concatenate(c) for c in lists]
-                for bs_m in merge_bs:
-                    cols = list(_merge_window_bins(W, bs_m, *cols))
-                for lst, c in zip(lists, cols):
-                    lst[:] = [c]
-            return _results_from(lists)
-
-        return _Deferred(build) if pending else build()
+        job = _PeaksJob(calls, np.ascontiguousarray(W[:, 0], np.int64) if merge_bs else None,
+                        tuple(merge_bs))
+        if defer and any(isinstance(c[4], (_CallParts, _Deferred)) for c in calls):
+            return job
+        return job.result()
 
     def empty_shared(self, shape, dtype=np.complex64, input=False):
         """An array in this bank's device memory that the host can read, for reused buffers.
@@ -3328,54 +3260,6 @@ def _bin_count_groups(bstarts, bws, bwe, bin_counts):
         m = bin_counts == u
         groups.append((bstarts[m], bws[m], bwe[m], None))
     return groups
-
-
-def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):
-    """Append the peaks of one run_series result of shape (nblocks, ntemplates, nbins) to
-    lists, the five columns of a FilterResults, in the result's C order (block, template,
-    bin). Returns nothing.
-
-    The result is dense, aidx and aval arrays of that shape (aidx -1 in an empty bin), or
-    sparse, a _SparsePeaks as aidx and aval None. Blocks start at sub_starts and are N long.
-    With tmpl_arg given the call filtered one template, whose peaks are template_index's;
-    otherwise template t of the result is group g's template g.template_indices[t]."""
-    ti_out, si_out, snr_out, ts_out, bl_out = lists
-    if aval is None:
-        if aidx.flat.size == 0:
-            return
-        nt, nb = aidx.shape[1], aidx.shape[2]
-        bi, rest = np.divmod(aidx.flat, nt * nb)
-        ti = rest // nb
-        si, snr = sub_starts[bi] + aidx.idx, aidx.val
-    else:
-        bi, ti, bini = np.nonzero(aidx >= 0)
-        if not bi.size:
-            return
-        t = 0 if tmpl_arg is not None else ti
-        si, snr = sub_starts[bi] + aidx[bi, t, bini], aval[bi, t, bini]
-    ti_out.append(np.full(bi.size, template_index, dtype=np.int64) if tmpl_arg is not None
-                  else g.template_indices[ti])
-    si_out.append(si)
-    snr_out.append(snr)
-    ts_out.append(sub_starts[bi])
-    bl_out.append(np.full(bi.size, N, dtype=np.int64))
-
-
-def _results_from(lists):
-    """Returns the FilterResults of the columns _consume_into filled, or the empty result
-    when they hold no peaks. A column of one chunk is that chunk itself where its dtype
-    already matches, not a copy; a column of several chunks is their concatenation."""
-    ti, si, snr, ts, bl = lists
-    if not ti:
-        return _EMPTY_FILTER_RESULTS
-    join = (lambda c: c[0]) if len(ti) == 1 else np.concatenate
-    return FilterResults(
-        template_indices=join(ti).astype(np.int64, copy=False),
-        sample_indices=join(si).astype(np.int64, copy=False),
-        snr=join(snr).astype(np.complex64, copy=False),
-        block_starts=join(ts).astype(np.int64, copy=False),
-        block_lengths=join(bl).astype(np.int64, copy=False),
-    )
 
 
 # The batch machinery reads this module's helpers, so it is imported last; the class's

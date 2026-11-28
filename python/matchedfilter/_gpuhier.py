@@ -40,6 +40,7 @@ from .gatechain import band_forward_wanted
 from ._shared import pack_half2, shared_view
 from . import gatechain
 from ._results import _SparsePeaks
+from . import _core
 from ._coarse import coarse_launch, forced_layout, shortlist, layout_label, screen, tile_offer
 from . import _settings
 
@@ -1079,7 +1080,8 @@ class HierOps:
         return _settings.slot(self.props.name, "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, slot, async_submit):
-        """Run a recorded call and return its result (a tracked collector when async)."""
+        """Run a recorded call and return its result (a tracked collector when async, whose
+        readback an assembly in the extension can take in place: Pending.take)."""
         wait = self._exec_submit(rec.native, binds, slot, rec) if async_submit else None
         if wait is None:
             self._exec_run(rec.native, True, binds, slot, rec)
@@ -1088,63 +1090,77 @@ class HierOps:
             if wait is not None:
                 wait()
             return self._hier_result(rec, shape, sparse, way, cascade)
-        return self._track(result, owner=rec.buffers["idx"]) if async_submit else result()
+        if not async_submit:
+            return result()
 
-    def _hier_result(self, rec, shape, sparse, way, cascade):
-        """The call's peaks from its readback buffers. Counts, survivors and the rows a
-        sparse result gathers are read in place where the host sees the buffers (_x_view):
-        only a dense result copies its outputs whole."""
+        def live():
+            if wait is not None:
+                wait()
+            return self._readback(rec, shape, way, cascade)
+        return self._track(result, owner=rec.buffers["idx"], live=live if sparse else None)
+
+    def _readback(self, rec, shape, way, cascade):
+        """The readback of a recorded call, as the extension reads it (_core.device_peaks,
+        _core.assemble_peaks): (way code, rows, templates, bins, the counts words, the word of
+        the refined count, of the compacted count, of the transform refines and of tier 1's
+        passes (-1 where the record has none), the tier-0 pairs a run checks, then views of the
+        survivor rows, lags, values and compacted list, None where the way does not read
+        them). The views are made once per record, over the bytes the recording reads back:
+        where the host reads device outputs in place (props.unified_memory) a view is the
+        buffer itself, and the compacted list is viewed whole; elsewhere it is the page-locked
+        copy the run made, and a list longer than that copy is read for this run alone."""
         nd, nt, nbins = shape
         pairs, out = nd * nt, nd * nt * nbins
         B = rec.buffers
-        last = 1 if cascade else 0
-        self.last_tier0_checked = getattr(B.get("cidx0"), "nbytes", pairs * 4) // 4
-        words = self._x_view(B["counts"], np.uint32, B["counts"].nbytes // 4)
-        # a word's place in the counts buffer (itself a section of an arena's block, or not)
-        base = getattr(B["counts"], "offset", 0)
-        at = lambda name: int(words[(self._section_offset(B, name) - base) // 4])
-        count = at("args%d" % last)
-        self.last_refinements = count
-        if "fbargs" in B:
-            fb = at("fbargs")
-            self.last_direct_refinements = max(0, count - fb)
-            self.last_fft_refinements = fb
-        else:
-            self.last_direct_refinements = 0
-            self.last_fft_refinements = count
+        rb = getattr(rec, "readback", None)
+        if rb is None:
+            last = 1 if cascade else 0
+            # A word's index in the counts view handed to the reader: the counters' sections
+            # lie in the counts buffer's own base, so their offsets count from the base's
+            # start where the counts buffer is itself a section (of an arena's block).
+            base = getattr(B["counts"], "offset", 0)
+            word = lambda name: (self._section_offset(B, name) - base) // 4 if name in B else -1
+            listed = out if self.props.unified_memory else min(out, self._SPARSE_FIRST)
+            rb = ({"dense": 0, "rows": 1, "compact": 2}[way], nd, nt, nbins,
+                  self._x_view(B["counts"], np.uint32, B["counts"].nbytes // 4),
+                  word("args%d" % last), word("count") if way == "compact" else -1,
+                  word("fbargs"), word("args0") if cascade else -1,
+                  getattr(B.get("cidx0"), "nbytes", pairs * 4) // 4,
+                  self._x_view(B["surv%d" % last], np.uint32, pairs) if way == "rows" else None,
+                  self._x_view(B["idx"], np.int32, out) if way != "compact" else None,
+                  self._x_view(B["val"], np.complex64, out) if way != "compact" else None,
+                  self._x_view(B["list"], np.uint32, 4 * listed) if way == "compact" else None)
+            rec.readback = rb
+        if way == "compact" and rb[13].size < 4 * out:
+            c = int(rb[4][rb[6]])
+            if 4 * c > rb[13].size:
+                rb = rb[:13] + (self._x_view(B["list"], np.uint32, 4 * c),)
+        return rb
+
+    def _hier_result(self, rec, shape, sparse, way, cascade):
+        """The call's peaks from its readback buffers, read in place where the host sees them
+        by the extension's reader (_core.device_peaks): a sparse result's peaks in flat order;
+        a dense result's outputs copied whole. Leaves the run's counts on the context
+        (last_refinements, ...)."""
+        flat, lags, vals, refined, tier1, direct, fft, checked = _core.device_peaks(
+            self._readback(rec, shape, way, cascade), sparse)
+        self.last_tier0_checked = checked
+        self.last_refinements = refined
+        self.last_direct_refinements = direct
+        self.last_fft_refinements = fft
         if cascade:
-            self.last_tier1_survivors = at("args0")
-        rows = None
-        if sparse and way == "rows":
-            rows = self._x_view(B["surv%d" % last], np.uint32, count)
+            self.last_tier1_survivors = tier1
         if not sparse:
-            if count == 0:
+            if refined == 0:
                 return (np.full(shape, -1, np.int32), np.zeros(shape, np.complex64))
+            out = shape[0] * shape[1] * shape[2]
             idx = np.empty(out, np.int32)
             val = np.empty(out, np.complex64)
-            self._x_read(B["idx"], idx)
-            self._x_read(B["val"], val)
+            self._x_read(rec.buffers["idx"], idx)
+            self._x_read(rec.buffers["val"], val)
             return idx.reshape(shape), val.reshape(shape)
-        empty = np.empty(0, np.int64)
-        if count == 0:
-            return _SparsePeaks(shape, empty, empty, np.empty(0, np.complex64))
-        if way == "rows":
-            ri = self._x_view(B["idx"], np.int32, out).reshape(pairs, nbins)[rows]
-            k, b = np.nonzero(ri >= 0)
-            if not k.size:
-                return _SparsePeaks(shape, empty, empty, np.empty(0, np.complex64))
-            rk = rows[k].astype(np.int64)
-            flat = rk * nbins + b
-            order = np.argsort(flat)
-            val = self._x_view(B["val"], np.complex64, out).reshape(pairs, nbins)
-            return _SparsePeaks(shape, flat[order], ri[k, b][order], val[rk, b][order])
-        c = at("count")
-        recs = self._x_view(B["list"], np.uint32, 4 * c).reshape(c, 4)
-        pos = recs[:, 0].astype(np.int64)
-        order = np.argsort(pos)                 # positions are distinct: C order
-        recs = recs[order]
-        v = recs[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
-        return _SparsePeaks(shape, pos[order], recs[:, 1].view(np.int32), v)
+        return _SparsePeaks(shape, np.frombuffer(flat, np.int64), np.frombuffer(lags, np.int64),
+                            np.frombuffer(vals, np.complex64))
 
     @staticmethod
     def _section_offset(B, name):
