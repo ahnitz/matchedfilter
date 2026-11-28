@@ -261,3 +261,16 @@ library chooses the execution.
   (their children read a lane through a copy the walk makes, so such searches keep the walk).
   Goldens 20,039 arrays, 0 differ from ac35c8b2. Capture top 1: 7.816 -> 7.757 billion
   instructions a steady pass; capture tops' Python share of inner + leaf 1.5% -> 0.4%.
+- 2026-11-27: conversion step 6, part B: tiling is a schedule of the one table. The cascade's
+  execution is `HMFTable` schedule ops (correlation step ranges into a scratch slot, leaf
+  block ranges as one batch, stale-scratch and margin zeroing, scaling, copies to the output,
+  collars to a carry slot, copies around the last leaf batch's peaks for `retain_radius > 0`)
+  run by `hmf_run_schedule` in the table's one C call; the leaf steps it runs (phase -1)
+  gather their slices' peaks and are assembled with the others. `_batches._cascade_steps` and
+  `_cohort_schedule` compile it from the same steps (`_compile_steps(scheduled=...,
+  schedule=...)`); the Python run loop and its helpers, `_assemble_leaf_results` and
+  `HMFTable.run_slices` are deleted. A CPU search keeps tiled chunks as it keeps untiled ones.
+  Goldens (24,593 arrays, every tiling case under both schedules) 0 differ from ac35c8b2, and
+  the two schedules agree on 4,550 arrays. Injection-window cases 6-12% faster a steady pass,
+  their inner + leaf Python share 18.5-28% -> 4-13%. Not folded in: inner nodes with inner
+  children (a lane copy step would do it) and the root.

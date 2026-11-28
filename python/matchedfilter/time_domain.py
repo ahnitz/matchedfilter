@@ -2441,7 +2441,6 @@ class TimeDomainFilterBank:
     #: Default L3-resident middle-output tile target in bytes for CPU
     #: correlate_and_filter_many execution (0 disables tiling).
     _TILE_BYTES = 4 << 20
-    _STREAM_HOOKS = None
 
     @staticmethod
     def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,

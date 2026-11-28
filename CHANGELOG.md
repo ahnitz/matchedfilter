@@ -188,6 +188,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
   job. `correlate_and_filter_many` runs its correlations and the leaf calls that read them as
   one table wherever it tiles no cohort. One compiler (`_batches._compile_steps`) makes every
   CPU table. Results are unchanged, to the bit and in order.
+- The tiled cascade of `correlate_and_filter_many` is a schedule of the step table: the
+  ordering of the same correlation and leaf steps per time tile, with the scratch, output and
+  carry slots it moves samples between (clearing, margins, copies, collars, and the copies
+  around the leaf peaks with `retain_radius > 0`, whose spans the executor takes from the peaks
+  it just found), run by the table's one C call with the untiled correlations and leaves of the
+  same call. Its Python compiler and run loop (`_CohortPrep`, `_run_tiled_group`, the collar,
+  margin, copy and stale-scratch helpers, `_assemble_leaf_results`, `HMFTable.run_slices`) are
+  removed. A CPU search keeps a tiled chunk's table as it keeps an untiled one. Results are
+  unchanged, to the bit and in order, under both schedules.
 - `HierarchicalSearch.timings["inner_compute"]`: of the inner stage, the seconds the CPU
   correlation steps spent in the extension (in the walk and in `correlate_and_filter_many`);
   `tools/search_bench.py` prints it as the inner stage's compute fraction.

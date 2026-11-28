@@ -13,7 +13,6 @@ from collections import OrderedDict
 from typing import Any
 from typing import NamedTuple
 from typing import Optional
-import ctypes
 import math
 import numpy as np
 import time
@@ -24,7 +23,7 @@ from . import _settings
 from . import _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, playing
 from ._filter import _from_any, MatchedFilter
-from ._results import FilterResults, _Deferred, _EMPTY_FILTER_RESULTS, _SparsePeaks
+from ._results import FilterResults, _Deferred, _EMPTY_FILTER_RESULTS
 from ._windows import _merge_window_bins, _normalize_windows, _window_bin_phases
 from .time_domain import (
     TimeDomainFilterBank, _SAME_PROFILE, _aligned_zeros, _bin_phases, _blocks_by_bin_count,
@@ -262,74 +261,6 @@ _TILED_CORR_KEYS = frozenset(("windows", "scales", "templates", "out", "out_supp
 _TILED_LEAF_KEYS = frozenset(("windows", "binsize", "threshold", "template_index", "profile"))
 
 
-class _LeafSub:
-    """One leaf plan's share of a tiled leaf job: a template group of the leaf bank, the
-    blocks it filters and the compiled plan that filters them, which is step `step` of the
-    cohort's compiled leaf steps (`table`). Compiling the cohort advances `cursor` through
-    its slabs; a run adds the peaks found, their count and the seconds spent."""
-    __slots__ = ("group", "starts", "slabs", "plan", "ep", "series", "ntemplates", "binsize",
-                 "threshold", "parts", "total", "seconds", "slab_info", "cursor", "table",
-                 "step")
-
-    def __init__(self, group, starts, slabs, plan, ep, series, ntemplates, binsize, threshold,
-                 slab_info, table, step):
-        self.group, self.starts, self.slabs, self.plan, self.ep = group, starts, slabs, plan, ep
-        self.series, self.ntemplates, self.binsize = series, ntemplates, binsize
-        self.threshold, self.slab_info = threshold, slab_info
-        self.table, self.step = table, step
-        self.parts, self.total, self.seconds, self.cursor = [], 0, 0.0, 0
-
-
-class _TiledGroup(NamedTuple):
-    """One template group of the middle bank, compiled for a cohort: its rows of the output,
-    the blocks it correlates and the samples they write, its chunks, and the correlation steps
-    of its chunks (a table whose input slots are the detectors' series and whose output slots
-    are their scratch rows, then their outputs, which a step mirrors into). A chunk is
-    (has blocks, block starts, block bounds, first sample, end sample, written runs,
-    bridges to zero, batch jobs, first correlation step); a batch job is (first row, first
-    template, templates, output rows, rows contiguous, filter calls, their leaf subs, earliest
-    sample a later chunk's leaf still reads). Batch b of a chunk with blocks is correlation
-    steps [first + b D, first + (b + 1) D), one per detector."""
-    group: Any
-    n_rows: int
-    max_batch: int
-    n_batches: int
-    rows: Any
-    local: Any
-    contiguous: bool
-    out_rows: Any
-    blocks: int
-    out_samples: int
-    template_values: int
-    plan: Any
-    ep: Any
-    lo: int
-    hi: int
-    col0: Any
-    col1: Any
-    written: Any
-    unwritten: Any
-    edges: Any
-    first_col: int
-    chunks: list
-    corr_table: Any
-
-
-class _CohortPrep(NamedTuple):
-    """What a cohort settles before it runs, kept by the middle bank for the next call with
-    the same jobs: the leaf banks and plans it was made for (checked before reuse), every
-    leaf sub, the leaf jobs with no window, each other leaf job's assembly record
-    (job, windows, bin sizes to merge, subs), the compiled groups and the samples the
-    cohort's windows span."""
-    bank_refs: list
-    plan_checks: list
-    subs: list
-    empty_leaves: list
-    leaf_preps: list
-    groups: list
-    w_span: int
-
-
 def _template_batches(corr_bank, sel_arr, n_out_rows):
     """The cohort's output rows by template group of the middle bank, each group's rows cut
     into batches of consecutive templates (up to 8 at n <= 4096, 4 at 8192, else 1) that one
@@ -386,10 +317,43 @@ def _template_batches(corr_bank, sel_arr, n_out_rows):
     return pre_grp_batches, row_slot, max_kr
 
 
+class _LeafSub:
+    """A leaf step of a tiled cohort while its schedule is compiled: the step, its slabs
+    (_layout_slabs) and how many of them the tiles so far have made ready."""
+    __slots__ = ("step", "slab_info", "cursor")
+
+    def __init__(self, step, slab_info):
+        self.step, self.slab_info, self.cursor = step, slab_info, 0
+
+
+class _Ops:
+    """A schedule being compiled: its ops (_core.c's HMF_OP_*, twelve int64 each) and the
+    runs, rows and slices they read."""
+
+    CORR, POOL, STALE, ZERO, SCALE, COPY, COLLAR, LEAF, RETAIN, PENDING = 1, 3, 4, 5, 6, 7, 8, 9, 10, 11
+
+    def __init__(self):
+        self.ops, self.args = [], []
+
+    def arg(self, values):
+        """Append values (int64) to the args; returns their offset."""
+        at = len(self.args)
+        self.args.extend(int(v) for v in np.asarray(values, np.int64).ravel())
+        return at
+
+    def op(self, kind, *fields):
+        self.ops.append([kind] + [int(f) for f in fields] + [0] * (11 - len(fields)))
+
+    def arrays(self):
+        return (np.asarray(self.ops, np.int64).reshape(-1), np.asarray(self.args, np.int64))
+
+
 def _tile_scratch(corr_bank, D, S, max_kr):
-    """The middle bank's scratch for a cohort of D detectors: per detector, max_kr rows of S
-    samples that stay in cache, zero where nothing has been written. Returns the pool, the
-    detectors' stride in it, each detector's rows and the map of what each row holds."""
+    """The middle bank's scratch pool for a cohort of D detectors: per detector, max_kr rows
+    of S samples that stay in cache, zero where nothing has been written, and its state (the
+    layout it was last used with, then each row's span an earlier group wrote, which the
+    schedule's OP_POOL and OP_STALE read and update). Returns the pool, its state, each
+    detector's rows and the samples of the pool the layout uses."""
     # Stagger detector buffers by 256 samples (2 KiB) so power-of-two/64-aligned spans
     # do not alias onto identical L2/L3 cache sets across detectors.
     det_span = max_kr * S
@@ -397,129 +361,36 @@ def _tile_scratch(corr_bank, D, S, max_kr):
     stride_det = det_span + pad_s
     need_total = D * stride_det
     raw_pool = corr_bank.__dict__.get("_l3_tile_pool")
-    prev_layout = corr_bank.__dict__.get("_l3_tile_layout")
-    dirty_map = corr_bank.__dict__.setdefault("_l3_tile_dirty_map", {})
     if raw_pool is None or raw_pool.size < need_total:
         raw_pool = _aligned_zeros(need_total, dtype=np.complex64)
         corr_bank.__dict__["_l3_tile_pool"] = raw_pool
-        corr_bank.__dict__["_l3_tile_layout"] = (S, stride_det)
-        dirty_map.clear()
-    elif prev_layout != (S, stride_det):
-        raw_pool[:need_total] = 0
-        corr_bank.__dict__["_l3_tile_layout"] = (S, stride_det)
-        dirty_map.clear()
+        # a new pool is zero: its state says so for this layout
+        state = np.zeros(2 + 2 * 8 * max(D, 64), np.int64)
+        state[:2] = (S, stride_det)
+        corr_bank.__dict__["_l3_tile_state"] = state
+    state = corr_bank.__dict__["_l3_tile_state"]
     tbuf_det = [
         raw_pool[d * stride_det : d * stride_det + det_span].reshape(max_kr, S)
         for d in range(D)
     ]
-    return raw_pool, stride_det, tbuf_det, dirty_map
-
-
-def _cohort_memo_key(corr_bank, members, leaf_jobs, S, max_kr, stride_det, W_corr,
-                     eff_tile_bytes, raw_pool):
-    """The key a cohort's preparation is kept under, or None where it may not be reused: a
-    trial is playing, a job carries scales, or a leaf job is not a plain windowed call on an
-    array. The key names the jobs' arrays by address and layout, and the leaf banks."""
-    D = len(members)
-    memo_ok = (not playing() and not getattr(corr_bank, "_in_trial", False)
-               and all(info.scales is None for _, info in members))
-    memo_key = None
-    if memo_ok:
-        leaf_sigs = []
-        for d_idx, (_, info) in enumerate(members):
-            for j in info.leaves:
-                lb, ls, lk = leaf_jobs[j]
-                if (getattr(lb, "_in_trial", False)
-                        or not isinstance(ls, np.ndarray)
-                        or (lk and ((set(lk) - _TILED_LEAF_KEYS)
-                                    or lk.get("template_index") is not None))):
-                    memo_ok = False
-                    break
-                w_arg = lk.get("windows") if lk else None
-                if w_arg is not None and type(w_arg) is not slice:
-                    memo_ok = False
-                    break
-                w_sig = None if w_arg is None else (w_arg.start, w_arg.stop, w_arg.step)
-                leaf_sigs.append((
-                    j, d_idx, id(lb), getattr(lb, "_layout_rank", None),
-                    ls.ctypes.data, ls.dtype.char, ls.shape, ls.strides,
-                    w_sig, lk.get("binsize") if lk else None,
-                    lk.get("threshold") if lk else None,
-                ))
-            if not memo_ok:
-                break
-        if memo_ok:
-            mem_sigs = tuple(
-                (info.out.ctypes.data, info.out.shape,
-                 None if info.support is None else info.support.tobytes())
-                for _, info in members
-            )
-            memo_key = (
-                D, S, max_kr, stride_det, W_corr.tobytes(), members[0][1].selection_key,
-                eff_tile_bytes, id(raw_pool), mem_sigs, tuple(leaf_sigs),
-            )
-    return memo_key
-
-
-def _prep_still_valid(cached_prep, leaf_jobs):
-    """Whether a kept preparation still describes these leaf jobs: the same bank objects,
-    each plan still holding the execution plan and the real-series mode it was bound with."""
-    valid_cache = all(
-        wref() is leaf_jobs[j_ref][0] for wref, j_ref in cached_prep.bank_refs
-    )
-    if valid_cache:
-        for ap, ep, real_m, _ in cached_prep.plan_checks:
-            if getattr(ap, "_mf", None) is not ep:
-                valid_cache = False
-                break
-            if ap.__dict__.get("_applied_real", False) is not real_m and hasattr(ap, "_sync_direct_prices"):
-                valid_cache = False
-                break
-            if real_m and ap.__dict__.get("_ep_real") != (ep, True):
-                valid_cache = False
-                break
-    return valid_cache
-
-
-def _reset_prep(cached_prep):
-    """Clear what the last run left in a kept preparation: the plans' data state and each
-    leaf sub's peaks, count and seconds."""
-    for ap, _, _, _ in cached_prep.plan_checks:
-        ap._dataset = False
-        if ap._data_ready:
-            ap._data_ready.clear()
-    for srec in cached_prep.subs:
-        srec.parts.clear()
-        srec.total = 0
-        srec.seconds = 0.0
+    return raw_pool, state, stride_det, tbuf_det, need_total
 
 
 def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
     """Bind every leaf job of the cohort to the scratch row its series will be read from.
 
-    A leaf job's series is a row (or a real or imaginary lane) of a member's output; its
-    plans are prepared on the scratch row that holds that output row while its batch runs.
-    Returns None where a leaf job cannot run tiled (not a hierarchical bank on such a row, a
-    threshold below the bank's, a plan that would have to switch its series mode within the
-    cohort). Otherwise (subs by output row and detector, the assembly record of each leaf
-    job, the leaf jobs with no window, every sub, the plans to check before reuse, the
-    banks to check before reuse, the compiled leaf steps' table or None). The leaf jobs are
-    compiled as every gated CPU call is (_compile_steps); each sub is one step."""
-    D = len(members)
-    calls, placed, series_of = [], {}, {}
-    subs_by_row = [[[] for _ in range(D)] for _ in range(n_out_rows)]
-    cohort_leaf_preps = []
-    cohort_empty_leaves = []
-    all_sub_recs = []
-    plan_checks = []
-    bank_refs = []
+    A leaf job's series is a row (or a real or imaginary lane) of a member's output; it is
+    filtered on the scratch row that holds that output row while its batch runs. Returns None
+    where a leaf job cannot run tiled (not a hierarchical bank on such a row, a threshold
+    below the bank's, a plan that would have to switch its series mode within the cohort).
+    Otherwise (the leaf calls on the scratch rows, as _compile_steps takes them; leaf job ->
+    (detector, output row); the leaf jobs with no window)."""
+    calls, placed, empty = [], {}, []
     row_stride_bytes = S * 8
-
     for d_idx, (ci, info) in enumerate(members):
-        _, _, _, _, _, out_arr, _, _, _, dep_indices = info
-        out_lo = out_arr.ctypes.data
-        out_hi = out_lo + out_arr.nbytes
-        for j in dep_indices:
+        out_lo = info.out.ctypes.data
+        out_hi = out_lo + info.out.nbytes
+        for j in info.leaves:
             l_bank, l_ser_raw, l_kw = leaf_jobs[j]
             l_kw = l_kw or {}
             if (l_bank.engine != "hier" or l_kw.get("template_index") is not None
@@ -530,24 +401,18 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
                     or l_ser_raw.dtype not in (np.complex64, np.float32)
                     or l_ser_raw.ctypes.data + (S - 1) * 8 + l_ser_raw.itemsize > out_hi):
                 return None
-            off_b = l_ser_raw.ctypes.data - out_lo
-            out_row, rem_b = divmod(off_b, row_stride_bytes)
+            out_row, rem_b = divmod(l_ser_raw.ctypes.data - out_lo, row_stride_bytes)
             if out_row < 0 or out_row >= n_out_rows:
                 return None
-            q_slot = row_slot[out_row]
-            t_row_base = tbuf_det[d_idx][q_slot]
+            t_row_base = tbuf_det[d_idx][row_slot[out_row]]
             if l_ser_raw.dtype == np.complex64:
                 if rem_b != 0:
                     return None
                 tbuf_view = t_row_base
+            elif rem_b in (0, 4):
+                tbuf_view = t_row_base.real if rem_b == 0 else t_row_base.imag
             else:
-                if rem_b == 0:
-                    tbuf_view = t_row_base.real
-                elif rem_b == 4:
-                    tbuf_view = t_row_base.imag
-                else:
-                    return None
-
+                return None
             thr_arg = l_kw.get("threshold")
             eff_thr = l_bank.threshold if thr_arg is None else float(thr_arg)
             if not np.isfinite(eff_thr) or eff_thr < l_bank.threshold or eff_thr <= 0.0:
@@ -555,59 +420,36 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
             ser_t = l_bank._input_series(tbuf_view)
             if ser_t.ctypes.data != tbuf_view.ctypes.data or ser_t.size != S:
                 return None
-
-            bank_refs.append((weakref.ref(l_bank), j))
-            series_of[j] = ser_t
             W_leaf, cache_key = l_bank._call_windows(l_kw.get("windows"), S)
             if W_leaf.shape[0] == 0:
-                cohort_empty_leaves.append(j)
+                empty.append(j)
                 continue
             calls.append((j, l_bank, ser_t, W_leaf, cache_key, l_kw.get("binsize"), eff_thr,
                           l_kw.get("profile", _SAME_PROFILE)))
             placed[j] = (d_idx, out_row)
-
-    # The leaf jobs' steps, compiled as every other gated CPU call's: a plan asked for two
-    # series modes within the cohort runs untiled.
-    if not calls:
-        return (subs_by_row, cohort_leaf_preps, cohort_empty_leaves, all_sub_recs, plan_checks,
-                bank_refs, None)
-    compiled = _compile_steps(calls, split_modes=False)
-    if compiled is None or len(compiled.calls) != len(calls):
-        return None
-    subs_of = {j: [] for j, _, _ in compiled.calls}
-    for k, (j, g_f, sub_st, sl, active_plan, ep, nt_f, bs, thr_f, real, stride) in enumerate(
-            compiled.steps):
-        active_plan._dataset = False
-        active_plan._data_ready = set()
-        plan_checks.append((active_plan, ep, real, stride))
-        slab_info = _layout_slabs(sl, int(ep.series_group()), g_f.n, S)
-        d_idx, out_row = placed[j]
-        sub_rec = _LeafSub(g_f, sub_st, sl, active_plan, ep, series_of[j], nt_f, bs, thr_f,
-                           slab_info, compiled.table, k)
-        subs_of[j].append(sub_rec)
-        all_sub_recs.append(sub_rec)
-        subs_by_row[out_row][d_idx].append(sub_rec)
-    for (j, _, _), (W_p, merge_bs) in zip(compiled.calls, compiled.merges):
-        cohort_leaf_preps.append((j, W_p, merge_bs, subs_of[j]))
-    return (subs_by_row, cohort_leaf_preps, cohort_empty_leaves, all_sub_recs, plan_checks,
-            bank_refs, compiled.table)
+    # A plan asked for two series modes within the cohort runs untiled (its slices of one
+    # batch would share one mode).
+    if calls:
+        probe = _compile_steps(calls, split_modes=False)
+        if probe is None or len(probe.calls) != len(calls):
+            return None
+    return calls, placed, empty
 
 
 def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
-    """One chunk's work per template batch: the filter calls for every leaf slab that ends
-    within the chunk's horizon (the first sample a later chunk writes), each with the sub it
-    belongs to, and the earliest sample a slab still waiting will read, which is what must
-    be carried to the next chunk. Advances each sub's slab cursor."""
+    """One chunk's work per template batch: the slices (step, first block, end block,
+    cluster, scratch row) of every leaf slab that ends within the chunk's horizon (the first
+    sample a later chunk writes), and the earliest sample a slab still waiting will read,
+    which is what must be carried to the next chunk. Advances each sub's slab cursor."""
     chunk_batch_jobs = []
     for k_r0, li0, kr, b_rows, b_contig_out in batches:
-        c_jobs = []
-        back_subs = []
+        items = []
         for d_idx in range(D):
             for q, out_row in enumerate(b_rows):
-                cid = d_idx * kr + q
-                for sub_rec in subs_by_row[out_row][d_idx]:
-                    slab_info = sub_rec.slab_info
-                    s_cur = sub_rec.cursor
+                cluster = d_idx * kr + q
+                for sub in subs_by_row[out_row][d_idx]:
+                    slab_info = sub.slab_info
+                    s_cur = sub.cursor
                     if slab_info[0]:
                         _, _, slab_r1, slab_req_end, _ = slab_info
                         if s_cur >= slab_req_end.size:
@@ -617,10 +459,8 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
                         if s_next <= s_cur:
                             continue
                         r0 = 0 if s_cur == 0 else int(slab_r1[s_cur - 1])
-                        r1 = int(slab_r1[s_next - 1])
-                        sub_rec.cursor = s_next
-                        c_jobs.append((sub_rec.step, r0, r1, cid, sub_rec.series))
-                        back_subs.append((sub_rec, q, r0, r1))
+                        sub.cursor = s_next
+                        items.append((sub.step, r0, int(slab_r1[s_next - 1]), cluster, q))
                     else:
                         _, _, sorted_r0, sorted_r1, sorted_req_end, _ = slab_info
                         if s_cur >= sorted_req_end.size:
@@ -629,105 +469,107 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
                                   else int(np.searchsorted(sorted_req_end, horizon, side="right")))
                         if s_next <= s_cur:
                             continue
-                        sub_rec.cursor = s_next
-                        run_r0 = int(sorted_r0[s_cur])
-                        run_r1 = int(sorted_r1[s_cur])
-                        slices = []
+                        sub.cursor = s_next
+                        run_r0, run_r1 = int(sorted_r0[s_cur]), int(sorted_r1[s_cur])
                         for k_s in range(s_cur + 1, s_next):
-                            nr0 = int(sorted_r0[k_s])
-                            nr1 = int(sorted_r1[k_s])
+                            nr0, nr1 = int(sorted_r0[k_s]), int(sorted_r1[k_s])
                             if nr0 == run_r1:
                                 run_r1 = nr1
                             else:
-                                slices.append((run_r0, run_r1))
+                                items.append((sub.step, run_r0, run_r1, cluster, q))
                                 run_r0, run_r1 = nr0, nr1
-                        slices.append((run_r0, run_r1))
-                        for r0, r1 in slices:
-                            c_jobs.append((sub_rec.step, r0, r1, cid, sub_rec.series))
-                            back_subs.append((sub_rec, q, r0, r1))
-
+                        items.append((sub.step, run_r0, run_r1, cluster, q))
         min_fut = S
         if has_b and more_chunks and len(batches) > 1:
             for d_idx in range(D):
                 for out_row in b_rows:
-                    for sub_rec in subs_by_row[out_row][d_idx]:
-                        s_cur = sub_rec.cursor
-                        suf_min = sub_rec.slab_info[-1]
-                        if s_cur < suf_min.size:
-                            v_min = int(suf_min[s_cur])
-                            if v_min < min_fut:
-                                min_fut = v_min
-        chunk_batch_jobs.append((
-            k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut,
-        ))
+                    for sub in subs_by_row[out_row][d_idx]:
+                        suf_min = sub.slab_info[-1]
+                        if sub.cursor < suf_min.size:
+                            min_fut = min(min_fut, int(suf_min[sub.cursor]))
+        chunk_batch_jobs.append((k_r0, li0, kr, b_rows, b_contig_out, items, min_fut))
     return chunk_batch_jobs
 
 
-def _compile_groups(corr_bank, members, pre_grp_batches, subs_by_row, S, W_corr, n_out_rows,
-                    eff_tile_bytes):
-    """Compile each template group of the middle bank for the cohort: where its blocks
-    write, which output margins and gaps must be zero, its time chunks (as many as keep a
-    batch's span within eff_tile_bytes) and each chunk's filter calls. Returns the
-    _TiledGroup list and the samples the windows span."""
+def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_out_rows,
+                     eff_tile_bytes, retain_radius, retain_threshold, slots, carry_need):
+    """Compile one tiled cohort into the schedule: per template group of the middle bank, the
+    stale scratch cleared, the output's margins zeroed and scaled (where it is written), then
+    per time chunk (as many as keep a batch's span within eff_tile_bytes) and template batch:
+    the carried collar restored, the batch's correlation steps (every detector) into the
+    scratch rows, the rows copied to the output (or mirrored by the kernel, or copied around
+    the batch's peaks with retain_radius > 0), the leaf slabs that are ready filtered, and the
+    collar a later chunk's leaves read carried.
+
+    ``slots`` is (first series slot of the detectors' series, first output slot of their
+    scratch rows, first output slot of their outputs, first correlation step, first scale
+    vector, the pool state tile, the pool tile, the first carry tile). carry_need[parity] is
+    raised to the samples the carries of that chunk parity hold. Returns the correlation step
+    tuples, the correlation plans, and per group the work counters (block length, counts)."""
     D = len(members)
-    w_span = int((W_corr[:, 1] - W_corr[:, 0]).sum())
-    compiled_groups = []
+    ser0, scr0, out0, step0, vec0, _, _, carry0 = slots
+    corr_bank = members[0][1].bank
+    corr_steps, corr_plans, work = [], [], []
+    r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
     for g_m, row_pairs, batches in pre_grp_batches:
         nt_sel_g = len(row_pairs)
         max_batch_kr = max((b[2] for b in batches), default=1)
         row_indices_arr = np.array([r_out for _, r_out in row_pairs], dtype=np.int64)
         li_arr = np.array([li for li, _ in row_pairs], dtype=np.int64)
-        is_contig_out = (
-            nt_sel_g == n_out_rows
-            and row_indices_arr[0] == 0
-            and np.array_equal(row_indices_arr, np.arange(n_out_rows, dtype=np.int64))
-        ) or (
-            row_indices_arr[-1] - row_indices_arr[0] + 1 == nt_sel_g
-            and np.array_equal(
-                row_indices_arr,
-                np.arange(row_indices_arr[0], row_indices_arr[0] + nt_sel_g, dtype=np.int64),
-            )
-        )
-        out_slice_obj = (slice(int(row_indices_arr[0]), int(row_indices_arr[0]) + nt_sel_g)
-                         if is_contig_out else row_indices_arr)
-
         st, bounds, keep, _ = corr_bank._windows_layout(g_m, S, W_corr, None)
         M = int(st.size)
         if M > 0:
-            w_out_samples = int((keep[:, 1] - keep[:, 0]).sum()) * nt_sel_g
-            tmpl_vals = nt_sel_g * _stored_bins(g_m)
             cplan = g_m.get_correlation_plan()
             cplan._require_templates(0, len(g_m.template_indices))
             ep_m = cplan._continuous_plan()
+            corr_plans.append((cplan, ep_m))
             lo_v, hi_v = cplan.valid
             s64 = st.astype(np.int64)
             if bounds is not None:
                 b64 = bounds.astype(np.int64)
-                col0 = s64 + b64[:, 0]
-                col1 = s64 + b64[:, 1]
+                col0, col1 = s64 + b64[:, 0], s64 + b64[:, 1]
             else:
-                col0 = s64 + lo_v
-                col1 = np.minimum(s64 + hi_v, S)
+                col0, col1 = s64 + lo_v, np.minimum(s64 + hi_v, S)
             written_runs = _interval_runs(S, col0, col1)
+            work.append((g_m.n, dict(blocks=M, pairs=M * nt_sel_g,
+                                     out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt_sel_g,
+                                     tmpl_values=nt_sel_g * _stored_bins(g_m))))
         else:
-            w_out_samples = tmpl_vals = 0
-            cplan = ep_m = None
-            lo_v = hi_v = 0
             col0 = col1 = np.empty(0, dtype=np.int64)
             written_runs = np.empty((0, 2), dtype=np.int64)
-
         unwritten_runs = np.concatenate(([0], written_runs.ravel(), [S])).reshape(-1, 2)
-        det_edge_runs = []
-        for _, info in members:
-            _, _, _, edges_d = corr_bank._windows_layout(g_m, S, W_corr, info.support)
-            det_edge_runs.append(edges_d.reshape(-1, 2))
-
         if W_corr.shape[0] > 1 and M > 0:
             full_edges = np.concatenate(([0], keep.ravel(), [S])).reshape(-1, 2)
             bridged_edges = _intersect_runs(full_edges, written_runs)
         else:
             bridged_edges = np.empty((0, 2), dtype=np.int64)
 
+        # each row's entry of its detector's scale vector (the bank's per-template scales)
+        scale_entries = [None] * D
+        for d_idx, (_, info) in enumerate(members):
+            if info.scales is not None:
+                scale_entries[d_idx] = (info.selection[row_indices_arr]
+                                        if info.selection is not None
+                                        else g_m.template_indices[li_arr]).astype(np.int64)
+
+        # the stale scratch an earlier group left where this group's blocks will not write
+        new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
+        unwritten_at = ops.arg(unwritten_runs)
+        ops.op(_Ops.STALE, slots[5], D, max_batch_kr, unwritten_at, len(unwritten_runs),
+               new_dirty[0], new_dirty[1], scr0)
+        # the output's margins zeroed and its unwritten samples scaled, where it is written
+        rows_at = ops.arg(row_indices_arr)
+        if retain_radius != 0:
+            for d_idx, (_, info) in enumerate(members):
+                _, _, _, edges_d = corr_bank._windows_layout(g_m, S, W_corr, info.support)
+                edges_d = edges_d.reshape(-1, 2)
+                edges_d = edges_d[edges_d[:, 1] > edges_d[:, 0]]
+                ops.op(_Ops.ZERO, out0 + d_idx, rows_at, nt_sel_g, ops.arg(edges_d), len(edges_d))
+                if scale_entries[d_idx] is not None:
+                    ops.op(_Ops.SCALE, out0 + d_idx, rows_at, nt_sel_g, unwritten_at,
+                           len(unwritten_runs), vec0 + d_idx, ops.arg(scale_entries[d_idx]))
+
+        # the group's time chunks
         if M == 0:
             raw_chunks = [(0, 0, S)]
             grp_min_col = 0
@@ -751,436 +593,232 @@ def _compile_groups(corr_bank, members, pre_grp_batches, subs_by_row, S, W_corr,
                         hz = S if m_next == M else int(col0[m_next:].min())
                         raw_chunks.append((m_prev, m_next, hz))
                         m_prev = m_next
-
-        # each chunk's correlation steps: per template batch, one per detector, writing its
-        # scratch rows over the chunk's blocks; then its bridges zeroed and its rows scaled
-        # over the chunk's runs; mirrored into the output where nothing follows the kernel
-        comp_chunks, corr_steps = [], []
+        n_chunks, n_batches = len(raw_chunks), len(batches)
+        need_collars = n_chunks > 1 and n_batches > 1
+        pending = retain_radius is not None and retain_radius > 0 and n_chunks > 1
+        if pending:
+            ops.op(_Ops.PENDING, nt_sel_g)
+        saved = [None] * n_batches
+        written_at = ops.arg(written_runs)
+        thr_bits = int(np.array([0.0 if retain_threshold is None else retain_threshold],
+                                np.float64).view(np.int64)[0])
         for ck_idx, (m0, m1, horizon) in enumerate(raw_chunks):
             has_b = m1 > m0
             if has_b:
                 st_c = st[m0:m1]
                 bnd_c = bounds[m0:m1] if bounds is not None else None
-                c_start = int(col0[m0:m1].min())
-                c_end = int(col1[m0:m1].max())
+                c_start, c_end = int(col0[m0:m1].min()), int(col1[m0:m1].max())
                 if m1 - m0 == 1 or W_corr.shape[0] <= 1:
                     t_runs = ((c_start, c_end),)
                 else:
                     brk = np.flatnonzero(col0[m0 + 1:m1] > col1[m0:m1 - 1]) + 1
                     r_starts = col0[m0:m1][np.concatenate(([0], brk))]
                     r_stops = col1[m0:m1][np.concatenate((brk - 1, [m1 - m0 - 1]))]
-                    t_runs = tuple(
-                        (int(ra), int(rb)) for ra, rb in zip(r_starts, r_stops) if rb > ra
-                    )
-                chunk_bridges = (
-                    _intersect_runs(bridged_edges, np.asarray(t_runs, dtype=np.int64))
-                    if bridged_edges.size > 0 and t_runs else np.empty((0, 2), dtype=np.int64)
-                )
-            else:
-                st_c = bnd_c = None
-                c_start = c_end = 0
-                t_runs = ()
-                chunk_bridges = np.empty((0, 2), dtype=np.int64)
-
-            chunk_batch_jobs = _chunk_batch_jobs(
-                batches, subs_by_row, D, S, horizon, has_b, ck_idx + 1 < len(raw_chunks))
-            first_step = len(corr_steps)
-            if has_b:
+                    t_runs = tuple((int(ra), int(rb)) for ra, rb in zip(r_starts, r_stops)
+                                   if rb > ra)
+                chunk_bridges = (_intersect_runs(bridged_edges, np.asarray(t_runs, dtype=np.int64))
+                                 if bridged_edges.size > 0 and t_runs
+                                 else np.empty((0, 2), dtype=np.int64))
                 bridges = (np.ascontiguousarray(chunk_bridges, np.int64)
                            if chunk_bridges.size else None)
-                scale_runs = np.asarray(t_runs, dtype=np.int64).reshape(-1, 2)
-                for k_r0, li0, kr, b_rows, b_contig_out in batches:
+                t_runs_at = ops.arg(np.asarray(t_runs, np.int64).reshape(-1, 2))
+            chunk_jobs = _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b,
+                                           ck_idx + 1 < n_chunks)
+            write_off = 0
+            parity = ck_idx & 1
+            for b_idx, (k_r0, li0, kr, b_rows, b_contig_out, items, min_fut) in enumerate(chunk_jobs):
+                # the collar the previous chunk carried for this batch
+                if saved[b_idx] is not None:
+                    lo_s, hi_s, par_s, off_s = saved[b_idx]
+                    for d_idx in range(D):
+                        ops.op(_Ops.COLLAR, 1, scr0 + d_idx, carry0 + par_s,
+                               off_s + d_idx * kr * (hi_s - lo_s), kr, lo_s, hi_s)
+                    valid_lo = lo_s
+                    saved[b_idx] = None
+                elif n_batches == 1 and ck_idx > 0:
+                    valid_lo = grp_min_col
+                else:
+                    valid_lo = c_start if has_b else 0
+                # the batch's correlation steps, every detector, then its rows to the output
+                if has_b:
+                    first = step0 + len(corr_steps)
                     for d_idx, (_, info) in enumerate(members):
                         scaled = info.scales is not None
                         mirrored = bridges is None and b_contig_out and not scaled
                         corr_steps.append((
-                            ep_m, d_idx, int(info.series.dtype == np.float32), d_idx, 0, None,
-                            li0, kr, st_c, bnd_c, lo_v, hi_v, bridges,
-                            d_idx if scaled else -1,
-                            np.arange(k_r0, k_r0 + kr, dtype=np.int64) if scaled else None,
-                            scale_runs if scaled else None,
-                            D + d_idx if mirrored else -1, b_rows[0] if mirrored else -1))
-            comp_chunks.append((
-                has_b, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs,
-                first_step,
-            ))
-
-        compiled_groups.append(_TiledGroup(
-            g_m, nt_sel_g, max_batch_kr, len(batches), row_indices_arr, li_arr,
-            is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
-            cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
-            det_edge_runs, grp_min_col, comp_chunks,
-            _core.HMFTable((), (), D, (), (), corr_steps, 2 * D) if corr_steps else None,
-        ))
-    return compiled_groups, w_span
-
-
-def _clear_stale_scratch(M, col0, col1, max_batch_kr, unwritten_runs, tbuf_det, dirty_map,
-                         dt_corr_d):
-    """Zero what an earlier group left in the scratch rows where this group's blocks will
-    not write, and record what this group will leave. The time is shared between the
-    detectors' correlation times."""
-    D = len(tbuf_det)
-    t_c0 = time.perf_counter()
-    new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
-    for d_idx in range(D):
-        t_det = tbuf_det[d_idx]
-        for q in range(max_batch_kr):
-            d_lo, d_hi = dirty_map.get((d_idx, q), (0, 0))
-            if d_hi > d_lo:
-                stale = _intersect_runs(
-                    unwritten_runs, np.array([[d_lo, d_hi]], dtype=np.int64))
-                for sa, sb in stale:
-                    if sb > sa:
-                        t_det[q, int(sa):int(sb)] = 0
-            dirty_map[(d_idx, q)] = new_dirty
-    dt_share = (time.perf_counter() - t_c0) / D
-    for d_idx in range(D):
-        dt_corr_d[d_idx] += dt_share
+                            ep_m, ser0 + d_idx, int(info.series.dtype == np.float32),
+                            scr0 + d_idx, 0, None, li0, kr, st_c, bnd_c, lo_v, hi_v, bridges,
+                            vec0 + d_idx if scaled else -1,
+                            scale_entries[d_idx][k_r0:k_r0 + kr] if scaled else None,
+                            np.asarray(t_runs, dtype=np.int64).reshape(-1, 2) if scaled else None,
+                            out0 + d_idx if mirrored else -1, b_rows[0] if mirrored else -1))
+                    ops.op(_Ops.CORR, first, first + D, int(retain_radius is None))
+                    if retain_radius is None:
+                        for d_idx, (_, info) in enumerate(members):
+                            if info.scales is None and bridges is None and b_contig_out:
+                                continue            # mirrored by the kernel
+                            for q, r_out in enumerate(b_rows):
+                                ops.op(_Ops.COPY, scr0 + d_idx, q, out0 + d_idx, r_out,
+                                       t_runs_at, len(t_runs), 1)
+                # the leaf slabs this batch made ready, every detector, as one batch
+                if items or r_pad:
+                    ops.op(_Ops.LEAF, ops.arg(items), len(items), int(r_pad > 0), thr_bits)
+                # the output written around the batch's peaks
+                if has_b and r_pad:
+                    ops.op(_Ops.RETAIN, ops.arg([kr, k_r0, D, scr0, out0, ops.arg(b_rows),
+                                                 valid_lo, c_start, c_end, written_at,
+                                                 len(written_runs), retain_radius, S,
+                                                 int(pending), 1]))
+                # the collar a later chunk's leaves still read
+                if need_collars and has_b and ck_idx + 1 < n_chunks and min_fut < S:
+                    collar_lo = max(grp_min_col, min_fut - r_pad)
+                    if collar_lo < c_end:
+                        for d_idx in range(D):
+                            ops.op(_Ops.COLLAR, 0, scr0 + d_idx, carry0 + parity,
+                                   write_off + d_idx * kr * (c_end - collar_lo), kr, collar_lo,
+                                   c_end)
+                        saved[b_idx] = (collar_lo, c_end, parity, write_off)
+                        write_off += D * kr * (c_end - collar_lo)
+            carry_need[parity] = max(carry_need[parity], write_off)
+    return corr_steps, corr_plans, work
 
 
-def _output_margins_and_scales(members, g_m, row_indices_arr, li_arr, is_contig_out,
-                               out_slice_obj, det_edge_runs, unwritten_runs, retain_radius,
-                               dt_corr_d):
-    """Each detector's per-row scales for this group (None without scales). Where the output
-    is written (retain_radius is not 0), also zero its margins and apply the scales to the
-    samples no block writes, as correlate_series does."""
-    D = len(members)
-    det_scales = [None] * D
-    if retain_radius != 0:
-        for d_idx, (_, info) in enumerate(members):
-            t_d0 = time.perf_counter()
-            _, _, _, _, _, out_d, sel_d, _, sc_d, _ = info
-            for ea, eb in det_edge_runs[d_idx]:
-                if eb > ea:
-                    out_d[out_slice_obj, int(ea):int(eb)] = 0
-            if sc_d is not None:
-                row_sc = (sc_d[sel_d[row_indices_arr]] if sel_d is not None
-                          else sc_d[g_m.template_indices[li_arr]])
-                det_scales[d_idx] = row_sc
-                for ua, ub in unwritten_runs:
-                    if ub > ua:
-                        ua_i, ub_i = int(ua), int(ub)
-                        if is_contig_out:
-                            sub_v = out_d[out_slice_obj, ua_i:ub_i]
-                            np.multiply(sub_v, row_sc[:, None], out=sub_v)
-                        else:
-                            for k_r, r_out in enumerate(row_indices_arr):
-                                np.multiply(
-                                    out_d[r_out, ua_i:ub_i], row_sc[k_r],
-                                    out=out_d[r_out, ua_i:ub_i],
-                                )
-            dt_corr_d[d_idx] += time.perf_counter() - t_d0
-    else:
-        for d_idx, (_, info) in enumerate(members):
-            _, _, _, _, _, _, sel_d, _, sc_d, _ = info
-            if sc_d is not None:
-                det_scales[d_idx] = (
-                    sc_d[sel_d[row_indices_arr]] if sel_d is not None
-                    else sc_d[g_m.template_indices[li_arr]]
-                )
-    return det_scales
+class _Cascade(NamedTuple):
+    """correlate_and_filter_many's calls compiled into one table with a schedule
+    (_cascade_steps): what a run binds and how its results map to the leaf jobs."""
+    steps: Any            # _Steps
+    series: list          # the series slots
+    outs: list            # the output slots
+    scales: Any           # the scale vectors, or None
+    tiles: list           # pool states, pools, carries
+    before: list          # correlation jobs correlated by their own call before the table
+    leftover: list        # leaf jobs the table does not run (filter_series_many after it)
+    empty: list           # leaf jobs with no window
+    ephemeral: bool       # retain_radius 0 and every correlation tiled: no output written
 
 
-def _copy_runs(out, row, scratch_row, runs, stream_cp):
-    """Copy sample runs of a scratch row into row ``row`` of an output array, through the
-    streaming store when there is one. Returns whether the streaming store was used."""
-    if stream_cp is None:
-        for ra, rb in runs:
-            out[row, ra:rb] = scratch_row[ra:rb]
-        return False
-    out_ptr = out[row].ctypes.data
-    scratch_ptr = scratch_row.ctypes.data
-    used = False
-    for ra, rb in runs:
-        ra, rb = int(ra), int(rb)
-        stream_cp(out_ptr + ra * 8, scratch_ptr + ra * 8, (rb - ra) * 8)
-        used = True
-    return used
-
-
-def _restore_collar(saved, tbuf_det, kr, dt_corr_d):
-    """Copy back into every detector's scratch rows the samples :func:`_save_collar` kept
-    for a batch at the end of the previous chunk. Returns the first sample restored. The time
-    is shared between the detectors' correlation times."""
-    D = len(tbuf_det)
-    t_c0 = time.perf_counter()
-    saved_lo, saved_hi, src_pool, src_off = saved
-    c_len = saved_hi - saved_lo
-    step_elems = kr * c_len
-    for d_idx in range(D):
-        base_off = src_off + d_idx * step_elems
-        tbuf_det[d_idx][:kr, saved_lo:saved_hi] = (
-            src_pool[base_off : base_off + step_elems].reshape(kr, c_len)
-        )
-    dt_share = (time.perf_counter() - t_c0) / D
-    for d_idx in range(D):
-        dt_corr_d[d_idx] += dt_share
-    return saved_lo
-
-
-def _save_collar(collar_pools, pool_idx, write_off, tbuf_det, kr, collar_lo, c_end, n_batches,
-                 dt_corr_d):
-    """Keep samples [collar_lo, c_end) of a batch's kr scratch rows, for every detector, in
-    pool ``pool_idx`` at ``write_off`` (the pool grows as needed), because leaves of the next
-    chunk still read them. Returns the record :func:`_restore_collar` takes. The time is
-    shared between the detectors' correlation times."""
-    D = len(tbuf_det)
-    t_c0 = time.perf_counter()
-    c_len = c_end - collar_lo
-    step_elems = kr * c_len
-    total_elems = D * step_elems
-    dst_pool = collar_pools[pool_idx]
-    if dst_pool is None or write_off + total_elems > dst_pool.size:
-        new_cap = max(
-            write_off + total_elems,
-            0 if dst_pool is None else dst_pool.size * 2,
-            max(1, n_batches) * D * max(c_len, 4096),
-        )
-        grown = _aligned_zeros(new_cap, dtype=np.complex64)
-        if dst_pool is not None and write_off > 0:
-            grown[:write_off] = dst_pool[:write_off]
-        dst_pool = grown
-        collar_pools[pool_idx] = dst_pool
-    for d_idx in range(D):
-        base_off = write_off + d_idx * step_elems
-        dst_pool[base_off : base_off + step_elems].reshape(kr, c_len)[:] = (
-            tbuf_det[d_idx][:kr, collar_lo:c_end]
-        )
-    dt_share = (time.perf_counter() - t_c0) / D
-    for d_idx in range(D):
-        dt_corr_d[d_idx] += dt_share
-    return collar_lo, c_end, dst_pool, write_off
-
-
-def _filter_ready_slabs(c_jobs, back_subs, kr, retain_radius, eff_ret_thr):
-    """Filter a batch's ready leaf slabs, for all detectors, in one C call, and add each
-    slab's peaks to its sub. Returns the seconds the call took and, where output is kept
-    around peaks (retain_radius > 0), per scratch row the sample positions of the peaks at
-    or above eff_ret_thr (None when there are none)."""
-    t_f0 = time.perf_counter()
-    if not c_jobs:
-        return time.perf_counter() - t_f0, None
-    peaks_by_q = None
-    global STEP_COMPUTE_SECONDS
-    c_out = back_subs[0][0].table.run_slices(c_jobs)
-    dt_b = time.perf_counter() - t_f0
-    STEP_COMPUTE_SECONDS += dt_b
-    dt_each = dt_b / len(c_jobs)
-    for (fl, ix, vl, tot), (sub_rec, q, r0, r1) in zip(c_out, back_subs):
-        sub_rec.total += tot
-        sub_rec.seconds += dt_each
-        if tot > 0:
-            sl = sub_rec.slabs
-            nt_f = sub_rec.ntemplates
-            fl_arr = np.frombuffer(fl, np.int64)
-            ix_arr = np.frombuffer(ix, np.int64)
-            vl_arr = np.frombuffer(vl, np.complex64)
-            sp = _SparsePeaks((r1 - r0, nt_f, sl.nbins), fl_arr, ix_arr, vl_arr)
-            sub_rec.parts.append((r0, sp))
-            if retain_radius is not None and retain_radius > 0:
-                keep_pk = (
-                    np.ones(vl_arr.size, dtype=bool)
-                    if eff_ret_thr <= 0.0
-                    else (np.abs(vl_arr) >= eff_ret_thr)
-                )
-                if np.any(keep_pk):
-                    bi = fl_arr[keep_pk] // (nt_f * sl.nbins)
-                    s_pos = sl.starts[r0 + bi].astype(np.int64) + ix_arr[keep_pk]
-                    if peaks_by_q is None:
-                        peaks_by_q = [[] for _ in range(kr)]
-                    peaks_by_q[q].append(s_pos)
-    return dt_b, peaks_by_q
-
-
-def _retained_spans(q_peaks, pending_fwd_end, k_r, valid_lo, c_start, c_end, S, retain_radius,
-                    written_runs):
-    """The sample spans of this chunk to write for one output row: retain_radius either side
-    of each of its peaks, and what a peak of an earlier chunk still reaches into this one
-    (pending_fwd_end[k_r], which this updates for the chunks after), merged and clipped to
-    the samples the group's blocks wrote. Returns an (m, 2) int64 array, or None for
-    nothing to write."""
-    spans = []
-    if pending_fwd_end is not None and pending_fwd_end[k_r] > c_start:
-        spans.append((c_start, min(c_end, pending_fwd_end[k_r])))
-    if q_peaks:
-        all_s = q_peaks[0] if len(q_peaks) == 1 else np.concatenate(q_peaks)
-        if pending_fwd_end is not None:
-            max_fwd = int(all_s.max()) + retain_radius
-            if max_fwd > c_end and max_fwd > pending_fwd_end[k_r]:
-                pending_fwd_end[k_r] = min(S, max_fwd)
-        for s_val in all_s.tolist():
-            ca = max(valid_lo, int(s_val) - retain_radius)
-            cb = min(c_end, int(s_val) + retain_radius)
-            if cb > ca:
-                spans.append((ca, cb))
-    if not spans:
+def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_bytes,
+                   retain_radius, retain_threshold):
+    """Compile correlate_and_filter_many's calls, where some cohort runs tiled, into one
+    table with a schedule: the untiled correlations first (one OP_CORR), then each tiled
+    cohort's schedule (_cohort_schedule), then, after it, the leaf steps of every leaf job not
+    tiled, in their phases. Returns a _Cascade, or None where no cohort can be bound tiled
+    (every job then runs untiled)."""
+    ops = _Ops()
+    untiled_cohort_jobs, tiled_parts, tiled_calls, placed_all, empty = [], [], [], {}, []
+    for members in cohorts:
+        if not any(members is m for m in tiled):
+            untiled_cohort_jobs.extend(ci for ci, _ in members)
+            continue
+        first = members[0][1]
+        pre_grp_batches, row_slot, max_kr = _template_batches(
+            first.bank, first.selection, first.out.shape[0])
+        pool, state, stride_det, tbuf_det, need_total = _tile_scratch(
+            first.bank, len(members), first.S, max_kr)
+        bound = _bind_leaves(members, leaf_jobs, first.S, first.out.shape[0], row_slot, tbuf_det)
+        if bound is None:
+            untiled_cohort_jobs.extend(ci for ci, _ in members)
+            continue
+        calls, placed, cohort_empty = bound
+        tiled_calls.extend(calls)
+        for j, (d_idx, out_row) in placed.items():
+            placed_all[j] = (len(tiled_parts), d_idx, out_row)
+        empty.extend(cohort_empty)
+        tiled_parts.append((members, pre_grp_batches, pool, state, stride_det, tbuf_det,
+                            need_total))
+    if not tiled_parts:
         return None
-    spans.sort()
-    merged = [list(spans[0])]
-    for sa, sb in spans[1:]:
-        if sa <= merged[-1][1]:
-            if sb > merged[-1][1]:
-                merged[-1][1] = sb
+    # the untiled correlations, in the order the jobs were screened: as steps where every one
+    # can be, else all by their own calls before the table
+    untiled_corr = list(screened_out) + untiled_cohort_jobs
+    corr_calls, corr_scales, before = [], [], []
+    for ci in untiled_corr:
+        bank, series, kw = corr_jobs[ci]
+        kw = kw or {}
+        if (not (set(kw) <= _CORR_KEYS) or not bank._correlates_on_cpu()
+                or (isinstance(series, np.ndarray)
+                    and any(np.may_share_memory(series, call[5]) for call in corr_calls))):
+            corr_calls, corr_scales, before = [], [], untiled_corr
+            break
+        call, row_scales = _corr_call(bank, series, kw)
+        corr_calls.append(call)
+        corr_scales.append(row_scales)
+    # the leaf jobs not tiled: every one the leaf steps run, in leaf job order
+    leaf_calls, leftover = {c[0]: c for c in tiled_calls}, []
+    for j in sorted(set(range(len(leaf_jobs))) - set(placed_all) - set(empty)):
+        bank, series, kw = leaf_jobs[j]
+        call = _leaf_call(j, bank, series, kw)
+        if call is _EMPTY_FILTER_RESULTS:
+            empty.append(j)
+        elif call is None:
+            leftover.append(j)
         else:
-            merged.append([sa, sb])
-    w_spans = _intersect_runs(np.asarray(merged, dtype=np.int64), written_runs)
-    return w_spans if w_spans.size > 0 else None
+            leaf_calls[j] = call
 
+    # slots: series = untiled inputs, the cohorts' detectors' series, the leaf series;
+    # outputs = untiled outputs, per cohort its scratch rows then its outputs; scale vectors
+    # = untiled, then per cohort its detectors' bank scales; tiles = per cohort its pool's
+    # state and the pool, then the two carries
+    ncorr = len(corr_calls)
+    series = [c[1] for c in corr_calls]
+    outs = [c[5] for c in corr_calls]
+    scales = [np.empty(0, np.float32) if sc is None else sc for sc in corr_scales]
+    tiles, layouts = [], []
+    for members, _, pool, state, _, tbuf_det, _ in tiled_parts:
+        layouts.append((len(series), len(outs), len(scales), len(tiles)))
+        series.extend(info.series for _, info in members)
+        outs.extend(tbuf_det)
+        outs.extend(info.out for _, info in members)
+        scales.extend(np.empty(0, np.float32) if info.scales is None else info.scales
+                      for _, info in members)
+        tiles.extend((state, pool))
+    carry0 = len(tiles)
+    carry_need = [0, 0]
 
-def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools, S,
-                     retain_radius, eff_ret_thr, set_mirror, stream_cp, dt_corr_d):
-    """Run one compiled group: for each time chunk and template batch, correlate the batch
-    for every detector into the scratch rows (its correlation steps, one C call), write the
-    output as asked (all of it, nothing, or collars around retained peaks), filter every leaf
-    slab that is ready, and carry the samples a later chunk's leaves still read. Adds each
-    detector's correlation time to dt_corr_d (a batch's steps shared evenly between the
-    detectors); returns the filtering seconds and whether a streaming store was used."""
-    global CORR_COMPUTE_SECONDS
-    (g_m, nt_sel_g, max_batch_kr, n_batches, row_indices_arr, li_arr,
-     is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
-     cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
-     det_edge_runs, grp_min_col, comp_chunks, corr_table) = grp
-    D = len(members)
-    dt_fine_cohort = 0.0
-    used_nt_stream = False
-    if M > 0:
-        for _ in range(D):
-            corr_bank._add_corr_work(g_m.n, dict(
-                blocks=M, pairs=M * nt_sel_g,
-                out_samples=w_out_samples, tmpl_values=tmpl_vals,
-            ))
-        cplan._dataset = False
-        if cplan._data_ready:
-            cplan._data_ready.clear()
+    def schedule(steps, n_untiled_steps):
+        # the untiled correlations first
+        if n_untiled_steps:
+            ops.op(_Ops.CORR, 0, n_untiled_steps, 0)
+        # each tiled leaf call's steps, as subs of the scratch row its series is read from
+        subs_by_row = [[[[] for _ in range(len(part[0]))] for _ in range(part[0][0][1].out.shape[0])]
+                       for part in tiled_parts]
+        for k, (j, g_f, _, sl, _, ep, _, _, _, _, _) in enumerate(steps):
+            if j in placed_all:
+                p, d_idx, out_row = placed_all[j]
+                S = tiled_parts[p][0][0][1].S
+                subs_by_row[p][out_row][d_idx].append(
+                    _LeafSub(k, _layout_slabs(sl, int(ep.series_group()), g_f.n, S)))
+        more_corrs, plans, banks, work = [], [], [], []
+        for p, ((members, pre_grp_batches, _, _, stride_det, _, need_total),
+                (ser0, out0, vec0, tile0)) in enumerate(zip(tiled_parts, layouts)):
+            D = len(members)
+            first = members[0][1]
+            ops.op(_Ops.POOL, tile0, first.S, stride_det, tile0 + 1, need_total)
+            c_steps, c_plans, c_work = _cohort_schedule(
+                ops, members, pre_grp_batches, subs_by_row[p], first.S, first.windows,
+                first.out.shape[0], eff_tile_bytes, retain_radius, retain_threshold,
+                (ser0, out0, out0 + D, n_untiled_steps + len(more_corrs), vec0, tile0,
+                 tile0 + 1, carry0), carry_need)
+            more_corrs.extend(c_steps)
+            plans.extend(c_plans)
+            banks.append((weakref.ref(first.bank), first.bank._groups))
+            w_span = int((first.windows[:, 1] - first.windows[:, 0]).sum())
+            work.extend((len(banks) - 1, c_work, w_span) for _ in range(D))
+        return (more_corrs, len(outs) - ncorr, ops.arrays(), plans, banks, work)
 
-    _clear_stale_scratch(M, col0, col1, max_batch_kr, unwritten_runs, tbuf_det, dirty_map,
-                         dt_corr_d)
-    det_scales = _output_margins_and_scales(
-        members, g_m, row_indices_arr, li_arr, is_contig_out, out_slice_obj, det_edge_runs,
-        unwritten_runs, retain_radius, dt_corr_d)
-
-    n_chunks = len(comp_chunks)
-    need_collars = n_chunks > 1 and n_batches > 1
-    pending_fwd_end = (
-        [0] * nt_sel_g
-        if (retain_radius is not None and retain_radius > 0 and n_chunks > 1)
-        else None
-    )
-    saved_collars = [None] * n_batches if need_collars else None
-    r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
-
-    # The correlation steps' slots: the detectors' series; their scratch rows, then outputs.
-    series_slots = [info.series for _, info in members]
-    out_slots = list(tbuf_det) + [info.out for _, info in members]
-    scale_vectors = (None if all(sc is None for sc in det_scales)
-                     else [np.empty(0, np.float32) if sc is None else sc for sc in det_scales])
-    use_mirror = retain_radius is None and set_mirror is not None
-
-    for ck_idx, (has_blocks, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs,
-                 first_step) in enumerate(comp_chunks):
-        has_bridges = chunk_bridges.size > 0
-        write_pool_idx = ck_idx & 1
-        write_off = 0
-
-        for b_idx, (k_r0, li0, kr, b_rows, b_contig_out, c_jobs, back_subs, min_fut) in enumerate(chunk_batch_jobs):
-            # Restore any cross-chunk boundary collar saved from the previous chunk.
-            if saved_collars is not None and saved_collars[b_idx] is not None:
-                valid_lo = _restore_collar(saved_collars[b_idx], tbuf_det, kr, dt_corr_d)
-                saved_collars[b_idx] = None
-            elif n_batches == 1 and ck_idx > 0:
-                valid_lo = grp_min_col
-            else:
-                valid_lo = c_start
-
-            # Correlate batch [li0, li0 + kr) across all detectors in the cohort into L3 tbuf:
-            # its correlation steps (bridges zeroed, rows scaled, the output mirrored where
-            # nothing follows the kernel), then the copies of the rows not mirrored.
-            if has_blocks:
-                t_c0 = time.perf_counter()
-                step0 = first_step + b_idx * D
-                CORR_COMPUTE_SECONDS += corr_table.run_corr(
-                    step0, step0 + D, series_slots, out_slots, scale_vectors, use_mirror)
-                share = (time.perf_counter() - t_c0) / D
-                for d_idx, (_, info) in enumerate(members):
-                    dt_corr_d[d_idx] += share
-                    if use_mirror and det_scales[d_idx] is None and not has_bridges and b_contig_out:
-                        used_nt_stream = True
-                    elif retain_radius is None:
-                        t_d0 = time.perf_counter()
-                        for q, r_out in enumerate(b_rows):
-                            if _copy_runs(info.out, r_out, tbuf_det[d_idx][q], t_runs, stream_cp):
-                                used_nt_stream = True
-                        dt_corr_d[d_idx] += time.perf_counter() - t_d0
-
-            # Filter all ready slabs of this batch across all detectors in one C call.
-            dt_filter, peaks_by_q = _filter_ready_slabs(
-                c_jobs, back_subs, kr, retain_radius, eff_ret_thr)
-            dt_fine_cohort += dt_filter
-
-            # Write the output around retained peaks when retain_radius > 0.
-            if has_blocks and retain_radius is not None and retain_radius > 0:
-                for q, r_out in enumerate(b_rows):
-                    w_spans = _retained_spans(
-                        peaks_by_q[q] if peaks_by_q is not None else None,
-                        pending_fwd_end, k_r0 + q, valid_lo, c_start, c_end, S, retain_radius,
-                        written_runs)
-                    if w_spans is None:
-                        continue
-                    for d_idx, (_, info) in enumerate(members):
-                        t_d0 = time.perf_counter()
-                        if _copy_runs(info.out, r_out, tbuf_det[d_idx][q], w_spans, stream_cp):
-                            used_nt_stream = True
-                        dt_corr_d[d_idx] += time.perf_counter() - t_d0
-
-            # Save cross-chunk boundary collar into persistent ping-pong pool when needed.
-            if need_collars and has_blocks and ck_idx + 1 < n_chunks and min_fut < S:
-                collar_lo = max(grp_min_col, min_fut - r_pad)
-                if collar_lo < c_end:
-                    saved_collars[b_idx] = _save_collar(
-                        collar_pools, write_pool_idx, write_off, tbuf_det, kr, collar_lo, c_end,
-                        n_batches, dt_corr_d)
-                    write_off += D * kr * (c_end - collar_lo)
-    return dt_fine_cohort, used_nt_stream
-
-
-def _assemble_leaf_results(cohort_leaf_preps, out_results):
-    """Each tiled leaf job's FilterResults from its subs' peaks, into out_results: the
-    chunks' peaks joined in block order, bins merged where the job asked for a larger bin
-    size. Records each plan's trigger count and time."""
-    for j, W_p, merge_bs, job_subs in cohort_leaf_preps:
-        lists = ([], [], [], [], [])
-        for sub_rec in job_subs:
-            g_f, sub_st, sl, active_plan = sub_rec.group, sub_rec.starts, sub_rec.slabs, sub_rec.plan
-            nt_f, parts, tot_sum, dt_sum = sub_rec.ntemplates, sub_rec.parts, sub_rec.total, sub_rec.seconds
-            active_plan._last_n_triggers = tot_sum
-            active_plan._record_batch_time(dt_sum)
-            if tot_sum == 0 or not parts:
-                continue
-            shape = (sl.starts.size, nt_f, sl.nbins)
-            if sl.order is None and all(
-                parts[i][0] > parts[i - 1][0] for i in range(1, len(parts))
-            ):
-                if len(parts) == 1 and parts[0][0] == 0:
-                    sp = parts[0][1]
-                else:
-                    per_block = nt_f * sl.nbins
-                    sp = _SparsePeaks(
-                        shape,
-                        np.concatenate([p.flat + b0 * per_block for b0, p in parts]),
-                        np.concatenate([p.idx for _, p in parts]),
-                        np.concatenate([p.val for _, p in parts]),
-                    )
-            else:
-                sp = _SparsePeaks.combine(parts, shape, sl.order)
-            _consume_into(lists, sp, None, sub_st, g_f, None, g_f.n, None)
-        if merge_bs and lists[0]:
-            cols = [np.concatenate(c) for c in lists]
-            for bs_m in merge_bs:
-                cols = list(_merge_window_bins(W_p, bs_m, *cols))
-            for lst, c in zip(lists, cols):
-                lst[:] = [c]
-        out_results[j] = _results_from(lists)
+    ordered = [leaf_calls[j] for j in sorted(leaf_calls)]
+    compiled = _compile_steps(ordered, corr_calls, tuple(sc is not None for sc in corr_scales),
+                              scheduled=frozenset(placed_all), extra_series=len(series) - ncorr,
+                              schedule=schedule)
+    compiled_jobs = {j for j, _, _ in compiled.calls}
+    if not set(placed_all) <= compiled_jobs:
+        return None
+    leftover = sorted(set(leftover) | (set(leaf_calls) - compiled_jobs))
+    series.extend(leaf_calls[j][2] for j, _, _ in compiled.calls)
+    tiles.extend(_aligned_zeros(max(1, n), np.complex64) for n in carry_need)
+    return _Cascade(compiled, series, outs, scales if corr_scales or any(
+        info.scales is not None for part in tiled_parts for _, info in part[0]) else None,
+        tiles, before, leftover, empty, retain_radius == 0 and not untiled_corr)
 
 
 def _run_batch(jobs, wait, corr=None):
@@ -1676,7 +1314,8 @@ class _Steps(NamedTuple):
     #                      work counters)], input samples the windows read), added per run
 
 
-def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
+def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True, scheduled=frozenset(),
+                   extra_series=0, schedule=None):
     """The steps of correlation calls and leaf calls, compiled into one table.
 
     Correlation call c reads series slot c and writes output slot c. Its output rows are its
@@ -1720,6 +1359,16 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
         Per correlation call, whether the run gives it a scale vector.
     split_modes : bool, optional
         False refuses (None) where a plan would be asked for two series modes. Default True.
+    scheduled : set of int, optional
+        Leaf call indices whose steps a schedule runs (in block ranges, OP_LEAF): their steps
+        are phase -1 and take no part in the phases of the others. Default none.
+    extra_series : int, optional
+        Series slots after the correlation calls' inputs and before the leaf calls' series,
+        which the schedule's correlation steps read. Default 0.
+    schedule : callable, optional
+        ``schedule(steps, n)`` with the compiled leaf steps (``_Steps.steps``) and the
+        number of the calls' correlation steps returns the schedule's (correlation step tuples after the calls', output slots after the calls',
+        (ops, args) int64 arrays, correlation plans, banks, work); default None, no schedule.
 
     Returns
     -------
@@ -1821,7 +1470,7 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
             group_plans = [g.plan for g in groups]
         else:
             continue
-        slot = ncorr + len(series)
+        slot = ncorr + extra_series + len(series)
         series.append(ser)
         if id(bank) not in bank_index:
             bank_index[id(bank)] = len(banks)
@@ -1868,9 +1517,11 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
                 nt = plan.ntemplates
                 plan._require_templates(0, nt)
                 # The plan's series mode, as each call once set it: a mode another step of
-                # these calls set otherwise ends the phase.
+                # these calls set otherwise ends the phase (a scheduled step sets its mode
+                # for its own block ranges and is in no phase).
+                in_phases = index not in scheduled
                 previous = getattr(plan, '_mf', None)
-                if (previous is not None and id(previous) in modes
+                if (in_phases and previous is not None and id(previous) in modes
                         and modes[id(previous)] != (real, stride)):
                     if not split_modes:
                         return None
@@ -1878,7 +1529,7 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
                     modes.clear()
                 plan._want_real = real
                 ep = plan._execution_plan()
-                if id(ep) in modes and modes[id(ep)] != (real, stride):
+                if in_phases and id(ep) in modes and modes[id(ep)] != (real, stride):
                     if not split_modes:
                         return None
                     phase += 1
@@ -1891,7 +1542,8 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
                 if (plan.__dict__.get("_applied_real") is not real
                         and hasattr(plan, "_sync_direct_prices")):
                     plan._sync_direct_prices(ep, real)
-                modes[id(ep)] = (real, stride)
+                if in_phases:
+                    modes[id(ep)] = (real, stride)
                 resolved = plan.__dict__.get("_resolved")
                 prices = None
                 if getattr(plan, "_taps", None) is not None and resolved is not None \
@@ -1901,7 +1553,7 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
                 plans[(id(plan), plan_profile)] = (plan, plan_profile, ep, resolved)
                 step_args.append((ep, slot, int(real), stride, layout.starts, layout.low,
                                   layout.high, layout.phase, nt, bs, float(eff_threshold),
-                                  prices, phase, job,
+                                  prices, phase if in_phases else -1, job,
                                   np.ascontiguousarray(g.template_indices, dtype=np.int64),
                                   None if layout.order is None
                                   else np.ascontiguousarray(layout.order, dtype=np.int64),
@@ -1912,13 +1564,25 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True):
         jobs.append((np.ascontiguousarray(W[:, 0], dtype=np.int64), tuple(merge_bs)))
         compiled_calls.append((index, weakref.ref(bank), profile))
         merges.append((W, merge_bs))
-    if calls and not compiled_calls and not ncorr:
+    if calls and not compiled_calls and not ncorr and schedule is None:
         return None
-    table = _core.HMFTable(step_args, jobs, ncorr + len(series), (), flat_args, corr_steps, ncorr)
+    work = [(b, list(counters.items()), in_samples) for b, (counters, in_samples) in work.items()]
+    corr_plans = list(corr_plans.values())
+    nouts, sched = ncorr, None
+    if schedule is not None:
+        # the schedule's correlation steps, outputs, ops and accounting after the calls'
+        more_corrs, more_outs, sched, more_plans, more_banks, more_work = schedule(
+            steps, len(corr_steps))
+        corr_steps.extend(more_corrs)
+        nouts += more_outs
+        corr_plans.extend(more_plans)
+        first = len(banks)
+        banks.extend(more_banks)
+        work.extend((first + b, counters, in_samples) for b, counters, in_samples in more_work)
+    table = _core.HMFTable(step_args, jobs, ncorr + extra_series + len(series), (), flat_args,
+                           corr_steps, nouts, sched)
     return _Steps(table, ncorr, compiled_calls, merges, steps, list(plans.values()), banks,
-                  list(flat_plans.values()), list(corr_plans.values()),
-                  [(b, list(counters.items()), in_samples)
-                   for b, (counters, in_samples) in work.items()])
+                  list(flat_plans.values()), corr_plans, work)
 
 
 def _steps_valid(compiled):
@@ -1945,9 +1609,10 @@ def _steps_valid(compiled):
     return True
 
 
-def _run_steps(compiled, series, outs=None, scales=None):
+def _run_steps(compiled, series, outs=None, scales=None, tiles=None):
     """Run compiled steps on bound series (one per slot), outputs and scale vectors (one per
-    correlation call, None or an empty vector for a call without), in one C call
+    correlation call, None or an empty vector for a call without) and, for a table with a
+    schedule, its tiles (scratch pools' states, the pools, carries), in one C call
     (_core.HMFTable.run), and update what the calls once updated: the plans' data state, the
     correlation banks' work counters and the compute seconds.
 
@@ -1958,11 +1623,11 @@ def _run_steps(compiled, series, outs=None, scales=None):
     corr_seconds : float
         The seconds the correlation steps spent in the extension.
     """
-    if compiled.calls:
+    if compiled.calls or tiles is not None:
         # Device writes to shared host-readable series must have landed.
         _settle_device_writes()
         (offs_b, ti_b, si_b, snr_b, bs_b, bl_b, totals_b, seconds_b, kernel,
-         corr_seconds) = compiled.table.run(series, (), outs, scales)
+         corr_seconds) = compiled.table.run(series, (), outs, scales, tiles)
     else:
         # correlation steps only (a correlation call): the table's correlation entry, which
         # assembles no peaks
@@ -2330,20 +1995,30 @@ def _tiling_cohorts(corr_jobs, leaf_by_corr, tile_bytes):
     return screened_out, cohorts, tiled
 
 
-def _chunk_steps(corr_jobs, leaf_jobs):
+def _chunk_steps(corr_jobs, leaf_jobs, retain_radius=None):
     """The steps of a search chunk's correlation jobs and the leaf jobs that read them, as
-    correlate_and_filter_many(corr_jobs, leaf_jobs) runs them untiled, compiled into one
-    table: (the compiled steps, the series they bind, the outputs they write), or None
-    where not every job is in it (a job off the CPU, a trial undecided, a cohort the tiled
-    cascade runs, a leaf job the leaf steps do not run or with no window, a series read
-    through a copy of memory a correlation writes). Running them (_run_steps) gives the
-    results correlate_and_filter_many gives, in the order of leaf_jobs."""
-    if (TimeDomainFilterBank._TILE_BYTES > 0
-            and _tiling_cohorts(corr_jobs, _leaves_by_producer(corr_jobs, leaf_jobs)[0],
-                                None)[2]):
-        return None
+    correlate_and_filter_many(corr_jobs, leaf_jobs, retain_radius=retain_radius) runs them,
+    compiled into one table (with the tiled schedule where a cohort is tiled): (the compiled
+    steps, the series they bind, the outputs they write, the tiles of the schedule or None,
+    whether the outputs are left unwritten), or None where not every job is in it (a job off
+    the CPU, a trial undecided, a leaf job the leaf steps do not run or with no window, a
+    series read through a copy of memory a correlation writes). Running them (_run_steps)
+    gives the results correlate_and_filter_many gives, in the order of leaf_jobs."""
     if not _trials_decided(leaf_jobs):
         return None
+    if TimeDomainFilterBank._TILE_BYTES > 0:
+        screened_out, cohorts, tiled = _tiling_cohorts(
+            corr_jobs, _leaves_by_producer(corr_jobs, leaf_jobs)[0], None)
+        if tiled:
+            cascade = _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled,
+                                     TimeDomainFilterBank._TILE_BYTES, retain_radius, 0.0)
+            if cascade is not None:
+                if (cascade.before or cascade.leftover or cascade.empty
+                        or cascade.scales is not None
+                        or len(cascade.steps.calls) != len(leaf_jobs)):
+                    return None
+                return (cascade.steps, cascade.series, cascade.outs, cascade.tiles,
+                        cascade.ephemeral)
     corr_calls, corr_scales = [], []
     for bank, series, kw in corr_jobs:
         kw = kw or {}
@@ -2369,30 +2044,8 @@ def _chunk_steps(corr_jobs, leaf_jobs):
     compiled = _call_steps(calls, corr_calls, scales)
     if compiled is None or len(compiled.calls) != len(calls):
         return None
-    return compiled, [c[1] for c in corr_calls] + [c[2] for c in calls], [c[5] for c in corr_calls]
-
-
-def _corr_stream_hooks():
-    """Return lazily bound C non-temporal streaming helpers from _core."""
-    hooks = TimeDomainFilterBank._STREAM_HOOKS
-    if hooks is not None:
-        return hooks
-    try:
-        clib = ctypes.CDLL(_core.__file__)
-        set_mirror = clib.ap_mf_set_corr_mirror
-        set_mirror.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-        set_mirror.restype = None
-        stream_cp = clib.ap_mf_stream_copy
-        stream_cp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
-        stream_cp.restype = None
-        stream_fn = clib.ap_mf_stream_fence
-        stream_fn.argtypes = []
-        stream_fn.restype = None
-        hooks = (set_mirror, stream_cp, stream_fn)
-    except AttributeError:
-        hooks = (None, None, None)
-    TimeDomainFilterBank._STREAM_HOOKS = hooks
-    return hooks
+    return (compiled, [c[1] for c in corr_calls] + [c[2] for c in calls],
+            [c[5] for c in corr_calls], None, False)
 
 
 def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
@@ -2439,118 +2092,40 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
     if any(_parse_device(b.device).kind != "cpu" for b, _, _ in leaf_jobs):
         return _run_untiled()
 
-    set_mirror, stream_cp, stream_fn = _corr_stream_hooks()
-
-    leaf_by_corr, independent_leaves = _leaves_by_producer(corr_jobs, leaf_jobs)
-
-    _settle_device_writes()
-
-    out_results = [None] * len(leaf_jobs)
-    corr_times = [0.0] * len(corr_jobs)
-    dt_filter_total = 0.0
-    fallback_leaves = list(independent_leaves)
-    all_ephemeral = retain_radius == 0
-
-    def _correlate_untiled(indices):
-        """Correlate these jobs as correlate_series does and leave their leaves to
-        filter_series_many."""
-        nonlocal all_ephemeral
-        all_ephemeral = False
-        _correlate_jobs(corr_jobs, indices, corr_times)
-        for ci in indices:
-            fallback_leaves.extend(leaf_by_corr[ci])
-
+    leaf_by_corr, _ = _leaves_by_producer(corr_jobs, leaf_jobs)
     screened_out, cohorts, tiled = _tiling_cohorts(corr_jobs, leaf_by_corr, tile_bytes)
     # No cohort runs tiled: every job untiled, the correlations and the leaves in one table.
     if not tiled:
         return _run_untiled()
-    if screened_out:
-        _correlate_untiled(screened_out)
-    used_nt_stream = False
-    for members in cohorts:
-        D = len(members)
-        first = members[0][1]
-        corr_bank, S, W_corr = first.bank, first.S, first.windows
-        n_out_rows = first.out.shape[0]
-        if not any(members is m for m in tiled):
-            _correlate_untiled([ci for ci, _ in members])
-            continue
+    _settle_device_writes()
+    cascade = _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled,
+                             eff_tile_bytes, retain_radius, eff_ret_thr)
+    if cascade is None:
+        return _run_untiled()
 
-        # Template batches that fill SIMD lanes, and the scratch rows they write.
-        pre_grp_batches, row_slot, max_kr = _template_batches(
-            corr_bank, first.selection, n_out_rows)
-        raw_pool, stride_det, tbuf_det, dirty_map = _tile_scratch(corr_bank, D, S, max_kr)
-
-        # The cohort's preparation: kept from the last call with the same jobs, or made.
-        memo_key = _cohort_memo_key(corr_bank, members, leaf_jobs, S, max_kr, stride_det,
-                                    W_corr, eff_tile_bytes, raw_pool)
-        prep_cache = corr_bank.__dict__.setdefault("_cached_cohort_preps", OrderedDict())
-        prep = prep_cache.get(memo_key) if memo_key is not None else None
-        if prep is not None and not _prep_still_valid(prep, leaf_jobs):
-            prep = None
-        if prep is not None:
-            prep_cache.move_to_end(memo_key)
-            _reset_prep(prep)
-        else:
-            bound = _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det)
-            if bound is None:
-                _correlate_untiled([ci for ci, _ in members])
-                continue
-            subs_by_row, leaf_preps, empty_leaves, subs, plan_checks, bank_refs, _ = bound
-            groups, w_span = _compile_groups(corr_bank, members, pre_grp_batches,
-                                             subs_by_row, S, W_corr, n_out_rows,
-                                             eff_tile_bytes)
-            prep = _CohortPrep(bank_refs, plan_checks, subs, empty_leaves, leaf_preps,
-                               groups, w_span)
-            if memo_key is not None:
-                prep_cache[memo_key] = prep
-                while len(prep_cache) > 4:
-                    prep_cache.popitem(last=False)
-
-        for j_empty in prep.empty_leaves:
-            out_results[j_empty] = _EMPTY_FILTER_RESULTS
-
-        for ci, _ in members:
-            corr_bank._add_corr_in(prep.w_span)
-
-        # Run each middle-bank group across its time chunks and template batches.
-        dt_corr_d = [0.0] * D
-        dt_fine_cohort = 0.0
-        collar_pools = corr_bank.__dict__.setdefault("_l3_collar_pools", [None, None])
-        for grp in prep.groups:
-            dt_fine, streamed = _run_tiled_group(
-                grp, corr_bank, members, tbuf_det, dirty_map, collar_pools, S,
-                retain_radius, eff_ret_thr, set_mirror, stream_cp, dt_corr_d)
-            dt_fine_cohort += dt_fine
-            used_nt_stream = used_nt_stream or streamed
-
-        # Assemble FilterResults for every tiled leaf job in the cohort.
-        t_f0 = time.perf_counter()
-        _assemble_leaf_results(prep.leaf_preps, out_results)
-        dt_fine_cohort += time.perf_counter() - t_f0
-
-        for d_idx, (ci, _) in enumerate(members):
-            corr_times[ci] = dt_corr_d[d_idx]
-        dt_filter_total += dt_fine_cohort
-
-
-    if used_nt_stream and stream_fn is not None:
-        stream_fn()
-
-    # Execute any independent or fallback leaf jobs in original leaf_jobs order so
-    # bank-grouped multi-detector pairs stay adjacent in cache.
-    if fallback_leaves:
-        fallback_leaves.sort()
-        t_f0 = time.perf_counter()
-        fb_res = TimeDomainFilterBank.filter_series_many(
-            [leaf_jobs[j] for j in fallback_leaves], wait=True)
-        dt_filter_total += time.perf_counter() - t_f0
-        for j, r in zip(fallback_leaves, fb_res):
-            out_results[j] = r
-
+    # The table: the untiled correlations, the cohorts' schedules, the untiled leaves.
+    corr_times = [0.0] * len(corr_jobs)
+    t_0 = time.perf_counter()
+    if cascade.before:
+        _correlate_jobs(corr_jobs, cascade.before, corr_times)
+    results, corr_seconds = _run_steps(cascade.steps, cascade.series, cascade.outs,
+                                       cascade.scales, cascade.tiles)
+    out_results = [None] * len(leaf_jobs)
+    for j in cascade.empty:
+        out_results[j] = _EMPTY_FILTER_RESULTS
+    for (j, _, _), res in zip(cascade.steps.calls, results):
+        out_results[j] = res
+    # the leaf jobs the steps do not run, in leaf job order
+    if cascade.leftover:
+        for j, res in zip(cascade.leftover, TimeDomainFilterBank.filter_series_many(
+                [leaf_jobs[j] for j in cascade.leftover], wait=True)):
+            out_results[j] = res
+    in_table = [ci for ci in range(len(corr_jobs)) if ci not in set(cascade.before)]
+    for ci in in_table:
+        corr_times[ci] += corr_seconds / len(in_table)
     if timings is not None:
         timings["correlate_per_job"] = corr_times
         timings["correlate"] = sum(corr_times)
-        timings["filter"] = dt_filter_total
-        timings["ephemeral_used"] = bool(all_ephemeral)
+        timings["filter"] = max(0.0, time.perf_counter() - t_0 - sum(corr_times))
+        timings["ephemeral_used"] = cascade.ephemeral
     return out_results

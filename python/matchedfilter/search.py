@@ -569,6 +569,7 @@ class _ChunkPlan(NamedTuple):
     held: dict          # channel -> inner node id -> its series
     support: dict       # channel -> inner node id -> its computed spans
     commits: list       # (slot state, slots written, their spans, slot state key after)
+    tiles: object       # the tiled schedule's pool states, pools and carries, or None
 
 
 #: A chunk shape whose jobs do not all run as one table (HierarchicalSearch._cpu_chunk).
@@ -1183,7 +1184,9 @@ class HierarchicalSearch:
                     b.reallocated = False
             corr_jobs = [cj[0] for cj in step.corr_jobs]
             t1 = time.perf_counter()
-            compiled = _batches._chunk_steps(corr_jobs, built[1]) if built[1] else None
+            compiled = (_batches._chunk_steps(corr_jobs, built[1],
+                                              0 if step.on_peaks is None else None)
+                        if built[1] else None)
             if compiled is None:
                 # a shape the table does not run: not compiled again
                 self._chunk_plans[key] = _DECLINED
@@ -1204,16 +1207,21 @@ class HierarchicalSearch:
                 step.support[c].update(plan.support[c])
             series = [step.held[step.active[src]][id(step.root)] if type(src) is int else src
                       for src in plan.sources]
-            results, corr_seconds = _batches._run_steps(plan.steps, series, plan.outs)
+            results, corr_seconds = _batches._run_steps(plan.steps, series, plan.outs, None,
+                                                        plan.tiles)
             for state, k, regions, after in plan.commits:
                 state["support"][:k] = [regions] * k
                 state["key"] = after
             leaves, lengths, where = plan.leaves, plan.lengths, plan.where
         else:
-            steps, series, outs = compiled
-            results, corr_seconds = _batches._run_steps(steps, series, outs)
+            steps, series, outs, tiles, ephemeral = compiled
+            results, corr_seconds = _batches._run_steps(steps, series, outs, None, tiles)
+            # the slots now hold what the correlations wrote (nothing, when the tiled schedule
+            # left the outputs unwritten)
             commits = []
             for _, batch, c, k in step.corr_jobs:
+                if ephemeral:
+                    continue
                 batch.commit(c, k)
                 state = batch._chan[c]
                 commits.append((state, k, state["regions"], state["key"]))
@@ -1224,6 +1232,7 @@ class HierarchicalSearch:
             roots = [step.held[c][id(step.root)] for c in step.active]
             slot_arrays = [state["slots"] for b in self._inner.values()
                            for state in b._chan.values() if state["slots"] is not None]
+            slot_arrays.extend(outs)            # and the schedule's scratch rows
             sources = []
             for a in series:
                 src = next((i for i, r in enumerate(roots)
@@ -1243,7 +1252,7 @@ class HierarchicalSearch:
                      for c in step.active},
                     {c: {nid: v for nid, v in step.support[c].items() if nid in inner_ids}
                      for c in step.active},
-                    commits)
+                    commits, tiles)
                 while len(self._chunk_plans) > 8:
                     self._chunk_plans.popitem(last=False)
         # the correlation steps' seconds are the inner stage's, the rest the leaves'

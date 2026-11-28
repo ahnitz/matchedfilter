@@ -225,14 +225,17 @@ supports, rows and whether scaled) are compiled once and kept by the first call'
 binds the series, outputs and scale vectors and is one C call for every channel and group.
 `TimeDomainFilterBank.correlate_and_filter_many` runs a
 hierarchical search's middle correlations together with the leaf calls that read them: jobs
-on one middle bank and window layout form a cohort (the detectors of one search), which is
-correlated in cache-sized chunks into a scratch buffer that the leaf banks filter before
-the next chunk. Each chunk's template batches are correlated, every detector, as correlation
-steps of a table the cohort's preparation compiles per middle group (`_TiledGroup.corr_table`:
-the blocks of the chunk, the bridges between windows zeroed and the rows scaled in the
-extension, the output mirrored by the kernel's streaming copy where nothing follows it), one
-C call per batch. The functions it is made of are in `_batches`, in the order it calls them.
-Its results equal those of `correlate_series` followed by `filter_series_many`. Where no
+on one middle bank and window layout form a cohort (the detectors of one search). A cohort
+that runs tiled is a schedule of the same step table (`_batches._cascade_steps`,
+`_cohort_schedule`; `HMFTable`'s ops, run by `hmf_run_schedule` in the same C call as the
+rest): per middle group the stale scratch cleared and the output's margins zeroed and scaled,
+then per time tile and template batch the carried collar restored, the batch's correlation
+steps (every detector) into a scratch slot (the middle bank's pool), the rows copied to the
+output or mirrored by the kernel, the leaf steps' slabs that are ready run as one batch of
+block ranges, the output written around the batch's peaks where `retain_radius > 0` (spans
+the executor takes from those peaks), and the collar a later tile's leaves read carried to a
+carry slot. The leaf steps a schedule runs gather their slices' peaks and are assembled with
+the others. Its results equal those of `correlate_series` followed by `filter_series_many`. Where no
 cohort is tiled, its correlations and the batch's every-template leaf calls are the steps of
 one table, run by one C call (`_batches._untiled_batch`; correlations off the CPU, or whose
 series may lie in an earlier job's output, are made first, `_batches._correlate_jobs`).
@@ -244,10 +247,10 @@ series length, the active channels, every leaf's windows and the spans its paren
 and what each inner node's slots hold (`_InnerBatch.support_key`, by which the correlations
 clear). The search keeps it (the eight most recent shapes), with the inner series and spans
 the hooks read and what the run leaves in the slots, so a chunk of a kept shape makes no walk
-and no job: it binds the root outputs and runs. A shape whose jobs do not all fit one table (a
-cohort the tiled cascade runs, a job the steps do not take) is remembered as declined and runs
-through the walk and `correlate_and_filter_many`; so does every chunk while a leaf bank's trial
-is open or playing.
+and no job: it binds the root outputs and runs, tiled or untiled as the chunk's cohorts are. A
+shape whose jobs do not all fit one table (a job the steps do not take) is remembered as
+declined and runs through the walk and `correlate_and_filter_many`; so does every chunk while
+a leaf bank's trial is open or playing.
 
 ## The gate model
 

@@ -226,9 +226,10 @@ def test_banks_with_compiled_correlation_steps_are_freed_without_the_cyclic_coll
 
 
 def test_the_cascades_middle_calls_are_correlation_steps_with_the_untiled_results(monkeypatch):
-    """The tiled cascade correlates each time chunk's template batches, every detector, as
-    correlation steps (bridges between windows zeroed, rows scaled, in the extension); its
-    leaf peaks and middle output are the untiled path's."""
+    """The tiled cascade is a schedule of one table: each time chunk's template batches,
+    every detector, are correlation steps (bridges between windows zeroed, rows scaled, in
+    the extension), run with the leaf slabs in one C call; its leaf peaks and middle output
+    are the untiled schedule's."""
     rng = np.random.default_rng(91)
     corr = _bank([701, 851, 1201], False, 11)
     lt = np.zeros((6, 300), np.complex64)
@@ -251,14 +252,18 @@ def test_the_cascades_middle_calls_are_correlation_steps_with_the_untiled_result
         res = TimeDomainFilterBank.correlate_and_filter_many(corr_jobs, leaf_jobs, **kw)
         return outs, res
 
-    tiled_calls = []
-    orig_group = _batches._run_tiled_group
-    monkeypatch.setattr(_batches, "_run_tiled_group",
-                        lambda grp, *a: tiled_calls.append(grp) or orig_group(grp, *a))
+    schedules, runs = [], []
+    arrays = _batches._Ops.arrays
+    monkeypatch.setattr(_batches._Ops, "arrays",
+                        lambda self: schedules.append(arrays(self)) or schedules[-1])
+    run_steps = _batches._run_steps
+    monkeypatch.setattr(_batches, "_run_steps", lambda *a: runs.append(a) or run_steps(*a))
     outs_t, res_t = results(tile_bytes=1 << 18)
-    assert tiled_calls and any(len(g.chunks) > 1 for g in tiled_calls)
-    assert any(c[6].size for g in tiled_calls for c in g.chunks)      # bridges were zeroed
-    assert all(g.corr_table is not None and g.corr_table.corrs for g in tiled_calls if g.blocks)
+    assert len(schedules) == 1 and len(runs) == 1          # one table, one run
+    kinds = schedules[0][0].reshape(-1, 12)[:, 0]
+    assert (kinds == _batches._Ops.CORR).sum() >= 2         # more than one time chunk
+    assert (kinds == _batches._Ops.SCALE).sum() > 0 and (kinds == _batches._Ops.LEAF).sum() > 0
+    assert runs[0][0].table.corrs > 0
     outs_u, res_u = results(tile_bytes=0)
     for a, b in zip(outs_t, outs_u):
         assert np.array_equal(_bits(a), _bits(b))
