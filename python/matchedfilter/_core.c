@@ -2431,7 +2431,9 @@ enum {
   HMF_OP_PENDING=11, /* n: the rows' pending retain ends, zeroed */
   HMF_OP_LANE=12     /* src slot, src row, part, dst series slot, runs off, runs n: within the
                         runs, part 0 (real) or 1 (imaginary) of an output row into a writable
-                        contiguous float32 series that a later correlation step reads */
+                        contiguous float32 series that a later correlation step reads: a lane
+                        of a packed pair, or (part 0) a real filter's output where its batch
+                        writes complex rows, as _InnerBatch.prepare takes .real */
 };
 typedef struct { Py_buffer view; int held; char *ptr; Py_ssize_t len; } hmf_tile;
 typedef struct {

@@ -456,7 +456,10 @@ class _InnerBatch:
             part, 1 the imaginary part, None the whole row). A real series is then read
             through the channel's lane buffer, and ``lane_copy`` says what the table copies
             into it; a complex row is read in place. Default None: the series is written
-            already, and a real lane of it is copied now.
+            already, and a real lane of it is copied now. A batch with a real input given a
+            whole complex row (a real filter whose batch writes complex rows because a
+            sibling's taps are complex) reads the row's real part, the filter's output as
+            _real_output defines it, both here and through the lane copy (part 0).
         """
         if len(series) != self.length:
             raise ValueError("an inner batch's input length changed between chunks")
@@ -483,6 +486,11 @@ class _InnerBatch:
             series = state["lane"]
         elif not lane:
             _settle_device_writes()
+            # A real filter's output (_real_output: real taps on a real series) is the real
+            # part of its row where its batch writes complex rows (a sibling has complex
+            # taps); the lane copy takes the same part (part 0 for a whole row).
+            if self.real_input and np.iscomplexobj(series):
+                series = series.real
             series = np.ascontiguousarray(series, dtype=dt)
         state["series"] = series
         state["regions"] = regions

@@ -1371,7 +1371,8 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True, scheduled=
         ``call``'s steps, part 0 (real) or 1 (imaginary) of row ``source row`` of an earlier
         call's output is copied into call's series (a writable contiguous float32 array)
         within ``runs`` (``(k, 2)`` int64), so that call correlates a real lane of a row the
-        table writes (an inner node's output filtered by its inner children). The table is
+        table writes (an inner node's output filtered by its inner children: a lane of a
+        packed pair, or the real part of a complex row that holds a real filter's output). The table is
         then scheduled: its correlation steps in ranges with the copies between them, then the
         leaf phases. Not with ``schedule``. Default none.
 
