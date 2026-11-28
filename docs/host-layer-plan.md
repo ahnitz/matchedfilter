@@ -239,3 +239,10 @@ library chooses the execution.
   the process's device roots while every module is intact; `_Allocation.__del__` leaves an
   allocation still held at finalization to the process's end. The four "Exception ignored" at
   the end of every Vulkan PyCBC job are gone; goldens and triggers identical.
+- 2026-11-27: GPU step 1, item 2 (chain choice priced once per bank shape) not landed: on the
+  Vulkan job the choice's key without the template count is still distinct for 22,870 of
+  24,294 misses (128 profiles x windows x first bands x tier-0 clusters); the CPU's 1,012
+  come from the similarity store sharing choices across profiles, which on a GPU holds the
+  count in its key. Exact reuse saves 0.25 s of 8.9 s; the 7 s needs count-free similarity
+  reuse, which moves which profile a plan's choice is drawn from: a behaviour change, for a
+  decision (notes/host-layer/phase2-design-study.md, Step 1 results).
