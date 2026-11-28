@@ -347,3 +347,11 @@ library chooses the execution.
   (collector timing). In the same job the GPU cost model's feed is 0 for every chosen chain,
   and no choice changes with the template count dropped or rounded
   (notes/host-layer/phase2-design-study.md, Step 2 results).
+- 2026-11-28: arena fixes after cross-hardware verification. Metal orders work per MTLBuffer
+  (hazard tracking), so packed sections of shared blocks made plans' runs wait for each other
+  (M2 search_bench 0.926 against main's 0.845 s a pass): a device now reports
+  `allocation_hazards` and the arena gives each section a block of its own there (0.844 s,
+  peak currentAllocatedSize 2,874 against 4,344 MiB, peaks bit-identical); untracked blocks
+  ordered by the driver were measured and not taken (2.2% slower). The recycle tests check
+  each property through the device on every arena (they failed on CUDA, whose arena holds no
+  host arrays) (notes/host-layer/phase2-design-study.md, Arena fixes).

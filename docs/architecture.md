@@ -152,7 +152,11 @@ GPU operations are written once, above a thin per-API driver:
   the same blocks. Every section has a serial of its own, so nothing keyed on a serial
   mistakes a recycled section for its previous tenant. The device reports what the
   arena holds: device-only scratch everywhere; buffers the host reads or writes, and host
-  arrays, only where the host sees device memory in place (`unified_memory`).
+  arrays, only where the host sees device memory in place (`unified_memory`). It reports
+  how sections lie in blocks too: packed first fit where only the driver contract orders work
+  (Vulkan, CUDA), a block per section where the device orders work by allocation
+  (`allocation_hazards`: Metal, whose hazard tracking would order the runs of every plan with
+  a section in one block after each other).
 - Each backend's `Context` (`_vkcompute.Context`, `_cudacompute.Context`,
   `_mtlcompute.Context`) inherits `Executor` and `InputUploads` and supplies only driver
   primitives: allocate, record, submit, read back. All three call their APIs through

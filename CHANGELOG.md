@@ -35,7 +35,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   the previous search's plans built on it is released (deferred work dropped, recordings on it
   freed). A Vulkan PyCBC job makes 4,742 device buffers instead of 46,595. Where
   the host does not see device memory in place (CUDA), the arena holds device-only scratch,
-  and buffers the host reads back or writes stay buffers of their own. Results are unchanged.
+  and buffers the host reads back or writes stay buffers of their own. Where the device orders
+  work by allocation (`DeviceProps.allocation_hazards`: Metal's hazard tracking, per
+  `MTLBuffer`), every section is a block of its own, recycled from search to search; packed
+  sections of shared blocks made runs of different plans wait for each other there (an M2
+  search 9.6% slower). Results are unchanged.
 
 ### Fixed
 
