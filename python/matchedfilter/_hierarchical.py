@@ -104,6 +104,11 @@ def _q15_available(band):
 
 # Cumulative host calibration work, for benchmark boundaries (not search timing).
 _CPU_TRIAL_WORK = {"calls": 0, "seconds": 0.0}
+#: Seconds the process's GPU plans have spent resolving their plan (calibration: the chain,
+#: band fractions and thresholds) inside their first calls (_gpu_calibration): per-plan setup,
+#: which a caller reads as a difference around its calls and books as setup
+#: (HierarchicalSearch.timings), as the CPU's resolution is booked where it runs.
+PLAN_SETUP_SECONDS = 0.0
 
 
 def _record_cpu_trial(start):
@@ -1647,8 +1652,14 @@ class HierarchicalFilter(MatchedFilter):
     # otherwise each coarse template is normalized by its own.
     def _gpu_calibration(self, threshold):
         """(chain, per-tier reference band fractions or None, per-tier thresholds), from the
-        resolved plan (_resolve)."""
+        resolved plan (_resolve). A resolution made here is per-plan setup: its seconds are
+        added to PLAN_SETUP_SECONDS."""
+        global PLAN_SETUP_SECONDS
+        held = self.__dict__.get("_resolved")
+        t0 = time.perf_counter()
         r = self._resolve()
+        if r is not held:
+            PLAN_SETUP_SECONDS += time.perf_counter() - t0
         return r.chain, r.fractions, r.thresholds
 
     def _coarse_templates(self, H, bands, f, offsets=None):

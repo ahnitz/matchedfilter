@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from . import _batches, _core, _gpuroot
+from . import _batches, _core, _gpuroot, _hierarchical
 from ._errors import UnsupportedSize
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
                           _aligned_zeros, _normalize_windows, _page_aligned_empty,
@@ -1086,6 +1086,7 @@ class HierarchicalSearch:
             return None
         t0 = time.perf_counter()
         compute0 = _batches.STEP_COMPUTE_SECONDS
+        setup0 = _hierarchical.PLAN_SETUP_SECONDS
         jobs, where = [], {}
         for lf in leaves:
             for c in step.active:
@@ -1126,6 +1127,10 @@ class HierarchicalSearch:
             results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
             self.timings["leaf"] += time.perf_counter() - t0
         self.timings["leaf_compute"] += _batches.STEP_COMPUTE_SECONDS - compute0
+        # A GPU plan's first call resolves the plan (per-plan setup): setup, not leaf time.
+        planned = _hierarchical.PLAN_SETUP_SECONDS - setup0
+        self.timings["leaf"] -= planned
+        self.timings["setup"] += planned
         return leaves, jobs, where, deferred, results
 
     def _finish_leaves(self, step, submitted):
@@ -1135,6 +1140,7 @@ class HierarchicalSearch:
             return
         leaves, jobs, where, deferred, results = submitted
         t0 = time.perf_counter()
+        setup0 = _hierarchical.PLAN_SETUP_SECONDS
         if deferred:
             results = [r.result() for r in results]
         found = []
@@ -1152,7 +1158,9 @@ class HierarchicalSearch:
                 if e is not None:
                     scales[c] = e
             found.append((lf, peaks, scales))
-        self.timings["leaf"] += time.perf_counter() - t0
+        planned = _hierarchical.PLAN_SETUP_SECONDS - setup0
+        self.timings["leaf"] += time.perf_counter() - t0 - planned
+        self.timings["setup"] += planned
         if step.on_peaks is not None:
             t0 = time.perf_counter()
             compute0 = _batches.STEP_COMPUTE_SECONDS

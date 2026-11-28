@@ -139,6 +139,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   refilter calls ran (single-template steps, and gated leaf steps for every template) spent in
   the extension; `tools/search_bench.py --followups` makes pycbc_inspiral_fir's follow-ups in
   its hooks (tools/golden.py's follow-up hook) and prints it as the hooks' compute fraction.
+- A run of gated leaf steps records each step's batch time in its plan from the extension
+  (a buffer the plan owns, folded into `performance_stats` when read, with the same counts,
+  extremes and ring of the last 256 times), so it does no Python per step; and a GPU bank's
+  single-template call that runs on the CPU goes straight to its group's single-template step.
+- Accounting on a GPU: a plan's resolution in its first call (`_gpu_calibration`: chain, band
+  fractions and thresholds; per-plan setup) is booked in `HierarchicalSearch.timings["setup"]`
+  instead of `"leaf"`, as on the CPU; when it runs is unchanged. With `MF_GPU_TIMING=1` Vulkan
+  records each submission's device interval, so `_gputime.busy` (the union over the device's
+  queues) is no longer zero there. `tools/search_bench.py` reads it after collecting the
+  contexts' logs (Vulkan resolves its timestamps there), prints the device compute fraction
+  (device busy over steady wall) beside the submissions' summed device time, and prints the
+  setup passes by stage, where the booking shows.
 - The calls a consumer's hooks make back into a hierarchical search, per trigger, repeat less
   work: a single-template follow-up (`PeaksContext.refilter`) runs its one job through the
   batched follow-up path without building a batch around it, and on a GPU bank whose call

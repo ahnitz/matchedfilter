@@ -112,7 +112,9 @@ together with the inner correlations they read (`correlate_and_filter_many`). `H
 the seconds spent per stage (`root`, `inner`, `leaf`, `hooks`, `setup`); of `leaf`, the
 seconds the CPU leaf steps spent in the extension (`leaf_compute`); and of `hooks`, the
 seconds the steps the hooks' refilter calls ran (single-template steps, and gated leaf steps
-for every template) spent there (`hooks_compute`).
+for every template) spent there (`hooks_compute`). A GPU plan's resolution in its first
+call (chain, band fractions, thresholds) is per-plan setup and is booked in `setup`, as on the
+CPU, not in `leaf`.
 
 ## Exactness of the threshold envelope
 

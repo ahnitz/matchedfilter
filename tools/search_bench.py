@@ -130,6 +130,7 @@ def main():
         follow_up = _follow_up(205, 50)
     tot = {"setup_s": 0.0, "steady_s": 0.0, "work": 0.0}
     stage = {}
+    setup_stage = {}
     kernels = {}
     from matchedfilter import _gputime as gputime
     from matchedfilter import _roofline as rl
@@ -147,6 +148,8 @@ def main():
             search.run(inputs, windows=windows, on_series=noop, on_peaks=on_peaks, on_chunk=noop)
         tot["setup_s"] += time.perf_counter() - t0
         base = dict(search.timings)
+        for k, v in base.items():
+            setup_stage[k] = setup_stage.get(k, 0.0) + v
         if gputime.enabled():
             gputime.collect(clear=True)
             gputime.busy(clear=True)
@@ -169,12 +172,14 @@ def main():
                 roof["ticks"][k] = roof["ticks"].get(k, 0) + v
             roof["ctx"] = roof["ctx"] or rl.gpu_context(fines)
         if gputime.enabled():
-            dev_s = gputime.busy(clear=True)[0] / a.repeats
-            tot["device_s"] = tot.get("device_s", 0.0) + dev_s
+            # collect first: Vulkan resolves its timestamps, and so records the intervals
+            # busy() unites, only when its log is collected
             for lab, (n, ms) in gputime.collect(clear=True).items():
                 k = kernels.setdefault(lab, [0, 0.0])
                 k[0] += n / a.repeats
                 k[1] += ms / 1e3 / a.repeats
+            dev_s = gputime.busy(clear=True)[0] / a.repeats
+            tot["device_s"] = tot.get("device_s", 0.0) + dev_s
         tot["steady_s"] += dt
         tot["work"] += nt * secs
         for k, v in search.timings.items():
@@ -190,6 +195,11 @@ def main():
     for k in ("root", "inner", "leaf", "hooks", "setup"):
         if k in stage:
             print("  %-6s %8.3f s/pass  %5.1f%%" % (k, stage[k], 100 * stage[k] / s))
+    # the setup passes by stage: a plan's per-plan setup is booked in setup, wherever it runs
+    print("setup passes by stage: " + ", ".join(
+        "%s %.2f s" % (k, setup_stage[k]) for k in ("root", "inner", "leaf", "hooks", "setup")
+        if k in setup_stage) + "; leaf + setup %.2f s"
+        % (setup_stage.get("leaf", 0.0) + setup_stage.get("setup", 0.0)))
     if stage.get("leaf_compute") and stage.get("leaf"):
         print("  leaf compute fraction (CPU leaf steps in the extension) %.3f s/pass = %.1f%% of leaf"
               % (stage["leaf_compute"], 100 * stage["leaf_compute"] / stage["leaf"]))
@@ -197,8 +207,12 @@ def main():
         print("  hooks compute fraction (the refilters' steps in the extension) %.3f s/pass = "
               "%.1f%% of hooks" % (stage["hooks_compute"], 100 * stage["hooks_compute"] / stage["hooks"]))
     if "device_s" in tot:
-        print("  device busy (MF_GPU_TIMING) %.3f s/pass = %.1f%% of steady wall"
-              % (tot["device_s"], 100 * tot["device_s"] / s))
+        # the union of the device's intervals; the label sums below count each submission
+        # (overlapping ones twice, and k: marks again inside their submissions)
+        labelled = sum(sec for lab, (_, sec) in kernels.items() if not lab.startswith("k:"))
+        print("  device compute fraction (device busy, MF_GPU_TIMING) %.3f s/pass = %.1f%% of "
+              "steady wall; submissions' device time summed %.3f s/pass"
+              % (tot["device_s"], 100 * tot["device_s"] / s, labelled))
         for lab, (n, sec) in sorted(kernels.items(), key=lambda kv: -kv[1][1])[:12]:
             print("    %-28s %8.0f submissions/pass %8.3f s/pass" % (lab, n, sec))
     r = None
@@ -223,7 +237,7 @@ def main():
                    tops=len(files), repeats=a.repeats, warmup=a.warmup,
                    steady_s=s, templates_real_time=tot["work"] / s,
                    host_cpu_s=tot.get("host_cpu_s"), setup_s=tot["setup_s"],
-                   stages=stage, device_busy_s=tot.get("device_s"),
+                   stages=stage, setup_stages=setup_stage, device_busy_s=tot.get("device_s"),
                    labels={k: dict(per_pass=v[0], seconds=v[1]) for k, v in kernels.items()},
                    roofline=r, env={k: v for k, v in os.environ.items() if k.startswith("MF_")})
         try:

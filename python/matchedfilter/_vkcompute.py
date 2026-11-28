@@ -1756,6 +1756,11 @@ class Context(KernelRoles, Executor, InputUploads):
                 self.timing_rejected = getattr(self, "timing_rejected", 0) + 1
             else:
                 self.timing_log.append((label, ms))
+                # The submission's interval on the device's timestamp clock, which every
+                # queue and context of the device shares: _gputime.busy takes the union.
+                start = (int(out[0]) & ((1 << getattr(self, "timestamp_bits", 64)) - 1)) \
+                    * self._ts_period * 1e-9
+                _gputime.INTERVALS.append((start, start + ms * 1e-3))
 
     def _x_timings(self):
         self._timestamp_resolve()

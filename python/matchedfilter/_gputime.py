@@ -8,8 +8,10 @@ import weakref
 from . import _config
 
 _CONTEXTS = weakref.WeakSet()
-#: (start_s, end_s) device intervals on one host-comparable clock, from backends that report
-#: absolute command-buffer times (Metal GPUStartTime/GPUEndTime). busy() takes their union.
+#: (start_s, end_s) device intervals on one clock per device, from backends that report
+#: absolute times: Metal's command-buffer GPUStartTime/GPUEndTime, and Vulkan's timestamp
+#: pairs (every queue of a device shares its timestamp clock). busy() takes their union, so
+#: it is for one device at a time.
 INTERVALS = []
 
 

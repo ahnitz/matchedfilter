@@ -195,3 +195,12 @@ library chooses the execution.
   The cycle was step 2's: the compiled leaf steps a bank keeps held the banks of their batch.
   They hold them by weak reference now, and the job's peak is 1.6 GB, as before step 2,
   against 4.2 GB.
+- 2026-11-27: accounting corrections from the phase 0 baseline. A GPU plan's resolution in
+  its first call (`HierarchicalFilter._gpu_calibration`) is booked as setup, not leaf, in
+  `HierarchicalSearch.timings`; Vulkan records each submission's device interval, so
+  `_gputime.busy` reads the device-busy time there; `tools/search_bench.py` reads it after
+  collecting the contexts' logs, prints the device compute fraction and the setup passes by
+  stage. On the three capture tops (Radeon 8060S) the setup passes' leaf went from 2.58-2.68 s
+  to 1.61-1.63 s and setup from 1.17-1.24 s to 2.16-2.20 s (sum 3.75-3.92 s either way);
+  device busy 0.142-0.144 s a pass, 70-74% of the steady wall, equal to the submissions'
+  summed device time; peaks identical.
