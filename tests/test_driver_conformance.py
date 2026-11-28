@@ -147,9 +147,12 @@ def _close(got, want, what):
 class Writer:
     """A slow writer of `out` (rows of spectra): its list fills out with NaN, makes `passes`
     forward transforms into a scratch buffer, and only then writes out -- so out holds NaN
-    while it runs. The list begins and ends with a barrier."""
+    while it runs. The list begins and ends with a barrier. memory (optional): where out and
+    the scratch lie, a callable nbytes -> device-only buffer (sections of an arena's block,
+    ArenaBlock); out is then read through a Reader only, not checked from the host."""
 
-    def __init__(self, maker, ctx, rng, rows=None, passes=None, captured=False, out_arg=False):
+    def __init__(self, maker, ctx, rng, rows=None, passes=None, captured=False, out_arg=False,
+                 memory=None):
         big = maker.big
         self.ctx = ctx
         self.rows = rows or (2048 if big else 4)
@@ -162,8 +165,11 @@ class Writer:
         self.starts = _upload(ctx, st)
         self.want = _spectra(self.x, st, self.nser)
         self.nbytes = self.rows * N * 8
-        self.out = ctx._x_alloc(self.nbytes, readback=True)
-        _nan_fill(ctx, self.out, self.nbytes)
+        if memory is None:
+            self.out = ctx._x_alloc(self.nbytes, readback=True)
+            _nan_fill(ctx, self.out, self.nbytes)
+        else:
+            self.out = memory(self.nbytes)
         fwd = ctx._x_kernel("forward", N)
         lst = ctx._x_list("writer")
         out = Arg("out") if out_arg else self.out
@@ -179,14 +185,16 @@ class Writer:
             if not out_arg:
                 lst.fill(out, 0xFFFFFFFF)
                 lst.barrier()
-            self.scratch = ctx._x_alloc(self.nbytes) if self.passes else None
+            self.scratch = None
+            if self.passes:
+                self.scratch = (ctx._x_alloc if memory is None else memory)(self.nbytes)
             for _ in range(self.passes):
                 lst.dispatch(fwd, self.rows, [self.series, self.starts, self.scratch],
                              (self.nser, 0))
                 lst.barrier()
             lst.dispatch(fwd, self.rows, [self.series, self.starts, out], (self.nser, 0))
             lst.barrier()
-        if not out_arg:
+        if not out_arg and memory is None:
             lst.readback(self.out, self.nbytes)
         self.native = lst.end()
 
@@ -201,9 +209,10 @@ class Writer:
 class Reader:
     """A quick reader of a writer's output, in context ctx: a forward transform of a few of
     its rows into its own readback buffer (a list beginning and ending with a barrier).
-    passes > 0 makes it slow instead (that many transforms into a scratch buffer first)."""
+    passes > 0 makes it slow instead (that many transforms into a scratch buffer first, in
+    `memory` if given: see Writer)."""
 
-    def __init__(self, ctx, writer, passes=0):
+    def __init__(self, ctx, writer, passes=0, memory=None):
         self.ctx, self.writer = ctx, writer
         picks = sorted({0, writer.rows // 2, writer.rows - 1})
         self.count = len(picks)
@@ -218,7 +227,9 @@ class Reader:
         fwd = ctx._x_kernel("forward", N)
         lst = ctx._x_list("reader")
         lst.barrier()
-        self.scratch = ctx._x_alloc(self.nbytes) if passes else None
+        self.scratch = None
+        if passes:
+            self.scratch = (ctx._x_alloc if memory is None else memory)(self.nbytes)
         for _ in range(passes):
             lst.dispatch(fwd, self.count, [writer.out, self.starts, self.scratch], (nser, 0))
             lst.barrier()
@@ -229,6 +240,22 @@ class Reader:
 
     def check(self, what="reader output"):
         _close(_read(self.ctx, self.out, np.complex64, self.count * N), self.want, what)
+
+
+class ArenaBlock:
+    """Memory for Writer and Reader as a packed arena lays it out (_gpuhost.Arena):
+    consecutive sections of one device-only buffer of ctx, at the arena's alignment."""
+
+    def __init__(self, ctx, nbytes):
+        self.ctx, self.used = ctx, 0
+        self.align = max(256, int(ctx.props.offset_alignment))
+        self.block = ctx._x_alloc(nbytes)
+
+    def __call__(self, nbytes):
+        section = self.ctx._x_section(self.block, self.used, nbytes)
+        self.used += -(-nbytes // self.align) * self.align
+        assert self.used <= self.block.nbytes, "the test's arena block is too small"
+        return section
 
 
 SLOTS = [None, 0, 1]
@@ -864,6 +891,49 @@ def test_a_run_outside_a_fused_batch_follows_its_pending_writes(make):
         a.settle_writes()
 
 
+# ---- C16c: sections of one buffer, as a packed arena lays them out -------------------------
+@pytest.mark.parametrize("case", ["slot waited", "slot in flight", "deferred",
+                                  "pending, other slot", "pending, other context", "fused"])
+def test_runs_over_sections_of_one_buffer_keep_the_contract(make, case):
+    """Runs whose buffers are sections of one device-only buffer, as a packed arena gives
+    them to its tenants (_gpuhost.Arena), keep the contract as runs over buffers of their
+    own: a slow writer's output and scratch and a quick reader's scratch lie in one buffer,
+    and the reader reads the writer's output after it on the same slot (waited or left in
+    flight), as deferred work of its own submission, after it as a pending write on another
+    slot or in another context, and after it in a fused batch. On a device that orders work
+    by allocation (Metal) these runs are ordered whatever the driver does; elsewhere only the
+    driver's own ordering orders them, and the reader reads NaN or zeros without it."""
+    a, b = make(), make()
+    rows = 2048 if make.big else 4
+    block = ArenaBlock(a, 3 * rows * N * 8 + (1 << 20))
+    w = Writer(make, a, np.random.default_rng(21), memory=block)
+    reader_ctx = b if case == "pending, other context" else a
+    r = Reader(reader_ctx, w, passes=1, memory=block)
+    if case.startswith("slot"):
+        wait = a._x_submit(w.native, {}, 1)
+        a._x_run(r.native, case == "slot waited", None, 1)
+        a.settle_writes()
+        wait()
+    elif case == "deferred":
+        a._x_run(r.native, True, None, 1, pre=[(w.native, {})])
+    elif case == "fused":
+        close = _gpuexec.fused()
+        try:
+            a._x_run(w.native, False)
+            a._x_run(r.native, False)
+        finally:
+            close()
+        a.settle_writes()
+    else:
+        a._x_run(w.native, False, None, 0)
+        reader_ctx._x_run(r.native, True, None, 1)
+        a.settle_writes()
+    r.check("a reader of a section after its writer (%s)" % case)
+    for ctx, native in ((a, w.native), (reader_ctx, r.native)):
+        ctx._x_release(native, done=True)
+    a._x_free(block.block)
+
+
 # ---- idle and readers ----------------------------------------------------------------------
 def test_idle_waits_for_every_run_of_the_context(make):
     """_x_idle() returns after every run the context submitted has finished: waited, left in
@@ -949,7 +1019,8 @@ PROPERTY_TYPES = {
     "subgroup_size": _positive,
     "subgroup_range": lambda v: v is None or (len(v) == 2 and 0 < v[0] <= v[1]),
     "unified_memory": _flag, "managed_inputs": _flag, "offset_views": _flag,
-    "host_pointer_views": _flag, "shared_queue": _flag, "fp16": _flag,
+    "host_pointer_views": _flag, "shared_queue": _flag, "allocation_hazards": _flag,
+    "fp16": _flag,
     "cache_budget": _positive,
     "memory_budget": lambda v: v is None or _positive(v),
     "device_root": _flag,

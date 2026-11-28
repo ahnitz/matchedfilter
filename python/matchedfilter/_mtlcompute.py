@@ -598,6 +598,13 @@ class Context(KernelRoles, Executor, InputUploads):
             host_pointer_views=True,
             # Each context has its own queue (newCommandQueue above).
             shared_queue=False,
+            # Buffers are made with Metal's default hazard tracking, which orders work per
+            # MTLBuffer (and per MTLHeap for a heap's buffers): stated. Measured on an M2
+            # (2026-11-28): eight one-group kernels on sections of one buffer, in eight
+            # command buffers, took 8.0 times one kernel, on buffers of their own 5.0; a
+            # search whose plans' scratch were sections of shared arena blocks ran 9.6% slower
+            # than with a buffer per section (search_bench 0.926 against 0.846 s a pass).
+            allocation_hazards=True,
             # Apple AGX executes fp16 at the fp32 rate (no 2x packed half2 throughput
             # win): stated, for the constants step.
             fp16=False, cache_budget=self.cache_limit_bytes, memory_budget=None,

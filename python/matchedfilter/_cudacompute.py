@@ -838,7 +838,8 @@ class Context(KernelRoles, Executor, InputUploads):
             unified_memory=False, managed_inputs=True,
             # Unified addressing: a view inside a shared allocation is a device pointer.
             offset_views=True, host_pointer_views=False, shared_queue=False,
-            fp16=True, cache_budget=self.cache_limit_bytes, memory_budget=None,
+            # Streams and events order work, not the allocations it binds.
+            allocation_hazards=False, fp16=True, cache_budget=self.cache_limit_bytes, memory_budget=None,
             device_root=self.device_root)
 
     def _attr(self, attr):

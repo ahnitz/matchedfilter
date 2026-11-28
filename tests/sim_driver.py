@@ -375,7 +375,7 @@ def stated_props(**values):
                  max_dispatch_x=2 ** 31 - 1, max_binding_bytes=None, offset_alignment=16,
                  subgroup_size=32, subgroup_range=None, unified_memory=True,
                  managed_inputs=False, offset_views=False, host_pointer_views=False,
-                 shared_queue=False, fp16=True, cache_budget=512 * 1024 * 1024,
+                 shared_queue=False, allocation_hazards=False, fp16=True, cache_budget=512 * 1024 * 1024,
                  memory_budget=None, device_root=False)
     props.update(values)
     return DeviceProps(**props)

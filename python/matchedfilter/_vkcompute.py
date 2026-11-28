@@ -1269,8 +1269,9 @@ class Context(KernelRoles, Executor, InputUploads):
             # discrete card would need one: _Buffer's docstring).
             unified_memory=True, managed_inputs=False, offset_views=False,
             host_pointer_views=False,
-            # Every context submits to the device's queues (_SHARED: queue).
-            shared_queue=True,
+            # Every context submits to the device's queues (_SHARED: queue); barriers order
+            # work, not the buffers it binds.
+            shared_queue=True, allocation_hazards=False,
             # Stated for every Vulkan device, not measured (the constants step).
             fp16=True, cache_budget=self.cache_limit_bytes,
             memory_budget=None, device_root=self.device_root)

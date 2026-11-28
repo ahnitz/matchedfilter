@@ -3,8 +3,9 @@ recycled across leases, and nothing that outlives a lease mistaking a recycled s
 previous tenant.
 
 Each recycle test runs on the simulated driver (tests/sim_driver.py) as a device whose host sees
-device memory in place and as one whose host does not (whose arena holds device-only scratch
-only, as CUDA's), and on the host's GPU; each checks its property through the device (sections
+device memory in place, as one whose host does not (whose arena holds device-only scratch only,
+as CUDA's) and as one that orders work by allocation (whose arena gives each section a block of
+its own, as Metal's), and on the host's GPU; each checks its property through the device (sections
 written and read by kernels), and, where the arena holds host-addressed arrays, through them
 too. The search tests need a GPU: they compare a search's peaks after another search has used the arena
 with its peaks without an arena.
@@ -54,15 +55,19 @@ class _Device:
             ctx.destroy()
 
 
-@pytest.fixture(params=["sim", "sim-device-only", "device"])
+@pytest.fixture(params=["sim", "sim-device-only", "sim-allocation-hazards", "device"])
 def device(request):
     """The simulated driver as a device whose host sees device memory in place (its arena
     holds every kind and host arrays), as one whose host does not (unified_memory False, as
-    CUDA: its arena holds device-only scratch only), and the host's GPU."""
+    CUDA: its arena holds device-only scratch only), and as one that orders work by
+    allocation (allocation_hazards, as Metal: its arena gives each section a block of its
+    own); and the host's GPU."""
     if request.param == "device":
         dev = _Device(gpu_backend())
     elif request.param == "sim-device-only":
         dev = _Device("sim", props=dict(unified_memory=False))
+    elif request.param == "sim-allocation-hazards":
+        dev = _Device("sim", props=dict(allocation_hazards=True))
     else:
         dev = _Device("sim")
     yield dev
@@ -187,6 +192,37 @@ def test_a_lease_lays_out_aligned_sections_and_the_next_lease_reuses_its_blocks(
     assert arena.made == 2 and big.base is not first[0].base and big.offset == 0
     lease.end()
     assert arena.leases == 2 and arena.lease is None
+
+
+def test_a_device_that_orders_work_by_allocation_gets_a_block_per_section():
+    """Where the device orders work by allocation (allocation_hazards, as Metal), every
+    section is a block of its own: the smallest free block that holds it at no more than
+    twice its size, else a new block of its size; a later lease taking the same sizes in
+    another order makes no block, and a section never lies in a block more than twice its
+    size."""
+    dev = _Device("sim", props=dict(allocation_hazards=True))
+    try:
+        ctx, arena = dev.make(), dev.arena()
+        sizes = (100, 4096, 3 << 20, 4096)
+        lease = arena.begin()
+        first = [lease.take(ctx, nbytes) for nbytes in sizes]
+        assert [s.offset for s in first] == [0] * 4
+        assert len({id(s.base) for s in first}) == 4 and arena.made == 4
+        assert [s.base.nbytes for s in first] == [256, 4096, 3 << 20, 4096]
+        lease.end()
+        lease = arena.begin()
+        again = [lease.take(ctx, nbytes) for nbytes in reversed(sizes)]
+        assert arena.made == 4, "a lease of the same sizes made a block"
+        assert sorted(id(s.base) for s in again) == sorted(id(s.base) for s in first)
+        small = lease.take(ctx, 300)        # no free block within twice its size
+        assert arena.made == 5 and small.base.nbytes == 512
+        lease.end()
+        lease = arena.begin()
+        tiny = lease.take(ctx, 16)          # the 256-byte block, not the 512-byte one
+        assert tiny.base is first[0].base
+        lease.end()
+    finally:
+        dev.close()
 
 
 def test_one_lease_is_in_force_at_a_time(sim):
@@ -367,6 +403,7 @@ def test_outputs_after_a_recycle_are_the_new_tenants(device, monkeypatch):
     rng = np.random.default_rng(3)
     firsts = ([0, 900, 4000], [10, 2000, 5100])
     arena = device.arena()
+    made = []
     for turn in range(3):
         lease = arena.begin()
         order = (0, 1) if turn % 2 == 0 else (1, 0)
@@ -388,12 +425,14 @@ def test_outputs_after_a_recycle_are_the_new_tenants(device, monkeypatch):
         lease.end()
         for ctx in ctxs:
             assert not _owning(ctx, lease), "a record of an ended lease was kept"
-    assert arena.made == 1      # one block of device-only scratch
+        made.append(arena.made)
+    assert made[0] == made[-1], "a lease after the first made a block"
     if not arena.holds(upload=True):
         return
     # host-addressed spectra, written by forwards into a lease's arrays
     arena = device.arena()
     plans = [(_series(c, rng, 6 * N), np.array(s, np.uint32)) for c, s in zip(ctxs, firsts)]
+    made = []
     for turn in range(3):
         lease = arena.begin()
         order = (0, 1) if turn % 2 == 0 else (1, 0)
@@ -409,7 +448,8 @@ def test_outputs_after_a_recycle_are_the_new_tenants(device, monkeypatch):
         lease.end()
         for ctx in ctxs:
             assert not _owning(ctx, lease), "a record of an ended lease was kept"
-    assert arena.made == 2      # one block of each kind taken (spectra, staged starts)
+        made.append(arena.made)
+    assert made[0] == made[-1], "a lease after the first made a block"
 
 
 def test_a_lease_holds_its_tenants_weakly_and_frees_without_the_collector(device):

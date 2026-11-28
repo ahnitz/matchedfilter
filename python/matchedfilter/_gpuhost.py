@@ -6,6 +6,7 @@ how results are laid out, never how. Each backend keeps its own submission mecha
 helpers for the parts that must agree across backends.
 """
 
+from bisect import bisect_left
 from collections import OrderedDict
 import ctypes
 import itertools
@@ -333,6 +334,14 @@ class DeviceProps:
                               so work of one can be ordered behind another's in stream
                               (zeroing coalesced into an earlier context's submission):
                               Vulkan True; CUDA, Metal False.
+      allocation_hazards      whether the device orders work by allocation: a run that
+                              binds any part of an allocation waits for every earlier run
+                              that may write any part of it, on any queue, so work on
+                              buffers that share an allocation never overlaps (an arena then
+                              gives each section an allocation of its own, Arena). Metal
+                              True (automatic hazard tracking, per MTLBuffer and per
+                              MTLHeap); Vulkan, CUDA False (only the driver contract's
+                              barriers, queues and streams order work).
       fp16                    whether packed half-precision tiers run at twice the fp32
                               rate, so the fp16 tier 1 and its gate-way timing are offered:
                               Vulkan, CUDA True; Metal False (stated: AGX runs fp16 at the
@@ -357,7 +366,8 @@ class DeviceProps:
               "max_dispatch_x",
               "max_binding_bytes", "offset_alignment", "subgroup_size", "subgroup_range",
               "unified_memory", "managed_inputs", "offset_views", "host_pointer_views",
-              "shared_queue", "fp16", "cache_budget", "memory_budget", "device_root")
+              "shared_queue", "allocation_hazards", "fp16", "cache_budget", "memory_budget",
+              "device_root")
     __slots__ = FIELDS
 
     def __init__(self, **values):
@@ -684,6 +694,13 @@ class Arena:
     their own page-locked mirrors and staging, and the arena's blocks are plain device
     memory (_x_alloc without readback or upload), sized to what searches used.
 
+    How sections lie in blocks is what the device reports too. Where the device orders work
+    by allocation (DeviceProps.allocation_hazards: Metal), runs on sections of one block
+    would wait for each other whatever they touch, so every section is a block of its own:
+    the smallest free block of its kind that holds it and is at most twice its size, else a
+    new block of its size, kept for later leases as any block is. Elsewhere sections are
+    packed first fit in blocks of at least ARENA_BLOCK bytes.
+
     Persistent data -- a plan's templates and tap table -- is not in the arena: it lives as
     long as its plan, which can outlive a search's run, and residency checks (_gpu_cache)
     name it by allocation serial, which an arena section passing to another tenant would
@@ -716,6 +733,8 @@ class Arena:
         props = ctx.props
         self.align = max(256, int(props.offset_alignment))
         self.host_kinds = bool(props.unified_memory)
+        #: a block per section (DeviceProps.allocation_hazards), else sections packed
+        self.block_per_section = bool(props.allocation_hazards)
 
     def holds(self, readback=False, upload=False):
         """Whether the arena holds a buffer of this kind (see the class docstring)."""
@@ -790,6 +809,9 @@ class ArenaLease:
         self.used = {kind: [0] * len(blocks) for kind, blocks in arena.blocks.items()}
         #: (kind, aligned size) -> [(block index, offset)] given back during the lease
         self.free = {}
+        #: kind -> [(bytes, block index)] of the blocks no section of the lease lies in,
+        #: sorted (Arena.block_per_section; made at the kind's first request)
+        self.unused = {}
         self.plans = weakref.WeakValueDictionary()
         self.contexts = weakref.WeakValueDictionary()
         #: sections taken, and the bytes the lease's sections reached (aligned)
@@ -813,17 +835,32 @@ class ArenaLease:
         if reuse:
             index, offset = reuse.pop()
         else:
-            index = next((i for i, b in enumerate(blocks) if b.nbytes - used[i] >= size), None)
+            if arena.block_per_section:
+                # The smallest block no section of this lease lies in that holds it at no
+                # more than twice its size.
+                unused = self.unused.get(kind)
+                if unused is None:
+                    unused = self.unused[kind] = sorted(
+                        (b.nbytes, i) for i, b in enumerate(blocks) if not used[i])
+                j = bisect_left(unused, (size, -1))
+                index = (unused.pop(j)[1] if j < len(unused) and unused[j][0] <= 2 * size
+                         else None)
+            else:
+                index = next((i for i, b in enumerate(blocks) if b.nbytes - used[i] >= size),
+                             None)
             if index is None:
-                # Grow: a new block of at least ARENA_BLOCK bytes, at the end of the list.
-                blocks.append(arena.ctx._x_alloc(max(size, ARENA_BLOCK), readback=readback,
+                # Grow: a new block at the end of the list, of the section's size where a
+                # section is a block, else of at least ARENA_BLOCK bytes.
+                nbytes_block = size if arena.block_per_section else max(size, ARENA_BLOCK)
+                blocks.append(arena.ctx._x_alloc(nbytes_block, readback=readback,
                                                  upload=upload))
                 used.append(0)
                 arena.made += 1
                 index = len(blocks) - 1
             offset = used[index]
-            used[index] += size
-            self.bytes += size
+            taken = blocks[index].nbytes if arena.block_per_section else size
+            used[index] += taken
+            self.bytes += taken
             arena.peak_bytes = max(arena.peak_bytes, self.bytes)
         section = arena.ctx._x_section(blocks[index], offset, nbytes)
         section.lease = self
