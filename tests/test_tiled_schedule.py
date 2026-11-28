@@ -1,9 +1,11 @@
 """The tiled cascade of correlate_and_filter_many is a schedule of the step table
 (_batches._cascade_steps, _core.HMFTable's ops): per time tile the middle correlation steps
-into a scratch slot, the leaf slices that are ready, the copies to the output and the collars
-carried. Its peaks are, to the bit and in order, the untiled schedule's in every retain mode;
-its middle output is too wherever it is written whole; and with retain_radius > 0 the
-executor writes the output exactly around the leaf peaks it found (a data-dependent copy)."""
+and the leaf slices that are ready. Where the output is written whole the steps write it and
+the leaves read it in place; otherwise the steps write a scratch slot, and copies to the
+output and collars are carried. Its peaks are, to the bit and in order, the untiled
+schedule's in every retain mode; its middle output is too wherever it is written whole; and
+with retain_radius > 0 the executor writes the output exactly around the leaf peaks it found
+(a data-dependent copy)."""
 import numpy as np
 import pytest
 
@@ -102,3 +104,26 @@ def test_retained_output_is_written_around_the_peaks_the_executor_found():
         assert np.array_equal(got[near & (want != 0)], want[near & (want != 0)])
         checked += int(pos.size)
     assert checked > 0
+
+
+@pytest.mark.parametrize("retain_radius", [None, 0])
+def test_a_written_output_is_the_tile_the_leaves_read(retain_radius):
+    """Where the output is written whole, the tiled schedule's leaf steps read the output's
+    rows in place and the table holds no scratch pool (its tiles are the two carries); where
+    it is not written, they read the middle bank's scratch rows."""
+    corr, leaf, pair = _banks()
+    outs = [np.zeros((3, S), np.complex64) for _ in pair]
+    corr_jobs = [(corr, s, dict(windows=[(6000, 30000), (30300, S - 6000)],
+                                templates=[0, 2, 3], out=o)) for s, o in zip(pair, outs)]
+    leaf_jobs = [(leaf, o[r], dict(windows=[(9000, 29000), (36000, S - 9000)]))
+                 for o in outs for r in range(3)]
+    leaf_by_corr, _ = _batches._leaves_by_producer(corr_jobs, leaf_jobs)
+    screened_out, cohorts, _ = _batches._tiling_cohorts(corr_jobs, leaf_by_corr, 1 << 18)
+    cascade = _batches._cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, cohorts,
+                                      1 << 18, retain_radius, 0.0)
+    leaf_series = cascade.series[-len(cascade.steps.calls):]
+    in_place = [any(np.shares_memory(a, o) for o in outs) for a in leaf_series]
+    if retain_radius is None:
+        assert all(in_place) and len(cascade.tiles) == 2
+    else:
+        assert not any(in_place) and len(cascade.tiles) == 4

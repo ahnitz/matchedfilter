@@ -261,11 +261,14 @@ _TILED_CORR_KEYS = frozenset(("windows", "scales", "templates", "out", "out_supp
 _TILED_LEAF_KEYS = frozenset(("windows", "binsize", "threshold", "template_index", "profile"))
 
 
-def _template_batches(corr_bank, sel_arr, n_out_rows):
+def _template_batches(corr_bank, sel_arr, n_out_rows, direct):
     """The cohort's output rows by template group of the middle bank, each group's rows cut
-    into batches of consecutive templates (up to 8 at n <= 4096, 4 at 8192, else 1) that one
-    correlation call fills. Returns the groups as (group, [(local template, output row)],
-    batches), each output row's slot within its batch, and the largest batch."""
+    into batches of consecutive templates that one correlation step fills: with ``direct``
+    (the steps write the output itself) every run of templates consecutive in the group and
+    in the output, as the untiled steps take them; otherwise (they write the scratch rows)
+    up to 8 at n <= 4096, 4 at 8192, else 1. Returns the groups as (group, [(local template,
+    output row)], batches), each output row's slot within its batch, and the largest
+    batch."""
     grp_rows_map = {}
     if sel_arr is not None:
         for out_row, tmpl_id in enumerate(sel_arr):
@@ -292,7 +295,7 @@ def _template_batches(corr_bank, sel_arr, n_out_rows):
     max_kr = 1
     for g_m, row_pairs in grp_work:
         nt_sel_g = len(row_pairs)
-        max_kr_g = 8 if g_m.n <= 4096 else (4 if g_m.n == 8192 else 1)
+        max_kr_g = nt_sel_g if direct else (8 if g_m.n <= 4096 else (4 if g_m.n == 8192 else 1))
         batches = []
         k_cur = 0
         while k_cur < nt_sel_g:
@@ -302,14 +305,14 @@ def _template_batches(corr_bank, sel_arr, n_out_rows):
                 k_end < nt_sel_g
                 and k_end - k_cur < max_kr_g
                 and row_pairs[k_end][0] == li0 + (k_end - k_cur)
+                and (not direct or row_pairs[k_end][1] == row_pairs[k_cur][1] + (k_end - k_cur))
             ):
                 k_end += 1
             kr = k_end - k_cur
             if kr > max_kr:
                 max_kr = kr
             b_rows = tuple(row_pairs[k][1] for k in range(k_cur, k_end))
-            b_contig_out = all(b_rows[q] == b_rows[0] + q for q in range(kr))
-            batches.append((k_cur, li0, kr, b_rows, b_contig_out))
+            batches.append((k_cur, li0, kr, b_rows))
             for q, r_out in enumerate(b_rows):
                 row_slot[r_out] = q
             k_cur = k_end
@@ -330,7 +333,7 @@ class _Ops:
     """A schedule being compiled: its ops (_core.c's HMF_OP_*, twelve int64 each) and the
     runs, rows and slices they read."""
 
-    CORR, POOL, STALE, ZERO, SCALE, COPY, COLLAR, LEAF, RETAIN, PENDING = 1, 3, 4, 5, 6, 7, 8, 9, 10, 11
+    CORR, POOL, STALE, ZERO, SCALE, COLLAR, LEAF, RETAIN, PENDING = 1, 3, 4, 5, 6, 8, 9, 10, 11
 
     def __init__(self):
         self.ops, self.args = [], []
@@ -377,10 +380,12 @@ def _tile_scratch(corr_bank, D, S, max_kr):
 
 
 def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
-    """Bind every leaf job of the cohort to the scratch row its series will be read from.
+    """Bind every leaf job of the cohort to the row its series will be read from.
 
     A leaf job's series is a row (or a real or imaginary lane) of a member's output; it is
-    filtered on the scratch row that holds that output row while its batch runs. Returns None
+    filtered on the scratch row that holds that output row while its batch runs, or, with
+    tbuf_det None (the correlation steps write the output itself), on its own series in
+    place. Returns None
     where a leaf job cannot run tiled (not a hierarchical bank on such a row, a threshold
     below the bank's, a plan that would have to switch its series mode within the cohort).
     Otherwise (the leaf calls on the scratch rows, as _compile_steps takes them; leaf job ->
@@ -404,7 +409,8 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
             out_row, rem_b = divmod(l_ser_raw.ctypes.data - out_lo, row_stride_bytes)
             if out_row < 0 or out_row >= n_out_rows:
                 return None
-            t_row_base = tbuf_det[d_idx][row_slot[out_row]]
+            t_row_base = (info.out[out_row] if tbuf_det is None
+                          else tbuf_det[d_idx][row_slot[out_row]])
             if l_ser_raw.dtype == np.complex64:
                 if rem_b != 0:
                     return None
@@ -438,11 +444,12 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
 
 def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
     """One chunk's work per template batch: the slices (step, first block, end block,
-    cluster, scratch row) of every leaf slab that ends within the chunk's horizon (the first
-    sample a later chunk writes), and the earliest sample a slab still waiting will read,
-    which is what must be carried to the next chunk. Advances each sub's slab cursor."""
+    cluster, row slot in the batch) of every leaf slab that ends within the chunk's horizon
+    (the first sample a later chunk writes), and the earliest sample a slab still waiting
+    will read, which is what must be carried to the next chunk. Advances each sub's slab
+    cursor."""
     chunk_batch_jobs = []
-    for k_r0, li0, kr, b_rows, b_contig_out in batches:
+    for k_r0, li0, kr, b_rows in batches:
         items = []
         for d_idx in range(D):
             for q, out_row in enumerate(b_rows):
@@ -487,27 +494,38 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
                         suf_min = sub.slab_info[-1]
                         if sub.cursor < suf_min.size:
                             min_fut = min(min_fut, int(suf_min[sub.cursor]))
-        chunk_batch_jobs.append((k_r0, li0, kr, b_rows, b_contig_out, items, min_fut))
+        chunk_batch_jobs.append((k_r0, li0, kr, b_rows, items, min_fut))
     return chunk_batch_jobs
 
 
 def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_out_rows,
                      eff_tile_bytes, retain_radius, retain_threshold, slots, carry_need):
-    """Compile one tiled cohort into the schedule: per template group of the middle bank, the
-    stale scratch cleared, the output's margins zeroed and scaled (where it is written), then
-    per time chunk (as many as keep a batch's span within eff_tile_bytes) and template batch:
-    the carried collar restored, the batch's correlation steps (every detector) into the
-    scratch rows, the rows copied to the output (or mirrored by the kernel, or copied around
-    the batch's peaks with retain_radius > 0), the leaf slabs that are ready filtered, and the
-    collar a later chunk's leaves read carried.
+    """Compile one tiled cohort into the schedule, per template group of the middle bank and
+    time chunk (as many as keep a batch's span within eff_tile_bytes).
+
+    Where the output is written whole (retain_radius None) there is no scratch: per group the
+    output's margins are zeroed and scaled, then per time chunk and template batch the
+    batch's correlation steps (every detector) write its rows of the output itself, as the
+    untiled steps do over every block (a batch is every template of a group that is one run
+    of the output, _template_batches), and the leaf slabs that are ready read those rows in
+    place, while they are in cache. Nothing is copied or carried.
+
+    Otherwise (retain_radius 0, the output is not written, or positive, written around the
+    leaves' peaks) per group the stale scratch is cleared (and, with retain_radius > 0, the
+    output's margins zeroed and scaled), then per time chunk and template batch: the carried
+    collar restored, the batch's correlation steps into the scratch rows, the leaf slabs that
+    are ready filtered on them, the rows copied to the output around the batch's peaks (with
+    retain_radius > 0), and the collar a later chunk's leaves read carried.
 
     ``slots`` is (first series slot of the detectors' series, first output slot of their
-    scratch rows, first output slot of their outputs, first correlation step, first scale
-    vector, the pool state tile, the pool tile, the first carry tile). carry_need[parity] is
-    raised to the samples the carries of that chunk parity hold. Returns the correlation step
-    tuples, the correlation plans, and per group the work counters (block length, counts)."""
+    scratch rows or None for none, first output slot of their outputs, first correlation
+    step, first scale vector, the pool state tile, the pool tile, the first carry tile).
+    carry_need[parity] is raised to the samples the carries of that chunk parity hold.
+    Returns the correlation step tuples, the correlation plans, and per group the work
+    counters (block length, counts)."""
     D = len(members)
     ser0, scr0, out0, step0, vec0, _, _, carry0 = slots
+    direct = scr0 is None
     corr_bank = members[0][1].bank
     corr_steps, corr_plans, work = [], [], []
     r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
@@ -553,10 +571,11 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                                         else g_m.template_indices[li_arr]).astype(np.int64)
 
         # the stale scratch an earlier group left where this group's blocks will not write
-        new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
         unwritten_at = ops.arg(unwritten_runs)
-        ops.op(_Ops.STALE, slots[5], D, max_batch_kr, unwritten_at, len(unwritten_runs),
-               new_dirty[0], new_dirty[1], scr0)
+        if not direct:
+            new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
+            ops.op(_Ops.STALE, slots[5], D, max_batch_kr, unwritten_at, len(unwritten_runs),
+                   new_dirty[0], new_dirty[1], scr0)
         # the output's margins zeroed and its unwritten samples scaled, where it is written
         rows_at = ops.arg(row_indices_arr)
         if retain_radius != 0:
@@ -594,7 +613,7 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                         raw_chunks.append((m_prev, m_next, hz))
                         m_prev = m_next
         n_chunks, n_batches = len(raw_chunks), len(batches)
-        need_collars = n_chunks > 1 and n_batches > 1
+        need_collars = n_chunks > 1 and n_batches > 1 and not direct
         pending = retain_radius is not None and retain_radius > 0 and n_chunks > 1
         if pending:
             ops.op(_Ops.PENDING, nt_sel_g)
@@ -621,12 +640,31 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                                  else np.empty((0, 2), dtype=np.int64))
                 bridges = (np.ascontiguousarray(chunk_bridges, np.int64)
                            if chunk_bridges.size else None)
-                t_runs_at = ops.arg(np.asarray(t_runs, np.int64).reshape(-1, 2))
             chunk_jobs = _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b,
                                            ck_idx + 1 < n_chunks)
             write_off = 0
             parity = ck_idx & 1
-            for b_idx, (k_r0, li0, kr, b_rows, b_contig_out, items, min_fut) in enumerate(chunk_jobs):
+            for b_idx, (k_r0, li0, kr, b_rows, items, min_fut) in enumerate(chunk_jobs):
+                if direct:
+                    # the batch's correlation steps into the output, then its ready slabs
+                    # on the rows in place (a slice's row slot is read only by OP_RETAIN)
+                    if has_b:
+                        first = step0 + len(corr_steps)
+                        for d_idx, (_, info) in enumerate(members):
+                            scaled = info.scales is not None
+                            corr_steps.append((
+                                ep_m, ser0 + d_idx, int(info.series.dtype == np.float32),
+                                out0 + d_idx, b_rows[0], None, li0, kr, st_c, bnd_c, lo_v,
+                                hi_v, bridges, vec0 + d_idx if scaled else -1,
+                                scale_entries[d_idx][k_r0:k_r0 + kr] if scaled else None,
+                                np.asarray(t_runs, dtype=np.int64).reshape(-1, 2) if scaled
+                                else None))
+                        ops.op(_Ops.CORR, first, first + D)
+                    if items:
+                        ops.op(_Ops.LEAF, ops.arg([(st, r0, r1, cl, 0)
+                                                   for st, r0, r1, cl, _ in items]),
+                               len(items), 0, thr_bits)
+                    continue
                 # the collar the previous chunk carried for this batch
                 if saved[b_idx] is not None:
                     lo_s, hi_s, par_s, off_s = saved[b_idx]
@@ -639,27 +677,18 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                     valid_lo = grp_min_col
                 else:
                     valid_lo = c_start if has_b else 0
-                # the batch's correlation steps, every detector, then its rows to the output
+                # the batch's correlation steps, every detector, into the scratch rows
                 if has_b:
                     first = step0 + len(corr_steps)
                     for d_idx, (_, info) in enumerate(members):
                         scaled = info.scales is not None
-                        mirrored = bridges is None and b_contig_out and not scaled
                         corr_steps.append((
                             ep_m, ser0 + d_idx, int(info.series.dtype == np.float32),
                             scr0 + d_idx, 0, None, li0, kr, st_c, bnd_c, lo_v, hi_v, bridges,
                             vec0 + d_idx if scaled else -1,
                             scale_entries[d_idx][k_r0:k_r0 + kr] if scaled else None,
-                            np.asarray(t_runs, dtype=np.int64).reshape(-1, 2) if scaled else None,
-                            out0 + d_idx if mirrored else -1, b_rows[0] if mirrored else -1))
-                    ops.op(_Ops.CORR, first, first + D, int(retain_radius is None))
-                    if retain_radius is None:
-                        for d_idx, (_, info) in enumerate(members):
-                            if info.scales is None and bridges is None and b_contig_out:
-                                continue            # mirrored by the kernel
-                            for q, r_out in enumerate(b_rows):
-                                ops.op(_Ops.COPY, scr0 + d_idx, q, out0 + d_idx, r_out,
-                                       t_runs_at, len(t_runs), 1)
+                            np.asarray(t_runs, dtype=np.int64).reshape(-1, 2) if scaled else None))
+                    ops.op(_Ops.CORR, first, first + D)
                 # the leaf slabs this batch made ready, every detector, as one batch
                 if items or r_pad:
                     ops.op(_Ops.LEAF, ops.arg(items), len(items), int(r_pad > 0), thr_bits)
@@ -711,10 +740,15 @@ def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_
             untiled_cohort_jobs.extend(ci for ci, _ in members)
             continue
         first = members[0][1]
+        # where the output is written whole, the steps write it and the leaves read it in
+        # place; otherwise through the bank's scratch rows
+        direct = retain_radius is None
         pre_grp_batches, row_slot, max_kr = _template_batches(
-            first.bank, first.selection, first.out.shape[0])
-        pool, state, stride_det, tbuf_det, need_total = _tile_scratch(
-            first.bank, len(members), first.S, max_kr)
+            first.bank, first.selection, first.out.shape[0], direct)
+        pool = state = stride_det = tbuf_det = need_total = None
+        if not direct:
+            pool, state, stride_det, tbuf_det, need_total = _tile_scratch(
+                first.bank, len(members), first.S, max_kr)
         bound = _bind_leaves(members, leaf_jobs, first.S, first.out.shape[0], row_slot, tbuf_det)
         if bound is None:
             untiled_cohort_jobs.extend(ci for ci, _ in members)
@@ -767,18 +801,20 @@ def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_
     for members, _, pool, state, _, tbuf_det, _ in tiled_parts:
         layouts.append((len(series), len(outs), len(scales), len(tiles)))
         series.extend(info.series for _, info in members)
-        outs.extend(tbuf_det)
+        if tbuf_det is not None:
+            outs.extend(tbuf_det)
         outs.extend(info.out for _, info in members)
         scales.extend(np.empty(0, np.float32) if info.scales is None else info.scales
                       for _, info in members)
-        tiles.extend((state, pool))
+        if pool is not None:
+            tiles.extend((state, pool))
     carry0 = len(tiles)
     carry_need = [0, 0]
 
     def schedule(steps, n_untiled_steps):
         # the untiled correlations first
         if n_untiled_steps:
-            ops.op(_Ops.CORR, 0, n_untiled_steps, 0)
+            ops.op(_Ops.CORR, 0, n_untiled_steps)
         # each tiled leaf call's steps, as subs of the scratch row its series is read from
         subs_by_row = [[[[] for _ in range(len(part[0]))] for _ in range(part[0][0][1].out.shape[0])]
                        for part in tiled_parts]
@@ -789,16 +825,18 @@ def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_
                 subs_by_row[p][out_row][d_idx].append(
                     _LeafSub(k, _layout_slabs(sl, int(ep.series_group()), g_f.n, S)))
         more_corrs, plans, banks, work = [], [], [], []
-        for p, ((members, pre_grp_batches, _, _, stride_det, _, need_total),
+        for p, ((members, pre_grp_batches, pool, _, stride_det, _, need_total),
                 (ser0, out0, vec0, tile0)) in enumerate(zip(tiled_parts, layouts)):
             D = len(members)
             first = members[0][1]
-            ops.op(_Ops.POOL, tile0, first.S, stride_det, tile0 + 1, need_total)
+            if pool is not None:
+                ops.op(_Ops.POOL, tile0, first.S, stride_det, tile0 + 1, need_total)
             c_steps, c_plans, c_work = _cohort_schedule(
                 ops, members, pre_grp_batches, subs_by_row[p], first.S, first.windows,
                 first.out.shape[0], eff_tile_bytes, retain_radius, retain_threshold,
-                (ser0, out0, out0 + D, n_untiled_steps + len(more_corrs), vec0, tile0,
-                 tile0 + 1, carry0), carry_need)
+                (ser0, None if pool is None else out0, out0 if pool is None else out0 + D,
+                 n_untiled_steps + len(more_corrs), vec0, tile0, tile0 + 1, carry0),
+                carry_need)
             more_corrs.extend(c_steps)
             plans.extend(c_plans)
             banks.append((weakref.ref(first.bank), first.bank._groups))
@@ -1431,7 +1469,7 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True, scheduled=
                                st if st.size else None, bounds if st.size else None, lo, hi,
                                clear, c if with_scales else -1,
                                out_rows if with_scales else None,
-                               np.array([[0, S]], np.int64) if with_scales else None, -1, -1))
+                               np.array([[0, S]], np.int64) if with_scales else None))
             if st.size:
                 n_work = counters.setdefault(g.n, dict(blocks=0, pairs=0, out_samples=0,
                                                        tmpl_values=0))

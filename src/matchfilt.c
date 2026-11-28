@@ -962,8 +962,6 @@ typedef struct {
 static pthread_mutex_t corr_fwd_mu = PTHREAD_MUTEX_INITIALIZER;
 static corr_fwd_entry corr_fwd_tab[16];
 static unsigned corr_fwd_hand;
-static __thread float *corr_mirror_dst;
-static __thread size_t corr_mirror_stride;
 
 #if defined(__x86_64__) && defined(__GNUC__)
 __attribute__((target("avx512f")))
@@ -1031,11 +1029,6 @@ static void fast_nt_copy(float *dst, const float *src, size_t bytes){
   out_copy(dst, src, bytes, 1);
 }
 
-void ap_mf_set_corr_mirror(float *dst, size_t stride){
-  corr_mirror_dst = dst;
-  corr_mirror_stride = stride;
-}
-
 void ap_mf_stream_copy(float *dst, const float *src, size_t bytes){
   fast_nt_copy(dst, src, bytes);
 }
@@ -1068,10 +1061,6 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                                       size_t nseries,const size_t *starts,
                                       int nblocks,size_t lo,size_t hi,
                                       int t0,int nt,float *out,const size_t *bounds){
-  float *mirror_dst = corr_mirror_dst;
-  const size_t mirror_stride = corr_mirror_stride;
-  corr_mirror_dst = NULL;
-  corr_mirror_stride = 0;
   if(!p||!series||!starts||!out||nblocks<1||nt<1||!ap_range_ok(t0,nt,p->nt)
      ||lo>=hi||hi>p->n) return -1;
   if(bounds)
@@ -1090,24 +1079,6 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   }
   const size_t llc = llc_bytes();
   const size_t cache_lim = llc >= (16u<<20) ? llc/2 : (12u<<20);
-  if(mirror_dst && ((!W && !p->gmajor)
-     || nt >= p->nt
-     || (size_t)nblocks * (2 * n * sizeof(float)) > cache_lim)){
-    if(ap_mf_correlate_series_continuous(p, series, nseries, starts, nblocks,
-                                         lo, hi, t0, nt, out, bounds))
-      return -1;
-    for(int b = 0; b < nblocks; b++){
-      const size_t start = starts[b];
-      const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
-      if(start >= nseries || blo >= nseries - start) continue;
-      const size_t end = bhi < nseries - start ? bhi : nseries - start;
-      const size_t bytes = 2 * (end - blo) * sizeof(float);
-      for(int t = 0; t < nt; t++)
-        fast_nt_copy(mirror_dst + 2 * ((size_t)t * mirror_stride + start + blo),
-                     out + 2 * ((size_t)t * nseries + start + blo), bytes);
-    }
-    return 0;
-  }
   const int stream = llc && (size_t)nt*span_sum*8u > (llc/2);
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
@@ -1256,18 +1227,12 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                 const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
                 if(start >= nseries || blo >= nseries - start) continue;
                 const size_t end = bhi < nseries - start ? bhi : nseries - start;
-                const size_t bytes = 2 * (end - blo) * sizeof(float);
                 if(ap_corr_prod_window_multi(p->fft, cdr + (size_t)b * n, cdi + (size_t)b * n,
                                              p->tre + (size_t)(t0 + t) * n, p->tim + (size_t)(t0 + t) * n,
                                              n, kt, blo, end,
                                              out + 2 * ((size_t)t * nseries + start + blo),
                                              2 * nseries, p->scratch, stream)){
                   err = -1; break;
-                }
-                if(mirror_dst){
-                  for(int q = 0; q < kt; q++)
-                    fast_nt_copy(mirror_dst + 2 * ((size_t)(t + q) * mirror_stride + start + blo),
-                                 out + 2 * ((size_t)(t + q) * nseries + start + blo), bytes);
                 }
               }
               t += kt;
@@ -1279,8 +1244,8 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
             const size_t blo = bounds ? bounds[2 * b] : lo, bhi = bounds ? bounds[2 * b + 1] : hi;
             if(start >= nseries || blo >= nseries - start) continue;
             const size_t end = bhi < nseries - start ? bhi : nseries - start;
-            const size_t bytes = 2 * (end - blo) * sizeof(float);
             if(W){
+              const size_t bytes = 2 * (end - blo) * sizeof(float);
               const float *Dr = cdr + (size_t)b * n, *Di = cdi + (size_t)b * n;
               if(p->ebr){
                 for(size_t k = 0; k < n; k++){
@@ -1306,9 +1271,6 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                 for(int t = 0; t < cnt; t++){
                   const float *csrc = p->corrbuf + 2 * ((size_t)t * n + blo);
                   out_copy(out + 2 * ((size_t)(tt + t) * nseries + start + blo), csrc, bytes, stream);
-                  if(mirror_dst)
-                    fast_nt_copy(mirror_dst + 2 * ((size_t)(tt + t) * mirror_stride + start + blo),
-                                 csrc, bytes);
                 }
               }
             }else{
@@ -1322,11 +1284,6 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                                              2 * nseries, p->scratch, stream)){
                   err = -1; break;
                 }
-                if(mirror_dst){
-                  for(int q = 0; q < kt; q++)
-                    fast_nt_copy(mirror_dst + 2 * ((size_t)(t + q) * mirror_stride + start + blo),
-                                 out + 2 * ((size_t)(t + q) * nseries + start + blo), bytes);
-                }
                 t += kt;
               }
             }
@@ -1335,7 +1292,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
         }
       }
 #if defined(__x86_64__) || defined(__i386__)
-      if(!err && (stream || mirror_dst)) _mm_sfence();
+      if(!err && stream) _mm_sfence();
 #endif
       pthread_mutex_lock(&corr_fwd_mu);
       corr_fwd_tab[slot].busy--;

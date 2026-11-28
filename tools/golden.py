@@ -30,7 +30,8 @@ The cases:
   interleave, of complex series, with gapped windows, scales, selections across groups and
   outputs reused through out_support; correlate_and_filter_many; and the tiled cascade's
   middle calls (two windows its blocks bridge, scales, time chunks forced by a small tile)
-  with the middle output written, mirrored, not written, and kept around peaks. Every case
+  with the middle output written (scaled, and unscaled: the case "mirrored", named after the
+  streaming copy that once made it), not written, and kept around peaks. Every case
   that tiles is recorded again under the other schedule (``.untiled``, ``.other``,
   ``.tiled``), and ``schedules`` checks that a record's two schedules gave the same peaks
   and series (and, where both wrote it, the same middle output).

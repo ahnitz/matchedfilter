@@ -1262,8 +1262,7 @@ typedef struct { int64_t *flat, *idx; float *val; size_t count; int total; } hmf
    one input slot's series, into nt rows of an output slot; then the sample runs it clears are
    zeroed on those rows, and when the step reads a scale vector of the run, each row is scaled
    over its scale runs. Rows given (rows) are written through a scratch of nt rows and copied
-   to those rows whole, after the clearing and scaling. A mirror (an output slot and row) is
-   the cascade's streaming copy of the rows the kernel writes (ap_mf_set_corr_mirror). */
+   to those rows whole, after the clearing and scaling. */
 typedef struct {
   MFObject *mf;
   int slot, real;                /* input slot; real: a float32 series, half-size transforms */
@@ -1276,7 +1275,6 @@ typedef struct {
   int scale;                     /* index of the run's scale vector, or -1 */
   int64_t *scale_index;          /* [nt] each row's entry of that vector */
   int64_t *scale_runs; Py_ssize_t nscale_runs;  /* [2 * nscale_runs] sample runs scaled */
-  int mirror_out, mirror_row;    /* the streaming mirror's output slot and row, or -1 */
 } hmf_corr_step;
 typedef struct {
   int64_t *win_starts; Py_ssize_t nwin;   /* the call's window starts, for merging bins */
@@ -1515,21 +1513,19 @@ static int hmf_runs_copy(PyObject *o,int64_t **runs,Py_ssize_t *count){
   return 0;
 }
 /* A correlation step from its tuple (mf, slot, real, out, row0, rows|None, t0, nt,
-   starts|None, bounds|None, lo, hi, clear|None, scale, scale_index|None, scale_runs|None,
-   mirror_out, mirror_row); see hmf_corr_step. uintp starts and bounds, int64 rows, runs and
+   starts|None, bounds|None, lo, hi, clear|None, scale, scale_index|None, scale_runs|None);
+   see hmf_corr_step. uintp starts and bounds, int64 rows, runs and
    scale indices. 0, or -1 with the exception set. */
 static int hmf_corr_init(hmf_corr_step *c,PyObject *item,int nslots,int nouts){
   PyObject *rows,*st,*bnd,*clear,*sidx,*sruns; MFObject *mf; Py_ssize_t lo,hi;
   memset(c,0,sizeof(*c));
-  if(!PyArg_ParseTuple(item,"O!iiiiOiiOOnnOiOOii",&MFType,&mf,&c->slot,&c->real,&c->out,&c->row0,
-                       &rows,&c->t0,&c->nt,&st,&bnd,&lo,&hi,&clear,&c->scale,&sidx,&sruns,
-                       &c->mirror_out,&c->mirror_row))
+  if(!PyArg_ParseTuple(item,"O!iiiiOiiOOnnOiOO",&MFType,&mf,&c->slot,&c->real,&c->out,&c->row0,
+                       &rows,&c->t0,&c->nt,&st,&bnd,&lo,&hi,&clear,&c->scale,&sidx,&sruns))
     return -1;
   Py_INCREF(mf); c->mf=mf;
   const char *bad="HMFTable: a correlation step's slots, templates or block layout are invalid";
   if(c->slot<0 || c->slot>=nslots || c->out<0 || c->out>=nouts || c->row0<0 || c->nt<1
-     || !ap_range_ok(c->t0,c->nt,mf->nt) || lo<0 || lo>=hi || hi>mf->n || c->scale<-1
-     || (c->mirror_out>=0 && (c->mirror_out>=nouts || c->mirror_row<0))){
+     || !ap_range_ok(c->t0,c->nt,mf->nt) || lo<0 || lo>=hi || hi>mf->n || c->scale<-1){
     PyErr_SetString(PyExc_ValueError,bad); return -1;
   }
   c->lo=(size_t)lo; c->hi=(size_t)hi;
@@ -2228,7 +2224,6 @@ done:
   PyMem_Free(cnt); PyMem_Free(starts); free(wide);
   return rc;
 }
-void ap_mf_set_corr_mirror(float *dst, size_t stride);   /* src/matchfilt.c */
 void ap_mf_stream_copy(float *dst, const float *src, size_t bytes);
 void ap_mf_stream_fence(void);
 /* An output slot of the correlation steps: a C-contiguous writable complex64 array of one or
@@ -2273,7 +2268,7 @@ static void hmf_scale_run(float *z,size_t count,float s){
    mirrors where use_mirror. Their seconds go to *seconds. 0, or -1 with the exception set. */
 static int hmf_corrs_exec(HMFTableObject *self,int c0,int c1,const hmf_slot *slots,
                           const hmf_out_slot *oslots,const Py_buffer *svec,Py_ssize_t nsc,
-                          int use_mirror,double *seconds){
+                          double *seconds){
   int err=0;
   /* every step's slots, rows and runs, before anything runs */
   for(int i=c0;i<c1;i++){
@@ -2289,8 +2284,6 @@ static int hmf_corrs_exec(HMFTableObject *self,int c0,int c1,const hmf_slot *slo
       for(int t=0;ok && t<c->nt;t++) ok=c->scale_index[t]<svec[c->scale].len/4;
       for(Py_ssize_t k=0;ok && k<c->nscale_runs;k++) ok=c->scale_runs[2*k+1]<=S;
     }
-    if(ok && use_mirror && c->mirror_out>=0)
-      ok=oslots[c->mirror_out].width==S && c->mirror_row<=oslots[c->mirror_out].rows-c->nt;
     if(!ok){
       PyErr_SetString(PyExc_ValueError,"HMFTable: a correlation step's series, output, rows or "
                       "scales do not fit what it was compiled for");
@@ -2312,8 +2305,6 @@ static int hmf_corrs_exec(HMFTableObject *self,int c0,int c1,const hmf_slot *slo
       dest=scratch;
     }
     if(c->nblocks){
-      if(use_mirror && c->mirror_out>=0)
-        ap_mf_set_corr_mirror(oslots[c->mirror_out].ptr+(size_t)c->mirror_row*row,S);
       const int r=c->real
         ? ap_mf_correlate_series_continuous_real(c->mf->p,(const float*)in->ptr,S,c->starts,
                                                  c->nblocks,c->lo,c->hi,c->t0,c->nt,dest,c->bounds)
@@ -2353,7 +2344,7 @@ static int hmf_corrs_exec(HMFTableObject *self,int c0,int c1,const hmf_slot *slo
    the GIL, each step's plan marked busy. The seconds of that part go to *seconds. 0, or -1
    with the exception set. */
 static int hmf_run_corrs(HMFTableObject *self,int c0,int c1,PyObject *series_arg,PyObject *outs_arg,
-                         PyObject *scales_arg,int use_mirror,double *seconds){
+                         PyObject *scales_arg,double *seconds){
   *seconds=0.0;
   if(c0>=c1) return 0;
   PyObject *ins=NULL,*outs=NULL,*scs=NULL;
@@ -2390,7 +2381,7 @@ static int hmf_run_corrs(HMFTableObject *self,int c0,int c1,PyObject *series_arg
       }
     }
   }
-  if(hmf_corrs_exec(self,c0,c1,slots,oslots,svec,nsc,use_mirror,seconds)) goto done;
+  if(hmf_corrs_exec(self,c0,c1,slots,oslots,svec,nsc,seconds)) goto done;
   rc=0;
 done:
   if(slots) for(Py_ssize_t k=0;k<nin;k++) if(slots[k].held) PyBuffer_Release(&slots[k].view);
@@ -2407,14 +2398,13 @@ done:
    in block ranges (OP_LEAF) and their peaks are gathered per step (hmf_parts), assembled as
    one step's at the end. Ops: */
 enum {
-  HMF_OP_CORR=1,     /* c0, c1, mirror: correlation steps [c0, c1) */
+  HMF_OP_CORR=1,     /* c0, c1: correlation steps [c0, c1) */
   HMF_OP_POOL=3,     /* state, S, stride, pool, need: a scratch pool's layout; zeroed when
                         it changes (the pool's [0, need) and every dirty span) */
   HMF_OP_STALE=4,    /* state, D, rows, runs off, runs n, new lo, new hi, first scratch slot:
                         zero each scratch row's dirty span within the runs, then set it */
   HMF_OP_ZERO=5,     /* out slot, rows off, rows n, runs off, runs n */
   HMF_OP_SCALE=6,    /* out slot, rows off, rows n, runs off, runs n, scale vector, entries off */
-  HMF_OP_COPY=7,     /* src slot, src row, dst slot, dst row, runs off, runs n, stream */
   HMF_OP_COLLAR=8,   /* restore, scratch slot, carry tile, carry offset, rows, lo, hi */
   HMF_OP_LEAF=9,     /* items off, items n, retain, retain threshold (double bits): items
                         (step, b0, b1, cluster, row) as one batch */
@@ -2475,7 +2465,7 @@ static int hmf_run_schedule(HMFTableObject *self,const hmf_slot *slots,const hmf
     case HMF_OP_CORR: {
       double dt=0.0;
       if(f[1]<0 || f[2]<f[1] || f[2]>self->ncorrs) HMF_BAD();
-      if(hmf_corrs_exec(self,(int)f[1],(int)f[2],slots,oslots,svec,nsc,(int)f[3],&dt)) goto done;
+      if(hmf_corrs_exec(self,(int)f[1],(int)f[2],slots,oslots,svec,nsc,&dt)) goto done;
       break;
     }
     case HMF_OP_POOL: {
@@ -2534,22 +2524,6 @@ static int hmf_run_schedule(HMFTableObject *self,const hmf_slot *slots,const hmf
           if(sv) hmf_scale_run(z+2*a,(size_t)(b-a),sv[self->sargs[f[7]+r]]);
           else memset(z+2*a,0,(size_t)(b-a)*8);
         }
-      }
-      break;
-    }
-    case HMF_OP_COPY: {
-      if(f[1]<0 || f[1]>=nouts || f[3]<0 || f[3]>=nouts || !HMF_RANGE_OK(f[5],f[6],2)) HMF_BAD();
-      const hmf_out_slot *src=&oslots[f[1]], *dst=&oslots[f[3]];
-      const int64_t *runs=self->sargs+f[5];
-      if(f[2]<0 || f[2]>=src->rows || f[4]<0 || f[4]>=dst->rows || src->width!=dst->width
-         || !hmf_runs_fit(runs,f[6],src->width)) HMF_BAD();
-      const float *sp=src->ptr+(size_t)f[2]*(size_t)src->width*2;
-      float *dp=dst->ptr+(size_t)f[4]*(size_t)dst->width*2;
-      for(int64_t k=0;k<f[6];k++){
-        const int64_t a=runs[2*k], b=runs[2*k+1];
-        if(b<=a) continue;
-        if(f[7]){ ap_mf_stream_copy(dp+2*a,sp+2*a,(size_t)(b-a)*8); streamed=1; }
-        else memcpy(dp+2*a,sp+2*a,(size_t)(b-a)*8);
       }
       break;
     }
@@ -2729,7 +2703,7 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
      they write */
   double corr_seconds=0.0;
   if(self->ncorrs && !self->ops
-     && hmf_run_corrs(self,0,self->ncorrs,series_arg,outs_arg,scales_arg,0,&corr_seconds))
+     && hmf_run_corrs(self,0,self->ncorrs,series_arg,outs_arg,scales_arg,&corr_seconds))
     return NULL;
   PyObject *seq=PySequence_Fast(series_arg,"series must be a sequence");
   if(!seq) return NULL;
@@ -3052,18 +3026,17 @@ done:
   Py_DECREF(seq);
   return ret;
 }
-/* run_corr(first, end, series, outputs, scales=None, mirror=False) -> seconds: correlation
-   steps [first, end) on the series (one per slot), outputs (one per output slot) and scale
-   vectors given, with the steps' mirrors when mirror: every step of a correlation call, or a
-   time chunk's steps of the tiled cascade. */
+/* run_corr(first, end, series, outputs, scales=None) -> seconds: correlation steps
+   [first, end) on the series (one per slot), outputs (one per output slot) and scale vectors
+   given: every step of a correlation call. */
 static PyObject *HMFTable_run_corr(HMFTableObject *self,PyObject *args){
-  int c0,c1,mirror=0; PyObject *series_arg,*outs_arg,*scales_arg=NULL;
-  if(!PyArg_ParseTuple(args,"iiOO|Op",&c0,&c1,&series_arg,&outs_arg,&scales_arg,&mirror)) return NULL;
+  int c0,c1; PyObject *series_arg,*outs_arg,*scales_arg=NULL;
+  if(!PyArg_ParseTuple(args,"iiOO|O",&c0,&c1,&series_arg,&outs_arg,&scales_arg)) return NULL;
   if(c0<0 || c1<c0 || c1>self->ncorrs){
     PyErr_SetString(PyExc_ValueError,"HMFTable.run_corr: a step range is out of range"); return NULL;
   }
   double seconds;
-  if(hmf_run_corrs(self,c0,c1,series_arg,outs_arg,scales_arg,mirror,&seconds)) return NULL;
+  if(hmf_run_corrs(self,c0,c1,series_arg,outs_arg,scales_arg,&seconds)) return NULL;
   return PyFloat_FromDouble(seconds);
 }
 static PyObject *HMFTable_get_corrs(HMFTableObject *self,void *closure){
@@ -3082,8 +3055,8 @@ static PyMethodDef HMFTable_methods[]={
    "totals and seconds per gated step, call, then flat step; the leaf kernels' and the "
    "correlation steps' seconds"},
   {"run_corr",(PyCFunction)HMFTable_run_corr,METH_VARARGS,
-   "run_corr(first, end, series, outputs, scales=None, mirror=False) -> seconds: correlation "
-   "steps [first, end) on the slots given, with their streaming mirrors when mirror"},
+   "run_corr(first, end, series, outputs, scales=None) -> seconds: correlation "
+   "steps [first, end) on the slots given"},
   {NULL,NULL,0,NULL}
 };
 static PyGetSetDef HMFTable_getset[]={

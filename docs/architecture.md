@@ -228,13 +228,17 @@ hierarchical search's middle correlations together with the leaf calls that read
 on one middle bank and window layout form a cohort (the detectors of one search). A cohort
 that runs tiled is a schedule of the same step table (`_batches._cascade_steps`,
 `_cohort_schedule`; `HMFTable`'s ops, run by `hmf_run_schedule` in the same C call as the
-rest): per middle group the stale scratch cleared and the output's margins zeroed and scaled,
-then per time tile and template batch the carried collar restored, the batch's correlation
-steps (every detector) into a scratch slot (the middle bank's pool), the rows copied to the
-output or mirrored by the kernel, the leaf steps' slabs that are ready run as one batch of
-block ranges, the output written around the batch's peaks where `retain_radius > 0` (spans
-the executor takes from those peaks), and the collar a later tile's leaves read carried to a
-carry slot. The leaf steps a schedule runs gather their slices' peaks and are assembled with
+rest). Where the output is written whole (`retain_radius` None, every search with hooks), per
+middle group the output's margins are zeroed and scaled, then per time tile the correlation
+steps of every run of the group's templates that is one run of the output (the untiled
+steps, restricted to the tile's blocks) write the output itself, every detector, and the
+leaf steps' slabs that are ready read those rows in place, as one batch of block ranges:
+nothing is copied or carried. Otherwise (`retain_radius` 0 or positive) per middle group the
+stale scratch is cleared, then per time tile and template batch (at most 8 templates) the
+carried collar is restored, the batch's correlation steps write a scratch slot (the middle
+bank's pool), the ready slabs run on it, the output is written around the batch's peaks
+where `retain_radius > 0` (spans the executor takes from those peaks), and the collar a
+later tile's leaves read is carried to a carry slot. The leaf steps a schedule runs gather their slices' peaks and are assembled with
 the others. Its results equal those of `correlate_series` followed by `filter_series_many`. Where no
 cohort is tiled, its correlations and the batch's every-template leaf calls are the steps of
 one table, run by one C call (`_batches._untiled_batch`; correlations off the CPU, or whose

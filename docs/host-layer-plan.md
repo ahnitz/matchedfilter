@@ -274,3 +274,20 @@ library chooses the execution.
   the two schedules agree on 4,550 arrays. Injection-window cases 6-12% faster a steady pass,
   their inner + leaf Python share 18.5-28% -> 4-13%. Not folded in: inner nodes with inner
   children (a lane copy step would do it) and the root.
+- 2026-11-28: conversion step 6, part C1: where the middle output is written whole, the tiled
+  schedule writes it with the untiled correlation steps restricted to each time tile's blocks
+  (every run of a group's templates that is one run of the output, the same kernel path) and
+  its leaf slabs read it in place; the scratch, copies, collars and the kernel's streaming
+  mirror are gone from that mode. Goldens and both schedules 0 differ. Forced on the full-data
+  shapes it loses at every tile size: capture tops 1.28-1.58x the untiled pass (1 to 32 MB
+  tiles), the real PyCBC CPU job +5% (32 MB) to +15% (4 MB), against 1.05-1.16x for the old
+  eight-template scratch schedule. The cycles go to DRAM: L1D fills from DRAM 4-7x untiled's,
+  because each tile re-reads every leaf bank's templates (time-major order), while what tiling
+  saves is the leaves' read of the middle output, about 2-3% of the pass (a one-row-at-a-time
+  order, which keeps the leaf templates, saves 4% of the leaf stage and loses 50% in the
+  middle stage re-reading the block spectra). On the injection-window shapes the tiled
+  schedule ties the untiled one: inj1, inj4 and the synthetic search within 2.5%, inj2 9% and
+  0.4% slower in two runs (their pass-to-pass noise is about 5%); the new tiled schedule is
+  within noise of the old there (-4% to +3%). At these shapes on this machine tiling does not
+  pay; it was the idea, not the kernel. Part C2 (the cap as a measured choice) waits for that
+  reading.

@@ -197,6 +197,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
   margin, copy and stale-scratch helpers, `_assemble_leaf_results`, `HMFTable.run_slices`) are
   removed. A CPU search keeps a tiled chunk's table as it keeps an untiled one. Results are
   unchanged, to the bit and in order, under both schedules.
+- Where the middle output is written whole (`retain_radius` None, every search with hooks), the
+  tiled schedule has no scratch: per time tile the correlation steps of every run of a
+  group's templates that is one run of the output (the untiled steps on the tile's blocks,
+  through the same template-batched kernel path) write the output, and the leaf slabs that
+  are ready read it in place. The kernel's streaming mirror (`ap_mf_set_corr_mirror`), the
+  schedule's copy op and the mirror fields of a correlation step are removed. The scratch
+  schedule remains for `retain_radius` 0 and positive. Results are unchanged, to the bit
+  and in order, under both schedules.
 - `HierarchicalSearch.timings["inner_compute"]`: of the inner stage, the seconds the CPU
   correlation steps spent in the extension (in the walk and in `correlate_and_filter_many`);
   `tools/search_bench.py` prints it as the inner stage's compute fraction.
