@@ -392,6 +392,75 @@ def test_two_tenants_alternating_on_an_arena_read_their_own_readbacks(setup):
     gc.enable()
 
 
+def test_a_window_bin_merge_compares_magnitudes_as_numpy_does():
+    """Two partial bins of one window bin whose peaks' magnitudes are equal as hypotf rounds
+    them and one unit in the last place apart as numpy's absolute value rounds them (two
+    peaks of the capture tops at threshold 4.0: hypotf 4.0295701 for both; np.abs 4.0295701
+    and 4.0295696): in a job whose peaks are not in template-then-sample order, the assembly
+    keeps the peak the Python merge kept (_windows._merge_window_bins, numpy's lexsort over
+    -np.abs), the later one here, as main's GPU assembly did; hypotf's tie kept the earlier.
+    The same for 2,000 window bins of such pairs."""
+    from matchedfilter import _core
+    from matchedfilter._results import _SparsePeaks
+    from matchedfilter._windows import _merge_window_bins
+    larger, smaller = np.complex64(-3.331164 + 2.267329j), np.complex64(-2.0475807 + 3.4705687j)
+    assert np.abs(larger) > np.abs(smaller)
+    # two blocks (starts 0 and 40, length 64) of two templates (bank indices 3 and 7), one
+    # bin each: template 3's peaks at samples 50 (block 0, the larger) and 43 (block 1)
+    lags = np.full((2, 2, 1), -1, np.int64)
+    vals = np.zeros((2, 2, 1), np.complex64)
+    lags[0, 0, 0], vals[0, 0, 0] = 50, larger
+    lags[0, 1, 0], vals[0, 1, 0] = 10, np.complex64(5 + 0j)
+    lags[1, 0, 0], vals[1, 0, 0] = 3, smaller
+    flat = np.flatnonzero(lags.reshape(-1) >= 0)
+    part = _SparsePeaks(lags.shape, flat, lags.reshape(-1)[flat], vals.reshape(-1)[flat])
+    geometry = (np.array([3, 7], np.int64), np.array([0, 40], np.uintp), None, None, 2, 1, 64,
+                None)
+    W = np.array([[0, 128]], np.int64)
+
+    def assemble(merged):
+        out = _core.assemble_peaks([([(geometry, ((0, part),))],
+                                     W[:, 0].copy() if merged else None,
+                                     (64,) if merged else ())])
+        t, s, v = (np.frombuffer(c, d) for c, d in
+                   zip(out[1:4], (np.int64, np.int64, np.complex64)))
+        return t, s, v
+    t, s, v = assemble(False)
+    assert t.tolist() == [3, 7, 3] and s.tolist() == [50, 10, 43]
+    want = _merge_window_bins(W, 64, t, s, v)
+    assert want[1].tolist() == [50, 10]
+    for got, ref in zip(assemble(True), want):
+        np.testing.assert_array_equal(got, ref)
+    # Many such pairs: per window bin of 64 samples (2,000 of them) a peak of block 0 (start
+    # 0) and one of block 1 (start 32), of one magnitude at random phases, so the two
+    # magnitudes are equal or a unit in the last place apart; one peak of a second template
+    # in block 0 puts the job out of template-then-sample order.
+    rng = np.random.default_rng(29)
+    nbins = 2000
+    lags = np.full((2, 2, nbins), -1, np.int64)
+    vals = np.zeros((2, 2, nbins), np.complex64)
+    j = np.arange(1, nbins)
+    lags[0, 0, j] = 64 * j + rng.integers(32, 64, j.size)
+    lags[1, 0, j - 1] = 64 * j - 32 + rng.integers(0, 32, j.size)
+    lags[0, 1, 0] = 5
+    phase = rng.random((2, 2, nbins)) * 2 * np.pi
+    vals[:] = (4.0295699 * np.exp(1j * phase)).astype(np.complex64)
+    flat = np.flatnonzero(lags.reshape(-1) >= 0)
+    part = _SparsePeaks(lags.shape, flat, lags.reshape(-1)[flat], vals.reshape(-1)[flat])
+    geometry = (np.array([3, 7], np.int64), np.array([0, 32], np.uintp), None, None, 2, nbins,
+                64 * nbins, None)
+    W = np.array([[0, 64 * (nbins + 1)]], np.int64)
+    t, s, v = assemble(False)
+    want = _merge_window_bins(W, 64, t, s, v)
+    assert want[0].size == nbins                      # a peak kept per window bin
+    for got, ref in zip(assemble(True), want):
+        np.testing.assert_array_equal(got, ref)
+    # the pairs numpy orders where hypotf ties (what the comparison above decides)
+    a, b = vals[0, 0, j], vals[1, 0, j - 1]
+    hyp = [np.hypot(x.real, x.imag) for x in (a, b)]
+    assert np.count_nonzero((hyp[0] == hyp[1]) & (np.abs(a) != np.abs(b))) > 0
+
+
 def test_a_compacted_list_past_the_mirrored_records_is_read_whole():
     """A compacted list of more records than a run copies back (_SPARSE_FIRST, 4,096, on a
     device whose host does not see device memory in place) is read whole for that run: the

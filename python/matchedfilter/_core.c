@@ -1880,7 +1880,13 @@ static int hmf_cluster_cmp(const void *a,const void *b){
 }
 /* The window-bin merge of a job's peaks (time_domain._merge_window_bins with a float sample
    column, as the bank's assembly had it): kept indices in order into keep, their count
-   returned; -2 on a peak before the first window. */
+   returned; -2 on a peak before the first window. Peaks in template-then-sample order are
+   compared by hypotf, as window_bin_keep compares them. Others are ordered as numpy's lexsort
+   over -|v| orders them, the magnitude by hypotf, or, with numpy_magnitude, as np.abs of a
+   complex64 computes it (the larger part times sqrt(1 + ratio^2), the square fused: numpy's
+   complex absolute loop), which differs from hypotf in the last place for some values, and so
+   decides between two peaks hypotf calls equal: the Python merge's comparison, which
+   assemble_peaks keeps. HMFTable.run's steps keep hypotf, as they had it. */
 typedef struct { int64_t t,w,b; float negm; double s; Py_ssize_t i; } hmf_mkey;
 static int hmf_mkey_cmp(const void *a,const void *b){
   const hmf_mkey *x=a,*y=b;
@@ -1895,7 +1901,8 @@ static int hmf_pidx_cmp(const void *a,const void *b){
   const Py_ssize_t x=*(const Py_ssize_t*)a,y=*(const Py_ssize_t*)b; return (x>y)-(x<y);
 }
 static Py_ssize_t hmf_merge_bins(const int64_t *W,Py_ssize_t nw,int64_t binsize,const int64_t *t,
-                                 const double *s,const float *v,Py_ssize_t n,Py_ssize_t *keep){
+                                 const double *s,const float *v,Py_ssize_t n,Py_ssize_t *keep,
+                                 int numpy_magnitude){
   if(n<2){ for(Py_ssize_t i=0;i<n;i++) keep[i]=i; return n; }
   /* ordered by template then sample: adjacent runs (window_bin_keep) */
   int ordered=1;
@@ -1927,7 +1934,16 @@ static Py_ssize_t hmf_merge_bins(const int64_t *W,Py_ssize_t nw,int64_t binsize,
     while(lo<hi){ const Py_ssize_t mid=(lo+hi)/2; if((double)W[mid]<=s[i]) lo=mid+1; else hi=mid; }
     const Py_ssize_t wi=lo-1<0?nw-1:lo-1;  /* numpy's index -1 is the last window */
     k[i].t=t[i]; k[i].w=wi; k[i].b=wbk_bin_f(s[i]-(double)W[wi],(double)binsize);
-    k[i].negm=-hypotf(v[2*i],v[2*i+1]); k[i].s=s[i]; k[i].i=i;
+    float m;
+    if(numpy_magnitude){
+      const float re=fabsf(v[2*i]), im=fabsf(v[2*i+1]);
+      const float larger=re>im?re:im, smaller=re>im?im:re;
+      if(isinf(re) || isinf(im)) m=INFINITY;
+      else if(isnan(re) || isnan(im)) m=NAN;
+      else if(larger==0.f) m=0.f;
+      else { const float ratio=smaller/larger; m=sqrtf(fmaf(ratio,ratio,1.f))*larger; }
+    } else m=hypotf(v[2*i],v[2*i+1]);
+    k[i].negm=-m; k[i].s=s[i]; k[i].i=i;
   }
   qsort(k,(size_t)n,sizeof(hmf_mkey),hmf_mkey_cmp);
   Py_ssize_t kept=0;
@@ -2711,13 +2727,15 @@ done:
 /* The window-bin merges of one job's peaks, arena entries [job0, at): for each bin size of
    merge_bs in order, the partial bins of a window bin merged into one (hmf_merge_bins), the
    kept entries moved down in order. keep holds at least at - job0 entries. Returns the job's
-   new end, or -1 with the exception set. Shared by HMFTable.run and assemble_peaks. */
+   new end, or -1 with the exception set. Shared by HMFTable.run and assemble_peaks (the
+   latter with numpy_magnitude: hmf_merge_bins). */
 static Py_ssize_t hmf_job_merge(const int64_t *win_starts,Py_ssize_t nwin,const Py_ssize_t *merge_bs,
                                 int nmerge,int64_t *o_t,double *o_s,float *o_v,int64_t *o_bs,
-                                int64_t *o_bl,Py_ssize_t job0,Py_ssize_t at,Py_ssize_t *keep){
+                                int64_t *o_bl,Py_ssize_t job0,Py_ssize_t at,Py_ssize_t *keep,
+                                int numpy_magnitude){
   for(int k=0;k<nmerge && at>job0;k++){
     const Py_ssize_t kept=hmf_merge_bins(win_starts,nwin,(int64_t)merge_bs[k],o_t+job0,o_s+job0,
-                                         o_v+2*job0,at-job0,keep);
+                                         o_v+2*job0,at-job0,keep,numpy_magnitude);
     if(kept==-2){ PyErr_SetString(PyExc_ValueError,"window_bin_keep: mismatched buffers, binsize < 1 or a peak before the first window"); return -1; }
     if(kept<0){ PyErr_NoMemory(); return -1; }
     for(Py_ssize_t q=0;q<kept;q++){
@@ -3181,7 +3199,7 @@ static PyObject *M_assemble_peaks(PyObject *self,PyObject *jobs_arg){
       if(PyErr_Occurred()) goto done;
       Py_buffer bw;
       if(PyObject_GetBuffer(ws,&bw,PyBUF_C_CONTIGUOUS)<0) goto done;
-      at=hmf_job_merge(bw.buf,bw.len/8,sizes,(int)nm,o_t,o_s,o_v,o_bs,o_bl,job0,at,keep);
+      at=hmf_job_merge(bw.buf,bw.len/8,sizes,(int)nm,o_t,o_s,o_v,o_bs,o_bl,job0,at,keep,1);
       PyBuffer_Release(&bw);
       if(at<0) goto done;
     }
@@ -3505,7 +3523,7 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
       if(at<0) goto done;
     }
     const hmf_table_job *J=&self->jobs[j];
-    at=hmf_job_merge(J->win_starts,J->nwin,J->merge_bs,J->nmerge,o_t,o_s,o_v,o_bs,o_bl,job0,at,keep);
+    at=hmf_job_merge(J->win_starts,J->nwin,J->merge_bs,J->nmerge,o_t,o_s,o_v,o_bs,o_bl,job0,at,keep,0);
     if(at<0) goto done;
   }
   {
