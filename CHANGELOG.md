@@ -10,7 +10,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   capture tops, a search with follow-ups, one with split windows and one with an injection
   job's windows, and the low-level entry points), in the order it hands them, from a seeded
   cost file, and compares two records bitwise. Two fresh runs of one tree record identical
-  results (19,868 arrays).
+  results (19,868 arrays). It also records correlations of complex series on a bank whose
+  block-size groups interleave (scales, gapped windows, selections across groups, outputs
+  reused through `out_support`, several channels) and the tiled cascade's middle calls with
+  each retain mode (20,039 arrays).
 
 ### Fixed
 

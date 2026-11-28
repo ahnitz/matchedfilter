@@ -24,8 +24,12 @@ The cases:
 - the low-level entry points on small synthetic inputs: filter_series (every template, a
   window list with a bin size, one template, a threshold below the bank's), on a gated and
   an ungated bank; filter_series_many over mixed jobs; correlate_series of a real and a
-  complex series (with windows, templates and scales); correlate_series_channels; and
-  correlate_and_filter_many.
+  complex series (with windows, templates and scales); correlate_series_channels;
+  correlate_series and correlate_series_channels on a bank whose block-size groups
+  interleave, of complex series, with gapped windows, scales, selections across groups and
+  outputs reused through out_support; correlate_and_filter_many; and the tiled cascade's
+  middle calls (two windows its blocks bridge, scales, time chunks forced by a small tile)
+  with the middle output written, mirrored, not written, and kept around peaks.
 
 Decisions must be the same in both trees for a bitwise comparison to mean anything, so
 every run reads its measured costs from a cost file and runs with MF_AUTOTUNE=0 (no timed
@@ -424,6 +428,36 @@ def _entry_point_cases(rec):
     for k, o in enumerate(outs_c):
         rec.add("complex.channel%d" % k, o)
 
+    rec.case = "entry.correlate_series.interleaved"
+    # Templates whose block-size groups interleave in the bank's order, so a group's rows are
+    # not one run of the output; scales, selections and one template of a complex series.
+    itaps, icounts = _chirps(6, [300, 2900, 420, 3100, 360, 2500], True, 13)
+    corr_i = TimeDomainFilterBank(itaps, icounts, engine="corr", device="cpu")
+    iscales = np.linspace(-1.5, 2.5, 6).astype(np.float32)
+    rec.add("all.scaled", corr_i.correlate_series(xc, scales=iscales))
+    rec.add("windows.scaled", corr_i.correlate_series(
+        xc, windows=[(3000, 20000), (20500, 41000), (90000, 125000)], scales=iscales))
+    rec.add("templates.scaled", corr_i.correlate_series(
+        xc, windows=slice(7000, 110000), templates=[5, 0, 2, 3], scales=iscales))
+    rec.add("one.scaled", corr_i.correlate_series(xc, windows=[(1000, 9000)], template_index=1,
+                                                  scales=iscales[1:2]))
+    reused = np.full((3, S), 7 + 7j, np.complex64)
+    corr_i.correlate_series(xc, windows=[(5000, 60000)], templates=[1, 2, 4], out=reused)
+    corr_i.correlate_series(xc, windows=[(30000, 80000), (100000, 120000)], templates=[1, 2, 4],
+                            out=reused, out_support=[(5000, 60000)])
+    rec.add("reused.support", reused)
+    # several complex channels, gapped windows, a selection across groups, outputs reused
+    chans = [xc, xc[::-1].copy(), (xc * np.complex64(0.5 - 0.25j)).astype(np.complex64)]
+    wins = [[(2000, 30000), (31000, 64000)], [(15000, 120000)], [(0, 5000), (70000, 131072)]]
+    outs_i = [np.full((4, S), 3 - 1j, np.complex64) for _ in chans]
+    corr_i.correlate_series_channels(chans, wins, outs_i, [None] * 3, templates=[4, 1, 0, 5])
+    for k, o in enumerate(outs_i):
+        rec.add("channels.first%d" % k, o)
+    corr_i.correlate_series_channels(chans, [wins[2], wins[0], wins[1]], outs_i, wins,
+                                     templates=[4, 1, 0, 5])
+    for k, o in enumerate(outs_i):
+        rec.add("channels.reused%d" % k, o)
+
     rec.case = "entry.correlate_and_filter_many"
     # Two leaf banks: one reads the middle rows as complex series, the other one row's real
     # lane (a plan reads one kind of series within a call). The small cohort's middle output
@@ -450,6 +484,30 @@ def _entry_point_cases(rec):
             rec.add_results("%s.leaf%d" % (series_name, k), res)
         for k, o in enumerate(outs):
             rec.add("%s.middle%d" % (series_name, k), o)
+
+    rec.case = "entry.correlate_and_filter_many.cascade"
+    # The tiled cascade's middle calls: two windows (a gap its blocks bridge), scales, time
+    # chunks forced by a small tile, and each retain mode of the middle output.
+    pair = (x[:65536].copy(), y[:65536].copy())
+    L = pair[0].size
+    for mode, scaled, kw in (("written", True, dict(tile_bytes=1 << 18)),
+                             ("mirrored", False, dict(tile_bytes=1 << 18)),
+                             ("ephemeral", True, dict(tile_bytes=1 << 18, retain_radius=0)),
+                             ("retained", True, dict(tile_bytes=1 << 18, retain_radius=600,
+                                                     retain_threshold=3.0)),
+                             ("auto", True, dict())):
+        outs = [np.zeros((3, L), np.complex64) for _ in pair]
+        corr_jobs = [(corr, s, dict(windows=[(6000, 30000), (30300, L - 6000)],
+                                    templates=[0, 1, 2], scales=scales if scaled else None,
+                                    out=o))
+                     for s, o in zip(pair, outs)]
+        leaf_jobs = [(leaf, o[r], dict(windows=[(9000, 29000), (36000, L - 9000)]))
+                     for o in outs for r in range(3)]
+        for k, res in enumerate(TimeDomainFilterBank.correlate_and_filter_many(
+                corr_jobs, leaf_jobs, **kw)):
+            rec.add_results("%s.leaf%d" % (mode, k), res)
+        for k, o in enumerate(outs):
+            rec.add("%s.middle%d" % (mode, k), o)
 
 
 def record(args):
