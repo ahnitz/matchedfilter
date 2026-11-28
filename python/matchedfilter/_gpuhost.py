@@ -702,8 +702,8 @@ class Arena:
         sections (_x_section) and frees them (_x_free).
     """
 
-    #: Fill every section a lease hands out with 0xFF bytes (float NaN), for tests that look
-    #: for readers of memory nobody wrote (as BufferPool.poison).
+    #: Fill every section a lease hands out with 0xFF bytes (float NaN), through the device,
+    #: for tests that look for readers of memory nobody wrote (as BufferPool.poison).
     poison = False
 
     def __init__(self, ctx):
@@ -828,8 +828,15 @@ class ArenaLease:
         section = arena.ctx._x_section(blocks[index], offset, nbytes)
         section.lease = self
         self.taken += 1
-        if arena.poison and arena.host_kinds:
-            ctypes.memset(section.ptr, 0xFF, nbytes)
+        if arena.poison:
+            # Every byte of the section 0xFF, by the device (the host may not address it),
+            # finished before the tenant has it.
+            lst = arena.ctx._x_list("arena poison")
+            lst.fill(blocks[index], 0xFFFFFFFF, offset, size)
+            lst.barrier()
+            native = lst.end()
+            arena.ctx._x_run(native, True)
+            arena.ctx._x_release(native, done=True)
         return section
 
     def give(self, section):

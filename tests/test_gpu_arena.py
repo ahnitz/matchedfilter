@@ -2,8 +2,11 @@
 recycled across leases, and nothing that outlives a lease mistaking a recycled section for its
 previous tenant.
 
-Each recycle test runs on the simulated driver (tests/sim_driver.py) and on the host's GPU. The
-search tests need a GPU: they compare a search's peaks after another search has used the arena
+Each recycle test runs on the simulated driver (tests/sim_driver.py) as a device whose host sees
+device memory in place and as one whose host does not (whose arena holds device-only scratch
+only, as CUDA's), and on the host's GPU; each checks its property through the device (sections
+written and read by kernels), and, where the arena holds host-addressed arrays, through them
+too. The search tests need a GPU: they compare a search's peaks after another search has used the arena
 with its peaks without an arena.
 """
 import gc
@@ -15,7 +18,9 @@ import pytest
 import sim_driver
 from conftest import gpu_backend, gpu_context
 from matchedfilter import _gpuhost, _gpuroot
+from matchedfilter._gpuexec import Record
 from matchedfilter._gpuhost import ARENA_BLOCK, Arena, binding_key
+from test_driver_conformance import _read, _upload
 
 N = 1024
 
@@ -49,10 +54,17 @@ class _Device:
             ctx.destroy()
 
 
-@pytest.fixture(params=["sim", "device"])
+@pytest.fixture(params=["sim", "sim-device-only", "device"])
 def device(request):
-    backend = "sim" if request.param == "sim" else gpu_backend()
-    dev = _Device(backend)
+    """The simulated driver as a device whose host sees device memory in place (its arena
+    holds every kind and host arrays), as one whose host does not (unified_memory False, as
+    CUDA: its arena holds device-only scratch only), and the host's GPU."""
+    if request.param == "device":
+        dev = _Device(gpu_backend())
+    elif request.param == "sim-device-only":
+        dev = _Device("sim", props=dict(unified_memory=False))
+    else:
+        dev = _Device("sim")
     yield dev
     dev.close()
 
@@ -82,9 +94,78 @@ def _want(series, starts):
     return out
 
 
-def _check(spectra, series, starts):
+def _check(spectra, series, starts, tolerance=2e-6):
+    """Spectra against each block's transform, to `tolerance` of the largest: 2e-6, or 1e-4
+    for spectra read back through the device (two more transforms there)."""
     want = _want(series, starts)
-    np.testing.assert_allclose(spectra, want, rtol=0, atol=2e-6 * np.abs(want).max())
+    np.testing.assert_allclose(spectra, want, rtol=0, atol=tolerance * np.abs(want).max())
+
+
+class _Blocks:
+    """A series and block starts in device memory of ctx's own (upload buffers, outside any
+    arena), and a recorded list writing their forward transforms into a given buffer or arena
+    section (write): the device path, which every arena holds, where the host may not
+    address the section."""
+
+    def __init__(self, ctx, rng, starts):
+        self.ctx = ctx
+        self.starts = np.asarray(starts, np.uint32)
+        self.nser = int(self.starts.max()) + 2 * N
+        self.x = (rng.standard_normal(self.nser)
+                  + 1j * rng.standard_normal(self.nser)).astype(np.complex64)
+        self.series_buffer = _upload(ctx, self.x)
+        self.starts_buffer = _upload(ctx, self.starts)
+
+    def write(self, out):
+        """A recorded list (between barriers) writing each block's transform into a row of
+        `out`; the caller runs and releases it."""
+        lst = self.ctx._x_list("arena test writer")
+        lst.barrier()
+        lst.dispatch(self.ctx._x_kernel("forward", N), len(self.starts),
+                     [self.series_buffer, self.starts_buffer, out], (self.nser, 0))
+        lst.barrier()
+        return lst.end()
+
+    def free(self):
+        self.ctx._x_free(self.series_buffer)
+        self.ctx._x_free(self.starts_buffer)
+
+
+def _read_back(ctx, buf, rows):
+    """The first `rows` rows of N complex values in `buf` (a buffer or an arena section the
+    host may not address), read through the device: each row's forward transform, written by
+    ctx into a readback buffer of its own and inverted on the host."""
+    starts = _upload(ctx, np.arange(rows, dtype=np.uint32) * N)
+    out = ctx._x_alloc(rows * N * 8, readback=True)
+    lst = ctx._x_list("arena test reader")
+    lst.barrier()
+    lst.dispatch(ctx._x_kernel("forward", N), rows, [buf, starts, out], (rows * N, 0))
+    lst.barrier()
+    lst.readback(out, rows * N * 8)
+    native = lst.end()
+    ctx._x_run(native, True)
+    ctx._x_release(native, done=True)
+    transforms = _read(ctx, out, np.complex64, rows * N).reshape(rows, N)
+    ctx._x_free(out)
+    ctx._x_free(starts)
+    return np.fft.ifft(transforms.astype(np.complex128) * N, axis=1)
+
+
+def _fill(ctx, buf, word):
+    """Fill a buffer or section with a 32-bit word through the device, finished."""
+    lst = ctx._x_list("arena test fill")
+    lst.barrier()
+    lst.fill(buf, word)
+    lst.barrier()
+    native = lst.end()
+    ctx._x_run(native, True)
+    ctx._x_release(native, done=True)
+
+
+def _owning(ctx, lease):
+    """The keys of ctx's records that own a section of `lease`."""
+    return [key for key, rec in ctx._exec_table().items()
+            if any(getattr(rec.buffers[name], "lease", None) is lease for name in rec.owned)]
 
 
 def test_a_lease_lays_out_aligned_sections_and_the_next_lease_reuses_its_blocks(sim):
@@ -199,7 +280,6 @@ def test_a_device_without_host_visible_memory_leases_device_scratch_only():
     try:
         ctx, arena = dev.make(), dev.arena()
         assert arena.holds() and not arena.holds(readback=True) and not arena.holds(upload=True)
-        from matchedfilter._gpuexec import Record
         lease = arena.begin()
         rec = Record()
         assert ctx._exec_buffer(rec, "s", nbytes=64).lease is lease
@@ -217,13 +297,41 @@ def test_a_device_without_host_visible_memory_leases_device_scratch_only():
 
 
 def test_work_held_from_an_ended_lease_never_writes_the_next_tenants_bytes(device):
-    """A forward deferred into a lease's spectra and never run is dropped when the lease ends:
+    """Work deferred into a lease's section and never run is dropped when the lease ends:
     the context's next run on that slot, after the next lease has given the same bytes to
     another tenant, leaves that tenant's values as they are (claimed by address, or run first
-    on its slot, the old forward would have written them)."""
+    on its slot, the old work would have written them). On every arena with device-only
+    sections written and read through the device; where the arena holds host-addressed
+    arrays, also with a forward deferred into a lease's spectra array (a plan's slots)."""
     ctx, other = device.make(), device.make()
-    arena = device.arena()
     rng = np.random.default_rng(2)
+    blocks = _Blocks(ctx, rng, [0, 1500])
+    arena = device.arena()
+    lease = arena.begin()
+    held = lease.take(ctx, 2 * N * 8)
+    held_native = blocks.write(held)
+    ctx._defer(held_native, {}, 0, None)
+    lease.end()
+    assert not ctx._pending()
+    lease = arena.begin()
+    theirs = lease.take(other, 2 * N * 8)
+    assert (theirs.base, theirs.offset) == (held.base, held.offset)
+    _fill(other, theirs, 0)
+    mine = lease.take(ctx, 2 * N * 8)
+    native = blocks.write(mine)
+    ctx._exec_run(native, True, {}, 0)
+    ctx._x_idle()
+    assert not np.any(_read_back(other, theirs, 2)), \
+        "work held from an ended lease wrote the next tenant's section"
+    _check(_read_back(ctx, mine, 2), blocks.x, blocks.starts, 1e-4)
+    lease.end()
+    for nat in (held_native, native):
+        ctx._x_release(nat, done=True)
+    blocks.free()
+    if not arena.holds(upload=True):
+        return
+    # host-addressed spectra: a forward deferred by MatchedFilter's path (forward(defer=True))
+    arena = device.arena()
     ser = _series(ctx, rng, 4 * N)
     # starts in shared memory, bound in place: the forward's record owns nothing of the
     # lease, so only the lease's end dropping held work keeps the forward from running later
@@ -250,14 +358,42 @@ def test_work_held_from_an_ended_lease_never_writes_the_next_tenants_bytes(devic
 def test_outputs_after_a_recycle_are_the_new_tenants(device, monkeypatch):
     """Two contexts take turns over three leases, each with its own series and block starts,
     on sections the earlier leases used (filled with NaN when handed out, so nothing reads
-    bytes no one wrote): every forward's spectra are its own inputs' transforms, and the
-    records of an ended lease are released."""
+    bytes no one wrote): every output is its own inputs' transforms, and the records of an
+    ended lease are released. On every arena with records owning device-only sections,
+    written and read through the device; where the arena holds host-addressed arrays, also
+    with forwards into a lease's spectra arrays."""
     monkeypatch.setattr(Arena, "poison", True)
     ctxs = [device.make(), device.make()]
-    arena = device.arena()
     rng = np.random.default_rng(3)
-    plans = [(_series(c, rng, 6 * N), np.array(s, np.uint32))
-             for c, s in zip(ctxs, ([0, 900, 4000], [10, 2000, 5100]))]
+    firsts = ([0, 900, 4000], [10, 2000, 5100])
+    arena = device.arena()
+    for turn in range(3):
+        lease = arena.begin()
+        order = (0, 1) if turn % 2 == 0 else (1, 0)
+        got = []
+        for i in order:
+            ctx = ctxs[i]
+            blocks = _Blocks(ctx, rng, np.array(firsts[i]) + turn * 37)
+            # a record owning a section of the lease, as an executor operation's scratch
+            rec = Record()
+            out = ctx._exec_buffer(rec, "out", nbytes=3 * N * 8)
+            assert out.lease is lease
+            rec.native = blocks.write(out)
+            ctx._exec_table()[("arena test", turn)] = rec
+            ctx._exec_run(rec.native, True, {}, 0)
+            got.append((ctx, out, blocks))
+        for ctx, out, blocks in got:
+            _check(_read_back(ctx, out, 3), blocks.x, blocks.starts, 1e-4)
+            blocks.free()
+        lease.end()
+        for ctx in ctxs:
+            assert not _owning(ctx, lease), "a record of an ended lease was kept"
+    assert arena.made == 1      # one block of device-only scratch
+    if not arena.holds(upload=True):
+        return
+    # host-addressed spectra, written by forwards into a lease's arrays
+    arena = device.arena()
+    plans = [(_series(c, rng, 6 * N), np.array(s, np.uint32)) for c, s in zip(ctxs, firsts)]
     for turn in range(3):
         lease = arena.begin()
         order = (0, 1) if turn % 2 == 0 else (1, 0)
@@ -271,38 +407,58 @@ def test_outputs_after_a_recycle_are_the_new_tenants(device, monkeypatch):
         for spectra, ser, starts in got:
             _check(spectra, ser, starts)
         lease.end()
-        for c in ctxs:
-            assert not any(getattr(rec.buffers[name], "lease", None) is lease
-                           for rec in c._exec_table().values() for name in rec.owned)
+        for ctx in ctxs:
+            assert not _owning(ctx, lease), "a record of an ended lease was kept"
     assert arena.made == 2      # one block of each kind taken (spectra, staged starts)
 
 
 def test_a_lease_holds_its_tenants_weakly_and_frees_without_the_collector(device):
     """A lease names its tenant contexts and plans by weak reference, and sections hold their
-    lease, not their tenant: with the collector off, a tenant's arrays and an ended lease
-    with nothing left on it go with their last holder, and a dropped device context is freed
-    at once (a simulated driver's buffers hold their context, and its finished runs what they
-    bound, so there only the arrays are checked)."""
-    arena = device.arena()
-    gc.collect()
-    gc.disable()
-    try:
-        ctx = (sim_driver.Context(device=device.dev) if device.backend == "sim"
-               else gpu_context(device.backend))
-        lease = arena.begin()
-        rng = np.random.default_rng(4)
-        ser = _series(ctx, rng, 2 * N)
-        spectra = lease.array(ctx, (1, N))
-        ctx.forward(N, ser, np.array([5], np.uint32), spectra)
-        refs = [weakref.ref(spectra)]
-        if device.backend != "sim":
-            refs += [weakref.ref(lease), weakref.ref(ctx)]
-        lease.end()
-        ctx.destroy()
-        del ctx, spectra, ser, lease
-        assert [r() for r in refs] == [None] * len(refs)
-    finally:
-        gc.enable()
+    lease, not their tenant: with the collector off, an ended lease with nothing left on it,
+    a tenant's arrays, and a dropped device context go with their last holder. On every
+    arena with a record owning a device-only section; where the arena holds host-addressed
+    arrays, also with a lease's array. (A simulated driver's buffers hold their context, and
+    its finished runs what they bound -- a host array's view, through it the array's section
+    and the lease -- so there the context is not checked, nor the lease of the arrays.)"""
+    forms = ["sections"]
+    if device.arena().holds(upload=True):
+        forms.append("arrays")
+    for form in forms:
+        arena = device.arena()
+        gc.collect()
+        gc.disable()
+        try:
+            ctx = (sim_driver.Context(device=device.dev) if device.backend == "sim"
+                   else gpu_context(device.backend))
+            rng = np.random.default_rng(4)
+            lease = arena.begin()
+            refs = []
+            if form == "sections" or device.backend != "sim":
+                refs.append(weakref.ref(lease))
+            if form == "sections":
+                blocks = _Blocks(ctx, rng, [5])
+                rec = Record()
+                out = ctx._exec_buffer(rec, "out", nbytes=N * 8)
+                rec.native = blocks.write(out)
+                ctx._exec_table()[("arena test",)] = rec
+                ctx._exec_run(rec.native, True, {}, 0)
+                lease.end()
+                blocks.free()
+                del blocks, rec, out
+            else:
+                ser = _series(ctx, rng, 2 * N)
+                spectra = lease.array(ctx, (1, N))
+                ctx.forward(N, ser, np.array([5], np.uint32), spectra)
+                refs.append(weakref.ref(spectra))
+                lease.end()
+                del ser, spectra
+            if device.backend != "sim":
+                refs.append(weakref.ref(ctx))
+            ctx.destroy()
+            del ctx, lease
+            assert [r() for r in refs] == [None] * len(refs), form
+        finally:
+            gc.enable()
 
 
 # ---- searches on the GPU ----------------------------------------------------------------
