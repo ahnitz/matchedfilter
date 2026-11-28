@@ -153,8 +153,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   samples outside the windows are zeroed and the rows scaled in the extension, where numpy did
   it per group. The steps of a call shape are compiled once; a call binds its series, outputs
   and scales. Results are unchanged, to the bit. The binary-pulsar dense pass (complex series,
-  21 channels a call) spends about 96% of its profiled time in the extension, against about
-  86% before.
+  21 channels a call; one Zen 5 core) takes 25.3-26.0 ms against 29.1-30.5 ms in its 3D shape
+  and 366-374 ms against 379-403 ms in its 5D shape, with 96-97.5% of its CPU time inside the
+  extension against 87-91%.
 - `HierarchicalSearch.timings["inner_compute"]`: of the inner stage, the seconds the CPU
   correlation steps spent in the extension (in the walk and in `correlate_and_filter_many`);
   `tools/search_bench.py` prints it as the inner stage's compute fraction.

@@ -213,3 +213,21 @@ library chooses the execution.
   what the steps decline: plans in a trial or wrapped, correlation and band-limited plans, the
   one-template plan of a single-template fallback; the tiled cascade's
   `_assemble_leaf_results` remains until step 6, and the GPU's calls until phase 2.
+- 2026-11-27: conversion step 5, correlation steps. A CPU correlation call is correlation steps
+  of `_core.HMFTable`, run by `run_corr`: a step is a template group's run of output rows (the
+  plan, the input slot of a real or complex series, the blocks a window reaches and their
+  bounds, the output slot and first row, or rows through a scratch for a group interleaved in
+  the bank's order), with the runs it zeroes and, for a scaled call, its rows' scale entries
+  and runs as side tables; zeroing and scaling (numpy's complex-by-real product) are in C.
+  `correlate_series` is one C call for every group, `correlate_series_channels` one for every
+  channel and group, the untiled middle correlations of `correlate_and_filter_many` one for
+  consecutive CPU jobs, and the tiled cascade's per-chunk middle calls the same steps (one C
+  call per template batch, every detector; the kernel's streaming mirror a run-time choice).
+  Compiled once per call shape (`_batches._compile_corr_steps`), kept by the first call's bank.
+  `HierarchicalSearch.timings["inner_compute"]` is the inner stage's compute side (99.0% of
+  inner on the three capture tops). Goldens (with new cases: complex series on interleaved
+  groups, the cascade in each retain mode) 0 differ. Binary-pulsar dense pass on one dev2 core
+  (load about 5): 3d 29.1-30.5 -> 25.3-26.0 ms a pass, 86.6-87.3% -> 96.1-96.8% inside the
+  extension; 5d 379-403 -> 366-374 ms, 91.1-91.4% -> 97.2-97.5%. The PyCBC job is unchanged
+  (it was already one middle call per chunk and detector). CORR and leaf steps of a chunk are
+  still two tables and two C calls: one table per chunk is step 6.
