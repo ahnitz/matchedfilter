@@ -261,6 +261,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
   job. `correlate_and_filter_many` runs its correlations and the leaf calls that read them as
   one table wherever it tiles no cohort. One compiler (`_batches._compile_steps`) makes every
   CPU table. Results are unchanged, to the bit and in order.
+- `MF_COST_FILE` is parsed once per content: a reader (cost models, prices, measured choices,
+  a joint trial's lock) still reads the file every time, so a record another process stored is
+  seen at once, and is handed the records parsed from the same bytes the last time when the
+  bytes are the same. A leaf bank reads its joint trial's lock when it is given its first
+  reference; in the PyCBC CPU job those 1,006 reads of an unchanged file parsed it 1,006 times
+  (150-163 us a read in the job) and now parse it once (62-68 us a read, the file's read
+  itself; 3 us on a warm path): 0.15-0.16 s to 0.06-0.07 s a job. Every decision is the same,
+  including while a trial is open: what a read returns is what a fresh parse of the file
+  returns (checked on every read of a cold and a warm job).
 - A CPU search whose inner nodes have inner children runs as one table per chunk too: every
   inner correlation, at every level, and the leaf searches are the steps of one `HMFTable`,
   compiled once per chunk shape and kept by the search, run by one C call. An inner node

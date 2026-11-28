@@ -86,6 +86,41 @@ def test_legacy_trial_records_are_reported_once(cost):
     assert len(hits) == 1
 
 
+def test_a_read_parses_the_file_once_per_content_and_sees_every_write(cost, monkeypatch):
+    """Reads of unchanged bytes hand out one parse; a record another writer stores (new
+    bytes, a new file) is read at once, and a writer's own read is a parse it may change."""
+    from matchedfilter import _trial
+    parses = []
+    loads = json.loads
+    monkeypatch.setattr(_costfile.json, "loads", lambda text: parses.append(1) or loads(text))
+    cost.write_text(json.dumps({"x": {"value": 1}}))
+    first = _costfile._load_cost_file(str(cost))
+    assert _costfile._load_cost_file(str(cost)) is first and len(parses) == 1
+    # another process's lock of a joint trial (a first pass that kept its base, so the
+    # search's end), written as a new file as _write_cost_file publishes it
+    key = "bank|cpu|1024,model|5|0.001"
+    assert _trial.winner(key) is None
+    other = cost.parent / "other.json"
+    other.write_text(json.dumps({"x": {"value": 1},
+                                 "choice|joint|" + key: {"value": _trial.DEFAULT}}))
+    os.replace(other, cost)
+    assert _trial.winner(key) == _trial.DEFAULT
+    seen = _costfile._load_cost_file(str(cost))
+    assert seen is not first and "choice|joint|" + key in seen
+    # the same bytes in a new file: the parse held is handed out again
+    other.write_bytes(cost.read_bytes())
+    os.replace(other, cost)
+    count = len(parses)
+    assert _costfile._load_cost_file(str(cost)) is seen and len(parses) == count
+    # a writer's read is its own: changing it changes no reader's records
+    own, state = _costfile._read_cost_file(str(cost))
+    assert state == "ok" and own is not seen
+    own["x"] = None
+    assert _costfile._load_cost_file(str(cost))["x"] == {"value": 1}
+    _costfile._store_cost(str(cost), "y", {"value": 2})
+    assert _costfile._load_cost_file(str(cost))["y"] == {"value": 2}
+
+
 def test_migrate_refuses_a_damaged_file(cost, tmp_path):
     import importlib.util
     from pathlib import Path

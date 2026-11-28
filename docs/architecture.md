@@ -481,6 +481,14 @@ recalibrated). A model another process stored first is the one used
 layout at each candidate block size; that layout is one arm of the bank's joint trial
 (below).
 
+Every reader of the file (`_costfile._load_cost_file`: cost models, prices, measured
+choices, a joint trial's lock) reads the whole file each time, so that a record another
+process stored is seen at once, and is handed the records parsed from those bytes: the parse
+is kept with the bytes it came from and handed out again while the file holds the same bytes
+(the readers read the records and never change them; a writer, under the lock, reads a parse
+of its own). A leaf bank reads its joint trial's lock this way when it is given its first
+reference, once per bank.
+
 ## Measured choices
 
 Where the library cannot predict which of a few candidates is faster on this machine, it

@@ -455,3 +455,18 @@ library chooses the execution.
   (0.1006-0.1020 against 0.0978-0.1013 s). Capture top 1: 7,757 million instructions a pass
   in both trees; pulsar dense pass: 253.14 and 3,334.2 million instructions a pass in both;
   real PyCBC job (three pairs): wall 64.72 against 64.70 s, RSS 1.61 GB, triggers identical.
+- 2026-11-28: CPU leftovers, item 2: the joint-trial lock read (`_trial.winner`, once per leaf
+  bank at its first reference, 1,006 reads of the cost file in the PyCBC CPU job, warm) is
+  made cheap in the store, not memoised per search: `_costfile._load_cost_file` still reads
+  the file every time and hands out the records parsed from the same bytes the last time
+  (`_read_cost_file(reuse=True)`). Why there: the lock's inputs are its key and the file's
+  content, which another process sharing the file can change between two banks of one search
+  (a first lock stored, a file replaced); every reader of the file paid the same parse, and
+  the parse (a JSON object of the whole file) was the cost. A per-search memo would have
+  frozen the file for the search. In situ (four alternated warm jobs a tree, timed around
+  every read): 150-163 us a read to 62-68 us, 0.150-0.163 s to 0.062-0.068 s a job; what
+  remains is the read of the file in a cold cache (3 us hot). Reads checked against a fresh
+  parse on every read of a cold job (31 reads, 18 reused) and a warm one (1,006, 1,005
+  reused): none differs. Warm chain records and triggers identical; goldens 0 differ; cold
+  runs decide from timings and differ within each tree as much as between them (chain records
+  of 2,006 plans: 94 differ between trees, 104 between two runs of the new tree).

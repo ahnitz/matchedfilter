@@ -36,9 +36,25 @@ def _cost_warn(path, what, msg):
         warnings.warn("MF_COST_FILE %s: %s" % (path, msg), RuntimeWarning, stacklevel=3)
 
 
-def _read_cost_file(path):
+#: path -> (the bytes last parsed by a reusing read of the file at path, their records):
+#: _read_cost_file's parse, handed out again while the file holds the same bytes.
+_PARSED = {}
+
+
+def _read_cost_file(path, reuse=False):
     """(records, state): state is 'ok', 'missing' (no such file), 'damaged' (not a JSON
-    object) or 'unreadable' (any other OSError); records is {} unless 'ok'."""
+    object) or 'unreadable' (any other OSError); records is {} unless 'ok'.
+
+    Parameters
+    ----------
+    path : str
+        The cost file.
+    reuse : bool, optional
+        Hand out the records parsed by the last reusing read of path when the file holds the
+        same bytes now (the same object: such a caller reads it and never changes it); the
+        file is still read every time, so a record another process stored is seen at once.
+        Default False: records of a parse of their own, which the caller may change.
+    """
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -46,18 +62,28 @@ def _read_cost_file(path):
         return {}, "missing"
     except OSError:
         return {}, "unreadable"
+    if reuse:
+        held = _PARSED.get(path)
+        if held is not None and held[0] == raw:
+            return held[1], "ok"
     try:
         data = json.loads(raw.decode("utf-8"))
     except ValueError:                  # (UnicodeDecodeError is a ValueError)
         return {}, "damaged"
-    return (data, "ok") if isinstance(data, dict) else ({}, "damaged")
+    if not isinstance(data, dict):
+        return {}, "damaged"
+    if reuse:
+        _PARSED[path] = (raw, data)
+    return data, "ok"
 
 
 def _load_cost_file(path):
-    """The records of the cost file at path ({} when missing). A damaged or unreadable
-    file reads as empty, with a warning; trial records in the old format are reported
-    once (tools/migrate_cost_file.py rewrites them)."""
-    data, state = _read_cost_file(path)
+    """The records of the cost file at path ({} when missing), for reading only: parsed
+    once per content of the file (_read_cost_file with reuse), since a JSON parse of the
+    whole file was most of a read (a joint trial's lock read once per leaf bank: 150 us, 0.15
+    s in a PyCBC job). A damaged or unreadable file reads as empty, with a warning; trial
+    records in the old format are reported once (tools/migrate_cost_file.py rewrites them)."""
+    data, state = _read_cost_file(path, reuse=True)
     if state == "damaged":
         _cost_warn(path, state, "not a JSON object; read as empty (the next write keeps it "
                    "aside as %s.corrupt.<pid>)" % path)
