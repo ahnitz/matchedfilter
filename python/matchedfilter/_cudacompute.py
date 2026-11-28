@@ -30,7 +30,7 @@ from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuhost import CommandList
 from ._gpuexec import Arg, Executor, settle as _settle
-from ._shared import empty_shared, _Borrowed, _Storage
+from ._shared import BUFFER_SERIALS, empty_shared, _Borrowed, _Storage
 from ._gpuhost import DeviceProps, Section, carray, hier_peaks_grouped
 from . import _peaks as _pk
 from ._coarse import candidates
@@ -513,9 +513,19 @@ class _Section(Section):
         self.base, self.offset, self.nbytes = base, offset, nbytes
         self.dptr = ctypes.c_uint64(base.dptr.value + offset)
         self.ptr = self.handle = self.dptr.value
+        self.serial, self.lease = next(BUFFER_SERIALS), None
 
     def write(self, array, stream=None):
-        raise TypeError("a section is written through its base buffer")
+        """Host to device copy into the section of a device buffer (_Buffer: an arena's
+        block), ordered on ``stream``, as _Buffer.write. A section of a staged or readback
+        buffer is written through its base buffer."""
+        if not isinstance(self.base, _Buffer):
+            raise TypeError("a section is written through its base buffer")
+        array = np.ascontiguousarray(array)
+        to_copy = min(self.nbytes, array.nbytes)
+        if to_copy > 0:
+            self.base.ctx._copy_h2d(self.dptr.value, array.ctypes.data, to_copy, stream,
+                                    "upload")
 
 
 class _WordSlots:

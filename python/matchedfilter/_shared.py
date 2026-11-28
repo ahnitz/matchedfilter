@@ -83,10 +83,13 @@ def _caller_holds(allocation):
 
 
 class _Borrowed:
-    """A descriptor reference; cache eviction must not free its allocation."""
+    """A descriptor reference; cache eviction must not free its allocation. `offset` is where
+    the view starts in the buffer `handle` names: for an allocation that is a section of a
+    larger buffer (an arena's array, _gpuhost.ArenaLease.array), the section's own offset
+    plus the view's; `nbytes` and `ptr` are the view's."""
     def __init__(self, allocation, offset=0):
         self.owner = allocation
-        self.offset = offset
+        self.offset = offset + getattr(allocation.buffer, "offset", 0)
         self.handle = allocation.buffer.handle
         self.nbytes = allocation.buffer.nbytes - offset
         base = allocation.buffer.ptr
@@ -103,7 +106,9 @@ class _Borrowed:
 
 def _buffer_live(buf):
     """Whether a buffer's device is still open (its destroy() has somewhere to go): a buffer
-    that names its device (`dev`, Vulkan) asks it; one that names its context asks that."""
+    that names its device (`dev`, Vulkan) asks it; one that names its context asks that; a
+    section asks its base buffer."""
+    buf = getattr(buf, "base", buf)
     dev = getattr(buf, "dev", None)
     if dev is not None:
         return bool(getattr(dev, "device", None))
@@ -111,7 +116,9 @@ def _buffer_live(buf):
 
 
 def _buffer_on(buf, ctx):
-    """Whether a buffer can be bound by ctx: made on ctx's device (_same_device)."""
+    """Whether a buffer can be bound by ctx: made on ctx's device (_same_device); a section,
+    where its base buffer was."""
+    buf = getattr(buf, "base", buf)
     dev = getattr(buf, "dev", None)
     if dev is not None:
         return dev is ctx._device_state
@@ -242,16 +249,19 @@ def containing_samples(array, ctx):
 
 def _whole_view(start, allocation, dtype):
     """The allocation starting at `start` as one 1-D array of dtype, cached."""
-    whole = _whole.get(start)
+    key = (start, allocation.serial)
+    whole = _whole.get(key)
     if whole is None or whole.dtype != dtype:
         nbytes, item = allocation.buffer.nbytes, dtype.itemsize
         storage = _Storage(start, nbytes - nbytes % item, allocation)
         whole = storage.array(dtype, ((nbytes - nbytes % item) // item,))
-        _whole[start] = whole
+        _whole[key] = whole
     return whole
 
 
-#: One whole-allocation view per allocation, so recordings keyed on it repeat.
+#: One whole-allocation view per allocation (its start and serial: an arena gives a start to
+#: a later allocation while a view of the earlier one may still live), so recordings keyed on
+#: it repeat.
 _whole = weakref.WeakValueDictionary()
 
 

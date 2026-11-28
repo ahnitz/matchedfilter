@@ -30,7 +30,7 @@ import weakref
 
 import numpy as np
 
-from . import _core, _kernels
+from . import _core, _gpuhost, _kernels
 from ._errors import UnsupportedSize
 from ._shared import BUFFER_SERIALS, shared_view
 
@@ -82,6 +82,39 @@ def release_roots():
 
 
 atexit.register(release_roots)
+
+
+#: Arena per GPU device (str of the parsed device) for the process, made on first use.
+_ARENAS = {}
+
+
+def device_arena(device):
+    """The arena of a parsed GPU device (_gpuhost.Arena), with a context of its own, made on
+    first use and kept for the process, as the device roots are; None where the device has no
+    driver."""
+    key = str(device)
+    if key not in _ARENAS:
+        from ._filter import _compute_module
+        try:
+            ctx = _compute_module(device).Context(device.index)
+        except Exception:          # no driver for it: nothing to lease
+            ctx = None
+        _ARENAS[key] = _gpuhost.Arena(ctx) if ctx is not None else None
+    return _ARENAS[key]
+
+
+def release_arenas():
+    """Release every device's arena (_gpuhost.Arena.release) and its context. Run at
+    interpreter exit, while every module is intact (as release_roots, and before it: a lease
+    in force ends while the roots still exist); an arena asked for afterwards is made again."""
+    arenas = [a for a in _ARENAS.values() if a is not None]
+    _ARENAS.clear()
+    for arena in arenas:
+        arena.release()
+        arena.ctx.destroy()
+
+
+atexit.register(release_arenas)
 
 
 def _signature(arr):

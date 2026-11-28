@@ -815,10 +815,10 @@ class HierOps:
         names = _count_names(len(bands), feed in ("tier0", "bands"), way == "compact", use_direct)
         counts = buf("counts", count_step * len(names), readback=True)
         for j, name in enumerate(names):
-            rec.buffers[name] = self._x_section(
+            rec.buffers[name] = self._exec_section(
                 counts, j * count_step, 32 if (name == "args0" and t1_shift) else 16)
         if t1_shift:
-            rec.buffers["t1args"] = self._x_section(counts, 16, 16)
+            rec.buffers["t1args"] = self._exec_section(counts, 16, 16)
         bi = buf("idx", out * 4, readback=True)
         bv = buf("val", out * 8, readback=True)
         if rowwin:
@@ -826,7 +826,7 @@ class HierOps:
             span = -(-nd * 12 // align) * align
             rws = buf("rws", span * (len(bands) + 1), upload=True)
             for j, name in enumerate(_rw_names(len(bands))):
-                rec.buffers[name] = self._x_section(rws, j * span, nd * 12)
+                rec.buffers[name] = self._exec_section(rws, j * span, nd * 12)
         if feed in ("tier0", "pack"):
             buf("band0", nd * bands[0] * cb0)
             buf("band1", nd * bands[1] * cb1 if last else 16)
@@ -1100,7 +1100,9 @@ class HierOps:
         last = 1 if cascade else 0
         self.last_tier0_checked = getattr(B.get("cidx0"), "nbytes", pairs * 4) // 4
         words = self._x_view(B["counts"], np.uint32, B["counts"].nbytes // 4)
-        at = lambda name: int(words[self._section_offset(B, name) // 4])
+        # a word's place in the counts buffer (itself a section of an arena's block, or not)
+        base = getattr(B["counts"], "offset", 0)
+        at = lambda name: int(words[(self._section_offset(B, name) - base) // 4])
         count = at("args%d" % last)
         self.last_refinements = count
         if "fbargs" in B:

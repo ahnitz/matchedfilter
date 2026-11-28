@@ -890,10 +890,20 @@ class HierarchicalSearch:
         on_chunk : callable, optional
             ``on_chunk(ChunkContext)`` runs after a chunk.
         """
+        # A GPU search's plans take their scratch from the device's arena for the run
+        # (_gpuhost.Arena, _gpuroot.device_arena): released, with what the plans built on
+        # it, when the run ends.
+        device = _parse_device(self.leaf_options.get("device"))
+        arena = _gpuroot.device_arena(device) if device.kind == "gpu" else None
+        lease = arena.begin() if arena is not None else None
         try:
             self._run(inputs, windows, on_series, on_peaks, on_chunk)
         finally:
-            self._give_root_outputs()
+            try:
+                self._give_root_outputs()
+            finally:
+                if lease is not None:
+                    lease.end()
 
     def _run(self, inputs, windows, on_series, on_peaks, on_chunk):
         channels = list(inputs)

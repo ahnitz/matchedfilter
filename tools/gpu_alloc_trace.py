@@ -18,6 +18,10 @@ writes OUT.json when the program exits. Per allocation it records:
   update in a recording, or written by the host through ``write()``. A host write through a
   NumPy view of a shared array is not seen; such arrays are bound when a kernel uses them.
 
+A search's arena (``matchedfilter._gpuhost.Arena``) shows as ``arena block`` allocations; the
+sections its leases hand out are traced by role too (``ArenaLease.take``), and the report's
+``arena`` entry gives the roles' bytes in the lease that took the most.
+
 It also samples, every 0.1 s, the live capacity, the pool's idle bytes and the GPU's GTT counter
 (``/sys/class/drm/cardN/device/mem_info_gtt_used``), and at the peak of live capacity keeps the
 live allocations, so the report gives the breakdown at the peak by role and how much of it was
@@ -53,6 +57,8 @@ T0 = time.perf_counter()
 #: The source lines that allocate a plan's workspace: a slot's spectra and starts
 #: (MatchedFilter._series_submit) and the series source (MatchedFilter._series_call).
 LINES = {}
+#: lease generation -> Counter of section bytes by role (ArenaLease.take)
+ARENA = {}
 DEVICES = []
 #: A new snapshot of the live set is taken when the peak grows by this much.
 SNAPSHOT_STEP = 32 << 20
@@ -70,7 +76,7 @@ RECORD_KINDS = {"_hier_record": "hier", "forward": "forward", "correlate_continu
                 "_followup_record": "followups", "correlate": "correlate",
                 "_correlate_tile": "correlate", "_flat_run": "flat"}
 GENERIC = {"__init__", "_x_alloc", "empty_shared", "<lambda>", "factory", "traced_init",
-           "_exec_buffer", "<listcomp>", "buf"}
+           "_exec_buffer", "<listcomp>", "buf", "array", "traced_take"}
 
 
 def gtt_counters():
@@ -135,6 +141,8 @@ def role_of(frame):
     while frame is not None and depth < 40:
         code = frame.f_code
         name = code.co_name
+        if name == "take" and code.co_filename.endswith("_gpuhost.py"):
+            return "arena block"
         if name == "_exec_buffer":
             caller = frame.f_back
             kind = caller.f_code.co_name
@@ -144,12 +152,12 @@ def role_of(frame):
         if name == "_series_submit" and code.co_filename.endswith("_filter.py"):
             line = frame.f_lineno
             for what in ("spectra", "starts"):
-                if line == LINES.get(what):
+                if line in LINES.get(what, ()):
                     return "%s slot %d" % (what, frame.f_locals.get("slot", -1))
             return "series submit:%d" % line
         if name == "_series_call" and code.co_filename.endswith("_filter.py"):
             line = frame.f_lineno
-            if line == LINES.get("source"):
+            if line in LINES.get("source", ()):
                 return "series source"
             return "series call:%d" % line
         if name in ROLE_FUNCTIONS and "matchedfilter" in code.co_filename:
@@ -207,13 +215,13 @@ def install():
     source, first = inspect.getsourcelines(_filter.MatchedFilter._series_submit)
     for i, text in enumerate(source):
         if "c.spectra_pool[slot] = " in text:
-            LINES["spectra"] = first + i
+            LINES.setdefault("spectra", []).append(first + i)
         elif "c.starts_pool[slot] = " in text:
-            LINES["starts"] = first + i
+            LINES.setdefault("starts", []).append(first + i)
     source, first = inspect.getsourcelines(_filter.MatchedFilter._series_call)
     for i, text in enumerate(source):
         if "src = sources[slot0] =" in text:
-            LINES["source"] = first + i
+            LINES.setdefault("source", []).append(first + i)
     if len(LINES) != 3:
         _abort("could not find the workspace lines of _series_submit and _series_call: %r"
                % LINES)
@@ -276,6 +284,21 @@ def install():
         return resolve(self, *args, **kwargs)
     _vkcompute._VkNative._resolve = traced_resolve
 
+    lease_type = getattr(_gpuhost, "ArenaLease", None)
+    if lease_type is not None:
+        take = lease_type.take
+
+        def traced_take(self, *args, **kwargs):
+            section = take(self, *args, **kwargs)
+            try:
+                size = -(-max(int(section.nbytes), 16) // self.arena.align) * self.arena.align
+                roles = ARENA.setdefault(self.generation, collections.Counter())
+                roles[role_of(sys._getframe(1))] += size
+            except Exception as e:
+                _abort("bookkeeping failed in ArenaLease.take: %r" % (e,))
+            return section
+        lease_type.take = traced_take
+
     def sample():
         while True:
             SAMPLES.append((round(time.perf_counter() - T0, 3), STATE["live"], _idle_bytes(),
@@ -319,7 +342,14 @@ def summary():
         peak = dict(t=t, live_bytes=live,
                     untouched_bytes=sum(r["untouched"] for r in at_peak.values()),
                     roles=dict(sorted(at_peak.items(), key=lambda kv: -kv[1]["bytes"])))
-    return dict(allocations=len(INFO), peak_live_bytes=STATE["peak"],
+    # The arena's sections by role, in the lease that took the most bytes (sections given back
+    # and taken again within a lease count each time they are taken).
+    arena = None
+    if ARENA:
+        gen, most = max(ARENA.items(), key=lambda kv: sum(kv[1].values()))
+        arena = dict(leases=len(ARENA), largest_lease_bytes=sum(most.values()),
+                     roles=dict(most.most_common()))
+    return dict(allocations=len(INFO), peak_live_bytes=STATE["peak"], arena=arena,
                 peak_live_t=STATE["peak_t"], peak=peak,
                 roles=dict(sorted(roles.items(), key=lambda kv: -kv[1]["bytes"])),
                 gtt_peak_sample=max(SAMPLES, key=lambda s: s[3]) if SAMPLES else None,

@@ -1049,6 +1049,15 @@ class MatchedFilter:
             for d in pending:
                 d.result()
 
+    def _arena_end(self, lease):
+        """Give back the pipelining slots this plan took from an arena lease that is ending
+        (_gpuhost.ArenaLease.end): its deferred calls collected, its workspace (whose slots
+        are the lease's sections) and the call plans recorded over it dropped. The next call
+        makes its slots again, from the lease then in force or as shared allocations."""
+        self._settle_deferred()
+        self._series_workspace = None
+        self.__dict__.pop("_call_plans", None)
+
     def _items_gpu(self, jobs, binsize, threshold, wait=True):
         """Many single-template series calls as one submission: a forward per series
         allocation (e.g. each detector's rows of a reused device buffer, read in place) and
@@ -2017,12 +2026,19 @@ class MatchedFilter:
         (deferred: the dispatch that reads the spectra takes it). The slot's buffers are made
         here when no batch has used the slot before, at the workspace's capacity; the pools
         are filled in place, so the call plans and records built on the other slots stay
-        valid, and each new buffer has an allocation serial of its own."""
+        valid, and each new buffer has an allocation serial of its own. Under an arena lease
+        whose arena holds host-addressed buffers (a search's run, _gpuhost.Arena) they are
+        sections of the arena, given back when the lease ends (_arena_end)."""
         slot = slot_idx % c.K
         if c.starts_pool[slot] is None:
             capacity, n = c.workspace[0][0], c.workspace[0][1]
-            c.spectra_pool[slot] = self._gpu.empty_shared((capacity, n))
-            c.starts_pool[slot] = self._gpu.empty_shared(capacity, np.uint32)
+            lease = getattr(self._gpu._device_state, "arena_lease", None)
+            if lease is not None and lease.arena.holds(upload=True):
+                c.spectra_pool[slot] = lease.array(self._gpu, (capacity, n), plan=self)
+                c.starts_pool[slot] = lease.array(self._gpu, capacity, np.uint32, plan=self)
+            else:
+                c.spectra_pool[slot] = self._gpu.empty_shared((capacity, n))
+                c.starts_pool[slot] = self._gpu.empty_shared(capacity, np.uint32)
         starts = c.starts_pool[slot]
         spec = c.spectra_pool[slot][:count]
         starts[:count] = rebased

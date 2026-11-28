@@ -42,7 +42,12 @@ Driver primitives (a Context provides each):
                             a view of bytes [offset, offset + nbytes) of an _x_alloc buffer,
                             bound, filled, updated and counted like a buffer (offset: a
                             multiple of props.offset_alignment). A record's small words
-                            share one buffer, so they move in one copy each way.
+                            share one buffer, so they move in one copy each way. A section
+                            of a buffer without readback or upload is written by _x_upload as
+                            the buffer is (a search's arena, _gpuhost.Arena, is such buffers
+                            and their sections: a record's buffers there are sections, and
+                            sections of them are made of the base, _exec_section); a section
+                            has a serial of its own (_gpuhost.Section).
   _x_upload(buf, array, slot)
                             write an upload buffer, ordered before the next work on `slot`.
   _x_list(label, once=False)
@@ -271,14 +276,59 @@ class Executor(HierOps):
 
     def _exec_buffer(self, rec, name, view=None, nbytes=0, readback=False, upload=False):
         """Bind `view` -- an array's place in device memory (a caller's shared allocation, or
-        a view into one at an allowed offset; shared_view) -- or, without one, a buffer of the
-        context's own of nbytes."""
+        a view into one at an allowed offset; shared_view) -- or, without one, a buffer the
+        record owns of nbytes: a section of the arena lease in force on the device, where
+        one is and the arena holds that kind (_gpuhost.Arena), else a buffer of the
+        context's own."""
         buf = view
         if buf is None:
-            buf = self._x_alloc(nbytes, readback=readback, upload=upload)
+            lease = getattr(self._device_state, "arena_lease", None)
+            if lease is not None and lease.arena.holds(readback, upload):
+                buf = lease.take(self, nbytes, readback=readback, upload=upload)
+            else:
+                buf = self._x_alloc(nbytes, readback=readback, upload=upload)
             rec.owned.add(name)
         rec.buffers[name] = buf
         return buf
+
+    def _exec_section(self, buf, offset, nbytes):
+        """Bytes [offset, offset + nbytes) of a record's buffer as a driver section
+        (_x_section): of the buffer itself, or, where it is a section already (an arena's),
+        of its base buffer at the sum of the offsets."""
+        base = getattr(buf, "base", None)
+        if base is not None:
+            return self._x_section(base, buf.offset + offset, nbytes)
+        return self._x_section(buf, offset, nbytes)
+
+    def _free_owned(self, buf):
+        """Free a buffer a record owned: an arena section goes back to its lease, anything
+        else to the driver (_x_free)."""
+        lease = getattr(buf, "lease", None)
+        if lease is not None:
+            lease.give(buf)
+        else:
+            self._x_free(buf)
+
+    def _arena_end(self, lease):
+        """Give back everything this context holds on an arena lease that is ending
+        (_gpuhost.ArenaLease.end): every run of this context finished, the work it holds for
+        later runs on its slots dropped (it could be claimed by address, _exec_claim, at a
+        recycled section), and every record owning one of the lease's sections released with
+        its recording (a CUDA graph or Vulkan command buffer bakes the sections' addresses)
+        and its residency signatures."""
+        self._drain()
+        self._x_idle()
+        self.cancel_forward()
+        table = self._exec_table()
+        order = getattr(self, "_cache_order", {})
+        hold = self.__dict__.get("_exec_hold")
+        for key in [k for k, rec in table.items()
+                    if any(getattr(rec.buffers[name], "lease", None) is lease
+                           for name in rec.owned)]:
+            self._exec_evict(key, done=True)
+            order.pop(key, None)
+            if hold:
+                hold.discard(key)
 
     # ---- deferred work ------------------------------------------------------------------
     def _pending(self):
@@ -419,7 +469,7 @@ class Executor(HierOps):
                     self._x_run(nat, True, b, slot)
         self._x_release(rec.native, done)        # waits for the record's runs unless done
         for name in rec.owned:
-            self._x_free(rec.buffers[name])
+            self._free_owned(rec.buffers[name])
         for resident in self._uploaded.values():
             resident.pop(key, None)
 
@@ -1281,9 +1331,9 @@ class Executor(HierOps):
             # Peak values, then indices, in one buffer: one readback.
             vbytes = -(-cap * nbins * 8 // align) * align
             out = self._exec_buffer(rec, "out", nbytes=vbytes + cap * nbins * 4, readback=True)
-            bv = rec.buffers["val"] = self._x_section(out, 0, cap * nbins * 8)
-            bi = rec.buffers["idx"] = self._x_section(out, vbytes, cap * nbins * 4)
-            rows, ent, ids, args = (self._x_section(tab, o, b) for o, b in
+            bv = rec.buffers["val"] = self._exec_section(out, 0, cap * nbins * 8)
+            bi = rec.buffers["idx"] = self._exec_section(out, vbytes, cap * nbins * 4)
+            rows, ent, ids, args = (self._exec_section(tab, o, b) for o, b in
                                     zip(offs, (4 * cap, 24 * cap, 4 * cap, 16)))
             host_tab = np.zeros(at // 4, np.uint32)
             host_tab[offs[2] // 4:offs[2] // 4 + cap] = np.arange(cap, dtype=np.uint32)

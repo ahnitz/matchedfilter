@@ -9,6 +9,7 @@ helpers for the parts that must agree across backends.
 from collections import OrderedDict
 import ctypes
 import itertools
+import weakref
 
 import numpy as np
 
@@ -16,7 +17,8 @@ from ._errors import UnsupportedSize
 from ._windows import (
     coarse_lags, _merge_window_bins, _normalize_windows, _window_bin_phases, _window_layout)
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS
-from ._shared import _same_device, containing, containing_samples, shared_buffer, sparsified
+from ._shared import (BUFFER_SERIALS, _same_device, containing, containing_samples,
+                      shared_buffer, sparsified)
 from .device import parse as _parse_device
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).
@@ -375,9 +377,11 @@ class DeviceProps:
 
 def binding_key(value):
     """The identity of a value an Arg is bound to, for caching what a recording binds: an
-    allocation's serial and offset (a view of a shared array), a buffer's serial, a section's
-    base serial, offset and size, or the value itself (words). Serials are never reused, so
-    a key cannot name a later allocation at a freed one's address or handle."""
+    allocation's serial and offset (a view of a shared array), a buffer's or a section's
+    serial (a section has one of its own: Section), a section's base serial, offset and size
+    where it has none, or the value itself (words). Serials are never reused, so a key cannot
+    name a later allocation at a freed one's address or handle, nor an arena section's next
+    tenant."""
     owner = getattr(value, "owner", None)
     if owner is not None and getattr(owner, "serial", None) is not None:
         return ("view", owner.serial, int(getattr(value, "offset", 0)))
@@ -621,12 +625,18 @@ class BufferPool:
 
 class Section:
     """Bytes [offset, offset + nbytes) of a device buffer (a context's _x_section). The base
-    buffer owns the memory; the section has the base's handle and its own host pointer."""
-    __slots__ = ("base", "handle", "offset", "nbytes", "ptr")
+    buffer owns the memory; the section has the base's handle and its own host pointer.
+
+    `serial` names this section object, a fresh one per section made (BUFFER_SERIALS): an
+    arena hands the same bytes of the same base buffer to another tenant after a lease ends
+    (Arena), so the base's serial with the offset could name a previous tenant's buffer.
+    `lease` is the ArenaLease the section was taken from, or None."""
+    __slots__ = ("base", "handle", "offset", "nbytes", "ptr", "serial", "lease")
 
     def __init__(self, base, offset, nbytes):
         self.base, self.handle, self.offset, self.nbytes = base, base.handle, offset, nbytes
         self.ptr = address(base.ptr) + offset
+        self.serial, self.lease = next(BUFFER_SERIALS), None
 
     def write(self, array):
         """Copy an array to the start of the section, up to the section's size."""
@@ -641,6 +651,228 @@ class Section:
 
     def destroy(self, idle=False):
         """Nothing to free: the base buffer owns the memory."""
+
+
+#: The fewest bytes an arena grows by (ArenaLease.take): a lease that needs more memory than
+#: its arena holds adds a block of at least this size (or of the request, if larger), so the
+#: first search on a device makes tens of allocations rather than one per buffer, and later
+#: searches none until one needs more than every earlier one. A granularity, not a budget:
+#: the arena holds the most any one search used, rounded up to it.
+ARENA_BLOCK = 32 << 20
+
+
+class Arena:
+    """The scratch memory of one search at a time on one GPU device, recycled from search to
+    search.
+
+    A search's plans run together (their calls in one fused submission per chunk), so their
+    scratch cannot alias within a search: a search takes the arena for its run (begin: an
+    ArenaLease), every buffer its plans' records own and every pipelining slot's spectra and
+    starts is a section of it, laid out as the plans first ask (ArenaLease.take), and when
+    the run ends the lease ends (ArenaLease.end): each tenant's runs have finished, its work
+    held for later runs is dropped, its records on the arena's sections are released, and
+    its slots are dropped. The next search's lease takes the same blocks from their start; it
+    adds blocks only for what no earlier search needed (ARENA_BLOCK), so a job's steady state
+    allocates nothing per call and nothing per search.
+
+    Which kinds of buffer the arena holds is what the device reports: device-only scratch on
+    every device; buffers the host reads back or writes, and spectra and starts the host
+    addresses as arrays, only where the host sees device memory in place
+    (DeviceProps.unified_memory). Elsewhere (CUDA) those stay buffers of their own, with
+    their own page-locked mirrors and staging, and the arena's blocks are plain device
+    memory (_x_alloc without readback or upload), sized to what searches used.
+
+    Persistent data -- a plan's templates and tap table -- is not in the arena: it lives as
+    long as its plan, which can outlive a search's run, and residency checks (_gpu_cache)
+    name it by allocation serial, which an arena section passing to another tenant would
+    keep. The coarse templates a record uploads are its own buffers, so they are written
+    once per lease, when the record is made.
+
+    The blocks are allocated, sectioned and freed by a context of the arena's own (`ctx`,
+    one per device for the process: _gpuroot.device_arena), so no block keeps a plan's
+    context alive. Only one lease is in force at a time on a device; a search that starts
+    while one is (a search run from another's hook) allocates as before.
+
+    Parameters
+    ----------
+    ctx : Executor
+        The arena's own context on the device: it makes the blocks (_x_alloc) and their
+        sections (_x_section) and frees them (_x_free).
+    """
+
+    #: Fill every section a lease hands out with 0xFF bytes (float NaN), for tests that look
+    #: for readers of memory nobody wrote (as BufferPool.poison).
+    poison = False
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        #: kind (readback, upload) -> the blocks of that kind, in the order leases fill them
+        self.blocks = {}
+        self.lease = None
+        #: blocks allocated, leases begun, and the most bytes any lease took, over its life
+        self.made = self.leases = self.peak_bytes = 0
+        props = ctx.props
+        self.align = max(256, int(props.offset_alignment))
+        self.host_kinds = bool(props.unified_memory)
+
+    def holds(self, readback=False, upload=False):
+        """Whether the arena holds a buffer of this kind (see the class docstring)."""
+        return self.host_kinds or not (readback or upload)
+
+    def capacity(self):
+        """Bytes of every block the arena holds."""
+        return sum(b.nbytes for blocks in self.blocks.values() for b in blocks)
+
+    def begin(self):
+        """A new lease on the arena (ArenaLease), in force on its device until it ends, or
+        None while another lease is in force."""
+        if self.lease is not None:
+            return None
+        self.lease = ArenaLease(self)
+        self.leases += 1
+        self.ctx._device_state.arena_lease = self.lease
+        return self.lease
+
+    def release(self):
+        """End the lease in force and free every block (at interpreter exit, or when the
+        arena's device is closed)."""
+        if self.lease is not None:
+            self.lease.end()
+        for blocks in self.blocks.values():
+            for block in blocks:
+                self.ctx._x_free(block)
+        self.blocks.clear()
+
+
+class ArenaLease:
+    """One search's use of an Arena (Arena.begin), from its run's start to its end.
+
+    Sections are taken first fit from the free bytes of the arena's blocks of their kind, in
+    the blocks' order, each at a multiple of the arena's alignment (at least 256 bytes and
+    the device's offset_alignment); a section given back during the lease (a record evicted
+    within the search) is reused for the next request of its kind and aligned size. Every
+    section taken is a new section object, with a serial of its own (Section), so nothing
+    keyed on it can be mistaken for the bytes' previous tenant.
+
+    Tenants are held weakly: the contexts whose records took sections (Executor._exec_buffer)
+    and the plans whose slots did (MatchedFilter._series_submit). end() asks each live plan,
+    then each live context, to give back what it holds (_arena_end), then makes the blocks
+    free for the next lease.
+
+    Parameters
+    ----------
+    arena : Arena
+        The arena this lease takes sections from.
+    """
+
+    def __init__(self, arena):
+        self.arena = arena
+        #: Each lease's own name: what a cache that outlives a lease can key on.
+        self.generation = next(BUFFER_SERIALS)
+        self.live = True
+        #: kind -> [bytes used at the start of each block]
+        self.used = {kind: [0] * len(blocks) for kind, blocks in arena.blocks.items()}
+        #: (kind, aligned size) -> [(block index, offset)] given back during the lease
+        self.free = {}
+        self.plans = weakref.WeakValueDictionary()
+        self.contexts = weakref.WeakValueDictionary()
+        #: sections taken, and the bytes the lease's sections reached (aligned)
+        self.taken = self.bytes = 0
+
+    def take(self, tenant, nbytes, readback=False, upload=False):
+        """A section of at least nbytes of the arena's memory of this kind, for `tenant` (a
+        context, registered so end() releases its records on it). Grows the arena by a block
+        when no block of the kind has room."""
+        arena = self.arena
+        if not self.live:
+            raise RuntimeError("a section asked of an arena lease that has ended")
+        kind = (bool(readback), bool(upload))
+        nbytes = max(int(nbytes), 16)
+        size = -(-nbytes // arena.align) * arena.align
+        self.contexts[id(tenant)] = tenant
+        blocks = arena.blocks.setdefault(kind, [])
+        used = self.used.setdefault(kind, [])
+        used.extend([0] * (len(blocks) - len(used)))
+        reuse = self.free.get((kind, size))
+        if reuse:
+            index, offset = reuse.pop()
+        else:
+            index = next((i for i, b in enumerate(blocks) if b.nbytes - used[i] >= size), None)
+            if index is None:
+                # Grow: a new block of at least ARENA_BLOCK bytes, at the end of the list.
+                blocks.append(arena.ctx._x_alloc(max(size, ARENA_BLOCK), readback=readback,
+                                                 upload=upload))
+                used.append(0)
+                arena.made += 1
+                index = len(blocks) - 1
+            offset = used[index]
+            used[index] += size
+            self.bytes += size
+            arena.peak_bytes = max(arena.peak_bytes, self.bytes)
+        section = arena.ctx._x_section(blocks[index], offset, nbytes)
+        section.lease = self
+        self.taken += 1
+        if arena.poison and arena.host_kinds:
+            ctypes.memset(section.ptr, 0xFF, nbytes)
+        return section
+
+    def give(self, section):
+        """Take back a section its tenant is done with (no run still uses it), for the next
+        request of its kind and size in this lease. A section of an ended lease is ignored:
+        its bytes are already the next lease's."""
+        if not self.live or section.lease is not self:
+            return
+        section.lease = None
+        for kind, blocks in self.arena.blocks.items():
+            for index, block in enumerate(blocks):
+                if block is section.base:
+                    size = -(-section.nbytes // self.arena.align) * self.arena.align
+                    self.free.setdefault((kind, size), []).append((index, section.offset))
+                    return
+
+    def array(self, ctx, shape, dtype=np.complex64, plan=None):
+        """A host array over a section of the arena's device memory, shared like an
+        empty_shared array (a kernel binds it in place, and it has an allocation serial of
+        its own), for context `ctx` and, given, `plan` (registered so end() drops what it
+        built on it, _arena_end). The arena must hold host-addressed buffers (Arena.holds
+        with upload: the host sees device memory in place)."""
+        from ._shared import _Allocation, _Storage
+        if not self.arena.holds(upload=True):
+            raise ValueError("this device's arena holds no host-addressed arrays")
+        dtype = np.dtype(dtype)
+        shape = tuple(shape) if np.iterable(shape) else (shape,)
+        nbytes = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+        section = self.take(ctx, nbytes)
+        if plan is not None:
+            self.plans[id(plan)] = plan
+        owner = _Allocation(section)
+        storage = _Storage(section.ptr, nbytes, owner)
+        owner._storage = weakref.ref(storage)
+        return storage.array(dtype, shape)
+
+    def end(self):
+        """End the lease: every live plan tenant collects its results and drops its slots,
+        every live context tenant finishes its runs, drops the work it holds for later runs
+        and releases its records on the lease's sections (_arena_end); then the arena's
+        blocks are free for the next lease."""
+        if not self.live:
+            return
+        try:
+            for plan in list(self.plans.values()):
+                plan._arena_end(self)
+            for ctx in list(self.contexts.values()):
+                ctx._arena_end(self)
+        finally:
+            self.live = False
+            self.free.clear()
+            self.plans.clear()
+            self.contexts.clear()
+            arena = self.arena
+            if arena.lease is self:
+                arena.lease = None
+                dev = arena.ctx._device_state
+                if getattr(dev, "arena_lease", None) is self:
+                    dev.arena_lease = None
 
 
 def bin_shift(binsize):

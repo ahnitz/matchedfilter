@@ -138,8 +138,9 @@ def _place(binding, binds):
     if isinstance(binding, Arg):
         binding = binds[binding.name]
     owner = getattr(binding, "owner", None)
-    if owner is not None:                       # a shared view (_shared._Borrowed)
-        return owner.buffer, binding.offset
+    if owner is not None:                       # a shared view (_shared._Borrowed), whose
+        buf = owner.buffer                      # offset counts from its base buffer's start
+        return getattr(buf, "base", buf), binding.offset
     base = getattr(binding, "base", None)
     if base is not None:                        # a section (_gpuhost.Section)
         return base, binding.offset
