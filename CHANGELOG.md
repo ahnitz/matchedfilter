@@ -13,7 +13,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   results (19,868 arrays). It also records correlations of complex series on a bank whose
   block-size groups interleave (scales, gapped windows, selections across groups, outputs
   reused through `out_support`, several channels) and the tiled cascade's middle calls with
-  each retain mode (20,039 arrays). With `--device gpu:0` it records the same cases on a GPU,
+  each retain mode (20,039 arrays). Every case that tiles is recorded again under the other
+  schedule (the injection-window capture case and the synthetic search untiled, the first
+  capture top tiled, `correlate_and_filter_many`'s small and large cohorts and each retain
+  mode of the cascade untiled; 24,593 arrays), and `golden.py schedules` checks that the two
+  schedules of a record gave the same peaks, hook series and, where both wrote it, the same
+  middle output. With `--device gpu:0` it records the same cases on a GPU,
   from a seed of that device's own; on a Radeon 8060S three fresh runs from one seed record
   identical results. `--digest-above` keeps large arrays whole, to see how two records differ.
 - `tools/gpu_alloc_trace.py` runs a program with every Vulkan device allocation traced by

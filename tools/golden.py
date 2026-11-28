@@ -10,6 +10,7 @@ must not change results can be checked against the tree it changes.
 
     python tools/golden.py record OUT.npz --costs SEED.json
     python tools/golden.py compare A.npz B.npz
+    python tools/golden.py schedules A.npz
 
 The cases:
 
@@ -29,7 +30,10 @@ The cases:
   interleave, of complex series, with gapped windows, scales, selections across groups and
   outputs reused through out_support; correlate_and_filter_many; and the tiled cascade's
   middle calls (two windows its blocks bridge, scales, time chunks forced by a small tile)
-  with the middle output written, mirrored, not written, and kept around peaks.
+  with the middle output written, mirrored, not written, and kept around peaks. Every case
+  that tiles is recorded again under the other schedule (``.untiled``, ``.other``,
+  ``.tiled``), and ``schedules`` checks that a record's two schedules gave the same peaks
+  and series (and, where both wrote it, the same middle output).
 
 Decisions must be the same in both trees for a bitwise comparison to mean anything, so
 every run reads its measured costs from a cost file and runs with MF_AUTOTUNE=0 (no timed
@@ -263,6 +267,29 @@ def _injection_windows(search, inputs, live_leaves=4, half_width=int(4.5 * 2048)
     return windows
 
 
+class _Schedule:
+    """Within it, the search's middle-to-leaf work runs under one schedule: "untiled" (the
+    middle rows correlated whole, then the leaves), "tiled" (every cohort the tiled cascade
+    can run runs tiled, in one time chunk per group), or None (the library's own choice)."""
+
+    def __init__(self, schedule):
+        self.schedule = schedule
+
+    def __enter__(self):
+        from matchedfilter.time_domain import TimeDomainFilterBank
+        self.saved = TimeDomainFilterBank._TILE_BYTES
+        if self.schedule == "untiled":
+            TimeDomainFilterBank._TILE_BYTES = 0
+        elif self.schedule == "tiled":
+            TimeDomainFilterBank._TILE_BYTES = 1 << 40
+        return self
+
+    def __exit__(self, *exc):
+        from matchedfilter.time_domain import TimeDomainFilterBank
+        TimeDomainFilterBank._TILE_BYTES = self.saved
+        return False
+
+
 def _capture_cases(rec, tops, device):
     """Every capture top, then the first again with follow-ups, with split windows and with
     an injection job's windows, each searched on `device`."""
@@ -272,16 +299,19 @@ def _capture_cases(rec, tops, device):
         with open(path, "rb") as f:
             capture = pickle.load(f)
         top = Path(path).stem
-        variants = [("plain", None, None)]
+        variants = [("plain", None, None, None)]
         if i == 0:
-            variants += [("followup", _envelope_of, _follow_up(205, 50)),
-                         ("split", None, None), ("injection", _envelope_of, _follow_up(205, 50))]
-        for variant, envelope, refilter in variants:
+            variants += [("followup", _envelope_of, _follow_up(205, 50), None),
+                         ("split", None, None, None),
+                         ("injection", _envelope_of, _follow_up(205, 50), None),
+                         ("injection.untiled", _envelope_of, _follow_up(205, 50), "untiled"),
+                         ("plain.tiled", None, None, "tiled")]
+        for variant, envelope, refilter, schedule in variants:
             search, inputs, windows, _, _ = search_bench.build(capture, device)
             search_threshold = search.threshold
             if variant == "split":
                 windows = _split_windows(windows, inputs)
-            elif variant == "injection":
+            elif variant.startswith("injection"):
                 windows = _injection_windows(search, inputs)
 
             def hooks(r, search=search, envelope=envelope, refilter=refilter,
@@ -294,7 +324,8 @@ def _capture_cases(rec, tops, device):
                     on_peaks(ctx)
                 h["on_peaks"] = with_threshold
                 return h
-            _search_case(rec, "%s.%s" % (top, variant), search, inputs, windows, hooks)
+            with _Schedule(schedule):
+                _search_case(rec, "%s.%s" % (top, variant), search, inputs, windows, hooks)
             print("recorded %s.%s (%d arrays so far)" % (top, variant, len(rec.arrays)),
                   flush=True)
 
@@ -365,6 +396,8 @@ def _synthetic_search_case(rec, device):
         h["on_peaks"] = with_threshold
         return h
     _search_case(rec, "synthetic.search", search, inputs, windows, hooks)
+    with _Schedule("untiled"):
+        _search_case(rec, "synthetic.search.untiled", search, inputs, windows, hooks)
 
 
 def _entry_point_cases(rec, device):
@@ -490,6 +523,14 @@ def _entry_point_cases(rec, device):
             rec.add_results("%s.leaf%d" % (series_name, k), res)
         for k, o in enumerate(outs):
             rec.add("%s.middle%d" % (series_name, k), o)
+        # the same calls under the other schedule (the small cohort runs tiled by default)
+        for o in outs:
+            o[:] = 0
+        for k, res in enumerate(TimeDomainFilterBank.correlate_and_filter_many(
+                corr_jobs, leaf_jobs, tile_bytes=0 if series_name == "small" else 1 << 40)):
+            rec.add_results("%s.other.leaf%d" % (series_name, k), res)
+        for k, o in enumerate(outs):
+            rec.add("%s.other.middle%d" % (series_name, k), o)
 
     rec.case = "entry.correlate_and_filter_many.cascade"
     # The tiled cascade's middle calls: two windows (a gap its blocks bridge), scales, time
@@ -514,6 +555,15 @@ def _entry_point_cases(rec, device):
             rec.add_results("%s.leaf%d" % (mode, k), res)
         for k, o in enumerate(outs):
             rec.add("%s.middle%d" % (mode, k), o)
+        # untiled, with the same retain mode: the same peaks, and the middle output written
+        for o in outs:
+            o[:] = 0
+        kw_untiled = dict(kw, tile_bytes=0)
+        for k, res in enumerate(TimeDomainFilterBank.correlate_and_filter_many(
+                corr_jobs, leaf_jobs, **kw_untiled)):
+            rec.add_results("%s.untiled.leaf%d" % (mode, k), res)
+        for k, o in enumerate(outs):
+            rec.add("%s.untiled.middle%d" % (mode, k), o)
 
 
 def record(args):
@@ -590,6 +640,43 @@ def compare(args):
     return 1
 
 
+def schedules(args):
+    """The schedules subcommand: 0 when every case recorded under both schedules gave the same
+    arrays under each, else 1. A case named ``X.untiled`` or ``X.tiled`` is the other schedule
+    of case X; within a case, a label holding ``.other.`` or ``.untiled.`` is the other
+    schedule of the label without it. The middle output of a call that keeps only part of it
+    (retain_radius 0 or positive) is written whole when untiled and is not compared."""
+    with np.load(args.record) as f:
+        by_key = {}
+        for name in f.files:
+            _, case, label = name.split("|", 2)
+            by_key[(case, label)] = name
+        pairs, diffs = 0, []
+        for (case, label), name in by_key.items():
+            other_case, other_label = case, label
+            for suffix in (".untiled", ".tiled"):
+                if case.endswith(suffix):
+                    other_case = case[:-len(suffix)]
+            for part in (".other.", ".untiled."):
+                if part in label:
+                    other_label = label.replace(part, ".", 1)
+            if (other_case, other_label) == (case, label):
+                continue
+            if label.split(".")[0] in ("ephemeral", "retained") and ".middle" in label:
+                continue
+            partner = by_key.get((other_case, other_label))
+            if partner is None:
+                diffs.append("%s: no record under the other schedule" % name)
+                continue
+            pairs += 1
+            if f[name].tobytes() != f[partner].tobytes() or f[name].dtype != f[partner].dtype:
+                diffs.append("%s differs from %s" % (name, partner))
+    print("%d arrays under both schedules; %d differ" % (pairs, len(diffs)))
+    for line in diffs[:args.show]:
+        print("  " + line)
+    return 1 if diffs or not pairs else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -617,8 +704,11 @@ def main(argv=None):
     cp.add_argument("a")
     cp.add_argument("b")
     cp.add_argument("--show", type=int, default=10, help="differences to print (default 10)")
+    sp = sub.add_parser("schedules", help="check a record's cases under both schedules")
+    sp.add_argument("record")
+    sp.add_argument("--show", type=int, default=10, help="differences to print (default 10)")
     args = ap.parse_args(argv)
-    return record(args) if args.command == "record" else compare(args)
+    return {"record": record, "compare": compare, "schedules": schedules}[args.command](args)
 
 
 if __name__ == "__main__":
