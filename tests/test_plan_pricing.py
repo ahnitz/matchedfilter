@@ -176,8 +176,8 @@ def test_a_gpu_choice_is_the_counts_own_at_every_template_count(feed, forced, sh
     cost = gc.CostModel(N, {64: 30.7, 128: 57.5, 256: 140.1, 512: 378.3, 1024: 876.6}, sparse,
                         [(0.0098, 3388.0), (0.104, 2889.0)], block=3306.0, feed=feed)
     counts = list(range(1, 25)) + [64, 96, 319]
-    pn = gc._norm_profile(p, N)
-    c_bands, k0s, bands = gc._cached_band_offsets(pn, gc._gm._profile_sig(pn), N, gc._MIN_BAND)
+    pn = gc.profile_class(p, N)
+    c_bands, k0s, bands = pn.band_offsets()
     nsamp, nsim = gc.model_draws(1e-3)
 
     def described(choice):
@@ -185,7 +185,7 @@ def test_a_gpu_choice_is_the_counts_own_at_every_template_count(feed, forced, sh
         return (tuple(best["chain"]), [(tuple(d["chain"]), d["cost"], d["q15"], d["offsets"],
                                         tuple(d["search"]["thresholds"]), tuple(d["thresholds"]),
                                         d["halfwidth"]) for d in every])
-    fresh = {nt: described(gc._choose_chain(pn, N, SNR, 1e-3, cost, 3, gc._MIN_BAND, nsim, None,
+    fresh = {nt: described(gc._choose_chain(pn.profile, N, SNR, 1e-3, cost, 3, gc._MIN_BAND, nsim, None,
                                             nt, nsamp, bands=bands,
                                             offsets_by_band=dict(zip(c_bands, k0s))))
              for nt in counts}

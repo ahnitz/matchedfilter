@@ -5,11 +5,13 @@ fine maximum under signal, and priced on the noise pass rates of whole-block max
 (gatechain's module docstring states the model). This module makes those draws and keeps
 them: the profile's normal form and its usable bands, the signal table (drawn from the
 samples' joint law, _signal_law, or simulated), the noise simulation's running-maximum
-records, the window local to a signal that the planner reads, and the store that lets a
-profile reuse the results of one like it (_SIMILAR).
+records, the window local to a signal that the planner reads, the store that lets a
+profile reuse the results of one like it (_SIMILAR), and a reference's ProfileClass, which
+works out once what follows from the reference alone for every plan it reaches.
 
 gatechain plans on these and binds the public names here under its own.
 """
+import functools
 import math
 from collections import OrderedDict
 from itertools import combinations
@@ -166,7 +168,7 @@ def _cache_put(cache, key, value):
         cache.popitem(last=False)
 
 
-_SIMILAR = {}           # (kind, n, bands, params) -> [((unit profile, gate features), value)]
+_SIMILAR = {}           # (kind, n, bands, params) -> [((identity, unit, features), value, seq)]
 
 #: Reuse tolerances: a profile takes a cached result of another only if their shapes agree
 #: (cosine, a cheap first test) AND every candidate band's signal response sqrt(f_b) g_b
@@ -178,24 +180,11 @@ _REUSE_COS = 0.985
 _REUSE_RESPONSE = 3e-3
 
 
-_FEATURES = OrderedDict()
-
-
 def _gate_features(p, n, m=17):
     """Per candidate band b of n: sqrt(f_b) * g_b, f_b the band's share of the profile and g_b
     the smallest normalised in-band correlation over half a coarse step (the worst sub-grid
-    offset). Memoised per profile (every similarity lookup asks again: ~1000 a job)."""
+    offset). A profile's are worked out once, by its ProfileClass."""
     p = np.asarray(p, np.float64)
-    key = (hashlib.sha1(p.tobytes()).digest(), p.size, int(n), int(m))
-    hit = _FEATURES.get(key)
-    if hit is None:
-        hit = _FEATURES[key] = _gate_features_uncached(p, n, m)
-        while len(_FEATURES) > 4096:
-            _FEATURES.popitem(last=False)
-    return hit.copy()
-
-
-def _gate_features_uncached(p, n, m):
     tot = p.sum()
     out = []
     for b in candidate_bands(int(n)):
@@ -211,20 +200,227 @@ def _gate_features_uncached(p, n, m):
     return np.array(out)
 
 
-def _similar_get(kind, p, params):
-    u = (p / np.linalg.norm(p)).astype(np.float32)
-    feats = None
-    for (v, fv), val, _ in _SIMILAR.get((kind,) + params, []):
-        if float(np.dot(u, v)) < _REUSE_COS:
-            continue
-        if feats is None:
-            feats = _gate_features(p, params[0])
-        if fv.shape == feats.shape and np.all(
-                np.abs(fv - feats) <= _REUSE_RESPONSE * np.maximum(np.abs(feats), 1e-12)):
-            return (u, feats), val
-    if feats is None:
-        feats = _gate_features(p, params[0])
-    return (u, feats), None
+def _band_features(power, m, k0=0):
+    """(in-band fraction, effective bandwidth in bins) at band m starting at k0."""
+    p = np.asarray(power, dtype=np.float64)
+    p = np.where(p > 0, p, 0.0)
+    tot = p.sum()
+    if tot <= 0:
+        return 0.0, 1.0
+    k0, khi = _band_slice(len(p), m, k0)
+    inb = p[k0:khi]
+    s = inb.sum()
+    if s <= 0:
+        return 0.0, 1.0
+    q = inb / s
+    return float(s / tot), float(1.0 / np.sum(q ** 2))
+
+
+#: References without a localised correlation peak are outside automatic selection: every
+#: candidate band's effective bandwidth (_band_features) below this many bins.
+_BEFF_MIN = 8.0
+
+
+class ProfileClass:
+    """A reference profile at one transform size, and what follows from it alone.
+
+    The plans of one root and channel (a top template's leaf banks in one detector) are
+    handed one reference at each block size, and the chain choice, its thresholds and the
+    screeners ask the same questions of it for every plan and every call: its normalised
+    profile and that profile's signature, its band offsets, the bands that hold power, and
+    whether a result the similarity store holds for another profile stands for it
+    (_similar_get). This object answers each question once and is handed to every plan of
+    the root and channel (TimeDomainFilterBank.set_reference makes one per reference and
+    block size). Its identity is its content: equal profiles at one size have equal
+    identities, whichever object holds them.
+
+    It holds no plan, bank or other class, only its arrays and the answers, so it goes with
+    the last plan that holds it (and, for one made from a bare array, when _CLASSES drops
+    it, the oldest first past _CLASSES_MAX).
+
+    Parameters
+    ----------
+    reference : numpy.ndarray
+        The profile as a plan is handed it: nonnegative power per frequency bin, length n
+        for every answer that needs the normalised profile. The class keeps this array, as
+        it is, and makes it read-only.
+    n : int
+        The transform size.
+
+    Attributes
+    ----------
+    reference : numpy.ndarray
+        The profile as handed, read-only.
+    n : int
+        The transform size.
+    """
+
+    def __init__(self, reference, n):
+        reference.setflags(write=False)
+        self.reference = reference
+        self.n = int(n)
+        self._band_offsets = {}         # floor -> (candidate bands, their offsets, usable bands)
+        self._chain_offsets = {}        # chain -> its bands' offsets
+        self._reference_offsets = {}    # band -> band_offset of the reference as handed
+        self._usable = {}               # floor -> usable_bands of the reference as handed
+        self._resembles = {}            # identity of another profile -> whether this one takes its results
+
+    @functools.cached_property
+    def profile(self):
+        """The reference normalised to unit sum (_norm_profile: float64, read-only)."""
+        return _norm_profile(self.reference, self.n)
+
+    @functools.cached_property
+    def identity(self):
+        """bytes: the SHA-1 digest of the normalised profile's bytes, then n."""
+        return hashlib.sha1(self.profile.tobytes()).digest() + self.n.to_bytes(4, "little")
+
+    @functools.cached_property
+    def signature(self):
+        """bytes: the normalised profile's signature (gatemodel._profile_sig), the key of the
+        exact caches of choices and plans."""
+        return _gm._profile_sig(self.profile)
+
+    @functools.cached_property
+    def unit(self):
+        """The normalised profile scaled to unit length, float32: the similarity store's
+        first test (cosine)."""
+        return (self.profile / np.linalg.norm(self.profile)).astype(np.float32)
+
+    @functools.cached_property
+    def features(self):
+        """The normalised profile's gate features at n (_gate_features)."""
+        return _gate_features(self.profile, self.n)
+
+    @functools.cached_property
+    def uncovered(self):
+        """True when no candidate band of the reference has a localised peak to work with: a
+        reference whose in-band power sits in a bin or two gives a correlation of nearly
+        constant magnitude, with no peak to find coarsely and refine (_BEFF_MIN)."""
+        bands = candidate_bands(self.n)
+        return bool(bands) and all(
+            _band_features(self.reference, b, self.reference_offset(b))[1] < _BEFF_MIN
+            for b in bands)
+
+    def band_offsets(self, floor=_MIN_BAND):
+        """The normalised profile's candidate bands from `floor`, their offsets (band_offset)
+        and the bands among them that hold power.
+
+        Parameters
+        ----------
+        floor : int, optional
+            The narrowest band (default _MIN_BAND).
+
+        Returns
+        -------
+        tuple
+            (candidate bands, a tuple of their offsets k0, the list of usable bands).
+        """
+        hit = self._band_offsets.get(floor)
+        if hit is None:
+            p, n = self.profile, self.n
+            c_bands = candidate_bands(n, floor)
+            k0_cand = tuple(band_offset(p, n, b) for b in c_bands)
+            bands = [b for b, k0 in zip(c_bands, k0_cand) if p[slice(*_band_slice(n, b, k0))].sum() > 0]
+            hit = self._band_offsets[floor] = (c_bands, k0_cand, bands)
+        return hit
+
+    def chain_offsets(self, chain):
+        """The normalised profile's offsets (band_offset) of the bands of `chain`, a tuple."""
+        hit = self._chain_offsets.get(chain)
+        if hit is None:
+            hit = self._chain_offsets[chain] = tuple(band_offset(self.profile, self.n, b) for b in chain)
+        return hit
+
+    def reference_offset(self, band):
+        """band_offset of the reference as handed (not normalised) at `band`, an int."""
+        hit = self._reference_offsets.get(band)
+        if hit is None:
+            hit = self._reference_offsets[band] = band_offset(self.reference, self.n, band)
+        return hit
+
+    def usable_bands(self, floor=_MIN_BAND):
+        """usable_bands of the reference as handed: the candidate bands from `floor` that hold
+        some of its power, a list."""
+        hit = self._usable.get(floor)
+        if hit is None:
+            hit = self._usable[floor] = usable_bands(self.reference, self.n, floor)
+        return hit
+
+    def resembles(self, identity, unit, features):
+        """Whether this profile takes a result the similarity store holds for the profile of
+        `identity` (whose unit vector and gate features are `unit` and `features`): their
+        cosine at least _REUSE_COS and every gate feature within _REUSE_RESPONSE of this
+        profile's, relative. Decided once for each such profile.
+
+        Returns
+        -------
+        bool
+        """
+        hit = self._resembles.get(identity)
+        if hit is None:
+            feats = self.features
+            hit = self._resembles[identity] = bool(
+                float(np.dot(self.unit, unit)) >= _REUSE_COS
+                and features.shape == feats.shape
+                and np.all(np.abs(features - feats)
+                           <= _REUSE_RESPONSE * np.maximum(np.abs(feats), 1e-12)))
+        return hit
+
+    @property
+    def nbytes(self):
+        """The bytes of its reference (what a reference cache that holds it counts)."""
+        return self.reference.nbytes
+
+
+#: Classes made from bare arrays (profile_class), by identity, the most recent last.
+_CLASSES = OrderedDict()
+_CLASSES_MAX = 4096
+
+
+def profile_class(power, n):
+    """The ProfileClass of `power` at transform size n.
+
+    Parameters
+    ----------
+    power : ProfileClass or numpy.ndarray
+        A class (returned as it is), or a profile: then the class of its normalised profile
+        (_norm_profile), one per content, made on first use and held in _CLASSES.
+    n : int
+        The transform size.
+
+    Returns
+    -------
+    ProfileClass
+
+    Raises
+    ------
+    ValueError
+        If `power` is a class of another transform size, or not a finite nonnegative
+        length-n profile with positive sum.
+    """
+    if isinstance(power, ProfileClass):
+        if power.n != int(n):
+            raise ValueError("a profile class of n=%d asked for at n=%d" % (power.n, int(n)))
+        return power
+    made = ProfileClass(_norm_profile(power, n), n)
+    held = _CLASSES.get(made.identity)
+    if held is not None:
+        _CLASSES.move_to_end(made.identity)
+        return held
+    _CLASSES[made.identity] = made
+    while len(_CLASSES) > _CLASSES_MAX:
+        _CLASSES.popitem(last=False)
+    return made
+
+
+def _similar_get(kind, profile, params):
+    """The first result held under (kind,) + params for a profile `profile` (a ProfileClass)
+    resembles, in the order they were put; None if there is none."""
+    for (identity, unit, features), value, _ in _SIMILAR.get((kind,) + params, ()):
+        if profile.resembles(identity, unit, features):
+            return value
+    return None
 
 
 #: The most entries _SIMILAR holds of each kind over all its keys, the oldest dropped first.
@@ -238,14 +434,14 @@ _SIMILAR_COUNT = {}     # kind -> entries put since the kind was last counted (a
 _SIMILAR_SEQ = [0]
 
 
-def _similar_put(kind, u, params, value, keep=None):
-    """Hold `value` for profiles like the unit profile `u` under (kind,) + params: the key's
-    newest `keep` entries, and of the kind's entries over all keys its newest _SIMILAR_MAX
-    (an eighth are dropped at a time, oldest first, when the bound is passed)."""
+def _similar_put(kind, profile, params, value, keep=None):
+    """Hold `value` for profiles like `profile` (a ProfileClass) under (kind,) + params: the
+    key's newest `keep` entries, and of the kind's entries over all keys its newest
+    _SIMILAR_MAX (an eighth are dropped at a time, oldest first, when the bound is passed)."""
     key = (kind,) + params
     lst = _SIMILAR.setdefault(key, [])
     _SIMILAR_SEQ[0] += 1
-    lst.append((u, value, _SIMILAR_SEQ[0]))
+    lst.append(((profile.identity, profile.unit, profile.features), value, _SIMILAR_SEQ[0]))
     del lst[:-(keep or _CACHE_MAX)]
     cap = _SIMILAR_MAX.get(kind, 4096)
     _SIMILAR_COUNT[kind] = _SIMILAR_COUNT.get(kind, 0) + 1
@@ -392,9 +588,10 @@ def _law_profile(p, n, bands, snr, k0s):
     """The profile whose draws (_signal_law) stand for `p`'s: p itself, or an earlier profile
     alike in the gates' response (_similar_get), as a job's banks' simulations are shared."""
     params = (n, tuple(bands), float(snr), tuple(k0s))
-    unit, base = _similar_get("law-profile", p, params)
+    profile = profile_class(p, n)
+    base = _similar_get("law-profile", profile, params)
     if base is None:
-        _similar_put("law-profile", unit, params, p, keep=_RECORDS_MAX)
+        _similar_put("law-profile", profile, params, p, keep=_RECORDS_MAX)
         return p
     return base
 
@@ -693,7 +890,7 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _ex
         # banks have nearly one reference profile. It is extended with its own profile, so
         # it stays one simulation.
         params = (n, tuple(bands), snr, seed, _NF) + extra
-        unit, sim = (None, None) if _exact else _similar_get("signal-records", p, params)
+        sim = None if _exact else _similar_get("signal-records", profile_class(p, n), params)
         if sim is None:
             if use_base:
                 base0 = _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=k0s, alphas=None,
@@ -704,9 +901,9 @@ def _signal_records(p, n, bands, Fb, snr, kept, seed, k0s=None, alphas=None, _ex
             sim = dict(p=p_sim, Fb=Fb_sim, k0s=k0s, alphas=al, rows=0,
                        t=np.empty(0, np.int64), u=np.empty(0),
                        keep_mask=np.empty(0, np.uint8), recs=None, sub_recs=None, tab=None)
-            if unit is None:
-                unit = ((p_sim / np.linalg.norm(p_sim)).astype(np.float32), _gate_features(p_sim, n))
-            _similar_put("signal-records", unit, params, sim, keep=_RECORDS_MAX)
+            # held as p's where p was looked up (its class asked the store), else as p_sim's
+            _similar_put("signal-records", profile_class(p_sim if _exact else p, n), params, sim,
+                         keep=_RECORDS_MAX)
         _SIGNAL_RECORDS[key] = sim
         while len(_SIGNAL_RECORDS) > _RECORDS_MAX:
             _SIGNAL_RECORDS.popitem(last=False)
@@ -1142,7 +1339,7 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
         _NOISE_CACHE.move_to_end(key)
         return hit
     sim_params = (n, tuple(bands), int(nsim), int(seed), counts) + extra
-    unit, hit = (None, None) if _exact else _similar_get("noise", p, sim_params)
+    hit = None if _exact else _similar_get("noise", profile_class(p, n), sim_params)
     if hit is not None:
         _cache_put(_NOISE_CACHE, key, hit)
         return hit
@@ -1159,7 +1356,5 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
         last = below[off[1:] - 1] - np.concatenate(([0], below[off[1:-1] - 1]))
         out[:, i] = val[off[:-1] + last - 1]
     _cache_put(_NOISE_CACHE, key, out)
-    if unit is None:
-        unit = ((p / np.linalg.norm(p)).astype(np.float32), _gate_features(p, n))
-    _similar_put("noise", unit, sim_params, out)
+    _similar_put("noise", profile_class(p, n), sim_params, out)
     return out

@@ -16,6 +16,7 @@ from . import _gatedraws
 from . import _chains, _choice, _prices, _settings, _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune
 from ._filter import MatchedFilter, _from_any
+from ._gatedraws import _BEFF_MIN
 from ._shared import shared_view
 
 
@@ -36,40 +37,6 @@ def _uncovered_message(n, snr, fd):
         f"no gate chain for n={n} snr={snr:.2f} fd={fd:.0e}: the gate model cannot resolve "
         "the false-dismissal budget for this reference profile. Provide a reference with a "
         "localised correlation peak, or pin a chain and set its thresholds explicitly."
-    )
-
-
-def _band_features(power, m, k0=0):
-    """(in-band fraction, effective bandwidth in bins) at band m starting at k0."""
-    p = np.asarray(power, dtype=np.float64)
-    p = np.where(p > 0, p, 0.0)
-    tot = p.sum()
-    if tot <= 0:
-        return 0.0, 1.0
-    k0, khi = _gatedraws._band_slice(len(p), m, k0)
-    inb = p[k0:khi]
-    s = inb.sum()
-    if s <= 0:
-        return 0.0, 1.0
-    q = inb / s
-    return float(s / tot), float(1.0 / np.sum(q ** 2))
-
-
-# References without a localised correlation peak are outside automatic selection.
-_BEFF_MIN = 8.0
-
-
-def _uncovered_reference(power, n):
-    """True when no candidate band has a localised peak to work with.
-
-    A reference whose in-band power sits in a bin or two gives a correlation
-    of nearly constant magnitude -- there is no peak to find coarsely and
-    refine, so the hierarchical method does not apply. See `_BEFF_MIN`.
-    """
-    bands = _gatedraws.candidate_bands(n)
-    return bool(bands) and all(
-        _band_features(power, b, _gatedraws.band_offset(power, n, b))[1] < _BEFF_MIN
-        for b in bands
     )
 
 
@@ -291,7 +258,7 @@ class HierarchicalFilter(MatchedFilter):
         #: Lags each block's peak search covers, (start, end) in samples; prices noise passes.
         self.search_window = None if search_window is None else (int(search_window[0]), int(search_window[1]))
         self._init_state()
-        self._pending_ref = None
+        self._profile_class = None     # the reference's _gatedraws.ProfileClass (set_reference)
         self._cal_thr = None           # explicit per-tier thresholds, bypassing the model
         self._resolved = None          # the resolved plan (_resolve), until an input changes
         self._fs_snr = None
@@ -339,12 +306,18 @@ class HierarchicalFilter(MatchedFilter):
     # shared screeners and the compiled plan's tiers. A plan holds one calibration per
     # profile (use_profile) and one copy of the templates: every profile's compiled plan
     # reads the first one's template storage (_core.HMF(share=)).
-    _PROFILE_STATE = ("_pending_ref", "_cal_thr", "_resolved", "_mf", "_q15", "_tier0_clusters",
+    _PROFILE_STATE = ("_profile_class", "_cal_thr", "_resolved", "_mf", "_q15", "_tier0_clusters",
                       "_tier0_cand_cache", "_tier1_clusters", "_chosen_csig", "_synced_t0",
                       "_synced_t1", "_gt0_checked", "_forced", "_model_chain", "_chain",
                       "autotune_info", "_choice_key", "_plan_halfwidth", "_refine_reach",
                       "_execution_policy", "_applied_plan", "_applied_res", "_applied_real",
                       "_ep_real")
+
+    @property
+    def _pending_ref(self):
+        """The reference in use as set (its ProfileClass's array, read-only), or None."""
+        cls = self._profile_class
+        return None if cls is None else cls.reference
 
     def use_profile(self, profile):
         """Run with one noise profile's calibration from the next call on.
@@ -370,7 +343,7 @@ class HierarchicalFilter(MatchedFilter):
         held[d.get("_profile")] = {a: d.pop(a) for a in self._PROFILE_STATE if a in d}
         state = held.pop(profile, None)
         if state is None:
-            state = dict(_pending_ref=None, _cal_thr=None, _resolved=None, _mf=None, _q15=False,
+            state = dict(_profile_class=None, _cal_thr=None, _resolved=None, _mf=None, _q15=False,
                          _tier0_clusters={}, _tier0_cand_cache={}, _tier1_clusters={},
                          _chosen_csig=(), _synced_t0=None, _synced_t1=None, _gt0_checked=0,
                          _forced=False, _model_chain=None, _chain=self._pinned,
@@ -578,7 +551,7 @@ class HierarchicalFilter(MatchedFilter):
         got = self._tier0_cand_cache.get(b)
         if got is not None and (got[1] or pass2 is not None):
             return got[0]
-        usable = _gatedraws.usable_bands(self._pending_ref, self.n)
+        usable = self._profile_class.usable_bands()
         cand_ok = (b in usable) if self.device.kind == "cpu" else (len(usable) >= 2 and b in usable[:-1])
         if not cand_ok:
             self._tier0_cand_cache[b] = (empty, True)
@@ -586,7 +559,7 @@ class HierarchicalFilter(MatchedFilter):
         tmpl = self._templates_for_clustering() if templates is None else templates
         if tmpl is None:
             return empty
-        k0 = _gatedraws.band_offset(self._pending_ref, self.n, b)
+        k0 = self._profile_class.reference_offset(b)
         min_cl = _tier0_min_clusters(b, is_cpu=self.device.kind == "cpu")
         step_ref = [0]
         skipped = [False]
@@ -641,7 +614,7 @@ class HierarchicalFilter(MatchedFilter):
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         if use_forced:
             pl_uncl = _gatechain.chain_thresholds(
-                self._pending_ref, self.n, snr, self.fd, forced_chain,
+                self._profile_class, self.n, snr, self.fd, forced_chain,
                 cost=base_cm, window=self.search_window
             )
             best_cost = float("inf") if pl_uncl is None else (
@@ -651,7 +624,7 @@ class HierarchicalFilter(MatchedFilter):
             )
         else:
             _, uncl_plans = _gatechain.choose_chain(
-                self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
                 cost=base_cm, max_tiers=tiers, window=self.search_window, first=b
             )
             best_cost = min((q["cost"] for q in uncl_plans), default=float("inf"))
@@ -660,7 +633,7 @@ class HierarchicalFilter(MatchedFilter):
             cm_cand = base_cm.with_tier0_cluster({b: cand.ratio}, single_tier=is_cpu)
             if use_forced:
                 pl_lb = _gatechain.chain_thresholds(
-                    self._pending_ref, self.n, snr, self.fd, forced_chain,
+                    self._profile_class, self.n, snr, self.fd, forced_chain,
                     cost=cm_cand, window=self.search_window
                 )
                 lb_val = float("inf") if pl_lb is None else (
@@ -671,7 +644,7 @@ class HierarchicalFilter(MatchedFilter):
                 if lb_val >= best_cost:
                     continue
                 pl = _gatechain.chain_thresholds(
-                    self._pending_ref, self.n, snr, self.fd, forced_chain,
+                    self._profile_class, self.n, snr, self.fd, forced_chain,
                     cost=cm_cand, window=self.search_window, tier0_cluster=cand
                 )
                 c_val = float("inf") if pl is None else (
@@ -681,14 +654,14 @@ class HierarchicalFilter(MatchedFilter):
                 )
             else:
                 _, lb_plans = _gatechain.choose_chain(
-                    self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                    self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
                     cost=cm_cand, max_tiers=tiers, window=self.search_window, first=b
                 )
                 if min((q["cost"] for q in lb_plans), default=float("inf")) >= best_cost:
                     continue
                 a_q = math.floor(cand.alpha * 200.0 + 1e-9) / 200.0
                 _, plans = _gatechain.choose_chain(
-                    self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                    self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
                     cost=cm_cand, max_tiers=tiers, window=self.search_window,
                     tier0_clusters={b: (a_q, cand.lag_pad)}, first=b
                 )
@@ -840,8 +813,8 @@ class HierarchicalFilter(MatchedFilter):
     def _desired_offsets(self, chain):
         """Per-tier starting fine bins k0: model-selected offsets when calibrating from a
         reference profile, or zeros when explicit thresholds bypass the model."""
-        if self._pending_ref is not None and self._cal_thr is None:
-            return tuple(int(_gatedraws.band_offset(self._pending_ref, self.n, b)) for b in chain)
+        if self._profile_class is not None and self._cal_thr is None:
+            return tuple(int(self._profile_class.reference_offset(b)) for b in chain)
         return (0,) * len(chain)
 
     def _restore_into(self, plan, templates=None):
@@ -1012,7 +985,7 @@ class HierarchicalFilter(MatchedFilter):
                 cost = cost.unscreened()
             cl0 = self._active_tier0_cluster(self._chain)
             cl1 = self._active_tier1_cluster(self._chain) if cl0 is not None else None
-            pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
+            pl = _gatechain.chain_thresholds(self._profile_class, self.n, self._fs_snr or self.snr, self.fd,
                                              self._chain, cost=cost, window=self.search_window,
                                              tier0_cluster=cl0, tier1_cluster=cl1)
             if pl is not None:
@@ -1088,17 +1061,22 @@ class HierarchicalFilter(MatchedFilter):
 
         Parameters
         ----------
-        power : ndarray or None
-            A 1-D array of length n. None uses each template's own band fraction, which only
-            explicit thresholds (:meth:`set_coarse_threshold`) allow.
+        power : ndarray, _gatedraws.ProfileClass or None
+            A 1-D array of length n, or the class of one (a bank hands each of its plans the
+            class its reference makes at their block size, shared by every plan given that
+            reference: what depends on the reference alone is then worked out once). None
+            uses each template's own band fraction, which only explicit thresholds
+            (:meth:`set_coarse_threshold`) allow.
 
         Raises
         ------
         ValueError
             If the array is not one-dimensional of length n.
         """
+        handed = power if isinstance(power, _gatedraws.ProfileClass) else None
         if power is not None:
-            p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
+            p = np.ascontiguousarray(_from_any(power if handed is None else handed.reference),
+                                     dtype=np.float32)
             if p.shape != (self.n,) and p.shape != (getattr(self, 'k', self.n),):
                 raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
             if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
@@ -1111,7 +1089,7 @@ class HierarchicalFilter(MatchedFilter):
             self._ckey = None
             self.__dict__.pop("_call_plans", None)
         if power is None:
-            self._pending_ref = None
+            self._profile_class = None
             self._tier0_clusters = {}
             self._tier0_cand_cache = {}
             self._tier1_clusters = {}
@@ -1123,7 +1101,9 @@ class HierarchicalFilter(MatchedFilter):
                 self._mf.set_reference(None)
                 self._reload_templates()
             return
-        self._pending_ref = p.copy()
+        # the handed class where it holds the float32 array checked here, else one made of a copy
+        self._profile_class = (handed if handed is not None and handed.reference is p
+                               and handed.n == self.n else _gatedraws.ProfileClass(p.copy(), self.n))
         self._tier0_clusters = {}
         self._tier0_cand_cache = {}
         self._tier1_clusters = {}
@@ -1235,11 +1215,11 @@ class HierarchicalFilter(MatchedFilter):
         base_cm = self._cost_model(cluster_ratios={})
         opt_cm = base_cm.with_tier0_cluster(opt_map, single_tier=is_cpu)
         _, lb_plans = _gatechain.choose_chain(
-            self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+            self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
             cost=opt_cm, max_tiers=tiers, window=self.search_window
         )
         best_uncl, uncl_plans = _gatechain.choose_chain(
-            self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+            self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
             cost=base_cm, max_tiers=tiers, window=self.search_window
         )
         best_upper = best_uncl["cost"] if best_uncl is not None else float("inf")
@@ -1281,7 +1261,7 @@ class HierarchicalFilter(MatchedFilter):
                 # the cheapest chain from b0 with tier 0 at this screener ratio
                 # and no loss of signal (alpha 1, no lag padding): a lower bound
                 _, plans_r = _gatechain.choose_chain(
-                    self._pending_ref, self.n, snr, self.fd,
+                    self._profile_class, self.n, snr, self.fd,
                     ntemplates=self.ntemplates,
                     cost=base_cm.with_tier0_cluster({b0: ratio}, single_tier=is_cpu),
                     max_tiers=tiers,
@@ -1324,7 +1304,7 @@ class HierarchicalFilter(MatchedFilter):
                 a_q = math.floor(cand.alpha * 200.0 + 1e-9) / 200.0
                 cm_b0 = base_cm.with_tier0_cluster({b0: cand.ratio}, single_tier=is_cpu)
                 _, cur_plans = _gatechain.choose_chain(
-                    self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+                    self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
                     cost=cm_b0, max_tiers=tiers, window=self.search_window,
                     tier0_clusters={b0: (a_q, cand.lag_pad)}, first=b0
                 )
@@ -1356,7 +1336,7 @@ class HierarchicalFilter(MatchedFilter):
         MF_CHAIN_FORCE's for measurement. Records the model's screen setting for every priced
         chain (_chains._Q15_MODEL), which the joint trial's screen arms start from.
         """
-        if _uncovered_reference(self._pending_ref, self.n):
+        if self._profile_class.uncovered:
             raise ValueError(
                 "the reference has no localised correlation peak at n=%d: every candidate "
                 "band has an effective bandwidth below %.0f bins, so there is nothing for a "
@@ -1379,14 +1359,13 @@ class HierarchicalFilter(MatchedFilter):
                     if want and len(want) <= tiers and all(b < self.n for b in want):
                         forced_want = want
 
-        ref = np.asarray(self._pending_ref, np.float64)
-        prof = _gatechain._gm._profile_sig(ref / ref.sum())
+        prof = self._profile_class.signature
 
         # Lazily cluster only candidate Tier-0 bands whose optimistic lower bound can win
         if self._tier0_cluster_eligible():
             is_cpu = self.device.kind == "cpu"
             min_len = 1 if is_cpu else 2
-            usable = _gatedraws.usable_bands(self._pending_ref, self.n)
+            usable = self._profile_class.usable_bands()
             cand_bands = usable if (is_cpu and usable) else (usable[:-1] if len(usable) >= 2 else [])
             tmpl = self._templates_for_clustering() if cand_bands else None
             if tmpl is not None:
@@ -1408,7 +1387,7 @@ class HierarchicalFilter(MatchedFilter):
             hit = _chains._CHAIN_CHOICE.get(key)
         if hit is None:
             t0_choice = {b: (a, lp) for b, _, a, lp in csig} if csig else None
-            best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+            best, plans = _gatechain.choose_chain(self._profile_class, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                                   cost=self._cost_model(), max_tiers=tiers,
                                                   window=self.search_window,
                                                   tier0_clusters=t0_choice)

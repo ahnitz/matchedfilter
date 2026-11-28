@@ -55,8 +55,8 @@ store_choice, stored_choice = _costfile.store_choice, _costfile.stored_choice
 # The draws a plan rests on live in _gatedraws. The planner uses these; private names of
 # that module are reached there, not here.
 from ._gatedraws import (
-    _MIN_BAND, model_draws, _band_slice, band_offset, candidate_bands, usable_bands,
-    enumerate_chains, _norm_profile, _cache_put, _similar_get, _similar_put, _SEED,
+    _MIN_BAND, model_draws, _band_slice, band_offset, usable_bands,
+    enumerate_chains, _norm_profile, _cache_put, _similar_get, _similar_put, _SEED, profile_class,
     local_window, _law_applies, _law_profile, _signal_table, _Beside, _column, _signal_records,
     noise_block_maxima,
 )
@@ -956,26 +956,10 @@ def _flop_cost(chain, reach, n):
 
 
 _CHOICE_CACHE = OrderedDict()
-_OFFSET_CACHE = OrderedDict()
 #: choose_chain's template-count slot for a choice that holds at every count (its plans take
 #: no priced feed), and the value it keeps under that key where the plans do take one.
 _ANY_COUNT = "any count"
 _COUNT_NEEDED = ("count needed",)
-
-
-def _cached_band_offsets(p, sig_p, n, floor):
-    """Return cached (k0_cand, usable_bands_list) for normalized profile `p` at `(n, floor)`."""
-    off_key = (sig_p, int(n), int(floor))
-    hit = _OFFSET_CACHE.get(off_key)
-    if hit is not None:
-        _OFFSET_CACHE.move_to_end(off_key)
-        return hit
-    c_bands = candidate_bands(n, floor)
-    k0_cand = tuple(band_offset(p, n, b) for b in c_bands)
-    bands = [b for b, k0 in zip(c_bands, k0_cand) if p[slice(*_band_slice(n, b, k0))].sum() > 0]
-    res = (c_bands, k0_cand, bands)
-    _cache_put(_OFFSET_CACHE, off_key, res)
-    return res
 
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
@@ -989,8 +973,12 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     profiles within the cosine similarity gatemodel applies to them. A cost model with a feed
     (a GPU's) is priced per template count only where some chain's plan takes a priced feed;
     otherwise the choice is the same at every count and is kept and shared without it.
+
+    power: the reference profile, an array of length n or its _gatedraws.ProfileClass (a
+    plan hands its class: what depends on the profile alone is then worked out once).
     """
-    p = _norm_profile(power, n)
+    profile = profile_class(power, n)
+    p = profile.profile
     win = None if window is None else (int(window[0]), int(window[1]))
     dsamp, dsim = model_draws(fd)
     nsamp = dsamp if nsamp is None else int(nsamp)
@@ -1004,8 +992,8 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         for b, sp in tier0_clusters.items():
             a, lp = (sp.alpha, sp.lag_pad) if hasattr(sp, "alpha") else sp
             t0_map[int(b)] = (round(max(0.0, min(1.0, float(a))), 4), max(0, int(lp)))
-    sig_p = _gm._profile_sig(p)
-    c_bands, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
+    sig_p = profile.signature
+    c_bands, k0_cand, bands = profile.band_offsets(int(floor))
     extra = (k0_cand,) if any(k0_cand) else ()
     if t0_map:
         extra = extra + (("t0", tuple(sorted(t0_map.items()))),)
@@ -1014,7 +1002,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     tail = (None if first is None else int(first),) + extra
     offsets_map = dict(zip(c_bands, k0_cand))
     count = None if not getattr(cost, "feed", None) else int(ntemplates or 0)
-    free_unit = None        # the similarity store's unit, where this key's choice may be shared
+    shareable = False       # whether this key's choice may be shared without the count
     if count:
         # A GPU's model prices a feed: a forward's per-block price spread over the template
         # count (CostModel.feed_delta), so a choice could depend on the count. Where every
@@ -1031,7 +1019,8 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         free_key = (sig_p,) + free_params
         hit = _CHOICE_CACHE.get(free_key)
         if hit is None:
-            free_unit, hit = _similar_get("choice", p, free_params)
+            shareable = True
+            hit = _similar_get("choice", profile, free_params)
             if hit is not None:
                 _cache_put(_CHOICE_CACHE, free_key, hit)
                 return hit
@@ -1044,11 +1033,11 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if hit is not None:
         _CHOICE_CACHE.move_to_end(key)
         return hit
-    unit, hit = _similar_get("choice", p, params)
+    hit = _similar_get("choice", profile, params)
     if hit is not None:
         _cache_put(_CHOICE_CACHE, key, hit)
         return hit
-    if free_unit is not None:
+    if shareable:
         best, plans, shared = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win,
                                             ntemplates, nsamp, bands=bands,
                                             offsets_by_band=offsets_map, tier0_clusters=t0_map,
@@ -1056,7 +1045,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         out = best, plans
         if shared:
             _cache_put(_CHOICE_CACHE, free_key, out)
-            _similar_put("choice", free_unit, free_params, out)
+            _similar_put("choice", profile, free_params, out)
             return out
         _cache_put(_CHOICE_CACHE, free_key, _COUNT_NEEDED)
     else:
@@ -1064,7 +1053,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
                             nsamp, bands=bands, offsets_by_band=offsets_map,
                             tier0_clusters=t0_map, first=first)
     _cache_put(_CHOICE_CACHE, key, out)
-    _similar_put("choice", unit, params, out)
+    _similar_put("choice", profile, params, out)
     return out
 
 
@@ -1212,8 +1201,11 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     Called whenever a plan's reference changes, inside the caller's filtering,
     so results are cached -- by profile signature, and reused for profiles
     within the same cosine similarity gatemodel applies to its draws.
+
+    power: the reference profile, an array of length n or its _gatedraws.ProfileClass.
     """
-    p = _norm_profile(power, n)
+    profile = profile_class(power, n)
+    p = profile.profile
     chain = tuple(int(b) for b in chain)
     win = None if window is None else (int(window[0]), int(window[1]))
     dsamp, dsim = model_draws(fd)
@@ -1232,14 +1224,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         a1, lp1 = ((tier1_cluster.alpha, tier1_cluster.lag_pad)
                    if hasattr(tier1_cluster, "alpha") else tier1_cluster)
         t1_cl = (round(max(0.0, min(1.0, float(a1))), 4), max(0, int(lp1)))
-    sig_p = _gm._profile_sig(p)
-    ch_off_key = ("chain", sig_p, int(n), chain)
-    k0_chain = _OFFSET_CACHE.get(ch_off_key)
-    if k0_chain is None:
-        k0_chain = tuple(band_offset(p, n, b) for b in chain)
-        _cache_put(_OFFSET_CACHE, ch_off_key, k0_chain)
-    else:
-        _OFFSET_CACHE.move_to_end(ch_off_key)
+    sig_p = profile.signature
+    k0_chain = profile.chain_offsets(chain)
     extra = (k0_chain,) if any(k0_chain) else ()
     if t0_cl is not None:
         extra = extra + (("t0", t0_cl),)
@@ -1251,16 +1237,15 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
         _PLAN_CACHE.move_to_end(key)
         return hit
     sim_params = (n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost)) + extra
-    unit, hit = _similar_get("plan", p, sim_params)
+    hit = _similar_get("plan", profile, sim_params)
     if hit is not None:
         _cache_put(_PLAN_CACHE, key, hit)
         return hit
-    _, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
+    c_bands, k0_cand, bands = profile.band_offsets(int(floor))
     if not set(chain) <= set(bands):
         return None
     if t0_cl is not None:
         b0 = chain[0]
-        c_bands, _, _ = _cached_band_offsets(p, sig_p, n, floor)
         off_map = dict(zip(c_bands, k0_cand))
         k0s = tuple(off_map[b] for b in bands)
         Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
@@ -1298,7 +1283,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, memo=memo, lags=lags,
                      offsets=k0_chain, far=sig_win != ((0, int(n)) if win is None else win))
     _cache_put(_PLAN_CACHE, key, out)
-    _similar_put("plan", unit, sim_params, out)
+    _similar_put("plan", profile, sim_params, out)
     return out
 
 
@@ -1370,7 +1355,7 @@ def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND,
     """
     if not isinstance(cost, CostModel) or not cost._refine or not _cost_model_nonneg(cost):
         return None
-    p = _norm_profile(power, n)
+    profile = profile_class(power, n)
     win = None if window is None else (int(window[0]), int(window[1]))
     dsamp, dsim = model_draws(fd)
     nsamp = dsamp if nsamp is None else int(nsamp)
@@ -1385,8 +1370,8 @@ def pair_cost_lower_bound(power, n, snr, fd, cost, max_tiers=3, floor=_MIN_BAND,
     if k_bud < 0 or fit_j < 1 or fit_j > m_fit or span_chk < 1:
         return None
 
-    sig_p = _gm._profile_sig(p)
-    _, k0_cand, bands = _cached_band_offsets(p, sig_p, n, floor)
+    sig_p = profile.signature
+    _, k0_cand, bands = profile.band_offsets(int(floor))
     if not bands:
         return None
 

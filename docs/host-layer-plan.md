@@ -385,3 +385,14 @@ library chooses the execution.
   is the count's own choice either way: at most one chain is priced twice. Radeon 8060S job
   against main: 24,294 evaluations to 10,009, setup median 21.8 to 18.5 s, all plans' chains
   identical, triggers and goldens identical.
+- 2026-11-28: setup step 3 (notes/host-layer/setup-study.md, section F): what follows from a
+  reference alone is worked out once per reference and block size, by a `ProfileClass` that
+  `TimeDomainFilterBank.set_reference` hands every plan the reference reaches: the normalised
+  profile and signature, band offsets, usable bands, gate features, the coverage check and
+  the similarity store's verdict for each held profile, where the 29,727 chain-choice calls
+  of the PyCBC CPU job normalised, hashed and scanned the profile each time. The offset
+  cache, the gate-feature memo and the per-call coverage check are deleted. CPU job (four
+  alternated pairs, core 13, load 3.2-4.8): setup 20.04 to 18.39 s, wall 69.16 to 67.09 s,
+  peak RSS 1.61-1.62 GB both; all 1,994 plans' chains, thresholds, reach, offsets and
+  tier-0 and tier-1 screeners identical, triggers and CPU and GPU goldens identical. Radeon
+  8060S job (three pairs): setup median 19.83 to 18.53 s, wall 46.96 to 44.78 s.

@@ -1082,7 +1082,7 @@ def reference_note(runs):
     for m in (256, 512, 1024):
         if m >= n:
             continue
-        f, be = _mf._hierarchical._band_features(p, m)
+        f, be = _mf._gatedraws._band_features(p, m)
         c = captured.get(m)
         rows.append([str(m), "%.4f" % f, "%.0f" % be,
                      "%.4f" % c[0] if c else "-", "%.0f" % c[1] if c else "-"])

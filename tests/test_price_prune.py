@@ -81,7 +81,7 @@ def isolated_caches(monkeypatch):
     for name in (
         "_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE",
         "_PLAN_CACHE", "_SIGNAL_RECORDS", "_NOISE_RECORDS", "_PRICE_CACHE",
-        "_OFFSET_CACHE", "_BOUND_PRICE_CACHE",
+        "_BOUND_PRICE_CACHE",
     ):
         monkeypatch.setattr(gd if hasattr(gd, name) else gc, name, OrderedDict())
     monkeypatch.setattr(gd, "_SIMILAR", {})

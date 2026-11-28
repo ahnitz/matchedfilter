@@ -24,6 +24,7 @@ from ._results import _SparsePeaks, _Deferred
 from ._filter import _from_any, _automatic_series_layout
 from ._shared import containing_samples, shared_buffer, shared_view
 from . import _layout, gatechain
+from ._gatedraws import ProfileClass
 from . import device as _device
 
 
@@ -1661,19 +1662,20 @@ class TimeDomainFilterBank:
         if hit is not None:
             profiles = hit[3]
         else:
+            # one ProfileClass per block size, handed to every plan this reference reaches
             ref_arr = np.asarray(reference, dtype=np.float64)
             if fine_df is not None:
                 profiles = {}
                 for n in hier_ns:
                     ref_g = gatechain.rebin_profile(ref_arr, fine_df, self.data_sample_rate, n)
-                    profiles[n] = ref_g.astype(np.float32) if ref_g is not None else None
+                    profiles[n] = ProfileClass(ref_g.astype(np.float32), n) if ref_g is not None else None
             else:
                 # A per-bin profile without delta_f must cover every block size.
                 wrong = [n for n in hier_ns if n != len(ref_arr)]
                 if wrong:
                     raise ValueError(f"1-D reference of length {len(ref_arr)} does not match hierarchical "
                                      f"block size(s) {wrong} (bank block sizes: {hier_ns}); {accepted}")
-                profiles = {n: ref_arr.astype(np.float32) for n in hier_ns}
+                profiles = {n: ProfileClass(ref_arr.astype(np.float32), n) for n in hier_ns}
             hit = _REF_BINNED_CACHE.put(cache_key, (reference,), profiles)
             ref_key = (cache_key, hit[0]) if hit is not None else None
         for g in self._groups:

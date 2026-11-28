@@ -141,14 +141,14 @@ def test_similar_results_are_bounded_over_all_keys(empty_model, monkeypatch):
     oldest dropped first and an emptied key removed: a long job meets new keys throughout."""
     monkeypatch.setattr(gd, "_SIMILAR_COUNT", {})
     monkeypatch.setitem(gd._SIMILAR_MAX, "choice", 8)
-    unit = (np.ones(4, np.float32), np.ones(2))
+    profile = gd.profile_class(np.ones(256), 256)
     for i in range(40):
-        gd._similar_put("choice", unit, (i,), "result %d" % i)
+        gd._similar_put("choice", profile, (i,), "result %d" % i)
         held = sorted(k[1] for k in gd._SIMILAR)
         assert len(held) <= 8
         assert held == list(range(i - len(held) + 1, i + 1))      # the newest, no gaps
     assert len(gd._SIMILAR) >= 7
     # a key's own list still keeps only its newest entries
     for i in range(4):
-        gd._similar_put("plan", unit, ("one key",), i, keep=2)
+        gd._similar_put("plan", profile, ("one key",), i, keep=2)
     assert [e[1] for e in gd._SIMILAR[("plan", "one key")]] == [2, 3]

@@ -28,6 +28,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- What follows from a reference profile alone is worked out once for every plan the
+  reference reaches. `TimeDomainFilterBank.set_reference` makes one `ProfileClass` per
+  reference and block size (`_gatedraws`: the normalised profile and its signature, the band
+  offsets and usable bands, the gate features, whether the reference has a localised peak,
+  and whether a result the similarity store holds for another profile stands for it) and
+  hands it to each plan; the chain choice, the thresholds and the screeners read it, where
+  every call normalised, hashed and compared the profile again (29,727 chain-choice calls in
+  the PyCBC CPU job). Its identity is its content. `gatechain._OFFSET_CACHE`, the
+  gate-feature memo and `_hierarchical._uncovered_reference` are gone; `_band_features` lives
+  in `_gatedraws`. PyCBC CPU job: library setup 20.0 to 18.4 s, wall 69.2 to 67.1 s (four
+  alternated pairs), every plan's chain, thresholds, reach, offsets and screeners identical,
+  triggers and goldens identical; the Radeon 8060S job's setup 19.8 to 18.5 s.
 - A GPU search takes its scratch from one arena per device: the buffers its plans'
   recordings own and their pipelining slots' spectra and starts are sections of the arena,
   laid out as the plans first ask. A search keeps the arena between its runs; the next search

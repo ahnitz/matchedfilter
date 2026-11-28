@@ -23,8 +23,8 @@ def test_a_heterogeneous_bank_needs_more_than_one_reference():
     n, band = 4096, 2048
     narrow = inspiral_power(n)
     broad = inspiral_power(n, exponent=-4/3)
-    assert mf._hierarchical._band_features(narrow, band)[0] > .999999
-    assert mf._hierarchical._band_features(broad, band)[0] > .999999
+    assert mf._gatedraws._band_features(narrow, band)[0] > .999999
+    assert mf._gatedraws._band_features(broad, band)[0] > .999999
     gate = gatemodel.gate_for(narrow, n, band, 5., .001)
     broad_gate = gatemodel.gate_for(broad, n, band, 5., .001)
     assert broad_gate < .85 * gate

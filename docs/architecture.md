@@ -319,6 +319,17 @@ Profiles that agree in shape and in every band's signal response share cached si
 and plans (`_gatedraws._similar_get`: a cosine of at least `_REUSE_COS` and a gate response
 within `_REUSE_RESPONSE`), because a search's banks have nearly one reference.
 
+What follows from a reference alone is worked out once, by its `_gatedraws.ProfileClass`:
+the normalised profile and its signature (the key of the exact caches), the band offsets
+and usable bands, the gate features, whether the reference has a localised peak, and, for
+each profile the similarity store holds a result for, whether this one takes it.
+`TimeDomainFilterBank.set_reference` makes one class per reference and block size and hands
+it to every plan the reference reaches (a top template's leaf banks in one detector share
+one), and the chain choice, the thresholds and the screeners read it. Its identity is its
+content (a SHA-1 of the normalised profile and n). It holds no plan, bank or other class:
+it goes with the last plan holding it; a class made from a bare array (a direct call of
+`choose_chain` or `chain_thresholds`) is held in `_gatedraws._CLASSES`, by identity.
+
 ### Chains and the budget split
 
 `gatechain.enumerate_chains` lists every increasing tuple of up to `max_tiers` power-of-two
@@ -396,7 +407,7 @@ cases against the budget), and `tools/gate.py` runs it before every merge.
 ### Refusals
 
 `HierarchicalFilter._choose_chain` raises `ValueError` when no chain can be planned: a
-reference with no localised correlation peak (`_hierarchical._uncovered_reference`, every
+reference with no localised correlation peak (`_gatedraws.ProfileClass.uncovered`, every
 band's effective bandwidth below `_BEFF_MIN`), a transform size too small for any band of
 at least 64 at or below n/2 (n = 64), or a budget the draws cannot resolve
 (`_uncovered_message`). A pinned chain with explicit thresholds always runs, with whatever
