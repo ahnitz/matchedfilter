@@ -9,15 +9,17 @@ Phase 1 of the design: one chunk per input block, each block filtered on its own
 valid span padded by the filters' reach, as a caller filtering block by block would).
 On a GPU search the root runs on the device or the host, as measured (_gpuroot).
 """
+from collections import OrderedDict
 from typing import Callable, Dict, List, NamedTuple, Optional
 import time
 
 import numpy as np
 
 from . import _batches, _core, _gpuroot, _hierarchical
+from ._choice import playing
 from ._errors import UnsupportedSize
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
-                          _aligned_zeros, _normalize_windows, _page_aligned_empty,
+                          _SAME_PROFILE, _aligned_zeros, _normalize_windows, _page_aligned_empty,
                           _settle_device_writes)
 from .device import parse as _parse_device
 
@@ -425,13 +427,14 @@ class _InnerBatch:
         self.tap_reach = int(rows_counts.max()) // 2
         self._chan = {}                          # channel -> slots, series and regions
         self.in_flight = False                   # rows written on the device, not yet waited for
+        self.reallocated = False                 # a channel's slots were replaced (prepare_job)
         self._alloc = self.bank.empty_shared if device is not None else None
 
     def prepare(self, channel, series, regions):
         """channel's series and the merged (start, stop) spans its rows must hold this chunk."""
         if len(series) != self.length:
             raise ValueError("an inner batch's input length changed between chunks")
-        state = self._chan.setdefault(channel, {"slots": None, "support": []})
+        state = self._chan.setdefault(channel, {"slots": None, "support": [], "key": None})
         dt = np.float32 if self.real_input else np.complex64
         # On a device a parent's row -- or its lane of a packed row (stride 2) -- is read
         # where it is; a host copy waits for the device's writes to it first.
@@ -484,22 +487,28 @@ class _InnerBatch:
                 state["slots"] = self._alloc((k, self.length))
                 state["support"] = [[(0, self.length)] for _ in range(k)]
 
+    def support_key(self, channel):
+        """What channel's slots hold, as a key: the slots' array and each slot's spans, or
+        None before the channel has slots. A chunk's correlation steps clear by it
+        (out_support), so a search's compiled chunk is kept under it."""
+        state = self._chan.get(channel)
+        return None if state is None else state["key"]
+
     def prepare_job(self, channel, rows):
-        """Prepare channel's first len(rows) slots and return (slot_of, (corr_job, commit))
-        for coupled CPU middle-to-leaf execution."""
+        """Prepare channel's first len(rows) slots and return (slot_of, (corr_job, self,
+        channel, k)) for coupled CPU middle-to-leaf execution: the job correlates the first k
+        slots; commit(channel, k) records it once it ran."""
         state = self._chan[channel]
         k = len(rows)
         if state["slots"] is None or state["slots"].shape[0] < k:
             state["slots"] = _aligned_zeros((k, self.length), dtype=np.complex64)
             state["support"] = [[] for _ in range(k)]
+            state["key"] = (id(state["slots"]), ((),) * k)
+            self.reallocated = True
         support = state["support"]
         regions = state["regions"]
         sel = None if k == self.n_rows else rows
         out_support = _merge([w for j in range(k) for w in support[j]])
-
-        def commit():
-            for j in range(k):
-                support[j] = regions
 
         job = (self.bank, state["series"], dict(
             windows=regions,
@@ -507,7 +516,17 @@ class _InnerBatch:
             out=state["slots"][:k],
             out_support=out_support,
         ))
-        return {r: j for j, r in enumerate(rows)}, (job, commit)
+        return {r: j for j, r in enumerate(rows)}, (job, self, channel, k)
+
+    def commit(self, channel, k):
+        """Record that channel's first k slots now hold the spans prepare gave: what the
+        correlation job of prepare_job wrote."""
+        state = self._chan[channel]
+        regions = state["regions"]
+        support = state["support"]
+        for j in range(k):
+            support[j] = regions
+        state["key"] = (id(state["slots"]), tuple(tuple(w) for w in support))
 
     def view(self, channel, slot, pos):
         """Child pos's series in the slot its row was computed into."""
@@ -535,6 +554,25 @@ class _Step(NamedTuple):
     pending: list       # leaves in walk order, searched once the chunk's series exist
     corr_jobs: list     # CPU inner correlation jobs coupled with leaf filtering
 
+
+class _ChunkPlan(NamedTuple):
+    """A CPU chunk's inner correlations and leaf searches compiled into the steps of one table
+    (_batches._chunk_steps), kept by the search under the chunk's key
+    (HierarchicalSearch._cpu_chunk): what a run binds and what it leaves for the hooks."""
+    steps: object       # _batches._Steps
+    sources: list       # per series slot: the position of the channel whose root output it
+    #                     is, or the array it is (a view of an inner node's slots)
+    outs: list          # the correlation steps' outputs (inner nodes' slots)
+    leaves: list        # the leaves searched, in walk order
+    where: dict         # (leaf id, channel) -> the leaf call's position in the table
+    lengths: list       # per leaf call, its series' length
+    held: dict          # channel -> inner node id -> its series
+    support: dict       # channel -> inner node id -> its computed spans
+    commits: list       # (slot state, slots written, their spans, slot state key after)
+
+
+#: A chunk shape whose jobs do not all run as one table (HierarchicalSearch._cpu_chunk).
+_DECLINED = object()
 
 #: Root transform plans by series length (HierarchicalSearch._root_plan).
 _ROOT_PLANS: Dict[int, object] = {}
@@ -607,6 +645,8 @@ class HierarchicalSearch:
         self._leaf_banks = {}
         self._ready_banks = {}           # (leaf, channel) -> its bank, built and referenced
         self._inner = {}
+        self._chunk_plans = OrderedDict()   # a CPU chunk's key -> its _ChunkPlan
+        self._chunk_roots = {}              # root -> whether its chunks run as one table
         self._root_outs = {}             # (root, channel, n, parity) -> output buffer
         self._root_pos = {}              # channel -> its position (a GPU search's root buffers)
         self._root_placed = {}           # chunk -> where the current root's output was computed
@@ -914,8 +954,17 @@ class HierarchicalSearch:
                             node = self._parent[id(node)]
                 step = _Step(root, k, active, tags, held, support, need, win, envelopes, pads,
                              live, on_peaks, [], [])
-                self._walk(root, step)
-                submitted = self._submit_leaves(step)
+                if self._chunks_as_table(root):
+                    # the chunk's shape: its windows, what its parents' series must hold,
+                    # and what every inner node's slots hold
+                    key = (id(root), len(held[active[0]][id(root)]), tuple(active),
+                           tuple(pads.values()), tuple(tuple(w) for w in win.values()),
+                           tuple((kn, tuple(w)) for kn, w in need.items()),
+                           tuple(b.support_key(c) for b in self._inner.values() for c in active))
+                    submitted = self._cpu_chunk(step, key)
+                else:
+                    self._walk(root, step)
+                    submitted = self._submit_leaves(step)
                 # While the device searches this chunk's leaves, the next chunk's root outputs
                 # on the host (into the other of two buffers: this chunk's are still read).
                 nxt = [c for c in channels if k + 1 < len(inputs[c].spectra)]
@@ -1064,36 +1113,11 @@ class HierarchicalSearch:
         if work:
             trial.sample(place, time.perf_counter() - mark[0], work)
 
-    def _submit_leaves(self, step):
-        """Start the chunk's leaf searches, in every channel: (leaves, jobs, where, deferred,
-        results), or None when no leaf is searched.
-
-        On a GPU the searches are one filter_series_many batch, submitted and left in flight
-        (deferred): every call submitted before any is collected, so the device is not idle
-        while the host prepares the next leaf -- or the next chunk's root. On the CPU the batch
-        runs each in turn, as filter_series, and its banks' joint trial takes its rounds on it.
-        The results are the same either way."""
+    def _leaf_jobs(self, step):
+        """The chunk's leaf searches as filter_series jobs: (the leaves searched, in walk
+        order; per (leaf, channel) with windows a (bank, series, kwargs) job; (leaf id,
+        channel) -> the job's position)."""
         leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
-        # the inner correlations made here (deferred into correlate_and_filter_many) run as
-        # correlation steps; their extension seconds are the inner stage's compute
-        corr0 = _batches.CORR_COMPUTE_SECONDS
-        if not leaves:
-            if step.corr_jobs:
-                cjobs = [jb for jb, _ in step.corr_jobs]
-                t_info = {}
-                TimeDomainFilterBank.correlate_and_filter_many(
-                    cjobs, [], timings=t_info,
-                    retain_radius=0 if step.on_peaks is None else None,
-                )
-                if not t_info.get("ephemeral_used", False):
-                    for _, commit in step.corr_jobs:
-                        commit()
-                self.timings["inner"] += t_info["correlate"]
-                self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
-            return None
-        t0 = time.perf_counter()
-        compute0 = _batches.STEP_COMPUTE_SECONDS
-        setup0 = _hierarchical.PLAN_SETUP_SECONDS
         jobs, where = [], {}
         for lf in leaves:
             for c in step.active:
@@ -1105,28 +1129,184 @@ class HierarchicalSearch:
                     where[(id(lf), c)] = len(jobs)
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w,
                                                     profile=self._call_profile(step.root, c))))
+        return leaves, jobs, where
+
+    def _chunks_as_table(self, root):
+        """Whether root's chunks run as the steps of one table (_cpu_chunk): a CPU search
+        whose inner nodes all filter leaves only, so every correlation of a chunk is deferred
+        to the chunk's table, and no trial of the leaf banks is open or playing (a trial
+        takes its rounds on the leaf calls, through filter_series_many)."""
+        ok = self._chunk_roots.get(id(root))
+        if ok is None:
+            # (a leaf bank's device is the search's leaf option, MF_DEVICE's where None)
+            ok = self._chunk_roots[id(root)] = (
+                _parse_device(self.leaf_options.get("device")).kind == "cpu"
+                and all(self._inner[id(node)]._alloc is None
+                        and not any(self._kids[id(ch)][0] for ch in self._inner[id(node)].children)
+                        for node in self._inner_below(root)))
+        return ok and not playing() and not any(
+            getattr(b, "_in_trial", False) for b in self._leaf_banks.values())
+
+    def _inner_below(self, node):
+        """node and the inner nodes below it that have inner children (a batch)."""
+        inner = self._kids[id(node)][0]
+        if inner:
+            yield node
+            for c in inner:
+                yield from self._inner_below(c)
+
+    def _cpu_chunk(self, step, key):
+        """Run a CPU chunk's inner correlations and its leaf searches as the steps of one
+        table, in one C call (_batches._run_steps): compiled from the chunk's walk the first
+        time its key is seen (_batches._chunk_steps) and kept, the eight most recent, by the
+        search. Returns what _submit_leaves returns. A chunk the table does not run (a
+        cohort the tiled cascade runs, a job the steps do not take) runs as the walk and
+        _submit_leaves make it, and its shape is kept as declined.
+
+        A plan holds the inner nodes' slots it writes and reads; a chunk that replaces a
+        node's slots (more rows than before) drops every kept plan."""
+        t0 = time.perf_counter()
+        plan = self._chunk_plans.get(key)
+        if plan is _DECLINED:
+            self._walk(step.root, step)
+            return self._submit_leaves(step)
+        if plan is not None and not _batches._steps_valid(plan.steps):
+            plan = None
+        compiled = None
+        if plan is None:
+            self._walk(step.root, step)
+            built = self._leaf_jobs(step)
+            reallocated = any(b.reallocated for b in self._inner.values())
+            if reallocated:
+                self._chunk_plans.clear()
+                for b in self._inner.values():
+                    b.reallocated = False
+            corr_jobs = [cj[0] for cj in step.corr_jobs]
+            t1 = time.perf_counter()
+            compiled = _batches._chunk_steps(corr_jobs, built[1]) if built[1] else None
+            if compiled is None:
+                # a shape the table does not run: not compiled again
+                self._chunk_plans[key] = _DECLINED
+                while len(self._chunk_plans) > 8:
+                    self._chunk_plans.popitem(last=False)
+                return self._submit_leaves(step, built)
+            self.timings["setup"] += time.perf_counter() - t1
+            t0 = time.perf_counter()
+        corr0 = _batches.CORR_COMPUTE_SECONDS
+        compute0 = _batches.STEP_COMPUTE_SECONDS
+        if plan is not None:
+            # the kept plan's banks in the profiles of its calls, as the calls left them
+            for _, bank_ref, profile in plan.steps.calls:
+                if profile is not _SAME_PROFILE:
+                    bank_ref().use_profile(profile)
+            for c in step.active:
+                step.held[c].update(plan.held[c])
+                step.support[c].update(plan.support[c])
+            series = [step.held[step.active[src]][id(step.root)] if type(src) is int else src
+                      for src in plan.sources]
+            results, corr_seconds = _batches._run_steps(plan.steps, series, plan.outs)
+            for state, k, regions, after in plan.commits:
+                state["support"][:k] = [regions] * k
+                state["key"] = after
+            leaves, lengths, where = plan.leaves, plan.lengths, plan.where
+        else:
+            steps, series, outs = compiled
+            results, corr_seconds = _batches._run_steps(steps, series, outs)
+            commits = []
+            for _, batch, c, k in step.corr_jobs:
+                batch.commit(c, k)
+                state = batch._chan[c]
+                commits.append((state, k, state["regions"], state["key"]))
+            leaves, jobs, where = built
+            lengths = [len(series) for _, series, _ in jobs]
+            # A series slot is a channel's root output, or a view of an inner node's slots
+            # that the plan can keep; any other (a copy made for this call) is not kept.
+            roots = [step.held[c][id(step.root)] for c in step.active]
+            slot_arrays = [state["slots"] for b in self._inner.values()
+                           for state in b._chan.values() if state["slots"] is not None]
+            sources = []
+            for a in series:
+                src = next((i for i, r in enumerate(roots)
+                            if a.ctypes.data == r.ctypes.data and a.dtype == r.dtype
+                            and a.shape == r.shape and a.strides == r.strides), None)
+                if src is None and any(np.may_share_memory(a, sl) for sl in slot_arrays):
+                    src = a
+                sources.append(src)
+            # (a chunk that replaced slots is kept by the next chunk of its shape, whose key
+            # names the new slots)
+            if all(src is not None for src in sources) and not reallocated:
+                inner_ids = {id(ch) for node in self._inner_below(step.root)
+                             for ch in self._kids[id(node)][0]}
+                self._chunk_plans[key] = _ChunkPlan(
+                    steps, sources, outs, leaves, where, lengths,
+                    {c: {nid: v for nid, v in step.held[c].items() if nid in inner_ids}
+                     for c in step.active},
+                    {c: {nid: v for nid, v in step.support[c].items() if nid in inner_ids}
+                     for c in step.active},
+                    commits)
+                while len(self._chunk_plans) > 8:
+                    self._chunk_plans.popitem(last=False)
+        # the correlation steps' seconds are the inner stage's, the rest the leaves'
+        wall = time.perf_counter() - t0
+        self.timings["inner"] += corr_seconds
+        self.timings["leaf"] += max(0.0, wall - corr_seconds)
+        self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
+        self.timings["leaf_compute"] += _batches.STEP_COMPUTE_SECONDS - compute0
+        return leaves, lengths, where, False, results
+
+    def _submit_leaves(self, step, built=None):
+        """Start the chunk's leaf searches, in every channel: (leaves, the series' lengths,
+        where, deferred, results), or None when no leaf is searched. built: the chunk's
+        _leaf_jobs, when made already.
+
+        On a GPU the searches are one filter_series_many batch, submitted and left in flight
+        (deferred): every call submitted before any is collected, so the device is not idle
+        while the host prepares the next leaf -- or the next chunk's root. On the CPU the batch
+        runs each in turn, as filter_series, and its banks' joint trial takes its rounds on it.
+        The results are the same either way."""
+        leaves, jobs, where = built if built is not None else self._leaf_jobs(step)
+        # the inner correlations made here (deferred into correlate_and_filter_many) run as
+        # correlation steps; their extension seconds are the inner stage's compute
+        corr0 = _batches.CORR_COMPUTE_SECONDS
+        if not leaves:
+            if step.corr_jobs:
+                cjobs = [cj[0] for cj in step.corr_jobs]
+                t_info = {}
+                TimeDomainFilterBank.correlate_and_filter_many(
+                    cjobs, [], timings=t_info,
+                    retain_radius=0 if step.on_peaks is None else None,
+                )
+                if not t_info.get("ephemeral_used", False):
+                    for _, batch, c, k in step.corr_jobs:
+                        batch.commit(c, k)
+                self.timings["inner"] += t_info["correlate"]
+                self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
+            return None
+        t0 = time.perf_counter()
+        compute0 = _batches.STEP_COMPUTE_SECONDS
+        setup0 = _hierarchical.PLAN_SETUP_SECONDS
         # A bank's device None is MF_DEVICE's (device.parse), as everywhere in the library.
         deferred = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
         if step.corr_jobs and not deferred:
-            cjobs = [jb for jb, _ in step.corr_jobs]
+            cjobs = [cj[0] for cj in step.corr_jobs]
             t_info = {}
             results = TimeDomainFilterBank.correlate_and_filter_many(
                 cjobs, jobs, wait=True, timings=t_info,
                 retain_radius=0 if step.on_peaks is None else None,
             )
             if not t_info.get("ephemeral_used", False):
-                for _, commit in step.corr_jobs:
-                    commit()
+                for _, batch, c, k in step.corr_jobs:
+                    batch.commit(c, k)
             dt_total = time.perf_counter() - t0
             self.timings["inner"] += t_info["correlate"]
             self.timings["leaf"] += max(0.0, dt_total - t_info["correlate"])
         else:
             if step.corr_jobs:
-                cjobs = [jb for jb, _ in step.corr_jobs]
+                cjobs = [cj[0] for cj in step.corr_jobs]
                 t_info = {}
                 TimeDomainFilterBank.correlate_and_filter_many(cjobs, [], timings=t_info)
-                for _, commit in step.corr_jobs:
-                    commit()
+                for _, batch, c, k in step.corr_jobs:
+                    batch.commit(c, k)
                 self.timings["inner"] += t_info["correlate"]
                 t0 = time.perf_counter()
             # On the CPU too as one batch (filter_series_many runs it in order), where the leaves'
@@ -1139,14 +1319,14 @@ class HierarchicalSearch:
         planned = _hierarchical.PLAN_SETUP_SECONDS - setup0
         self.timings["leaf"] -= planned
         self.timings["setup"] += planned
-        return leaves, jobs, where, deferred, results
+        return leaves, [len(series) for _, series, _ in jobs], where, deferred, results
 
     def _finish_leaves(self, step, submitted):
         """Collect what _submit_leaves started, apply the envelopes, and run each leaf's
         on_peaks in walk order."""
         if submitted is None:
             return
-        leaves, jobs, where, deferred, results = submitted
+        leaves, lengths, where, deferred, results = submitted
         t0 = time.perf_counter()
         setup0 = _hierarchical.PLAN_SETUP_SECONDS
         if deferred:
@@ -1162,7 +1342,7 @@ class HierarchicalSearch:
                     if envelope is not None:
                         scales[c] = np.empty(0, dtype=np.float64)
                     continue
-                peaks[c], e = self._apply_envelope(results[j], lf, envelope, len(jobs[j][1]))
+                peaks[c], e = self._apply_envelope(results[j], lf, envelope, lengths[j])
                 if e is not None:
                     scales[c] = e
             found.append((lf, peaks, scales))

@@ -558,7 +558,7 @@ def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch)
     calls = []
     orig = TimeDomainFilterBank._windows_layout
 
-    # the blocks each group's correlation steps compute (_batches._compile_corr_steps)
+    # the blocks each group's correlation steps compute (_batches._compile_steps)
     def spy(self, g, S_, W_, support):
         layout = orig(self, g, S_, W_, support)
         if layout[0].size:

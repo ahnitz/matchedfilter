@@ -1,5 +1,5 @@
 """CPU correlation calls run as correlation steps of one table (_batches._cpu_correlate and
-_core.HMFTable.run_corr): correlate_series, and correlate_series_channels for every channel in
+_core.HMFTable): correlate_series, and correlate_series_channels for every channel in
 one C call. The outputs are, to the bit, what each block-size group's correlation kernel gives
 over the blocks the windows reach, with the samples outside the windows zeroed and the rows
 scaled with numpy, group by group, as the Python path computed them. The steps of a call shape
@@ -152,13 +152,13 @@ def test_a_call_shape_compiles_once_and_binds_its_values(monkeypatch):
     rng = np.random.default_rng(61)
     bank = _bank(INTERLEAVED, False, 8)
     compiled = []
-    original = _batches._compile_corr_steps
+    original = _batches._compile_steps
 
-    def counting(calls, scaled):
-        compiled.append(len(calls))
-        return original(calls, scaled)
+    def counting(calls, corr_calls=(), scaled=(), split_modes=True):
+        compiled.append(len(corr_calls))
+        return original(calls, corr_calls, scaled, split_modes)
 
-    monkeypatch.setattr(_batches, "_compile_corr_steps", counting)
+    monkeypatch.setattr(_batches, "_compile_steps", counting)
     chans = [_series(rng, False) for _ in range(2)]
     outs = [np.zeros((2, S), np.complex64) for _ in chans]
     for k in range(3):
@@ -215,7 +215,7 @@ def test_banks_with_compiled_correlation_steps_are_freed_without_the_cyclic_coll
     outs = [np.zeros((6, S), np.complex64) for _ in range(2)]
     bank.correlate_series_channels([x, x[::-1].copy()], [None, [(100, 9000)]], outs,
                                    [None, None])
-    assert len(bank.__dict__["_corr_steps"]) == 1
+    assert len(bank.__dict__["_compiled_steps"]) == 1
     ref = weakref.ref(bank)
     gc.disable()
     try:

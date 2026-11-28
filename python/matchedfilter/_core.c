@@ -2358,8 +2358,16 @@ done:
   return rc;
 }
 static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
-  PyObject *series_arg,*calls_arg=NULL;
-  if(!PyArg_ParseTuple(args,"O|O",&series_arg,&calls_arg)) return NULL;
+  PyObject *series_arg,*calls_arg=NULL,*outs_arg=NULL,*scales_arg=NULL;
+  if(!PyArg_ParseTuple(args,"O|OOO",&series_arg,&calls_arg,&outs_arg,&scales_arg)) return NULL;
+  if(self->ncorrs && (!outs_arg || outs_arg==Py_None)){
+    PyErr_SetString(PyExc_ValueError,"HMFTable.run: a table with correlation steps needs its outputs");
+    return NULL;
+  }
+  /* the correlation steps first, in order: the leaf steps may read what they write */
+  double corr_seconds=0.0;
+  if(self->ncorrs && hmf_run_corrs(self,0,self->ncorrs,series_arg,outs_arg,scales_arg,0,&corr_seconds))
+    return NULL;
   PyObject *seq=PySequence_Fast(series_arg,"series must be a sequence");
   if(!seq) return NULL;
   hmf_single_out sing; memset(&sing,0,sizeof(sing));
@@ -2566,11 +2574,11 @@ static PyObject *HMFTable_run(HMFTableObject *self,PyObject *args){
     }
   }
   offs[self->njobs+nsc]=at;
-  ret=Py_BuildValue("(NNNNNNNNd)",hmf_bytes(offs,((Py_ssize_t)self->njobs+nsc+1)*8),
+  ret=Py_BuildValue("(NNNNNNNNdd)",hmf_bytes(offs,((Py_ssize_t)self->njobs+nsc+1)*8),
                     hmf_bytes(o_t,at*8),hmf_bytes(o_s,at*8),hmf_bytes(o_v,at*8),
                     hmf_bytes(o_bs,at*8),hmf_bytes(o_bl,at*8),
                     hmf_bytes(totals,nout*(Py_ssize_t)sizeof(int)),
-                    hmf_bytes(seconds,nout*8),kernel);
+                    hmf_bytes(seconds,nout*8),kernel,corr_seconds);
 done:
   hmf_single_out_free(&sing);
   if(jobs) for(int k=0;k<ns;k++){ free(jobs[k].out_flat); free(jobs[k].out_idx); free(jobs[k].out_val); }
@@ -2656,11 +2664,13 @@ static PyObject *HMFTable_get_steps(HMFTableObject *self,void *closure){
 }
 static PyMethodDef HMFTable_methods[]={
   {"run",(PyCFunction)HMFTable_run,METH_VARARGS,
-   "run(series, calls=()) -> (offsets, templates, samples, snr, block_starts, block_lengths, "
-   "step_totals, step_seconds, kernel_seconds): every gated and flat step on its slot's series "
-   "and every call (single, series, row, windows, binsize, aligned, threshold) bound to a "
-   "single-template step, the peaks of each job (the table's, then one per call); totals and "
-   "seconds per gated step, call, then flat step"},
+   "run(series, calls=(), outputs=None, scales=None) -> (offsets, templates, samples, snr, "
+   "block_starts, block_lengths, step_totals, step_seconds, kernel_seconds, corr_seconds): every "
+   "correlation step into the outputs (with the scale vectors), then every gated and flat step on "
+   "its slot's series and every call (single, series, row, windows, binsize, aligned, threshold) "
+   "bound to a single-template step, the peaks of each job (the table's, then one per call); "
+   "totals and seconds per gated step, call, then flat step; the leaf kernels' and the "
+   "correlation steps' seconds"},
   {"run_corr",(PyCFunction)HMFTable_run_corr,METH_VARARGS,
    "run_corr(first, end, series, outputs, scales=None, mirror=False) -> seconds: correlation "
    "steps [first, end) on the slots given, with their streaming mirrors when mirror"},

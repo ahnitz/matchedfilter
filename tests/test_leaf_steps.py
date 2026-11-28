@@ -1,4 +1,4 @@
-"""Every-template CPU calls run as compiled leaf steps (_batches._compile_leaf_steps and
+"""Every-template CPU calls run as compiled leaf steps (_batches._compile_steps and
 _core.HMFTable): gated steps for a hierarchical bank's calls, flat steps for a flat bank's and
 for calls below a hierarchical bank's threshold. The steps of a call shape are compiled once and
 reused, a window list given again as a new list reuses them, and their peaks are, to the bit and
@@ -49,8 +49,8 @@ def test_a_call_shape_compiles_once_and_a_new_window_list_reuses_it(monkeypatch)
     bank = _bank(rng)
     x = rng.standard_normal(1 << 17).astype(np.float32)
     compiled = []
-    compile_steps = _batches._compile_leaf_steps
-    monkeypatch.setattr(_batches, "_compile_leaf_steps",
+    compile_steps = _batches._compile_steps
+    monkeypatch.setattr(_batches, "_compile_steps",
                         lambda *a, **k: compiled.append(1) or compile_steps(*a, **k))
     first = bank.filter_series(x, windows=[(4000, 50000), (60000, 120000)])
     again = bank.filter_series(x, windows=[(4000, 50000), (60000, 120000)])
@@ -127,7 +127,7 @@ def test_banks_with_compiled_steps_are_freed_without_the_cyclic_collector():
     got = TimeDomainFilterBank.filter_series_many(
         [(first, x, dict(windows=[(4000, 50000)])), (second, x, dict())])
     assert sum(len(r.snr) for r in got) > 0
-    assert len(first.__dict__["_leaf_steps"]) == 1
+    assert len(first.__dict__["_compiled_steps"]) == 1
     refs = [weakref.ref(first), weakref.ref(second)]
     gc.disable()
     try:
@@ -161,7 +161,7 @@ def test_flat_steps_give_the_call_at_a_time_peaks(monkeypatch):
     got = TimeDomainFilterBank.filter_series_many(jobs)
     assert not consumed                         # no call was assembled in Python
     assert [len(r.snr) > 0 for r in got] == [True] * len(jobs)
-    flat_steps = [len(c.flat_plans) for c in flat_bank.__dict__["_leaf_steps"].values()]
+    flat_steps = [len(c.flat_plans) for c in flat_bank.__dict__["_compiled_steps"].values()]
     assert flat_steps and all(n > 0 for n in flat_steps)
     monkeypatch.setattr(_batches, "_cpu_sparse_batch", lambda *a, **k: set())
     want = [bank.filter_series(series, **kw) for bank, series, kw in jobs]
@@ -178,8 +178,8 @@ def test_flat_steps_compile_once_and_free_their_bank_without_the_collector(monke
     bank = _bank(rng, engine="flat")
     x = rng.standard_normal(1 << 17).astype(np.float32)
     compiled = []
-    compile_steps = _batches._compile_leaf_steps
-    monkeypatch.setattr(_batches, "_compile_leaf_steps",
+    compile_steps = _batches._compile_steps
+    monkeypatch.setattr(_batches, "_compile_steps",
                         lambda *a, **k: compiled.append(1) or compile_steps(*a, **k))
     plans = {id(g.plan): g.plan for g in bank._groups}
     before = {k: p.performance_stats["timed_calls"] for k, p in plans.items()}

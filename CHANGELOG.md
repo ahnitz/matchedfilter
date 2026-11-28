@@ -174,6 +174,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
   21 channels a call; one Zen 5 core) takes 25.3-26.0 ms against 29.1-30.5 ms in its 3D shape
   and 366-374 ms against 379-403 ms in its 5D shape, with 96-97.5% of its CPU time inside the
   extension against 87-91%.
+- A CPU search chunk is one table: the inner correlations of the inner nodes whose children
+  are leaves and the chunk's leaf searches are the steps of one `HMFTable`, run by one C call
+  (correlation steps first, then the leaf steps that read their rows). The table is compiled
+  the first time a chunk's shape is seen (series length, channels, every leaf's windows and
+  the spans its parent holds, what each inner node's slots hold) and kept by the search, with
+  the series and spans the hooks read, so a chunk of a known shape makes no walk and builds no
+  job. `correlate_and_filter_many` runs its correlations and the leaf calls that read them as
+  one table wherever it tiles no cohort. One compiler (`_batches._compile_steps`) makes every
+  CPU table. Results are unchanged, to the bit and in order.
 - `HierarchicalSearch.timings["inner_compute"]`: of the inner stage, the seconds the CPU
   correlation steps spent in the extension (in the walk and in `correlate_and_filter_many`);
   `tools/search_bench.py` prints it as the inner stage's compute fraction.

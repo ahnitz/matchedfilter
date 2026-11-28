@@ -106,7 +106,8 @@ here: `simulate` (the one simulation, below; its kernel is `src/simulate.c`),
 table `HMFTable` (gated leaf steps, run with `ap_hmf_run_series_batch_sparse`; flat steps,
 run with `ap_mf_run_series`; single-template steps, run with the follow-up kernel of
 `src/followup.c`; and correlation steps, run with `ap_mf_correlate_series_continuous` or its
-real-series form, then zeroed and scaled in C, by `run_corr`). Buffers are checked at
+real-series form, then zeroed and scaled in C; `run` runs a table's correlation steps, then its
+leaf steps, which may read what the correlation steps wrote). Buffers are checked at
 the boundary independently of the Python API. `MF` and `HMF` share one implementation of
 ingest, `run` and `run_series` (`bind_set`, `bind_set_batch`, `bind_run`,
 `bind_run_series`, reading a `filter_view` of the object); every buffer a binding takes is
@@ -194,7 +195,7 @@ and whether a trial has locked its arm.
 (`_batches._run_batch`): follow-up windows, single-template calls and sparse CPU jobs each
 go to a path that takes many at once, and the rest run in turn. On a GPU every call is
 submitted before any is collected. The gated CPU calls run as compiled leaf steps
-(`_batches._compile_leaf_steps`, `_core.HMFTable`): each template group's blocks of one bin
+(`_batches._compile_steps`, `_core.HMFTable`): each template group's blocks of one bin
 count are a step on the plan of the call's profile, compiled once per call shape (the
 calls' banks, layouts, profiles, series lengths and kinds, windows, bin sizes and
 thresholds) and kept by the first call's bank; a run is one C call that sets each plan's
@@ -213,8 +214,8 @@ correlates (time-domain for a narrow window, else by transforms), bins and merge
 template's spectrum is made from its taps when a call first needs it and kept in a slot of
 the group's store (256 slots at most, the least recently used given up first).
 CPU correlation calls (`correlate_series`, and `correlate_series_channels` for all its
-channels) are correlation steps of the same table type (`_batches._cpu_correlate`,
-`_batches._compile_corr_steps`): a step is one template group's templates adjacent in the
+channels) are correlation steps of the same table type, compiled by the same compiler
+(`_batches._cpu_correlate`, `_batches._compile_steps`): a step is one template group's templates adjacent in the
 group and in the output, over the group's blocks that a window reaches, written into rows of
 an output, with the samples it clears (outside the windows, and inside the output's support)
 and, for a scaled call, each row's scale vector entry and the samples it scales. A group whose
@@ -231,9 +232,22 @@ steps of a table the cohort's preparation compiles per middle group (`_TiledGrou
 the blocks of the chunk, the bridges between windows zeroed and the rows scaled in the
 extension, the output mirrored by the kernel's streaming copy where nothing follows it), one
 C call per batch. The functions it is made of are in `_batches`, in the order it calls them.
-Its results equal those of `correlate_series` followed by `filter_series_many`. The middle
-correlations it does not tile run as the correlation steps of one table, consecutive CPU jobs
-in one C call (`_batches._correlate_jobs`).
+Its results equal those of `correlate_series` followed by `filter_series_many`. Where no
+cohort is tiled, its correlations and the batch's every-template leaf calls are the steps of
+one table, run by one C call (`_batches._untiled_batch`; correlations off the CPU, or whose
+series may lie in an earlier job's output, are made first, `_batches._correlate_jobs`).
+
+A CPU search runs each chunk's inner correlations (of inner nodes whose children are leaves)
+and its leaf searches as the steps of one table, one C call (`HierarchicalSearch._cpu_chunk`,
+`_batches._chunk_steps`). The table is compiled the first time the chunk's shape is seen: the
+series length, the active channels, every leaf's windows and the spans its parent must hold,
+and what each inner node's slots hold (`_InnerBatch.support_key`, by which the correlations
+clear). The search keeps it (the eight most recent shapes), with the inner series and spans
+the hooks read and what the run leaves in the slots, so a chunk of a kept shape makes no walk
+and no job: it binds the root outputs and runs. A shape whose jobs do not all fit one table (a
+cohort the tiled cascade runs, a job the steps do not take) is remembered as declined and runs
+through the walk and `correlate_and_filter_many`; so does every chunk while a leaf bank's trial
+is open or playing.
 
 ## The gate model
 

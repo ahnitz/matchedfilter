@@ -246,3 +246,18 @@ library chooses the execution.
   count in its key. Exact reuse saves 0.25 s of 8.9 s; the 7 s needs count-free similarity
   reuse, which moves which profile a plan's choice is drawn from: a behaviour change, for a
   decision (notes/host-layer/phase2-design-study.md, Step 1 results).
+- 2026-11-27: conversion step 6, part A: one table per CPU search chunk. One compiler
+  (`_batches._compile_steps`) makes every CPU table: correlation calls first (series slots and
+  output slots), then leaf calls; `HMFTable.run` runs the correlation steps, then the leaf
+  steps, in one C call. `correlate_and_filter_many` runs its correlations and the leaf calls
+  that read them as one table wherever it tiles no cohort (`_untiled_batch`). A CPU search
+  whose inner nodes filter leaves only compiles each chunk shape once (key: series length,
+  channels, pads, every leaf's windows and needed spans, each inner node's slot state,
+  `_InnerBatch.support_key`) and keeps it (`HierarchicalSearch._cpu_chunk`, eight shapes): a
+  kept chunk makes no walk and builds no job, binds the root outputs and runs; shapes that do
+  not fit one table (the tiled cascade's cohorts, jobs the steps do not take) are remembered as
+  declined and go the general way. Not folded in: the root (`Root.real` per channel stays
+  before the table; on_series reads it before the walk), and inner nodes with inner children
+  (their children read a lane through a copy the walk makes, so such searches keep the walk).
+  Goldens 20,039 arrays, 0 differ from ac35c8b2. Capture top 1: 7.816 -> 7.757 billion
+  instructions a steady pass; capture tops' Python share of inner + leaf 1.5% -> 0.4%.
