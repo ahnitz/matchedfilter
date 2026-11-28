@@ -419,3 +419,15 @@ library chooses the execution.
   2 s summed cumulative times that nest (build holds finish_grouped holds _hier_result); the
   old collection measured whole is 0.85 s real. What remains per call is the fence wait and
   the Pending (step 3) and the readback's take.
+- 2026-11-28: GPU step 4 rebased onto the arena (branch gpu-step4b on 05a77b94). A record's
+  readback buffers are arena sections where the device holds readback buffers in the arena
+  (Vulkan, Metal): the readback's counter words are indexed from the counts section's own
+  offset, every view reads its section in place, and an evicted record drops its views (a
+  lease's end collects every result in flight first). The CUDA verifier's low-threshold
+  differences were the candidate's, not run-to-run variation (on the 8060S main and the
+  candidate each reproduce themselves bit for bit at thresholds 4.0, 3.5 and 3.0): the
+  extension's window-bin merge compared out-of-order peaks by `hypotf`, the Python merge by
+  numpy's absolute value, which rounds a unit in the last place differently for some values;
+  the assembly now compares them as numpy does, and the low-threshold peaks equal main's. A
+  call compacting 26,000 records (past the 4,096 a CUDA run copies back) is a GPU test
+  (notes/host-layer/phase2-design-study.md, Step 4 on the arena).

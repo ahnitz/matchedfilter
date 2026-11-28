@@ -268,7 +268,15 @@ in-flight result), and the assembly reads each run's readback buffers where the 
 them (`_gpuhier._readback`: views made once per record, the buffers themselves where the
 device reports unified memory, the page-locked copy on CUDA), adding each run's work counts to
 its plan's counters (`MatchedFilter._gwork`). Host results (dense lags and values, or
-`_SparsePeaks`) are parts of the same assembly.
+`_SparsePeaks`) are parts of the same assembly. Where the device holds readback buffers in the
+search's arena (unified memory), a record's readback buffers are arena sections: the counters'
+words are indexed from the counts section's own offset and each view reads its section in
+place. The views die with the record, which the lease's end evicts after collecting every
+result still in flight into host arrays, so no readback outlives the lease whose bytes it
+names. The window-bin merge of the assembly compares peaks that are out of template-then-sample
+order by magnitude as numpy's absolute value of a complex64 rounds it, as the Python merge it
+replaced did; `HMFTable.run`'s steps compare them by `hypotf`, as before (the two differ in the
+last place for some values).
 
 A CPU search runs each chunk's inner correlations (of inner nodes whose children are leaves)
 and its leaf searches as the steps of one table, one C call (`HierarchicalSearch._cpu_chunk`,
