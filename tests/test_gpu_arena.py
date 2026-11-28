@@ -123,6 +123,32 @@ def test_one_lease_is_in_force_at_a_time(sim):
     assert arena.begin() is not None
 
 
+def test_a_search_keeps_its_lease_between_runs(sim):
+    """A lease suspended at the end of its owner's run stays the owner's: no section is taken
+    from it outside a run, its tenants keep their records, and the owner's next run resumes
+    it (nothing to re-record). Another owner's begin ends it, releasing those records."""
+    class Search:
+        pass
+    first, second = Search(), Search()
+    ctx, arena = sim.make(), sim.arena()
+    rng = np.random.default_rng(5)
+    ser = _series(ctx, rng, 2 * N)
+    lease = arena.begin(first)
+    spectra = lease.array(ctx, (1, N))
+    ctx.forward(N, ser, np.array([3], np.uint32), spectra)
+    records = dict(ctx._exec_table())
+    lease.suspend()
+    assert ctx._device_state.arena_lease is None and lease.live
+    assert arena.begin(first) is lease and arena.leases == 1
+    ctx.forward(N, ser, np.array([3], np.uint32), spectra)
+    assert dict(ctx._exec_table()) == records, "a resumed lease re-recorded"
+    lease.suspend()
+    other = arena.begin(second)
+    assert other is not lease and not lease.live and arena.leases == 2
+    assert not ctx._exec_table(), "the ended lease's records were kept"
+    other.end()
+
+
 def test_a_recycled_section_is_named_afresh(sim):
     """The same bytes of the same block, taken in two leases, are two sections with serials
     of their own, so a binding cache cannot take the second for the first; a host array over
@@ -292,9 +318,9 @@ def _has_gpu():
 def test_a_gpu_search_after_others_on_the_arena_finds_its_own_peaks(monkeypatch):
     """Two GPU searches with different templates take the device's arena in turns (four runs,
     each section filled with NaN when handed out): each run's peaks and parent series are
-    the ones the same search finds without an arena, the plans of an ended run keep no
-    record on the arena, the second pair of runs allocates no block, and a search dropped
-    with the collector off is freed at once."""
+    the ones the same search finds without an arena, and the second pair of runs allocates
+    no block; a search run twice keeps its lease and records nothing the second time; a
+    search dropped with the collector off is freed at once."""
     from test_hierarchical_search import _collect, _inputs, _profiles, _tree
     from matchedfilter.search import HierarchicalSearch
     monkeypatch.setenv("MF_AUTOTUNE", "0")
@@ -318,7 +344,7 @@ def test_a_gpu_search_after_others_on_the_arena_finds_its_own_peaks(monkeypatch)
         i = turn % 2
         leases = arena.leases
         got = run(i)
-        assert arena.leases == leases + 1 and arena.lease is None
+        assert arena.leases == leases + 1 and not arena.lease.active
         made.append(arena.made)
         assert [g[:3] for g in got] == [w[:3] for w in want[i]]
         for g, w in zip(got, want[i]):
@@ -328,6 +354,16 @@ def test_a_gpu_search_after_others_on_the_arena_finds_its_own_peaks(monkeypatch)
             np.testing.assert_array_equal(g[4], w[4])
     assert made[3] == made[1], "a repeated pair of searches grew the arena"
     assert arena.peak_bytes > 0
+    # one search run twice: the second run resumes its lease and records nothing
+    search = HierarchicalSearch([roots[1]], threshold=4.0, leaf_options=opts)
+    got = _collect(search, inputs)
+    built, leases = search._device_builds(), arena.leases
+    again = _collect(search, inputs)
+    assert arena.leases == leases and search._device_builds() == built
+    assert [g[:3] for g in again] == [g[:3] for g in got]
+    for g, w in zip(again, got):
+        np.testing.assert_array_equal(g[3].snr, w[3].snr)
+    del search, got, again
     gc.collect()
     gc.disable()
     try:

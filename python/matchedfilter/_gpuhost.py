@@ -666,14 +666,16 @@ class Arena:
     search.
 
     A search's plans run together (their calls in one fused submission per chunk), so their
-    scratch cannot alias within a search: a search takes the arena for its run (begin: an
-    ArenaLease), every buffer its plans' records own and every pipelining slot's spectra and
-    starts is a section of it, laid out as the plans first ask (ArenaLease.take), and when
-    the run ends the lease ends (ArenaLease.end): each tenant's runs have finished, its work
-    held for later runs is dropped, its records on the arena's sections are released, and
-    its slots are dropped. The next search's lease takes the same blocks from their start; it
-    adds blocks only for what no earlier search needed (ARENA_BLOCK), so a job's steady state
-    allocates nothing per call and nothing per search.
+    scratch cannot alias within a search: a search takes the arena while it runs (begin: an
+    ArenaLease in force), every buffer its plans' records own and every pipelining slot's
+    spectra and starts is a section of it, laid out as the plans first ask (ArenaLease.take).
+    Between its runs the search keeps the lease (suspend), so running it again re-records
+    nothing. When another search takes the arena the lease ends (ArenaLease.end): each
+    tenant's runs have finished, its work held for later runs is dropped, its records on the
+    arena's sections are released, and its slots are dropped. The new lease takes the same
+    blocks from their start; it adds blocks only for what no earlier search needed
+    (ARENA_BLOCK), so a job's steady state allocates nothing per call and nothing per
+    search.
 
     Which kinds of buffer the arena holds is what the device reports: device-only scratch on
     every device; buffers the host reads back or writes, and spectra and starts the host
@@ -723,15 +725,24 @@ class Arena:
         """Bytes of every block the arena holds."""
         return sum(b.nbytes for blocks in self.blocks.values() for b in blocks)
 
-    def begin(self):
-        """A new lease on the arena (ArenaLease), in force on its device until it ends, or
-        None while another lease is in force."""
-        if self.lease is not None:
+    def begin(self, owner=None):
+        """The lease of `owner` (a search) on the arena, put in force on its device until it
+        is suspended or ends: the owner's own lease again when it holds the arena still (a
+        search run again keeps what its plans built), else a new one, after ending the lease
+        of whoever held the arena before. None while a lease is in force (a search run from
+        another's hook)."""
+        lease = self.lease
+        if lease is not None and lease.active:
             return None
-        self.lease = ArenaLease(self)
-        self.leases += 1
-        self.ctx._device_state.arena_lease = self.lease
-        return self.lease
+        if lease is not None and owner is not None and lease.owner() is owner:
+            lease.active = True
+        else:
+            if lease is not None:
+                lease.end()
+            lease = self.lease = ArenaLease(self, owner)
+            self.leases += 1
+        self.ctx._device_state.arena_lease = lease
+        return lease
 
     def release(self):
         """End the lease in force and free every block (at interpreter exit, or when the
@@ -745,7 +756,9 @@ class Arena:
 
 
 class ArenaLease:
-    """One search's use of an Arena (Arena.begin), from its run's start to its end.
+    """One search's use of an Arena (Arena.begin), from its first run until another search
+    takes the arena (or the arena is released); in force on the device only while the search
+    runs (begin to suspend).
 
     Sections are taken first fit from the free bytes of the arena's blocks of their kind, in
     the blocks' order, each at a multiple of the arena's alignment (at least 256 bytes and
@@ -765,11 +778,14 @@ class ArenaLease:
         The arena this lease takes sections from.
     """
 
-    def __init__(self, arena):
+    def __init__(self, arena, owner=None):
         self.arena = arena
+        #: the search the lease is for, weakly (Arena.begin)
+        self.owner = weakref.ref(owner) if owner is not None else (lambda: None)
         #: Each lease's own name: what a cache that outlives a lease can key on.
         self.generation = next(BUFFER_SERIALS)
-        self.live = True
+        #: live: not ended; active: in force on the device (between begin and suspend)
+        self.live = self.active = True
         #: kind -> [bytes used at the start of each block]
         self.used = {kind: [0] * len(blocks) for kind, blocks in arena.blocks.items()}
         #: (kind, aligned size) -> [(block index, offset)] given back during the lease
@@ -850,6 +866,16 @@ class ArenaLease:
         owner._storage = weakref.ref(storage)
         return storage.array(dtype, shape)
 
+    def suspend(self):
+        """Take the lease out of force on its device (its owner's run has ended) without
+        ending it: its tenants keep their sections, so the owner's next run finds its plans'
+        records and slots as they were; work outside a run takes no section. The lease ends
+        when another owner begins one (Arena.begin) or the arena is released."""
+        self.active = False
+        dev = self.arena.ctx._device_state
+        if getattr(dev, "arena_lease", None) is self:
+            dev.arena_lease = None
+
     def end(self):
         """End the lease: every live plan tenant collects its results and drops its slots,
         every live context tenant finishes its runs, drops the work it holds for later runs
@@ -863,7 +889,7 @@ class ArenaLease:
             for ctx in list(self.contexts.values()):
                 ctx._arena_end(self)
         finally:
-            self.live = False
+            self.live = self.active = False
             self.free.clear()
             self.plans.clear()
             self.contexts.clear()

@@ -23,7 +23,19 @@ Alpha releases may change the API. Pin a version for reproducible work.
   identical results. `--digest-above` keeps large arrays whole, to see how two records differ.
 - `tools/gpu_alloc_trace.py` runs a program with every Vulkan device allocation traced by
   role, whether a kernel or the host ever touched it, and the breakdown at the peak of live
-  device memory.
+  device memory; a search's arena shows as its blocks, with the largest lease's sections by
+  role.
+
+### Changed
+
+- A GPU search takes its scratch from one arena per device: the buffers its plans'
+  recordings own and their pipelining slots' spectra and starts are sections of the arena,
+  laid out as the plans first ask. A search keeps the arena between its runs; the next search
+  to run reuses the same memory, growing it only for what no earlier search needed, and what
+  the previous search's plans built on it is released (deferred work dropped, recordings on it
+  freed). A Vulkan PyCBC job makes 4,742 device buffers instead of 46,595. Where
+  the host does not see device memory in place (CUDA), the arena holds device-only scratch,
+  and buffers the host reads back or writes stay buffers of their own. Results are unchanged.
 
 ### Fixed
 

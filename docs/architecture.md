@@ -143,6 +143,16 @@ GPU operations are written once, above a thin per-API driver:
   forward rule `band_forward_wanted` is the gate model's, which prices it); `_gpu_cache` holds input residency and in-flight
   results; `_shared` provides host-visible allocations with DLPack lifetimes; `_gputime`
   collects device time under `MF_GPU_TIMING=1`.
+- A search's scratch is one arena per device (`_gpuhost.Arena`, made by
+  `_gpuroot.device_arena`), leased by a search while it runs (`HierarchicalSearch.run`):
+  the buffers its plans' records own and their pipelining slots' spectra and starts are
+  sections of the arena's blocks. The search keeps its lease between runs; when another
+  search takes the arena the lease ends, each plan and context giving back what it built on
+  it (deferred work dropped, records on its sections released), and the new search reuses
+  the same blocks. Every section has a serial of its own, so nothing keyed on a serial
+  mistakes a recycled section for its previous tenant. The device reports what the
+  arena holds: device-only scratch everywhere; buffers the host reads or writes, and host
+  arrays, only where the host sees device memory in place (`unified_memory`).
 - Each backend's `Context` (`_vkcompute.Context`, `_cudacompute.Context`,
   `_mtlcompute.Context`) inherits `Executor` and `InputUploads` and supplies only driver
   primitives: allocate, record, submit, read back. All three call their APIs through
