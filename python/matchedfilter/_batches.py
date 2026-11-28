@@ -330,7 +330,8 @@ class _Ops:
     """A schedule being compiled: its ops (_core.c's HMF_OP_*, twelve int64 each) and the
     runs, rows and slices they read."""
 
-    CORR, POOL, STALE, ZERO, SCALE, COPY, COLLAR, LEAF, RETAIN, PENDING = 1, 3, 4, 5, 6, 7, 8, 9, 10, 11
+    CORR, POOL, STALE, ZERO, SCALE, COPY, COLLAR, LEAF, RETAIN, PENDING, LANE = (
+        1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
 
     def __init__(self):
         self.ops, self.args = [], []
@@ -1311,7 +1312,7 @@ class _Steps(NamedTuple):
 
 
 def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True, scheduled=frozenset(),
-                   extra_series=0, schedule=None):
+                   extra_series=0, schedule=None, lanes=()):
     """The steps of correlation calls and leaf calls, compiled into one table.
 
     Correlation call c reads series slot c and writes output slot c. Its output rows are its
@@ -1365,6 +1366,14 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True, scheduled=
         ``schedule(steps, n)`` with the compiled leaf steps (``_Steps.steps``) and the
         number of the calls' correlation steps returns the schedule's (correlation step tuples after the calls', output slots after the calls',
         (ops, args) int64 arrays, correlation plans, banks, work); default None, no schedule.
+    lanes : sequence of tuple, optional
+        Lane copies, ``(call, source call, source row, part, runs)``: before correlation call
+        ``call``'s steps, part 0 (real) or 1 (imaginary) of row ``source row`` of an earlier
+        call's output is copied into call's series (a writable contiguous float32 array)
+        within ``runs`` (``(k, 2)`` int64), so that call correlates a real lane of a row the
+        table writes (an inner node's output filtered by its inner children). The table is
+        then scheduled: its correlation steps in ranges with the copies between them, then the
+        leaf phases. Not with ``schedule``. Default none.
 
     Returns
     -------
@@ -1575,6 +1584,28 @@ def _compile_steps(calls, corr_calls=(), scaled=(), split_modes=True, scheduled=
         first = len(banks)
         banks.extend(more_banks)
         work.extend((first + b, counters, in_samples) for b, counters, in_samples in more_work)
+    elif lanes:
+        # the correlation steps in ranges, each call's lane copies before its first step (a
+        # step's input slot is its call)
+        ops = _Ops()
+        pending = {}
+        for call, source, row, part, runs in lanes:
+            if source >= call:
+                raise ValueError("a lane copy reads the output of a later correlation call")
+            pending.setdefault(call, []).append((source, row, part, runs))
+        first = 0
+        for i, step in enumerate(corr_steps):
+            copies = pending.pop(step[1], None)
+            if copies is None:
+                continue
+            if i > first:
+                ops.op(_Ops.CORR, first, i)
+            for source, row, part, runs in copies:
+                ops.op(_Ops.LANE, source, row, part, step[1], ops.arg(runs), len(runs))
+            first = i
+        if first < len(corr_steps):
+            ops.op(_Ops.CORR, first, len(corr_steps))
+        sched = ops.arrays()
     table = _core.HMFTable(step_args, jobs, ncorr + extra_series + len(series), (), flat_args,
                            corr_steps, nouts, sched)
     return _Steps(table, ncorr, compiled_calls, merges, steps, list(plans.values()), banks,
@@ -1619,14 +1650,14 @@ def _run_steps(compiled, series, outs=None, scales=None, tiles=None):
     corr_seconds : float
         The seconds the correlation steps spent in the extension.
     """
-    if compiled.calls or tiles is not None:
+    if compiled.calls or tiles is not None or compiled.table.ops:
         # Device writes to shared host-readable series must have landed.
         _settle_device_writes()
         (offs_b, ti_b, si_b, snr_b, bs_b, bl_b, totals_b, seconds_b, kernel,
          corr_seconds) = compiled.table.run(series, (), outs, scales, tiles)
     else:
-        # correlation steps only (a correlation call): the table's correlation entry, which
-        # assembles no peaks
+        # correlation steps only, unscheduled (a correlation call): the table's correlation
+        # entry, which assembles no peaks
         kernel = 0.0
         corr_seconds = compiled.table.run_corr(0, compiled.table.corrs, series, outs, scales)
     for plan, _, _, _ in compiled.plans:
@@ -1674,11 +1705,12 @@ def _corr_key(calls, scaled):
                  for (bank, ser, W, support, rows, _), with_scales in zip(calls, scaled))
 
 
-def _call_steps(calls, corr_calls=(), corr_scales=None):
+def _call_steps(calls, corr_calls=(), corr_scales=None, lanes=()):
     """The compiled steps of normalised leaf calls (_leaf_call) after correlation calls
-    (_corr_call), kept by the first call's bank under a key of every correlation call's
-    (_corr_key) and every leaf call's bank, layout, profile, windows, series kind and
-    stride, bin size and threshold; or None where no leaf call compiles."""
+    (_corr_call) and their lane copies (_compile_steps), kept by the first call's bank under a
+    key of every correlation call's (_corr_key), every lane copy, and every leaf call's bank,
+    layout, profile, windows, series kind and stride, bin size and threshold; or None where no
+    leaf call compiles."""
     scaled = (tuple(s is not None for s in corr_scales) if corr_scales is not None
               else (False,) * len(corr_calls))
     key = (_corr_key(corr_calls, scaled),
@@ -1686,10 +1718,12 @@ def _call_steps(calls, corr_calls=(), corr_scales=None):
                   bank._plan_profile(bank.__dict__.get("_profile") if profile is _SAME_PROFILE
                                      else profile),
                   cache_key, ser.dtype.char, ser.strides, binsize, float(eff_threshold))
-                 for _, bank, ser, _, cache_key, binsize, eff_threshold, profile in calls))
+                 for _, bank, ser, _, cache_key, binsize, eff_threshold, profile in calls),
+           tuple((call, source, row, part, runs.tobytes())
+                 for call, source, row, part, runs in lanes))
     first = corr_calls[0][0] if corr_calls else calls[0][1]
     return _memo_steps(first.__dict__.setdefault("_compiled_steps", OrderedDict()), key,
-                       (calls, corr_calls, scaled))
+                       (calls, corr_calls, scaled, True, frozenset(), 0, None, lanes))
 
 
 def _memo_steps(memo, key, compile_args):
@@ -1981,24 +2015,30 @@ def _tiling_cohorts(corr_jobs, leaf_by_corr):
     return screened_out, _cohorts(cand_jobs)
 
 
-def _chunk_steps(corr_jobs, leaf_jobs):
-    """The steps of a search chunk's correlation jobs and the leaf jobs that read them, as
-    correlate_and_filter_many(corr_jobs, leaf_jobs) runs them (untiled), compiled into one
-    table: (the compiled steps, the series they bind, the outputs they write), or None where
-    not every job is in it (a job off the CPU, a trial undecided, a leaf job the leaf steps do
-    not run or with no window, a series read through a copy of memory a correlation writes).
-    Running them (_run_steps) gives the results correlate_and_filter_many gives, in the order
-    of leaf_jobs."""
+def _chunk_steps(corr_jobs, leaf_jobs, lanes=()):
+    """The steps of a search chunk's correlation jobs, their lane copies and the leaf jobs that
+    read them, compiled into one table: (the compiled steps, the series they bind, the outputs
+    they write), or None where not every job is in it (a job off the CPU, a trial undecided, a
+    leaf job the leaf steps do not run or with no window, a series read through a copy of
+    memory a correlation writes). The correlation jobs run in order, so a job may read an
+    earlier job's output in place (an inner node's complex row, filtered by its own inner
+    children), or a real lane of it through its series, which a lane copy fills first
+    (``lanes``: ``(job, source job, source row, part, runs)`` as _compile_steps takes them).
+    Running them (_run_steps) gives what correlating the jobs in order, filling each lane's
+    series as the copy does, and then filtering the leaf jobs (filter_series_many) gives, in
+    the order of leaf_jobs."""
     if not _trials_decided(leaf_jobs):
         return None
     corr_calls, corr_scales = [], []
     for bank, series, kw in corr_jobs:
         kw = kw or {}
-        if (not (set(kw) <= _CORR_KEYS) or not bank._correlates_on_cpu()
-                or (isinstance(series, np.ndarray)
-                    and any(np.may_share_memory(series, call[5]) for call in corr_calls))):
+        if not (set(kw) <= _CORR_KEYS) or not bank._correlates_on_cpu():
             return None
         call, row_scales = _corr_call(bank, series, kw)
+        # a copy of an earlier job's output, made now, would be read stale
+        if (isinstance(series, np.ndarray) and not np.may_share_memory(call[1], series)
+                and any(np.may_share_memory(series, cc[5]) for cc in corr_calls)):
+            return None
         corr_calls.append(call)
         corr_scales.append(row_scales)
     calls = []
@@ -2013,7 +2053,7 @@ def _chunk_steps(corr_jobs, leaf_jobs):
                      != 'MatchedFilter.run_series'):
         return None
     scales = corr_scales if any(sc is not None for sc in corr_scales) else None
-    compiled = _call_steps(calls, corr_calls, scales)
+    compiled = _call_steps(calls, corr_calls, scales, lanes)
     if compiled is None or len(compiled.calls) != len(calls):
         return None
     return (compiled, [c[1] for c in corr_calls] + [c[2] for c in calls],

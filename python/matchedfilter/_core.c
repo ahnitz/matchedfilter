@@ -2409,8 +2409,10 @@ done:
 }
 /* The schedule of a table: an order of its steps with buffer roles, run by hmf_run_schedule.
    The tiled middle-to-leaf schedule (a cohort of a middle bank's correlations and the leaf
-   steps that read them, per time tile) is built from these ops; a table without a schedule
-   runs every correlation step, then its leaf phases. A schedule's leaf steps (phase -1) run
+   steps that read them, per time tile) is built from these ops, and so is a search chunk whose
+   inner nodes have inner children (correlation step ranges with the lane copies between them
+   that a child's real series needs); a table without a schedule runs every correlation step,
+   then its leaf phases. A schedule's leaf steps (phase -1) run
    in block ranges (OP_LEAF) and their peaks are gathered per step (hmf_parts), assembled as
    one step's at the end. Ops: */
 enum {
@@ -2426,7 +2428,10 @@ enum {
   HMF_OP_LEAF=9,     /* items off, items n, retain, retain threshold (double bits): items
                         (step, b0, b1, cluster, row) as one batch */
   HMF_OP_RETAIN=10,  /* header off: copies around the last OP_LEAF's peaks */
-  HMF_OP_PENDING=11  /* n: the rows' pending retain ends, zeroed */
+  HMF_OP_PENDING=11, /* n: the rows' pending retain ends, zeroed */
+  HMF_OP_LANE=12     /* src slot, src row, part, dst series slot, runs off, runs n: within the
+                        runs, part 0 (real) or 1 (imaginary) of an output row into a writable
+                        contiguous float32 series that a later correlation step reads */
 };
 typedef struct { Py_buffer view; int held; char *ptr; Py_ssize_t len; } hmf_tile;
 typedef struct {
@@ -2558,6 +2563,19 @@ static int hmf_run_schedule(HMFTableObject *self,const hmf_slot *slots,const hmf
         if(f[7]){ ap_mf_stream_copy(dp+2*a,sp+2*a,(size_t)(b-a)*8); streamed=1; }
         else memcpy(dp+2*a,sp+2*a,(size_t)(b-a)*8);
       }
+      break;
+    }
+    case HMF_OP_LANE: {
+      if(f[1]<0 || f[1]>=nouts || f[4]<0 || f[4]>=self->nslots || (f[3]!=0 && f[3]!=1)
+         || !HMF_RANGE_OK(f[5],f[6],2)) HMF_BAD();
+      const hmf_out_slot *src=&oslots[f[1]]; const hmf_slot *dst=&slots[f[4]];
+      const int64_t *runs=self->sargs+f[5];
+      if(f[2]<0 || f[2]>=src->rows || dst->kind!=1 || dst->view.readonly
+         || dst->samples!=src->width || !hmf_runs_fit(runs,f[6],src->width)) HMF_BAD();
+      const float *sp=src->ptr+(size_t)f[2]*(size_t)src->width*2+f[3];
+      float *dp=(float*)dst->ptr;
+      for(int64_t k=0;k<f[6];k++)
+        for(int64_t i=runs[2*k];i<runs[2*k+1];i++) dp[i]=sp[2*i];
       break;
     }
     case HMF_OP_COLLAR: {
@@ -3588,6 +3606,9 @@ static PyObject *HMFTable_get_corrs(HMFTableObject *self,void *closure){
 static PyObject *HMFTable_get_steps(HMFTableObject *self,void *closure){
   (void)closure; return PyLong_FromLong(self->nsteps);
 }
+static PyObject *HMFTable_get_ops(HMFTableObject *self,void *closure){
+  (void)closure; return PyLong_FromLong(self->nops);
+}
 static PyMethodDef HMFTable_methods[]={
   {"run",(PyCFunction)HMFTable_run,METH_VARARGS,
    "run(series, calls=(), outputs=None, scales=None) -> (offsets, templates, samples, snr, "
@@ -3605,6 +3626,7 @@ static PyMethodDef HMFTable_methods[]={
 static PyGetSetDef HMFTable_getset[]={
   {"steps",(getter)HMFTable_get_steps,NULL,"the number of steps",NULL},
   {"corrs",(getter)HMFTable_get_corrs,NULL,"the number of correlation steps",NULL},
+  {"ops",(getter)HMFTable_get_ops,NULL,"the number of schedule ops (0: no schedule)",NULL},
   {NULL,NULL,NULL,NULL,NULL}
 };
 static PyTypeObject HMFTableType={

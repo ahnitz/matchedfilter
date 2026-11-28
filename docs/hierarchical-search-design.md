@@ -108,10 +108,17 @@ bank then holds a calibration for each channel's profile over one copy of its te
 `HierarchicalSearch.leaf_bank(root, leaf, channel)` returns a channel's bank.
 
 A chunk's leaf searches run as one batch (`TimeDomainFilterBank.filter_series_many`), and
-together with the inner correlations they read (`correlate_and_filter_many`). On the CPU,
-where every inner node filters leaves only, a chunk's correlations and leaf searches are the
-steps of one table, compiled once per chunk shape (windows, spans and what the inner slots
-hold) and kept by the search, so a chunk of a known shape is one C call and its hooks. `HierarchicalSearch.timings` holds
+together with the inner correlations they read (`correlate_and_filter_many`). On the CPU a
+chunk's correlations, at every level of inner nodes, and its leaf searches are the steps of
+one table, compiled once per chunk shape (windows, spans and what the inner slots and lane
+buffers hold) and kept by the search, so a chunk of a known shape is one C call and its
+hooks. An inner node whose parent is an inner node reads the parent's complex row in place,
+or a real lane of it (a packed pair's real or imaginary part, the real part of a complex
+row) through a contiguous buffer that a lane copy of the table fills, over the spans the
+parent and the buffer hold, once the parent's row is written. A chunk runs the walk instead
+(the inner nodes correlated node by node, the leaves as one batch) while a leaf bank's trial
+is open or playing, on a GPU search, and in a shape the table does not take (a leaf that
+reads its series through a copy of a row the chunk writes). `HierarchicalSearch.timings` holds
 the seconds spent per stage (`root`, `inner`, `leaf`, `hooks`, `setup`); of `inner`, the
 seconds the CPU correlation steps spent in the extension (`inner_compute`: their kernels,
 zeroing and scaling, in the walk and in `correlate_and_filter_many`); of `leaf`, the

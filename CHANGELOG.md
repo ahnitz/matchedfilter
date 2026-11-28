@@ -261,6 +261,17 @@ Alpha releases may change the API. Pin a version for reproducible work.
   job. `correlate_and_filter_many` runs its correlations and the leaf calls that read them as
   one table wherever it tiles no cohort. One compiler (`_batches._compile_steps`) makes every
   CPU table. Results are unchanged, to the bit and in order.
+- A CPU search whose inner nodes have inner children runs as one table per chunk too: every
+  inner correlation, at every level, and the leaf searches are the steps of one `HMFTable`,
+  compiled once per chunk shape and kept by the search, run by one C call. An inner node
+  reads its parent's complex row in place, and a real lane of it (a packed pair's real or
+  imaginary part, the real part of a complex row) through a contiguous buffer per inner
+  batch and channel that a lane copy of the table (`HMF_OP_LANE`, a schedule op) fills once
+  the parent's row is written, over the spans the parent and the buffer hold; until now such
+  searches were walked node by node every chunk, the walk copying each lane in NumPy. PyCBC's
+  FIR search (one inner level) is unchanged. Results are unchanged, to the bit and in order;
+  a 2^17-sample nested search makes 966 Python calls a pass against 4,125, and 1.0% fewer
+  instructions.
 - The tiled cascade of `correlate_and_filter_many` is a schedule of the step table: the
   ordering of the same correlation and leaf steps per time tile, with the scratch, output and
   carry slots it moves samples between (clearing, margins, copies, collars, and the copies

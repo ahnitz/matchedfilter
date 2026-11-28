@@ -720,10 +720,13 @@ def test_xxh64_is_the_reference_hash():
     assert _core.xxh64(a) != _core.xxh64(a[::-1].copy())
 
 
-def test_the_inner_stages_compute_is_every_correlation_step_it_ran():
+def test_the_inner_stages_compute_is_every_correlation_step_it_ran(monkeypatch):
     """timings["inner_compute"] holds the extension seconds of every inner correlation of a
-    CPU search, both those the walk makes (an inner node with inner children) and those
-    deferred into correlate_and_filter_many (an inner node with leaf children)."""
+    CPU search, both where the search would run a chunk as one table (here every chunk is
+    declined: its flat leaves read a real lane through a copy, so it is walked again) and in
+    the walk, which a chunk takes while a leaf bank's trial is open: an inner node with
+    inner children is correlated by the walk itself, one with leaf children is deferred into
+    correlate_and_filter_many. Either way the peaks and series are the same, to the bit."""
     from matchedfilter import _batches
     rng = np.random.default_rng(23)
     deep = [Inner(_real_taps(rng, c), children=[Leaf(_complex_taps(rng, (101, 131)), (101, 131),
@@ -733,18 +736,26 @@ def test_the_inner_stages_compute_is_every_correlation_step_it_ran():
     search = HierarchicalSearch([root], threshold=0.0, leaf_options=dict(LEAF, device="cpu"))
     inputs = _inputs(rng, nblocks=2)
     _collect(search, inputs)
-    before, inner0 = _batches.CORR_COMPUTE_SECONDS, search.timings["inner"]
-    walked = []
-    original = search._walk
+    got = {}
+    for as_table in (True, False):
+        monkeypatch.setattr(HierarchicalSearch, "_chunks_as_table", lambda self, r: as_table)
+        before, inner0 = _batches.CORR_COMPUTE_SECONDS, search.timings["inner"]
+        walked = []
+        original = search._walk
 
-    def walk(node, step):
-        walked.append(_batches.CORR_COMPUTE_SECONDS)
-        return original(node, step)
+        def walk(node, step, defer=False):
+            walked.append(_batches.CORR_COMPUTE_SECONDS)
+            return original(node, step, defer)
 
-    search._walk = walk
-    compute0 = search.timings["inner_compute"]
-    _collect(search, inputs)
-    ran = _batches.CORR_COMPUTE_SECONDS - before
-    assert ran > 0 and max(walked) > before       # the walk itself correlated
-    assert search.timings["inner_compute"] - compute0 == pytest.approx(ran, rel=1e-12)
-    assert ran < search.timings["inner"] - inner0
+        search._walk = walk
+        compute0 = search.timings["inner_compute"]
+        got[as_table] = _collect(search, inputs)
+        del search._walk
+        ran = _batches.CORR_COMPUTE_SECONDS - before
+        assert ran > 0 and max(walked) > before           # the walk itself correlated
+        assert search.timings["inner_compute"] - compute0 == pytest.approx(ran, rel=1e-12)
+        assert ran < search.timings["inner"] - inner0
+    assert len(got[True]) == len(got[False]) > 0
+    for a, b in zip(got[True], got[False]):
+        assert a[:3] == b[:3] and a[4].tobytes() == b[4].tobytes()
+        assert all(np.array_equal(u, v) for u, v in zip(a[3], b[3]))

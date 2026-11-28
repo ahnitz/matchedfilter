@@ -431,3 +431,27 @@ library chooses the execution.
   the assembly now compares them as numpy does, and the low-threshold peaks equal main's. A
   call compacting 26,000 records (past the 4,096 a CUDA run copies back) is a GPU test
   (notes/host-layer/phase2-design-study.md, Step 4 on the arena).
+- 2026-11-28: CPU leftovers, item 1: a CPU search whose inner nodes have inner children is one
+  table per chunk too. Who has such searches: PyCBC's FIR search builds its tree recursively
+  over the bank's `num_levels` (`RatioFilterBank.build_children`), and the production bank
+  (showcase `bank_standard`) has `num_levels` 2, root -> inner -> leaves, one inner level; the
+  binary-pulsar harness uses the entry points, not `HierarchicalSearch`; nesting occurred in
+  tests only, and now in the goldens (`nested.search`: three inner levels, real and imaginary
+  lanes, complex rows of a real series, the real part of a complex row, hooks reading every
+  ancestor's series). The walk that compiles a chunk defers every CPU inner batch
+  (`_walk(defer=True)`); a child batch whose series is a real lane of its parent's row reads
+  it through a persistent float32 buffer per (batch, channel), which the table's lane copy
+  (`HMF_OP_LANE`, a schedule op: `_compile_steps(lanes=...)` puts each call's copies before its
+  first correlation step) fills over the parent's spans and the spans the buffer held, so it
+  equals the lane everywhere; a complex row is read in place (the steps run in order). The
+  buffer's spans are part of the chunk key, as the slots' are. A nested chunk the table
+  declines is walked again in the old order. Goldens 23,541 arrays, 0 differ from ad0d5247
+  (and two records of the parent from one seed agree). The walk stays for chunks while a leaf
+  bank's trial is open or playing, GPU searches and declined shapes (a leaf that reads its
+  series through a copy of a row the chunk writes: an ungated bank's real lane). Nested
+  synthetic search (2^17 samples, two channels, three chunks, eight 24-template gated leaves
+  below two packed inner levels; three alternated rounds, dev2 core 13): 1,340 to 1,327 million
+  instructions a steady pass (-1.0%), Python calls 4,125 to 966 a pass, wall within noise
+  (0.1006-0.1020 against 0.0978-0.1013 s). Capture top 1: 7,757 million instructions a pass
+  in both trees; pulsar dense pass: 253.14 and 3,334.2 million instructions a pass in both;
+  real PyCBC job (three pairs): wall 64.72 against 64.70 s, RSS 1.61 GB, triggers identical.

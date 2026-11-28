@@ -77,12 +77,16 @@ def windows_of(search, inputs, windows, kind):
 
 def chunk_jobs(search, inputs, windows):
     """Every chunk's (correlation jobs, leaf jobs) of one pass of search, with no-op hooks
-    (the middle output is written whole, as in a search with hooks)."""
+    (the middle output is written whole, as in a search with hooks). A search whose inner
+    nodes have inner children (a chunk with lane copies) is not replayed."""
     from matchedfilter import _batches
     seen = []
     compile_chunk = _batches._chunk_steps
 
-    def recording(corr_jobs, leaf_jobs):
+    def recording(corr_jobs, leaf_jobs, lanes=()):
+        if lanes:
+            raise SystemExit("a chunk with lane copies (inner nodes with inner children) is "
+                             "not replayed")
         seen.append((list(corr_jobs), list(leaf_jobs)))
         return compile_chunk(corr_jobs, leaf_jobs)
     _batches._chunk_steps = recording

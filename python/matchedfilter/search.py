@@ -387,6 +387,12 @@ class _InnerBatch:
     remembers those spans, and the bank clears only there (out_support), not the whole
     row every chunk.
 
+    A real series that is a lane of a row its parent's batch writes later in a CPU chunk's
+    table (prepare with a source) is read through the channel's lane buffer: a contiguous
+    float32 series, filled by the table's lane copy before the rows are correlated, over the
+    parent's spans and the spans the buffer held before, so that it equals the lane
+    everywhere. The buffer remembers those spans as the slots remember theirs.
+
     device: the device the rows are correlated on and stored in -- on a GPU search the
     leaves', so a leaf reads its parent's row (or its lane of a packed row) where the
     correlation wrote it, with no host round trip."""
@@ -432,17 +438,50 @@ class _InnerBatch:
         self.reallocated = False                 # a channel's slots were replaced (prepare_job)
         self._alloc = self.bank.empty_shared if device is not None else None
 
-    def prepare(self, channel, series, regions):
-        """channel's series and the merged (start, stop) spans its rows must hold this chunk."""
+    def prepare(self, channel, series, regions, source=None):
+        """Set channel's series and the merged (start, stop) spans its rows must hold this
+        chunk.
+
+        Parameters
+        ----------
+        channel : str
+            The channel.
+        series : ndarray
+            The parent node's output in the channel.
+        regions : list of tuple of int
+            The spans the rows must hold.
+        source : tuple, optional
+            Where ``series`` lies when a CPU chunk's table writes it after this call: (the
+            parent's batch, the slot of its row, the series' lane of the row: 0 the real
+            part, 1 the imaginary part, None the whole row). A real series is then read
+            through the channel's lane buffer, and ``lane_copy`` says what the table copies
+            into it; a complex row is read in place. Default None: the series is written
+            already, and a real lane of it is copied now.
+        """
         if len(series) != self.length:
             raise ValueError("an inner batch's input length changed between chunks")
-        state = self._chan.setdefault(channel, {"slots": None, "support": [], "key": None})
+        state = self._chan.setdefault(channel, {"slots": None, "support": [], "key": None,
+                                                "lane": None, "lane_support": [],
+                                                "lane_copy": None})
         dt = np.float32 if self.real_input else np.complex64
+        state["lane_copy"] = None
         # On a device a parent's row -- or its lane of a packed row (stride 2) -- is read
         # where it is; a host copy waits for the device's writes to it first.
         lane = (self._alloc is not None and isinstance(series, np.ndarray) and series.dtype == dt
                 and series.ndim == 1 and series.strides in ((series.itemsize,), (8,)))
-        if not lane:
+        if not lane and source is not None and (series.dtype != dt
+                                                or not series.flags.c_contiguous):
+            # the parent's row is written later in the table: its lane is copied there, over
+            # the parent's spans and those the buffer held (zero elsewhere in both)
+            parent, slot, part = source
+            if state["lane"] is None:
+                state["lane"] = _aligned_zeros((self.length,), dtype=np.float32)
+            parent_regions = parent._chan[channel]["regions"]
+            runs = _merge(list(parent_regions) + list(state["lane_support"]))
+            state["lane_copy"] = (parent, slot, 0 if part is None else part,
+                                  np.array(runs, dtype=np.int64).reshape(-1, 2), parent_regions)
+            series = state["lane"]
+        elif not lane:
             _settle_device_writes()
             series = np.ascontiguousarray(series, dtype=dt)
         state["series"] = series
@@ -472,6 +511,7 @@ class _InnerBatch:
         for st in states:
             for j in range(k):
                 st["support"][j] = st["regions"]
+            st["key"] = self._slots_key(st)
         return {c: {r: j for j, r in enumerate(rows)} for c in channels}
 
     def _slots(self, channel, k):
@@ -488,11 +528,20 @@ class _InnerBatch:
                 # for each search, 0.67 s of a pycbc job's 64 top templates.
                 state["slots"] = self._alloc((k, self.length))
                 state["support"] = [[(0, self.length)] for _ in range(k)]
+            state["key"] = self._slots_key(state)
+
+    @staticmethod
+    def _slots_key(state):
+        """A channel state's key (support_key): its slots' array, each slot's spans and the
+        spans its lane buffer holds."""
+        return (id(state["slots"]), tuple(tuple(w) for w in state["support"]),
+                tuple(state["lane_support"]))
 
     def support_key(self, channel):
-        """What channel's slots hold, as a key: the slots' array and each slot's spans, or
-        None before the channel has slots. A chunk's correlation steps clear by it
-        (out_support), so a search's compiled chunk is kept under it."""
+        """What channel's slots and lane buffer hold, as a key: the slots' array, each slot's
+        spans and the lane buffer's spans, or None before the channel has slots. A chunk's
+        correlation steps clear by it (out_support) and its lane copies copy by it, so a
+        search's compiled chunk is kept under it."""
         state = self._chan.get(channel)
         return None if state is None else state["key"]
 
@@ -505,7 +554,7 @@ class _InnerBatch:
         if state["slots"] is None or state["slots"].shape[0] < k:
             state["slots"] = _aligned_zeros((k, self.length), dtype=np.complex64)
             state["support"] = [[] for _ in range(k)]
-            state["key"] = (id(state["slots"]), ((),) * k)
+            state["key"] = self._slots_key(state)
             self.reallocated = True
         support = state["support"]
         regions = state["regions"]
@@ -521,14 +570,18 @@ class _InnerBatch:
         return {r: j for j, r in enumerate(rows)}, (job, self, channel, k)
 
     def commit(self, channel, k):
-        """Record that channel's first k slots now hold the spans prepare gave: what the
-        correlation job of prepare_job wrote."""
+        """Record that channel's first k slots now hold the spans prepare gave, what the
+        correlation job of prepare_job wrote, and that its lane buffer holds its parent's
+        spans where the table copied a lane into it (lane_copy)."""
         state = self._chan[channel]
         regions = state["regions"]
         support = state["support"]
         for j in range(k):
             support[j] = regions
-        state["key"] = (id(state["slots"]), tuple(tuple(w) for w in support))
+        if state["lane_copy"] is not None:
+            state["lane_support"] = state["lane_copy"][4]
+            state["lane_copy"] = None
+        state["key"] = self._slots_key(state)
 
     def view(self, channel, slot, pos):
         """Child pos's series in the slot its row was computed into."""
@@ -555,6 +608,8 @@ class _Step(NamedTuple):
     on_peaks: Optional[Callable]
     pending: list       # leaves in walk order, searched once the chunk's series exist
     corr_jobs: list     # CPU inner correlation jobs coupled with leaf filtering
+    sources: dict       # (inner node id, channel) -> where its series lies in its parent's
+    #                     slots, for a walk that defers every correlation: (batch, slot, lane)
 
 
 class _ChunkPlan(NamedTuple):
@@ -570,7 +625,9 @@ class _ChunkPlan(NamedTuple):
     lengths: list       # per leaf call, its series' length
     held: dict          # channel -> inner node id -> its series
     support: dict       # channel -> inner node id -> its computed spans
-    commits: list       # (slot state, slots written, their spans, slot state key after)
+    commits: list       # (slot state, slots written, their spans, the spans its lane buffer
+    #                     holds after or None where the chunk copies no lane into it, the slot
+    #                     state's key after)
 
 
 #: A chunk shape whose jobs do not all run as one table (HierarchicalSearch._cpu_chunk).
@@ -976,7 +1033,7 @@ class HierarchicalSearch:
                             live.add(id(node))
                             node = self._parent[id(node)]
                 step = _Step(root, k, active, tags, held, support, need, win, envelopes, pads,
-                             live, on_peaks, [], [])
+                             live, on_peaks, [], [], {})
                 if self._chunks_as_table(root):
                     # the chunk's shape: its windows, what its parents' series must hold,
                     # and what every inner node's slots hold
@@ -1001,11 +1058,17 @@ class HierarchicalSearch:
             if trial is not None:
                 trial.end_run()                 # the run's two halves are one round
 
-    def _walk(self, node, step):
+    def _walk(self, node, step, defer=False):
         """Queue node's leaves for the chunk's leaf search, then produce its live inner
         children (every channel) and walk each. Every node has its own row slots, so all the
         chunk's series coexist until the next chunk: the leaves are searched together once the
-        walk is done (_submit_leaves, then _finish_leaves), with their ancestors' series still held for the hooks."""
+        walk is done (_submit_leaves, then _finish_leaves), with their ancestors' series still
+        held for the hooks.
+
+        A CPU batch whose children are leaves only is not correlated here: its job joins the
+        chunk's leaf search (step.corr_jobs). With defer (a CPU chunk compiled into one table,
+        _cpu_chunk) no CPU batch is: a child's own batch reads the rows its parent's job will
+        write (step.sources), in place or through its lane buffer."""
         inner, leaves = self._kids[id(node)]
         step.pending.extend(leaves)
         if not inner:
@@ -1021,15 +1084,15 @@ class HierarchicalSearch:
         rows = sorted({batch.row_of[pos][0] for pos in wanted})
         slot_of = {}
         regions_by_chan = {}
-        couple_cpu = (batch._alloc is None
-                      and all(not self._kids[id(batch.children[pos])][0] for pos in wanted))
+        couple_cpu = batch._alloc is None and (
+            defer or all(not self._kids[id(batch.children[pos])][0] for pos in wanted))
         for c in step.active:
             spans = []
             for pos in wanted:
                 self._span(batch.children[pos], c, step.need, step.pads, spans)
             regions = _clip(_merge(spans), 0, L)
             regions_by_chan[c] = regions
-            batch.prepare(c, held[c][id(node)], regions)
+            batch.prepare(c, held[c][id(node)], regions, step.sources.get((id(node), c)))
             if couple_cpu:
                 slot_of[c], job = batch.prepare_job(c, rows)
                 step.corr_jobs.append(job)
@@ -1038,13 +1101,16 @@ class HierarchicalSearch:
         members = sorted(wanted, key=lambda p: batch.row_of[p])
         for pos in members:
             child = batch.children[pos]
+            row, lane = batch.row_of[pos]
             for c in step.active:
-                held[c][id(child)] = batch.view(c, slot_of[c][batch.row_of[pos][0]], pos)
+                held[c][id(child)] = batch.view(c, slot_of[c][row], pos)
                 step.support[c][id(child)] = regions_by_chan[c]
+                if defer:
+                    step.sources[(id(child), c)] = (batch, slot_of[c][row], lane)
         self.timings["inner"] += time.perf_counter() - t0
         self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
         for pos in members:
-            self._walk(batch.children[pos], step)
+            self._walk(batch.children[pos], step, defer)
 
     def _roots(self, root, inputs, k, active):
         """Root's output for chunk k in every active channel: (held, support). Computed on
@@ -1155,17 +1221,16 @@ class HierarchicalSearch:
         return leaves, jobs, where
 
     def _chunks_as_table(self, root):
-        """Whether root's chunks run as the steps of one table (_cpu_chunk): a CPU search
-        whose inner nodes all filter leaves only, so every correlation of a chunk is deferred
-        to the chunk's table, and no trial of the leaf banks is open or playing (a trial
-        takes its rounds on the leaf calls, through filter_series_many)."""
+        """Whether root's chunks run as the steps of one table (_cpu_chunk): a CPU search,
+        whose every inner correlation of a chunk is deferred to the chunk's table, and no
+        trial of the leaf banks is open or playing (a trial takes its rounds on the leaf
+        calls, through filter_series_many)."""
         ok = self._chunk_roots.get(id(root))
         if ok is None:
             # (a leaf bank's device is the search's leaf option, MF_DEVICE's where None)
             ok = self._chunk_roots[id(root)] = (
                 _parse_device(self.leaf_options.get("device")).kind == "cpu"
                 and all(self._inner[id(node)]._alloc is None
-                        and not any(self._kids[id(ch)][0] for ch in self._inner[id(node)].children)
                         for node in self._inner_below(root)))
         return ok and not playing() and not any(
             getattr(b, "_in_trial", False) for b in self._leaf_banks.values())
@@ -1179,15 +1244,18 @@ class HierarchicalSearch:
                 yield from self._inner_below(c)
 
     def _cpu_chunk(self, step, key):
-        """Run a CPU chunk's inner correlations and its leaf searches as the steps of one
-        table, in one C call (_batches._run_steps): compiled from the chunk's walk the first
-        time its key is seen (_batches._chunk_steps) and kept, the eight most recent, by the
-        search. Returns what _submit_leaves returns. A chunk the table does not run (a job the
-        steps do not take) runs as the walk and _submit_leaves make it, and its shape is kept
-        as declined.
+        """Run a CPU chunk's inner correlations, at every level, and its leaf searches as the
+        steps of one table, in one C call (_batches._run_steps): compiled from the chunk's walk
+        (every correlation deferred) the first time its key is seen (_batches._chunk_steps)
+        and kept, the eight most recent, by the search. An inner node's correlation reads its
+        parent's row in place where it is complex, and a real lane of it through its lane
+        buffer, which a lane copy of the table fills after the parent's row is written.
+        Returns what _submit_leaves returns. A chunk the table does not run (a job the steps
+        do not take) runs as the walk and _submit_leaves make it, and its shape is kept as
+        declined.
 
-        A plan holds the inner nodes' slots it writes and reads; a chunk that replaces a
-        node's slots (more rows than before) drops every kept plan."""
+        A plan holds the inner nodes' slots and lane buffers it writes and reads; a chunk that
+        replaces a node's slots (more rows than before) drops every kept plan."""
         t0 = time.perf_counter()
         plan = self._chunk_plans.get(key)
         if plan is _DECLINED:
@@ -1197,7 +1265,7 @@ class HierarchicalSearch:
             plan = None
         compiled = None
         if plan is None:
-            self._walk(step.root, step)
+            self._walk(step.root, step, defer=True)
             built = self._leaf_jobs(step)
             reallocated = any(b.reallocated for b in self._inner.values())
             if reallocated:
@@ -1205,13 +1273,30 @@ class HierarchicalSearch:
                 for b in self._inner.values():
                     b.reallocated = False
             corr_jobs = [cj[0] for cj in step.corr_jobs]
+            # the lane copies: a job whose series is its lane buffer reads a lane of the row
+            # its parent's job writes
+            job_of = {(id(batch), c): i for i, (_, batch, c, _) in enumerate(step.corr_jobs)}
+            lanes = []
+            for i, (_, batch, c, _) in enumerate(step.corr_jobs):
+                copy = batch._chan[c]["lane_copy"]
+                if copy is not None:
+                    parent, slot, part, runs, _ = copy
+                    lanes.append((i, job_of[(id(parent), c)], slot, part, runs))
             t1 = time.perf_counter()
-            compiled = _batches._chunk_steps(corr_jobs, built[1]) if built[1] else None
+            compiled = _batches._chunk_steps(corr_jobs, built[1], lanes) if built[1] else None
             if compiled is None:
                 # a shape the table does not run: not compiled again
                 self._chunk_plans[key] = _DECLINED
                 while len(self._chunk_plans) > 8:
                     self._chunk_plans.popitem(last=False)
+                if any(node_id in self._inner for node_id, _ in step.sources):
+                    # a child's correlation reads a row no job has written yet: the walk
+                    # again, correlating parents before their children read them
+                    step.pending.clear()
+                    step.corr_jobs.clear()
+                    step.sources.clear()
+                    self._walk(step.root, step)
+                    return self._submit_leaves(step)
                 return self._submit_leaves(step, built)
             self.timings["setup"] += time.perf_counter() - t1
             t0 = time.perf_counter()
@@ -1228,8 +1313,10 @@ class HierarchicalSearch:
             series = [step.held[step.active[src]][id(step.root)] if type(src) is int else src
                       for src in plan.sources]
             results, corr_seconds = _batches._run_steps(plan.steps, series, plan.outs)
-            for state, k, regions, after in plan.commits:
+            for state, k, regions, lane_support, after in plan.commits:
                 state["support"][:k] = [regions] * k
+                if lane_support is not None:
+                    state["lane_support"] = lane_support
                 state["key"] = after
             leaves, lengths, where = plan.leaves, plan.lengths, plan.where
         else:
@@ -1238,16 +1325,19 @@ class HierarchicalSearch:
             # the slots now hold what the correlations wrote
             commits = []
             for _, batch, c, k in step.corr_jobs:
-                batch.commit(c, k)
                 state = batch._chan[c]
-                commits.append((state, k, state["regions"], state["key"]))
+                copied = state["lane_copy"] is not None
+                batch.commit(c, k)
+                commits.append((state, k, state["regions"],
+                                state["lane_support"] if copied else None, state["key"]))
             leaves, jobs, where = built
             lengths = [len(series) for _, series, _ in jobs]
-            # A series slot is a channel's root output, or a view of an inner node's slots
-            # that the plan can keep; any other (a copy made for this call) is not kept.
+            # A series slot is a channel's root output, or a view of an inner node's slots or
+            # lane buffer that the plan can keep; any other (a copy made for this call) is not
+            # kept.
             roots = [step.held[c][id(step.root)] for c in step.active]
-            slot_arrays = [state["slots"] for b in self._inner.values()
-                           for state in b._chan.values() if state["slots"] is not None]
+            slot_arrays = [a for b in self._inner.values() for state in b._chan.values()
+                           for a in (state["slots"], state["lane"]) if a is not None]
             sources = []
             for a in series:
                 src = next((i for i, r in enumerate(roots)
