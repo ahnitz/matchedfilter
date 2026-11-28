@@ -28,6 +28,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- A search reads each root's profile once per channel: the first leaf bank it calibrates
+  with a profile array is handed the search's own read-only copy, and so is every later bank
+  of the root and channel. The reference cache keeps no snapshot of such a copy
+  (`time_domain._OwnedReference`, which nothing can change) and does not compare it again,
+  where every bank compared the caller's array with a snapshot (the PyCBC job's 4 MB
+  fine-grid profile: 0.24 ms a bank, 1,994 times). A caller's array is still compared on
+  every `set_reference`, and each bank still checks a reference against its block sizes. An
+  edit of the root's array in place after the search has read it is seen by the next search.
+  PyCBC CPU job: library setup 18.9 to 18.4 s (four alternated pairs); every plan's chain,
+  thresholds and screeners, the triggers and the goldens identical.
 - What follows from a reference profile alone is worked out once for every plan the
   reference reaches. `TimeDomainFilterBank.set_reference` makes one `ProfileClass` per
   reference and block size (`_gatedraws`: the normalised profile and its signature, the band

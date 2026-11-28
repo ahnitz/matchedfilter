@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from matchedfilter import _core, _gpuroot
+from matchedfilter import time_domain as td
 from matchedfilter.device import parse
 from matchedfilter.search import BlockInput, HierarchicalSearch, Inner, Leaf, Root
 from matchedfilter.time_domain import TimeDomainFilterBank
@@ -579,8 +580,11 @@ def test_a_profile_per_channel_is_one_leaf_bank_holding_each(monkeypatch):
         bank = search.leaf_bank(root, lf, "A")
         assert search.leaf_bank(root, lf, "B") is bank
         assert bank.profiles == ("A", "B")
-        assert [(w, name) for b, w, name in given if b is bank] == [
-            (profiles["A"][0], "A"), (profiles["B"][0], "B")]
+        handed = [(w, name) for b, w, name in given if b is bank]
+        assert [name for _, name in handed] == ["A", "B"]
+        for (w, name) in handed:            # the search's own copy of the channel's profile
+            assert w is search._references[(id(root), name)][0]
+            np.testing.assert_array_equal(w, profiles[name][0])
         # no channel named, or one the root has no profile for: the first profile
         assert search.leaf_bank(root, lf) is bank and search.leaf_bank(root, lf, "C") is bank
         assert search._channel_profile(root, "C") == "A" and search._channel_profile(root, None) == "A"
@@ -636,9 +640,39 @@ def test_a_gpu_search_has_a_leaf_bank_for_each_profile(monkeypatch):
         # (a bank may be given the same reference more than once)
         for bank, ch in ((a, "A"), (b, "B")):
             refs = [(w, name) for bk, w, name in given if bk is bank]
-            assert refs and all(w is profiles[ch][0] and name is None for w, name in refs)
+            own = search._references[(id(root), ch)][0]
+            assert refs and all(w is own and name is None for w, name in refs)
+            np.testing.assert_array_equal(own, profiles[ch][0])
         # no channel named, or one the root has no profile for: the first profile's bank
         assert search.leaf_bank(root, lf) is a and search.leaf_bank(root, lf, "C") is a
+
+
+def test_a_search_reads_a_root_profile_once():
+    """Every leaf bank of a root and channel is calibrated on one read-only copy of the root's
+    profile, which the reference cache holds no snapshot of; an edit in place reaches the next
+    search, and a profile without power is refused as a bank refuses it."""
+    root = _tree(np.random.default_rng(16), inner_counts=(301, 351))
+    w, df = _profiles()["A"]
+    root.profile = (w, df)
+    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
+    banks = [search.leaf_bank(root, lf, "A") for lf in search._leaves_below(root)]
+    own = search._references[(id(root), None)][0]
+    assert len(banks) > 1 and all(b._refs[None][0] is own for b in banks)
+    assert own is not w and not own.flags.writeable
+    np.testing.assert_array_equal(own, w)
+    held = [e for e in td._REF_BINNED_CACHE.entries.values() if e[1][0]() is own]
+    assert held and all(e[2] == (None,) for e in held)
+
+    w[100:400] *= 3.0                       # the caller edits its array: the next search sees it
+    again = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
+    lf = next(iter(again._leaves_below(root)))
+    again.leaf_bank(root, lf, "A")
+    np.testing.assert_array_equal(again._references[(id(root), None)][0], w)
+    assert not np.array_equal(own, w)
+
+    root.profile = (np.zeros_like(w), df)
+    with pytest.raises(ValueError, match="holds no power or is not finite"):
+        HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF).leaf_bank(root, lf, "A")
 
 
 def test_one_profile_is_one_calibration_for_every_channel():

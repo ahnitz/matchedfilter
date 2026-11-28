@@ -523,11 +523,19 @@ def _side_of(label):
     return _settings.moves(label).get("side", _settings.dim("side").default)
 
 
+class _OwnedReference(np.ndarray):
+    """A read-only copy of a reference that the library made and alone holds: a search's copy
+    of a root's profile, made once per root and channel (HierarchicalSearch.leaf_bank) and
+    handed to every bank of that root and channel. Nothing can change it, so a reference cache
+    takes it as it is, without a snapshot to compare it with."""
+
+
 class _ReferenceCache:
     """Bounded derived profiles, invalidated when an input changes or dies.
 
     Setters compare an input with its saved values: an explicit setter must observe
-    in-place edits. Filtering does no comparison or hashing. Weak references protect
+    in-place edits. An input that cannot change (an _OwnedReference) has no saved values
+    and is not compared. Filtering does no comparison or hashing. Weak references protect
     identity keys without retaining every PSD/template from a long search; the LRU
     also bounds snapshots and derived arrays while their inputs remain alive.
     """
@@ -556,7 +564,8 @@ class _ReferenceCache:
                 return None
             _, refs, snapshots, _, _ = entry
             if (len(sources) != len(refs)
-                    or any(ref() is not source or not np.array_equal(np.asarray(source), snapshot)
+                    or any(ref() is not source or (snapshot is not None
+                                                   and not np.array_equal(np.asarray(source), snapshot))
                            for ref, source, snapshot in zip(refs, sources, snapshots))):
                 self._remove(key)
                 return None
@@ -573,13 +582,15 @@ class _ReferenceCache:
                              for source in sources)
             except TypeError:
                 return None         # non-weakrefable inputs (e.g. lists) work uncached
-            arrays = tuple(np.asarray(source) for source in sources)
+            # each input that can change is kept as a snapshot, to compare it with on a later get
+            changeable = tuple(None if isinstance(source, _OwnedReference) else np.asarray(source)
+                               for source in sources)
             values = value.values() if isinstance(value, dict) else (value,)
-            nbytes = sum(a.nbytes for a in arrays) + sum(
+            nbytes = sum(a.nbytes for a in changeable if a is not None) + sum(
                 a.nbytes for a in values if a is not None)
             if self.max_entries < 1 or nbytes > self.max_bytes:
                 return None
-            snapshots = tuple(a.copy() for a in arrays)
+            snapshots = tuple(None if a is None else a.copy() for a in changeable)
             while self.entries and (len(self.entries) >= self.max_entries
                                     or self.nbytes + nbytes > self.max_bytes):
                 self._remove(next(iter(self.entries)))

@@ -19,8 +19,8 @@ from . import _batches, _core, _gpuroot, _hierarchical
 from ._choice import playing
 from ._errors import UnsupportedSize
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
-                          _SAME_PROFILE, _aligned_zeros, _normalize_windows, _page_aligned_empty,
-                          _settle_device_writes)
+                          _OwnedReference, _SAME_PROFILE, _aligned_zeros, _normalize_windows,
+                          _page_aligned_empty, _settle_device_writes)
 from .device import parse as _parse_device
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
@@ -112,7 +112,9 @@ class Root:
         ``{channel: (w, delta_f)}`` where the channels' noise spectra differ (two
         detectors). Each leaf bank then holds a calibration for every channel's profile over
         one copy of its templates (on a GPU: a bank for each profile). A channel the dict
-        does not name takes the first profile.
+        does not name takes the first profile. A search reads a profile array once, when it
+        calibrates the first leaf bank with it, and calibrates every leaf bank of the root
+        and channel on that copy: an edit in place after that is seen by the next search.
     node_id : object, optional
         The caller's name for the root, handed back to hooks.
     """
@@ -644,6 +646,7 @@ class HierarchicalSearch:
         self._kids = {}                  # node -> (inner children, leaf children)
         self._leaf_banks = {}
         self._ready_banks = {}           # (leaf, channel) -> its bank, built and referenced
+        self._references = {}            # (root, its profile's name) -> (w, delta_f) as its banks get it
         self._inner = {}
         self._chunk_plans = OrderedDict()   # a CPU chunk's key -> its _ChunkPlan
         self._chunk_roots = {}              # root -> whether its chunks run as one table
@@ -734,8 +737,18 @@ class HierarchicalSearch:
         if prof is not None and (new if self._bank_per_profile else name not in bank.profiles):
             # the first reference settles the bank's block sizes; each calibrates its gates
             t0 = time.perf_counter()
-            w, df = prof
-            bank.set_reference(w, delta_f=df, profile=name)
+            handed = self._references.get((id(root), which))
+            if handed is None:
+                # The root's profile is read once for the search: every bank of the root and
+                # channel is handed the search's read-only copy, which nothing can change, so
+                # a bank's reference cache does not compare it with a snapshot again
+                # (comparing the caller's 4 MB fine-grid array was 0.25 ms a bank).
+                w, df = prof
+                if isinstance(w, np.ndarray):
+                    w = np.array(w).view(_OwnedReference)
+                    w.setflags(write=False)
+                handed = self._references[(id(root), which)] = (w, df)
+            bank.set_reference(handed[0], delta_f=handed[1], profile=name)
             self.timings["setup"] += time.perf_counter() - t0
         self._ready_banks[(id(leaf), channel)] = bank
         return bank

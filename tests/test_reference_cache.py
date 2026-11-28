@@ -62,6 +62,44 @@ def test_repeated_setter_observes_in_place_reference_changes(fine):
     np.testing.assert_allclose(_profile(bank), expected, rtol=1e-6)
 
 
+def test_a_later_bank_is_not_given_a_profile_rebinned_from_a_changed_reference():
+    """Banks handed one caller array: a later bank, after the array changed in place, is
+    calibrated on its new values (the cache compares a caller's array with its snapshot)."""
+    ref = np.ones(2049)
+    first = _bank()
+    first.set_reference(ref, delta_f=1)
+    ref[:512] = 8
+    later = _bank()
+    later.set_reference(ref, delta_f=1)
+    np.testing.assert_allclose(_profile(later), _expected(ref), rtol=1e-6)
+    assert not np.array_equal(_profile(later), _profile(first))
+
+
+def test_an_owned_reference_is_not_compared_but_each_bank_still_checks_its_sizes(monkeypatch):
+    """A reference only the library holds (a search's copy) is cached with no snapshot and
+    taken without a comparison; a later bank whose block size a 1-D reference does not
+    match is still refused."""
+    ref = np.array(np.ones(2048)).view(td._OwnedReference)
+    ref.setflags(write=False)
+    first = _bank()
+    first.set_reference(ref)
+    (entry,) = td._REF_BINNED_CACHE.entries.values()
+    assert entry[2] == (None,)
+
+    def no_comparison(a, b):
+        raise AssertionError("an owned reference was compared")
+    monkeypatch.setattr(td.np, "array_equal", no_comparison)
+    again = _bank()
+    again.set_reference(ref)
+    assert again._groups[0].plan._profile_class is first._groups[0].plan._profile_class
+    monkeypatch.undo()
+    other = TimeDomainFilterBank(np.ones((1, 31), np.float32), engine="hier",
+                                 fft_lengths=[1024], coarse_band_hz=256,
+                                 tap_sample_rate=2048, data_sample_rate=2048)
+    with pytest.raises(ValueError, match="does not match hierarchical block size"):
+        other.set_reference(ref)
+
+
 @pytest.mark.parametrize("changed", ["template", "psd"])
 def test_reference_from_template_observes_in_place_input_changes(changed):
     bank = _bank()

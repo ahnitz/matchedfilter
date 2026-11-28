@@ -396,3 +396,12 @@ library chooses the execution.
   peak RSS 1.61-1.62 GB both; all 1,994 plans' chains, thresholds, reach, offsets and
   tier-0 and tier-1 screeners identical, triggers and CPU and GPU goldens identical. Radeon
   8060S job (three pairs): setup median 19.83 to 18.53 s, wall 46.96 to 44.78 s.
+- 2026-11-28: setup step 4: a search reads a root's profile once per channel and hands every
+  leaf bank of the root and channel its own read-only copy, which the reference cache neither
+  snapshots nor compares; per bank, `set_reference` had compared the caller's 4.2 MB
+  fine-grid profile with a snapshot (`_ReferenceCache.get` 0.475 s over 1,994 calls, 0.010 s
+  after; the copies cost 0.03 s; the other 0.16 s of `set_reference`'s own time is the joint
+  trial's lock lookup in the cost file, `_trial.winner`, once per bank). CPU job (four
+  alternated pairs): setup 18.88 to 18.36 s, wall 68.63 to 68.42 s, peak RSS 1.61 GB; chain
+  record, triggers and goldens identical. Radeon 8060S job (three pairs): setup
+  16.73/17.56/17.10 to 17.07/16.48/16.73 s.
