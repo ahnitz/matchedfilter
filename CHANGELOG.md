@@ -23,6 +23,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- A GPU process no longer ends with "Exception ignored in `_Allocation.__del__`" (four at the
+  end of every Vulkan PyCBC job). The device root, which the library holds for the process,
+  was freed while the interpreter cleared modules, and its buffers' destroy() called a backend
+  function already cleared, so those destroys never ran. The device roots are now released at
+  exit while every module is intact (their runs finished, then their recordings, buffers,
+  outputs and context), and an allocation a caller still holds when the interpreter finalizes
+  is left to the process's end, on every backend.
 - A PyCBC CPU job's peak memory is back to 1.6 GB from 4.2 GB. The compiled leaf steps a
   bank keeps held every bank of their batch, the keeping bank among them, so each leaf bank
   sat in a reference cycle once its top was done and was freed only when the cyclic collector

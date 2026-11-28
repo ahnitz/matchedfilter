@@ -5,6 +5,7 @@ ROCm allocation. Consumers must finish writing before a synchronous filter call.
 """
 import bisect
 import itertools
+import sys
 import weakref
 import numpy as np
 
@@ -33,8 +34,17 @@ class _Allocation:
         _allocations[start] = self
         bisect.insort(_starts, start)
 
+    #: Whether the interpreter is finalizing, kept on the class: a module's globals are
+    #: cleared then, in no order this can rely on, while a class keeps its attributes.
+    _finalizing = staticmethod(sys.is_finalizing)
+
     def __del__(self):
-        if bisect is None:          # interpreter shutdown: the module's globals are gone
+        # An allocation a caller still holds when the interpreter finalizes is left to the
+        # process's end, which frees its memory: the backend modules a destroy() calls into
+        # may already be cleared (a Vulkan job's last four allocations raised in destroy()
+        # at exit). What the library holds itself is released at exit before that, while
+        # every module is intact (_gpuroot.release_roots).
+        if self._finalizing():
             return
         buf = self.buffer
         start = int(buf.ptr.value if hasattr(buf.ptr, 'value') else buf.ptr)

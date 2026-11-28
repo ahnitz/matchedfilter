@@ -235,3 +235,7 @@ library chooses the execution.
   call first uses it (`_series_submit`), not eight slots at the first call. On the Vulkan
   PyCBC job peak live device memory 3,240 MB to 1,133 MB (none untouched, against 2,129 MB),
   allocations 74,511 to 46,595; triggers and GPU and CPU goldens identical to d6e7a585.
+- 2026-11-27: GPU step 1, item 3: orderly teardown. `_gpuroot.release_roots` (atexit) releases
+  the process's device roots while every module is intact; `_Allocation.__del__` leaves an
+  allocation still held at finalization to the process's end. The four "Exception ignored" at
+  the end of every Vulkan PyCBC job are gone; goldens and triggers identical.

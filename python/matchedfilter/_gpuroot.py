@@ -25,6 +25,7 @@ What it keeps, so that its steady cost is the transform's and nothing else:
 Placement (host or device) is the search's decision (search.py, _root_place); both write
 the same pooled outputs, so moving between them re-records nothing downstream.
 """
+import atexit
 import weakref
 
 import numpy as np
@@ -66,6 +67,21 @@ def device_root(device):
         _ROOTS[key] = (DeviceRoot(ctx, ctx.props.name or key)
                        if ctx is not None else None)
     return _ROOTS[key]
+
+
+def release_roots():
+    """Release every device root (DeviceRoot.release). Run at interpreter exit, before any
+    module's globals are cleared: the roots live for the process in this module's _ROOTS, and
+    released later, while the interpreter clears modules in no fixed order, their buffers'
+    destroy() met backend modules already cleared (four exceptions at the end of every Vulkan
+    pycbc job). A root asked for afterwards is made again."""
+    roots = [r for r in _ROOTS.values() if r is not None]
+    _ROOTS.clear()
+    for root in roots:
+        root.release()
+
+
+atexit.register(release_roots)
 
 
 def _signature(arr):
@@ -137,6 +153,31 @@ class DeviceRoot:
     def give_output(self, n, position, parity, out):
         """Return a buffer take_output gave; the next take of the same kind gets it back."""
         self._free.setdefault((n, position, parity), []).append(out)
+
+    def release(self):
+        """Release everything this root holds, once its runs have finished: its recordings,
+        input blocks, template, parameter and scratch buffers, idle outputs, and its context.
+        An output a search still holds stays valid; its allocation is freed when the search
+        drops it. The root is not used afterwards."""
+        for wait in list(self._last.values()) + list(self._tmpl_run.values()):
+            wait()
+        self._last.clear()
+        self._tmpl_run.clear()
+        for native in self._records.values():
+            self.ctx._x_release(native, done=True)
+        self._records.clear()
+        held = [b.buffer for b in list(self._blocks.values()) + self._dead]
+        held += list(self._tmpl.values()) + [p for p, _ in self._params.values()]
+        held += list(self._scratch.values())
+        for buf in held:
+            self.ctx._x_free(buf)
+        self._blocks.clear()
+        self._dead = []
+        self._tmpl.clear()
+        self._params.clear()
+        self._scratch.clear()
+        self._free.clear()
+        self.ctx.destroy()
 
     # ---- device copies of the inputs -------------------------------------------------------
     def collect(self):

@@ -990,6 +990,83 @@ def test_a_driver_names_its_device_and_shares_its_state(make):
     assert a.props.name == a.device_name
 
 
+# ---- interpreter exit ----------------------------------------------------------------------
+_AT_EXIT = """
+import atexit
+import sys
+sys.path[:0] = %r
+measured = {}
+
+
+def report():
+    # Registered before the library is imported, so it runs after the library's own exit
+    # handlers (atexit runs the last registered first).
+    pool = measured.get("pool")
+    if pool is not None:
+        print("root bytes live after the exit handlers: %%d"
+              %% (pool.live_bytes - measured["before"]), flush=True)
+
+
+atexit.register(report)
+import numpy as np
+import matchedfilter as mf
+import matchedfilter._errors, matchedfilter._shared
+from matchedfilter import _gpuroot
+backend = %r
+if backend == "sim":
+    import sim_driver
+    ctx = sim_driver.Context()
+    root_ctx = sim_driver.Context(device=ctx._device_state)
+else:
+    from conftest import gpu_context
+    ctx, root_ctx = gpu_context(backend), gpu_context(backend)
+arrays = lambda k: [ctx.empty_shared((1 << 16,), np.complex64) for _ in range(k)]
+# Shared arrays held by modules torn down before and after the backend's (the order a
+# module's globals are cleared at exit is the interpreter's).
+matchedfilter._shared.held = arrays(2)
+matchedfilter._errors.held = arrays(2)
+np.held = arrays(2)
+mf.held = arrays(2) + [ctx]
+pool = getattr(root_ctx._device_state, "buffers", None)
+if pool is not None:
+    measured.update(pool=pool, before=pool.live_bytes)
+# A device root, held for the process as _gpuroot.device_root holds one: its idle outputs
+# (shared arrays) and its template buffer.
+n = 1 << 16
+root = _gpuroot._ROOTS["exit test"] = _gpuroot.DeviceRoot(root_ctx, "exit test")
+root.set_template(n, np.ones(n // 2 + 1, np.complex64))
+outputs = {(c, p): root.take_output(n, c, p) for c in range(2) for p in range(2)}
+for (c, p), out in outputs.items():
+    root.give_output(n, c, p, out)
+del outputs, out
+if pool is not None:
+    assert pool.live_bytes > measured["before"]
+print("ran")
+"""
+
+
+def test_teardown_at_exit_is_orderly(make):
+    """At interpreter exit the library releases what it holds for the process -- a device
+    root's outputs, template and context -- while every module is intact, so those destroys
+    run: none of a device root's bytes are live after the exit handlers. Shared arrays a
+    caller still holds then, in modules torn down before and after the backend's, are left
+    to the process's end. Neither prints "Exception ignored" (four at the end of every
+    Vulkan pycbc job: a device root's outputs freed while the interpreter cleared modules,
+    their destroy() calling a backend function already cleared)."""
+    import os
+    import subprocess
+    import sys
+    tests = os.path.dirname(os.path.abspath(__file__))
+    import matchedfilter
+    path = [tests, os.path.dirname(os.path.dirname(matchedfilter.__file__))]
+    out = subprocess.run([sys.executable, "-c", _AT_EXIT % (path, make.backend)],
+                         capture_output=True, text=True, timeout=300, cwd=tests)
+    assert out.returncode == 0 and "ran" in out.stdout, out.stderr[-2000:]
+    assert "Exception ignored" not in out.stderr, out.stderr[-2000:]
+    if make.backend in ("sim", "vulkan"):        # the backends whose device has a BufferPool
+        assert "root bytes live after the exit handlers: 0" in out.stdout, out.stdout
+
+
 # ---- the suite catches the faults that happened ---------------------------------------------
 def _faulty(*faults):
     return _Maker("sim", faults)
