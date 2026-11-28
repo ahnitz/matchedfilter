@@ -594,11 +594,12 @@ class HierarchicalSearch:
         self.min_pad = int(min_pad)
         if self.min_pad < 0:
             raise ValueError("min_pad must be non-negative")
-        # leaf_compute: of leaf, the seconds the CPU leaf steps spent in the extension;
+        # inner_compute: of inner, the seconds the CPU correlation steps spent in the
+        # extension; leaf_compute: of leaf, the seconds the CPU leaf steps spent there;
         # hooks_compute: of hooks, the seconds the steps their calls back into the library
         # ran (refilters: single-template and gated leaf steps) spent there
-        self.timings = dict(root=0.0, inner=0.0, leaf=0.0, leaf_compute=0.0, hooks=0.0,
-                            hooks_compute=0.0, setup=0.0)
+        self.timings = dict(root=0.0, inner=0.0, inner_compute=0.0, leaf=0.0, leaf_compute=0.0,
+                            hooks=0.0, hooks_compute=0.0, setup=0.0)
         # a GPU plan holds one calibration: there each profile has a leaf bank of its own
         self._bank_per_profile = _parse_device(self.leaf_options.get("device")).kind == "gpu"
         self._parent = {}
@@ -944,6 +945,7 @@ class HierarchicalSearch:
         if not wanted:
             return
         t0 = time.perf_counter()
+        corr0 = _batches.CORR_COMPUTE_SECONDS
         rows = sorted({batch.row_of[pos][0] for pos in wanted})
         slot_of = {}
         regions_by_chan = {}
@@ -968,6 +970,7 @@ class HierarchicalSearch:
                 held[c][id(child)] = batch.view(c, slot_of[c][batch.row_of[pos][0]], pos)
                 step.support[c][id(child)] = regions_by_chan[c]
         self.timings["inner"] += time.perf_counter() - t0
+        self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
         for pos in members:
             self._walk(batch.children[pos], step)
 
@@ -1071,6 +1074,9 @@ class HierarchicalSearch:
         runs each in turn, as filter_series, and its banks' joint trial takes its rounds on it.
         The results are the same either way."""
         leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
+        # the inner correlations made here (deferred into correlate_and_filter_many) run as
+        # correlation steps; their extension seconds are the inner stage's compute
+        corr0 = _batches.CORR_COMPUTE_SECONDS
         if not leaves:
             if step.corr_jobs:
                 cjobs = [jb for jb, _ in step.corr_jobs]
@@ -1083,6 +1089,7 @@ class HierarchicalSearch:
                     for _, commit in step.corr_jobs:
                         commit()
                 self.timings["inner"] += t_info["correlate"]
+                self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
             return None
         t0 = time.perf_counter()
         compute0 = _batches.STEP_COMPUTE_SECONDS
@@ -1127,6 +1134,7 @@ class HierarchicalSearch:
             results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
             self.timings["leaf"] += time.perf_counter() - t0
         self.timings["leaf_compute"] += _batches.STEP_COMPUTE_SECONDS - compute0
+        self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
         # A GPU plan's first call resolves the plan (per-plan setup): setup, not leaf time.
         planned = _hierarchical.PLAN_SETUP_SECONDS - setup0
         self.timings["leaf"] -= planned

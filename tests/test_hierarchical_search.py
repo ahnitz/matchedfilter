@@ -684,3 +684,33 @@ def test_xxh64_is_the_reference_hash():
     assert _core.xxh64(b"Nobody inspects the spammish repetition") == 0xFBCEA83C8A378BF1
     a = np.arange(1000, dtype=np.uint64)
     assert _core.xxh64(a) != _core.xxh64(a[::-1].copy())
+
+
+def test_the_inner_stages_compute_is_every_correlation_step_it_ran():
+    """timings["inner_compute"] holds the extension seconds of every inner correlation of a
+    CPU search, both those the walk makes (an inner node with inner children) and those
+    deferred into correlate_and_filter_many (an inner node with leaf children)."""
+    from matchedfilter import _batches
+    rng = np.random.default_rng(23)
+    deep = [Inner(_real_taps(rng, c), children=[Leaf(_complex_taps(rng, (101, 131)), (101, 131),
+                                                     node_id=("deep", c))])
+            for c in (201, 251)]
+    root = Root(_spec(rng), BAND, children=[Inner(_real_taps(rng, 301), children=deep)])
+    search = HierarchicalSearch([root], threshold=0.0, leaf_options=dict(LEAF, device="cpu"))
+    inputs = _inputs(rng, nblocks=2)
+    _collect(search, inputs)
+    before, inner0 = _batches.CORR_COMPUTE_SECONDS, search.timings["inner"]
+    walked = []
+    original = search._walk
+
+    def walk(node, step):
+        walked.append(_batches.CORR_COMPUTE_SECONDS)
+        return original(node, step)
+
+    search._walk = walk
+    compute0 = search.timings["inner_compute"]
+    _collect(search, inputs)
+    ran = _batches.CORR_COMPUTE_SECONDS - before
+    assert ran > 0 and max(walked) > before       # the walk itself correlated
+    assert search.timings["inner_compute"] - compute0 == pytest.approx(ran, rel=1e-12)
+    assert ran < search.timings["inner"] - inner0

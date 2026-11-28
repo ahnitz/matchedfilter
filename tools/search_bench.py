@@ -200,6 +200,9 @@ def main():
         "%s %.2f s" % (k, setup_stage[k]) for k in ("root", "inner", "leaf", "hooks", "setup")
         if k in setup_stage) + "; leaf + setup %.2f s"
         % (setup_stage.get("leaf", 0.0) + setup_stage.get("setup", 0.0)))
+    if stage.get("inner_compute") and stage.get("inner"):
+        print("  inner compute fraction (CPU correlation steps in the extension) %.3f s/pass = "
+              "%.1f%% of inner" % (stage["inner_compute"], 100 * stage["inner_compute"] / stage["inner"]))
     if stage.get("leaf_compute") and stage.get("leaf"):
         print("  leaf compute fraction (CPU leaf steps in the extension) %.3f s/pass = %.1f%% of leaf"
               % (stage["leaf_compute"], 100 * stage["leaf_compute"] / stage["leaf"]))

@@ -155,6 +155,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   and scales. Results are unchanged, to the bit. The binary-pulsar dense pass (complex series,
   21 channels a call) spends about 96% of its profiled time in the extension, against about
   86% before.
+- `HierarchicalSearch.timings["inner_compute"]`: of the inner stage, the seconds the CPU
+  correlation steps spent in the extension (in the walk and in `correlate_and_filter_many`);
+  `tools/search_bench.py` prints it as the inner stage's compute fraction.
 - `HierarchicalSearch.timings["hooks_compute"]`: of the hooks, the seconds the steps their
   refilter calls ran (single-template steps, and gated leaf steps for every template) spent in
   the extension; `tools/search_bench.py --followups` makes pycbc_inspiral_fir's follow-ups in

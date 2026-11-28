@@ -109,8 +109,10 @@ bank then holds a calibration for each channel's profile over one copy of its te
 
 A chunk's leaf searches run as one batch (`TimeDomainFilterBank.filter_series_many`), and
 together with the inner correlations they read (`correlate_and_filter_many`). `HierarchicalSearch.timings` holds
-the seconds spent per stage (`root`, `inner`, `leaf`, `hooks`, `setup`); of `leaf`, the
-seconds the CPU leaf steps spent in the extension (`leaf_compute`); and of `hooks`, the
+the seconds spent per stage (`root`, `inner`, `leaf`, `hooks`, `setup`); of `inner`, the
+seconds the CPU correlation steps spent in the extension (`inner_compute`: their kernels,
+zeroing and scaling, in the walk and in `correlate_and_filter_many`); of `leaf`, the
+seconds the CPU leaf steps spent there (`leaf_compute`); and of `hooks`, the
 seconds the steps the hooks' refilter calls ran (single-template steps, and gated leaf steps
 for every template) spent there (`hooks_compute`). A GPU plan's resolution in its first
 call (chain, band fractions, thresholds) is per-plan setup and is booked in `setup`, as on the
