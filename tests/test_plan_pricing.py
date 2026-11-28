@@ -156,12 +156,17 @@ def test_banks_that_price_apart_share_one_search(empty_model, monkeypatch):
     ({"band": dict.fromkeys(BANDS, 0.0), "full": 25.56}, "1", True),  # every plan bands
     ({"band": dict.fromkeys(BANDS, 0.0), "full": 25.56}, "", False),  # the Radeon's feeds
     ({"band": {64: 0.0, 128: 0.0, 256: 0.0, 512: 0.0, 1024: 3000.0}, "full": 20000.0}, "",
-     False)])
+     False),
+    # an L40S's (the frozen seed of the 4e8537f8 check, n = 2048): every band forward but
+    # band 64's priced, the full forward 0, so the chains worth running take a priced feed
+    ({"band": {64: 0.0, 128: 7.78125263423135, 256: 6.8750007358175935,
+               512: 9.31250201574585, 1024: 10.37499987432966}, "full": 0.0}, "", False)])
 def test_a_gpu_choice_is_the_counts_own_at_every_template_count(feed, forced, shared, empty_model,
                                                                 monkeypatch):
     """A GPU's model prices a feed, a forward's per-block price spread over the template count.
     choose_chain keeps a choice without the count only where no chain's plan takes a priced
-    feed, so that it is the count's own at every count; elsewhere it chooses per count. Every
+    feed, so that it is the count's own at every count; elsewhere it chooses per count, one
+    pricing a count (the first count's both finds that out and makes its choice). Every
     count, small ones included where a priced feed is large, gets exactly what pricing the
     choice afresh at that count gives: the same plans, costs, thresholds and offsets."""
     monkeypatch.setenv("MF_BAND_FORWARD", forced)
@@ -190,8 +195,9 @@ def test_a_gpu_choice_is_the_counts_own_at_every_template_count(feed, forced, sh
     for nt in counts:
         assert described(gc.choose_chain(p, N, SNR, 1e-3, cost=cost, max_tiers=3,
                                           ntemplates=nt)) == fresh[nt]
-    # shared: one choice for every count; else one without the feed, then one per count
-    assert len(made) == (1 if shared else 1 + len(counts))
+    # shared: one choice for every count; else one per count, the first finding that out
+    # with no second choice
+    assert len(made) == (1 if shared else len(counts))
     if feed is not None and not shared:
         # the feed is priced: some chain's plan, or the choice, moves with the count
         assert len({tuple(fresh[nt][1]) for nt in counts}) > 1

@@ -1014,6 +1014,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     tail = (None if first is None else int(first),) + extra
     offsets_map = dict(zip(c_bands, k0_cand))
     count = None if not getattr(cost, "feed", None) else int(ntemplates or 0)
+    free_unit = None        # the similarity store's unit, where this key's choice may be shared
     if count:
         # A GPU's model prices a feed: a forward's per-block price spread over the template
         # count (CostModel.feed_delta), so a choice could depend on the count. Where every
@@ -1022,29 +1023,20 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         # adds 0 to that plan's cost and nothing below it to any other candidate, so every
         # chain plans the same at any count: the choice, the ranking and every plan's cost are
         # the count's own. Such a choice is kept without the count and shared as a CPU's is,
-        # by the similarity store too; a key whose plans take a priced feed is marked, and
-        # its choices are made and kept per count.
+        # by the similarity store too. A key's first choice finds out (_choose_chain's
+        # free_first, which prices again with the count only the chains whose plan takes a
+        # priced forward, so that the attempt costs no second choice); a key where it fails
+        # is marked, and its choices are made and kept per count.
         free_params = head + (_ANY_COUNT,) + tail
         free_key = (sig_p,) + free_params
         hit = _CHOICE_CACHE.get(free_key)
         if hit is None:
-            unit, hit = _similar_get("choice", p, free_params)
-            if hit is None:
-                out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, None,
-                                    nsamp, bands=bands, offsets_by_band=offsets_map,
-                                    tier0_clusters=t0_map, first=first)
-                band_forward = _config.get("MF_BAND_FORWARD")
-                if all(cost.feed_delta(q["chain"], q["search"]["reach"], 1,
-                                       q["search"]["halfwidth"], band_forward) == 0.0
-                       for q in out[1]):
-                    _similar_put("choice", unit, free_params, out)
-                    hit = out
-                else:
-                    hit = _COUNT_NEEDED
-            _cache_put(_CHOICE_CACHE, free_key, hit)
-        else:
+            free_unit, hit = _similar_get("choice", p, free_params)
+            if hit is not None:
+                _cache_put(_CHOICE_CACHE, free_key, hit)
+                return hit
+        elif hit is not _COUNT_NEEDED:
             _CHOICE_CACHE.move_to_end(free_key)
-        if hit is not _COUNT_NEEDED:
             return hit
     params = head + (count,) + tail
     key = (sig_p,) + params
@@ -1056,23 +1048,45 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if hit is not None:
         _cache_put(_CHOICE_CACHE, key, hit)
         return hit
-    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp,
-                        bands=bands, offsets_by_band=offsets_map, tier0_clusters=t0_map,
-                        first=first)
+    if free_unit is not None:
+        best, plans, shared = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win,
+                                            ntemplates, nsamp, bands=bands,
+                                            offsets_by_band=offsets_map, tier0_clusters=t0_map,
+                                            first=first, free_first=True)
+        out = best, plans
+        if shared:
+            _cache_put(_CHOICE_CACHE, free_key, out)
+            _similar_put("choice", free_unit, free_params, out)
+            return out
+        _cache_put(_CHOICE_CACHE, free_key, _COUNT_NEEDED)
+    else:
+        out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates,
+                            nsamp, bands=bands, offsets_by_band=offsets_map,
+                            tier0_clusters=t0_map, first=first)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
-                  nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None, first=None):
+                  nsamp=None, bands=None, offsets_by_band=None, tier0_clusters=None, first=None,
+                  free_first=False):
+    """choose_chain's pricing: (best, plans sorted by cost), or (None, []).
+
+    free_first: price the chains without the feed first, keeping each plan that takes a
+    forward priced 0 (choose_chain: such a plan is its chain's plan at every count), until one
+    does not; that chain is priced again with the template count, and the rest with it at
+    once. The choice is the count's own either way, at most one chain's pricing more than
+    pricing with the count alone; returns (best, plans, shared), shared True when every chain's
+    plan was kept, so that the choice holds at every count."""
     p = _norm_profile(power, n)
+    nothing = (None, [], True) if free_first else (None, [])
     if bands is None:
         bands = usable_bands(p, n, floor)
     else:
         bands = sorted(int(b) for b in bands)
     if not bands:
-        return None, []
+        return nothing
     win = None if window is None else (int(window[0]), int(window[1]))
     nsamp = _gm._nsamp_for(fd) if nsamp is None else int(nsamp)
     if offsets_by_band is None:
@@ -1080,7 +1094,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     k0s = tuple(offsets_by_band[b] for b in bands)
     Fb = np.array([p[slice(*_band_slice(n, b, k0))].sum() for b, k0 in zip(bands, k0s)])
     if np.any(Fb <= 0):
-        return None, []
+        return nothing
     # Resolve the canonical profile in _SIGNAL_RECORDS so base and clustered draws share one realization
     sr_kw = {"k0s": k0s} if any(k0s) else {}
     p_base = (_law_profile(p, n, bands, float(snr), k0s)
@@ -1090,7 +1104,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     sig_win = local_window(p_base, n, bands, win)
     drawn = _signal_table(p_base, n, bands, snr, nsamp, window=sig_win, lags_too=True)
     if drawn is None:
-        return None, []
+        return nothing
     sig, lags = drawn
     noise = noise_block_maxima(p_base, n, bands, nsim=nsim, window=win)
     memo = ("choose", id(sig[0]), id(noise), n, float(snr), float(fd), tuple(bands), win,
@@ -1123,6 +1137,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
             t0_draws[b0] = (sig_b0, noise_b0, memo_b0, lags_b0)
 
     plans = []
+    shared = True
     band_forward = _config.get("MF_BAND_FORWARD")       # read once for every chain's feed
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         if first is not None and (len(chain) < min_t0_len or chain[0] != first):
@@ -1135,10 +1150,24 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
                 memo_use = memo_use + ("l1",)
         else:
             sig_use, noise_use, memo_use, lags_use = sig, noise, memo, lags
+        far = sig_win != ((0, int(n)) if win is None else win)
+        # while every chain so far plans with a forward priced 0, the next is priced without
+        # the feed; from the first that does not, the rest are priced with the count at once
+        free = free_first and shared
         pl = plan_chain(sig_use, noise_use, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, memo=memo_use, lags=lags_use, lazy_fit=True, offsets=offs,
-                        far=sig_win != ((0, int(n)) if win is None else win),
+                        ntemplates=None if free else ntemplates, memo=memo_use,
+                        lags=lags_use, lazy_fit=True, offsets=offs, far=far,
                         band_forward=band_forward)
+        if free and pl is not None:
+            search = pl["search"]
+            if cost.feed_delta(chain, list(search["reach"]), 1, search["halfwidth"],
+                               band_forward) != 0.0:
+                # its plan takes a priced forward: priced again with the count (the search's
+                # structure and candidates are kept by memo, so only the pricing is repeated)
+                shared = False
+                pl = plan_chain(sig_use, noise_use, bands, list(chain), fd, cost, n, snr,
+                                prune=True, ntemplates=ntemplates, memo=memo_use, lags=lags_use,
+                                lazy_fit=True, offsets=offs, far=far, band_forward=band_forward)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1152,6 +1181,8 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     best = pick_stable(plans, lambda d: d["cost"],
                        lambda d: (len(d["chain"]), _flop_cost(d["chain"], d["search"]["reach"], n),
                                   d["chain"]))
+    if free_first:
+        return best, plans, shared
     return best, plans
 
 

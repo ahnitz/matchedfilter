@@ -376,3 +376,12 @@ library chooses the execution.
   (6.4-7.3 MB). The library's own cycles were small and are gone: `ctypes.cast` of structures
   and arrays in the Vulkan backend (descriptor sets, pipelines, device queries), ctypes types
   made per call, and the chain search's self-referring helper. Goldens and triggers identical.
+- 2026-11-28: GPU step 2c: the GPU chain-choice sharing no longer costs a second choice where it
+  fails. On an L40S every key has a chain whose plan takes a priced band forward (the band
+  feeds are positive there and the full forward 0), so the no-feed pricing that decides
+  sharing always failed, and the per-count choice after it doubled the evaluations (15,906 to
+  32,403, setup +6 s). The first choice of a key now prices the chains without the feed only
+  until one plan takes a priced forward, prices that chain and the rest with the count, and
+  is the count's own choice either way: at most one chain is priced twice. Radeon 8060S job
+  against main: 24,294 evaluations to 10,009, setup median 21.8 to 18.5 s, all plans' chains
+  identical, triggers and goldens identical.
