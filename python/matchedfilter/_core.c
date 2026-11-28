@@ -2236,11 +2236,12 @@ static void hmf_scale_run(float *z,size_t count,float s){
   }
 }
 /* Run correlation steps [c0, c1) on the series, outputs and scale vectors given (sequences;
-   scales may be NULL). Every step's slots, rows and runs are checked first; then the kernels,
-   the clearing and the scaling run in step order without the GIL, each step's plan marked
-   busy. The seconds of that part go to *seconds. 0, or -1 with the exception set. */
+   scales may be NULL), with their mirrors where use_mirror. Every step's slots, rows and runs
+   are checked first; then the kernels, the clearing and the scaling run in step order without
+   the GIL, each step's plan marked busy. The seconds of that part go to *seconds. 0, or -1
+   with the exception set. */
 static int hmf_run_corrs(HMFTableObject *self,int c0,int c1,PyObject *series_arg,PyObject *outs_arg,
-                         PyObject *scales_arg,double *seconds){
+                         PyObject *scales_arg,int use_mirror,double *seconds){
   *seconds=0.0;
   if(c0>=c1) return 0;
   PyObject *ins=NULL,*outs=NULL,*scs=NULL;
@@ -2291,7 +2292,7 @@ static int hmf_run_corrs(HMFTableObject *self,int c0,int c1,PyObject *series_arg
       for(int t=0;ok && t<c->nt;t++) ok=c->scale_index[t]<svec[c->scale].len/4;
       for(Py_ssize_t k=0;ok && k<c->nscale_runs;k++) ok=c->scale_runs[2*k+1]<=S;
     }
-    if(ok && c->mirror_out>=0)
+    if(ok && use_mirror && c->mirror_out>=0)
       ok=oslots[c->mirror_out].width==S && c->mirror_row<=oslots[c->mirror_out].rows-c->nt;
     if(!ok){
       PyErr_SetString(PyExc_ValueError,"HMFTable: a correlation step's series, output, rows or "
@@ -2314,7 +2315,7 @@ static int hmf_run_corrs(HMFTableObject *self,int c0,int c1,PyObject *series_arg
       dest=scratch;
     }
     if(c->nblocks){
-      if(c->mirror_out>=0)
+      if(use_mirror && c->mirror_out>=0)
         ap_mf_set_corr_mirror(oslots[c->mirror_out].ptr+(size_t)c->mirror_row*row,S);
       const int r=c->real
         ? ap_mf_correlate_series_continuous_real(c->mf->p,(const float*)in->ptr,S,c->starts,
@@ -2633,17 +2634,18 @@ done:
   Py_DECREF(seq);
   return out;
 }
-/* run_corr(first, end, series, outputs, scales=None) -> seconds: correlation steps
-   [first, end) on the series (one per slot), outputs (one per output slot) and scale vectors
-   given: every step of a correlation call, or a time chunk's steps of the tiled cascade. */
+/* run_corr(first, end, series, outputs, scales=None, mirror=False) -> seconds: correlation
+   steps [first, end) on the series (one per slot), outputs (one per output slot) and scale
+   vectors given, with the steps' mirrors when mirror: every step of a correlation call, or a
+   time chunk's steps of the tiled cascade. */
 static PyObject *HMFTable_run_corr(HMFTableObject *self,PyObject *args){
-  int c0,c1; PyObject *series_arg,*outs_arg,*scales_arg=NULL;
-  if(!PyArg_ParseTuple(args,"iiOO|O",&c0,&c1,&series_arg,&outs_arg,&scales_arg)) return NULL;
+  int c0,c1,mirror=0; PyObject *series_arg,*outs_arg,*scales_arg=NULL;
+  if(!PyArg_ParseTuple(args,"iiOO|Op",&c0,&c1,&series_arg,&outs_arg,&scales_arg,&mirror)) return NULL;
   if(c0<0 || c1<c0 || c1>self->ncorrs){
     PyErr_SetString(PyExc_ValueError,"HMFTable.run_corr: a step range is out of range"); return NULL;
   }
   double seconds;
-  if(hmf_run_corrs(self,c0,c1,series_arg,outs_arg,scales_arg,&seconds)) return NULL;
+  if(hmf_run_corrs(self,c0,c1,series_arg,outs_arg,scales_arg,mirror,&seconds)) return NULL;
   return PyFloat_FromDouble(seconds);
 }
 static PyObject *HMFTable_get_corrs(HMFTableObject *self,void *closure){
@@ -2660,8 +2662,8 @@ static PyMethodDef HMFTable_methods[]={
    "single-template step, the peaks of each job (the table's, then one per call); totals and "
    "seconds per gated step, call, then flat step"},
   {"run_corr",(PyCFunction)HMFTable_run_corr,METH_VARARGS,
-   "run_corr(first, end, series, outputs, scales=None) -> seconds: correlation steps "
-   "[first, end) on the slots given"},
+   "run_corr(first, end, series, outputs, scales=None, mirror=False) -> seconds: correlation "
+   "steps [first, end) on the slots given, with their streaming mirrors when mirror"},
   {"run_slices",(PyCFunction)HMFTable_run_slices,METH_O,
    "run_slices(items) -> [(flat, index, value, total), ...]: (step, b0, b1, cluster, series) "
    "items as one batch"},

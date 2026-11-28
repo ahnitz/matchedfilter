@@ -282,11 +282,14 @@ class _LeafSub:
 
 class _TiledGroup(NamedTuple):
     """One template group of the middle bank, compiled for a cohort: its rows of the output,
-    the blocks it correlates and the samples they write, and its chunks. A chunk is
+    the blocks it correlates and the samples they write, its chunks, and the correlation steps
+    of its chunks (a table whose input slots are the detectors' series and whose output slots
+    are their scratch rows, then their outputs, which a step mirrors into). A chunk is
     (has blocks, block starts, block bounds, first sample, end sample, written runs,
-    bridges to zero, batch jobs); a batch job is (first row, first template, templates,
-    output rows, rows contiguous, filter calls, their leaf subs, earliest sample a later
-    chunk's leaf still reads)."""
+    bridges to zero, batch jobs, first correlation step); a batch job is (first row, first
+    template, templates, output rows, rows contiguous, filter calls, their leaf subs, earliest
+    sample a later chunk's leaf still reads). Batch b of a chunk with blocks is correlation
+    steps [first + b D, first + (b + 1) D), one per detector."""
     group: Any
     n_rows: int
     max_batch: int
@@ -309,6 +312,7 @@ class _TiledGroup(NamedTuple):
     edges: Any
     first_col: int
     chunks: list
+    corr_table: Any
 
 
 class _CohortPrep(NamedTuple):
@@ -748,7 +752,10 @@ def _compile_groups(corr_bank, members, pre_grp_batches, subs_by_row, S, W_corr,
                         raw_chunks.append((m_prev, m_next, hz))
                         m_prev = m_next
 
-        comp_chunks = []
+        # each chunk's correlation steps: per template batch, one per detector, writing its
+        # scratch rows over the chunk's blocks; then its bridges zeroed and its rows scaled
+        # over the chunk's runs; mirrored into the output where nothing follows the kernel
+        comp_chunks, corr_steps = [], []
         for ck_idx, (m0, m1, horizon) in enumerate(raw_chunks):
             has_b = m1 > m0
             if has_b:
@@ -777,8 +784,25 @@ def _compile_groups(corr_bank, members, pre_grp_batches, subs_by_row, S, W_corr,
 
             chunk_batch_jobs = _chunk_batch_jobs(
                 batches, subs_by_row, D, S, horizon, has_b, ck_idx + 1 < len(raw_chunks))
+            first_step = len(corr_steps)
+            if has_b:
+                bridges = (np.ascontiguousarray(chunk_bridges, np.int64)
+                           if chunk_bridges.size else None)
+                scale_runs = np.asarray(t_runs, dtype=np.int64).reshape(-1, 2)
+                for k_r0, li0, kr, b_rows, b_contig_out in batches:
+                    for d_idx, (_, info) in enumerate(members):
+                        scaled = info.scales is not None
+                        mirrored = bridges is None and b_contig_out and not scaled
+                        corr_steps.append((
+                            ep_m, d_idx, int(info.series.dtype == np.float32), d_idx, 0, None,
+                            li0, kr, st_c, bnd_c, lo_v, hi_v, bridges,
+                            d_idx if scaled else -1,
+                            np.arange(k_r0, k_r0 + kr, dtype=np.int64) if scaled else None,
+                            scale_runs if scaled else None,
+                            D + d_idx if mirrored else -1, b_rows[0] if mirrored else -1))
             comp_chunks.append((
                 has_b, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs,
+                first_step,
             ))
 
         compiled_groups.append(_TiledGroup(
@@ -786,6 +810,7 @@ def _compile_groups(corr_bank, members, pre_grp_batches, subs_by_row, S, W_corr,
             is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
             cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
             det_edge_runs, grp_min_col, comp_chunks,
+            _core.HMFTable((), (), D, (), (), corr_steps, 2 * D) if corr_steps else None,
         ))
     return compiled_groups, w_span
 
@@ -1006,14 +1031,16 @@ def _retained_spans(q_peaks, pending_fwd_end, k_r, valid_lo, c_start, c_end, S, 
 def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools, S,
                      retain_radius, eff_ret_thr, set_mirror, stream_cp, dt_corr_d):
     """Run one compiled group: for each time chunk and template batch, correlate the batch
-    for every detector into the scratch rows, write the output as asked (all of it, nothing,
-    or collars around retained peaks), filter every leaf slab that is ready, and carry the
-    samples a later chunk's leaves still read. Adds each detector's correlation time to
-    dt_corr_d; returns the filtering seconds and whether a streaming store was used."""
+    for every detector into the scratch rows (its correlation steps, one C call), write the
+    output as asked (all of it, nothing, or collars around retained peaks), filter every leaf
+    slab that is ready, and carry the samples a later chunk's leaves still read. Adds each
+    detector's correlation time to dt_corr_d (a batch's steps shared evenly between the
+    detectors); returns the filtering seconds and whether a streaming store was used."""
+    global CORR_COMPUTE_SECONDS
     (g_m, nt_sel_g, max_batch_kr, n_batches, row_indices_arr, li_arr,
      is_contig_out, out_slice_obj, M, w_out_samples, tmpl_vals,
      cplan, ep_m, lo_v, hi_v, col0, col1, written_runs, unwritten_runs,
-     det_edge_runs, grp_min_col, comp_chunks) = grp
+     det_edge_runs, grp_min_col, comp_chunks, corr_table) = grp
     D = len(members)
     dt_fine_cohort = 0.0
     used_nt_stream = False
@@ -1043,19 +1070,15 @@ def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools,
     saved_collars = [None] * n_batches if need_collars else None
     r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
 
-    # Resolve per-detector C correlation callables once per group.
-    if M > 0:
-        has_real_corr = hasattr(ep_m, "correlate_series_continuous_real")
-        det_run_fns = [
-            ep_m.correlate_series_continuous_real
-            if info.series.dtype == np.float32 and has_real_corr
-            else ep_m.correlate_series_continuous
-            for _, info in members
-        ]
-    else:
-        det_run_fns = None
+    # The correlation steps' slots: the detectors' series; their scratch rows, then outputs.
+    series_slots = [info.series for _, info in members]
+    out_slots = list(tbuf_det) + [info.out for _, info in members]
+    scale_vectors = (None if all(sc is None for sc in det_scales)
+                     else [np.empty(0, np.float32) if sc is None else sc for sc in det_scales])
+    use_mirror = retain_radius is None and set_mirror is not None
 
-    for ck_idx, (has_blocks, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs) in enumerate(comp_chunks):
+    for ck_idx, (has_blocks, st_c, bnd_c, c_start, c_end, t_runs, chunk_bridges, chunk_batch_jobs,
+                 first_step) in enumerate(comp_chunks):
         has_bridges = chunk_bridges.size > 0
         write_pool_idx = ck_idx & 1
         write_off = 0
@@ -1070,44 +1093,25 @@ def _run_tiled_group(grp, corr_bank, members, tbuf_det, dirty_map, collar_pools,
             else:
                 valid_lo = c_start
 
-            # Correlate batch [li0, li0 + kr) across all detectors in the cohort into L3 tbuf.
+            # Correlate batch [li0, li0 + kr) across all detectors in the cohort into L3 tbuf:
+            # its correlation steps (bridges zeroed, rows scaled, the output mirrored where
+            # nothing follows the kernel), then the copies of the rows not mirrored.
             if has_blocks:
-                out_row_first = b_rows[0]
+                t_c0 = time.perf_counter()
+                step0 = first_step + b_idx * D
+                CORR_COMPUTE_SECONDS += corr_table.run_corr(
+                    step0, step0 + D, series_slots, out_slots, scale_vectors, use_mirror)
+                share = (time.perf_counter() - t_c0) / D
                 for d_idx, (_, info) in enumerate(members):
-                    t_d0 = time.perf_counter()
-                    ser_d = info.series
-                    out_d = info.out
-                    r_sc = det_scales[d_idx]
-                    t_det_batch = tbuf_det[d_idx][:kr]
-                    direct_mirror = (
-                        retain_radius is None
-                        and r_sc is None
-                        and not has_bridges
-                        and b_contig_out
-                        and set_mirror is not None
-                    )
-                    if direct_mirror:
-                        set_mirror(out_d[out_row_first].ctypes.data, S)
+                    dt_corr_d[d_idx] += share
+                    if use_mirror and det_scales[d_idx] is None and not has_bridges and b_contig_out:
                         used_nt_stream = True
-                    det_run_fns[d_idx](ser_d, st_c, lo_v, hi_v, li0, kr, t_det_batch, bnd_c)
-                    if has_bridges:
-                        for za, zb in chunk_bridges:
-                            t_det_batch[:, int(za):int(zb)] = 0
-                    if r_sc is not None:
-                        if kr == 1:
-                            sc_val = r_sc[k_r0]
-                            t_row_1d = t_det_batch[0]
-                            for ra, rb in t_runs:
-                                np.multiply(t_row_1d[ra:rb], sc_val, out=t_row_1d[ra:rb])
-                        else:
-                            sc_vec = r_sc[k_r0 : k_r0 + kr, None]
-                            for ra, rb in t_runs:
-                                np.multiply(t_det_batch[:, ra:rb], sc_vec, out=t_det_batch[:, ra:rb])
-                    if retain_radius is None and not direct_mirror:
+                    elif retain_radius is None:
+                        t_d0 = time.perf_counter()
                         for q, r_out in enumerate(b_rows):
-                            if _copy_runs(out_d, r_out, t_det_batch[q], t_runs, stream_cp):
+                            if _copy_runs(info.out, r_out, tbuf_det[d_idx][q], t_runs, stream_cp):
                                 used_nt_stream = True
-                    dt_corr_d[d_idx] += time.perf_counter() - t_d0
+                        dt_corr_d[d_idx] += time.perf_counter() - t_d0
 
             # Filter all ready slabs of this batch across all detectors in one C call.
             dt_filter, peaks_by_q = _filter_ready_slabs(

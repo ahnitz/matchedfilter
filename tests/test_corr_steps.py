@@ -223,3 +223,46 @@ def test_banks_with_compiled_correlation_steps_are_freed_without_the_cyclic_coll
         assert ref() is None
     finally:
         gc.enable()
+
+
+def test_the_cascades_middle_calls_are_correlation_steps_with_the_untiled_results(monkeypatch):
+    """The tiled cascade correlates each time chunk's template batches, every detector, as
+    correlation steps (bridges between windows zeroed, rows scaled, in the extension); its
+    leaf peaks and middle output are the untiled path's."""
+    rng = np.random.default_rng(91)
+    corr = _bank([701, 851, 1201], False, 11)
+    lt = np.zeros((6, 300), np.complex64)
+    for i in range(6):
+        t = np.arange(200 + 15 * i) / 2048.0
+        row = np.exp(2j * np.pi * (60 + 11 * i) * t) * np.hanning(t.size)
+        lt[i, :t.size] = row / np.linalg.norm(row)
+    leaf = TimeDomainFilterBank(lt, np.array([200 + 15 * i for i in range(6)]), engine="hier",
+                                threshold=3.6, false_dismissal=1e-2, device="cpu")
+    f = np.arange(16385) / 16.0
+    leaf.set_reference(np.where((f >= 24) & (f <= 850), np.maximum(f, 1) ** (-7 / 3), 0), 1 / 16)
+    pair = [_series(rng, False) for _ in range(2)]
+    scales = np.array([0.5, -2.0, 1.25], np.float32)
+    def results(**kw):
+        outs = [np.zeros((3, S), np.complex64) for _ in pair]
+        corr_jobs = [(corr, s, dict(windows=[(6000, 30000), (30300, S - 6000)], scales=scales,
+                                    out=o)) for s, o in zip(pair, outs)]
+        leaf_jobs = [(leaf, o[r], dict(windows=[(9000, 29000), (36000, S - 9000)]))
+                     for o in outs for r in range(3)]
+        res = TimeDomainFilterBank.correlate_and_filter_many(corr_jobs, leaf_jobs, **kw)
+        return outs, res
+
+    tiled_calls = []
+    orig_group = _batches._run_tiled_group
+    monkeypatch.setattr(_batches, "_run_tiled_group",
+                        lambda grp, *a: tiled_calls.append(grp) or orig_group(grp, *a))
+    outs_t, res_t = results(tile_bytes=1 << 18)
+    assert tiled_calls and any(len(g.chunks) > 1 for g in tiled_calls)
+    assert any(c[6].size for g in tiled_calls for c in g.chunks)      # bridges were zeroed
+    assert all(g.corr_table is not None and g.corr_table.corrs for g in tiled_calls if g.blocks)
+    outs_u, res_u = results(tile_bytes=0)
+    for a, b in zip(outs_t, outs_u):
+        assert np.array_equal(_bits(a), _bits(b))
+    assert sum(len(r.snr) for r in res_t) > 0
+    for a, b in zip(res_t, res_u):
+        for x, y in zip(a, b):
+            assert x.dtype == y.dtype and np.array_equal(x.view(np.uint8), y.view(np.uint8))

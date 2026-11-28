@@ -148,7 +148,8 @@ Alpha releases may change the API. Pin a version for reproducible work.
   in one C call for every template group, `correlate_series_channels` in one C call for every
   channel and group (it called `correlate_series` channel by channel), and the middle
   correlations `correlate_and_filter_many` does not tile in one C call for consecutive CPU
-  jobs. A step is a template group's run of output rows over the blocks a window reaches; the
+  jobs; the tiled cascade's per-chunk middle calls are the same steps, every detector of a
+  template batch in one C call. A step is a template group's run of output rows over the blocks a window reaches; the
   samples outside the windows are zeroed and the rows scaled in the extension, where numpy did
   it per group. The steps of a call shape are compiled once; a call binds its series, outputs
   and scales. Results are unchanged, to the bit. The binary-pulsar dense pass (complex series,

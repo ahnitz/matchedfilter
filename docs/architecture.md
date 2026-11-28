@@ -226,7 +226,11 @@ binds the series, outputs and scale vectors and is one C call for every channel 
 hierarchical search's middle correlations together with the leaf calls that read them: jobs
 on one middle bank and window layout form a cohort (the detectors of one search), which is
 correlated in cache-sized chunks into a scratch buffer that the leaf banks filter before
-the next chunk. The functions it is made of are in `_batches`, in the order it calls them.
+the next chunk. Each chunk's template batches are correlated, every detector, as correlation
+steps of a table the cohort's preparation compiles per middle group (`_TiledGroup.corr_table`:
+the blocks of the chunk, the bridges between windows zeroed and the rows scaled in the
+extension, the output mirrored by the kernel's streaming copy where nothing follows it), one
+C call per batch. The functions it is made of are in `_batches`, in the order it calls them.
 Its results equal those of `correlate_series` followed by `filter_series_many`. The middle
 correlations it does not tile run as the correlation steps of one table, consecutive CPU jobs
 in one C call (`_batches._correlate_jobs`).
