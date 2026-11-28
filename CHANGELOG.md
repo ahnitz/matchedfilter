@@ -13,10 +13,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   results (19,868 arrays). It also records correlations of complex series on a bank whose
   block-size groups interleave (scales, gapped windows, selections across groups, outputs
   reused through `out_support`, several channels) and the tiled cascade's middle calls with
-  each retain mode (20,039 arrays).
-  results (19,868 arrays). With `--device gpu:0` it records the same cases on a GPU, from a
-  seed of that device's own; on a Radeon 8060S three fresh runs from one seed record identical
-  results. `--digest-above` keeps large arrays whole, to see how two records differ.
+  each retain mode (20,039 arrays). With `--device gpu:0` it records the same cases on a GPU,
+  from a seed of that device's own; on a Radeon 8060S three fresh runs from one seed record
+  identical results. `--digest-above` keeps large arrays whole, to see how two records differ.
 - `tools/gpu_alloc_trace.py` runs a program with every Vulkan device allocation traced by
   role, whether a kernel or the host ever touched it, and the breakdown at the peak of live
   device memory.
