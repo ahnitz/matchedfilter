@@ -951,6 +951,10 @@ def _flop_cost(chain, reach, n):
 
 _CHOICE_CACHE = OrderedDict()
 _OFFSET_CACHE = OrderedDict()
+#: choose_chain's template-count slot for a choice that holds at every count (its plans take
+#: no priced feed), and the value it keeps under that key where the plans do take one.
+_ANY_COUNT = "any count"
+_COUNT_NEEDED = ("count needed",)
 
 
 def _cached_band_offsets(p, sig_p, n, floor):
@@ -976,7 +980,9 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     tiers whose first tier is this band (a bound on one tier-0 band needs no others).
 
     Cached like the draws it is built from: by profile signature, and reused for
-    profiles within the cosine similarity gatemodel applies to them.
+    profiles within the cosine similarity gatemodel applies to them. A cost model with a feed
+    (a GPU's) is priced per template count only where some chain's plan takes a priced feed;
+    otherwise the choice is the same at every count and is kept and shared without it.
     """
     p = _norm_profile(power, n)
     win = None if window is None else (int(window[0]), int(window[1]))
@@ -997,10 +1003,44 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     extra = (k0_cand,) if any(k0_cand) else ()
     if t0_map:
         extra = extra + (("t0", tuple(sorted(t0_map.items()))),)
-    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
-              # ntemplates prices the feed
-              None if not getattr(cost, "feed", None) else int(ntemplates or 0),
-              None if first is None else int(first)) + extra
+    head = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win,
+            _cost_sig(cost))
+    tail = (None if first is None else int(first),) + extra
+    offsets_map = dict(zip(c_bands, k0_cand))
+    count = None if not getattr(cost, "feed", None) else int(ntemplates or 0)
+    if count:
+        # A GPU's model prices a feed: a forward's per-block price spread over the template
+        # count (CostModel.feed_delta), so a choice could depend on the count. Where every
+        # chain's plan priced without the feed takes a forward priced 0 (on the Radeon 8060S
+        # at n = 1024 the band forwards are 0 and only the full forward is priced), the feed
+        # adds 0 to that plan's cost and nothing below it to any other candidate, so every
+        # chain plans the same at any count: the choice, the ranking and every plan's cost are
+        # the count's own. Such a choice is kept without the count and shared as a CPU's is,
+        # by the similarity store too; a key whose plans take a priced feed is marked, and
+        # its choices are made and kept per count.
+        free_params = head + (_ANY_COUNT,) + tail
+        free_key = (sig_p,) + free_params
+        hit = _CHOICE_CACHE.get(free_key)
+        if hit is None:
+            unit, hit = _similar_get("choice", p, free_params)
+            if hit is None:
+                out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, None,
+                                    nsamp, bands=bands, offsets_by_band=offsets_map,
+                                    tier0_clusters=t0_map, first=first)
+                band_forward = _config.get("MF_BAND_FORWARD")
+                if all(cost.feed_delta(q["chain"], q["search"]["reach"], 1,
+                                       q["search"]["halfwidth"], band_forward) == 0.0
+                       for q in out[1]):
+                    _similar_put("choice", unit, free_params, out)
+                    hit = out
+                else:
+                    hit = _COUNT_NEEDED
+            _cache_put(_CHOICE_CACHE, free_key, hit)
+        else:
+            _CHOICE_CACHE.move_to_end(free_key)
+        if hit is not _COUNT_NEEDED:
+            return hit
+    params = head + (count,) + tail
     key = (sig_p,) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -1010,7 +1050,6 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if hit is not None:
         _cache_put(_CHOICE_CACHE, key, hit)
         return hit
-    offsets_map = dict(zip(c_bands, k0_cand))
     out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp,
                         bands=bands, offsets_by_band=offsets_map, tier0_clusters=t0_map,
                         first=first)

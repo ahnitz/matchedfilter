@@ -355,3 +355,14 @@ library chooses the execution.
   ordered by the driver were measured and not taken (2.2% slower). The recycle tests check
   each property through the device on every arena (they failed on CUDA, whose arena holds no
   host arrays) (notes/host-layer/phase2-design-study.md, Arena fixes).
+- 2026-11-28: GPU step 2b, item 1: a GPU chain choice is kept without the template count where
+  no chain's plan priced without the feed takes a priced forward (then every chain plans the
+  same at every count: feeds are clamped at 0, so the feed adds 0 to each chain's chosen
+  candidate and only raises the others), and shared through the similarity store as on a
+  CPU; other choices are still made per count. Vulkan PyCBC job: 24,294 chain evaluations to
+  12,769 (2,743 keys still need the count: the single-tier band-64 chain takes the full
+  forward), setup median 22.9 to 19.6 s, all 1,994 plans' chains, thresholds and offsets
+  identical, triggers and GPU and CPU goldens identical. Most of what remains is the GPU
+  cost model's unrounded direct-refine fraction (99 values in the job; a CPU plan's is
+  rounded to a twentieth): rounding it gives 4,847 evaluations but moves one plan's
+  thresholds, so it is not done (notes/host-layer/phase2-design-study.md, Step 2b results).

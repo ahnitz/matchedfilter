@@ -100,7 +100,8 @@ def test_a_gpus_feed_is_priced_as_the_python_loop_prices_it(forced, ratios, dire
                         tuple(d["search"]["reach"]), d["search"]["halfwidth"])
                        for d in every]
     assert plans[True] == plans[False] and len(plans[True]) >= 5
-    assert in_routine and all(f is not None for f in in_routine)
+    # the choice without the feed comes first; the per-count ones price it
+    assert in_routine and any(f is not None for f in in_routine)
     # the feed is in the costs: the same choice without it prices the chains differently
     monkeypatch.setattr(gc, "_C_PRICING", True)
     for c in (gc._CHOICE_CACHE, gc._PLAN_CACHE, gc._CAND_CACHE, gd._SIMILAR):
@@ -148,3 +149,49 @@ def test_banks_that_price_apart_share_one_search(empty_model, monkeypatch):
         c.clear()
     alone = [choose(a, 96), choose(a, 97), choose(b, 96)]
     assert kept == alone and kept[0] != kept[1] and kept[0] != kept[2]
+
+
+@pytest.mark.parametrize("feed, forced, shared", [
+    (None, "", True),                                             # a CPU's model: no feed
+    ({"band": dict.fromkeys(BANDS, 0.0), "full": 25.56}, "1", True),  # every plan bands
+    ({"band": dict.fromkeys(BANDS, 0.0), "full": 25.56}, "", False),  # the Radeon's feeds
+    ({"band": {64: 0.0, 128: 0.0, 256: 0.0, 512: 0.0, 1024: 3000.0}, "full": 20000.0}, "",
+     False)])
+def test_a_gpu_choice_is_the_counts_own_at_every_template_count(feed, forced, shared, empty_model,
+                                                                monkeypatch):
+    """A GPU's model prices a feed, a forward's per-block price spread over the template count.
+    choose_chain keeps a choice without the count only where no chain's plan takes a priced
+    feed, so that it is the count's own at every count; elsewhere it chooses per count. Every
+    count, small ones included where a priced feed is large, gets exactly what pricing the
+    choice afresh at that count gives: the same plans, costs, thresholds and offsets."""
+    monkeypatch.setenv("MF_BAND_FORWARD", forced)
+    p = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    sparse = {b: [(0.0098, 600.0 * b / 128), (0.05, 420.0 * b / 128), (0.104, 300.0 * b / 128)]
+              for b in BANDS}
+    cost = gc.CostModel(N, {64: 30.7, 128: 57.5, 256: 140.1, 512: 378.3, 1024: 876.6}, sparse,
+                        [(0.0098, 3388.0), (0.104, 2889.0)], block=3306.0, feed=feed)
+    counts = list(range(1, 25)) + [64, 96, 319]
+    pn = gc._norm_profile(p, N)
+    c_bands, k0s, bands = gc._cached_band_offsets(pn, gc._gm._profile_sig(pn), N, gc._MIN_BAND)
+    nsamp, nsim = gc.model_draws(1e-3)
+
+    def described(choice):
+        best, every = choice
+        return (tuple(best["chain"]), [(tuple(d["chain"]), d["cost"], d["q15"], d["offsets"],
+                                        tuple(d["search"]["thresholds"]), tuple(d["thresholds"]),
+                                        d["halfwidth"]) for d in every])
+    fresh = {nt: described(gc._choose_chain(pn, N, SNR, 1e-3, cost, 3, gc._MIN_BAND, nsim, None,
+                                            nt, nsamp, bands=bands,
+                                            offsets_by_band=dict(zip(c_bands, k0s))))
+             for nt in counts}
+    made = []
+    inner = gc._choose_chain
+    monkeypatch.setattr(gc, "_choose_chain", lambda *a, **k: made.append(1) or inner(*a, **k))
+    for nt in counts:
+        assert described(gc.choose_chain(p, N, SNR, 1e-3, cost=cost, max_tiers=3,
+                                          ntemplates=nt)) == fresh[nt]
+    # shared: one choice for every count; else one without the feed, then one per count
+    assert len(made) == (1 if shared else 1 + len(counts))
+    if feed is not None and not shared:
+        # the feed is priced: some chain's plan, or the choice, moves with the count
+        assert len({tuple(fresh[nt][1]) for nt in counts}) > 1

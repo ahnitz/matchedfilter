@@ -41,6 +41,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   sections of shared blocks made runs of different plans wait for each other there (an M2
   search 9.6% slower). Results are unchanged.
 
+### Changed
+
+- A GPU plan's chain choice is shared across template counts where the count cannot change
+  it. A GPU's cost model prices a feed (a forward's per-block price spread over the template
+  count), and every choice was kept per count, so plans of similar profiles shared nothing
+  that a CPU's plans share. Where no chain's plan priced without the feed takes a priced
+  forward, the feed adds nothing to any chain's plan at any count, and the choice is kept
+  without the count and shared through the similarity store, as on a CPU; elsewhere it is
+  still made per count. The Vulkan PyCBC job makes 12,769 chain evaluations instead of
+  24,294 and its setup is about 3 s shorter; every plan's chain, thresholds and offsets and
+  every trigger are unchanged.
+
 ### Fixed
 
 - A GPU process no longer ends with "Exception ignored in `_Allocation.__del__`" (four at the
