@@ -2405,6 +2405,7 @@ enum {
                         zero each scratch row's dirty span within the runs, then set it */
   HMF_OP_ZERO=5,     /* out slot, rows off, rows n, runs off, runs n */
   HMF_OP_SCALE=6,    /* out slot, rows off, rows n, runs off, runs n, scale vector, entries off */
+  HMF_OP_COPY=7,     /* src slot, src row, dst slot, dst row, runs off, runs n, stream */
   HMF_OP_COLLAR=8,   /* restore, scratch slot, carry tile, carry offset, rows, lo, hi */
   HMF_OP_LEAF=9,     /* items off, items n, retain, retain threshold (double bits): items
                         (step, b0, b1, cluster, row) as one batch */
@@ -2524,6 +2525,22 @@ static int hmf_run_schedule(HMFTableObject *self,const hmf_slot *slots,const hmf
           if(sv) hmf_scale_run(z+2*a,(size_t)(b-a),sv[self->sargs[f[7]+r]]);
           else memset(z+2*a,0,(size_t)(b-a)*8);
         }
+      }
+      break;
+    }
+    case HMF_OP_COPY: {
+      if(f[1]<0 || f[1]>=nouts || f[3]<0 || f[3]>=nouts || !HMF_RANGE_OK(f[5],f[6],2)) HMF_BAD();
+      const hmf_out_slot *src=&oslots[f[1]], *dst=&oslots[f[3]];
+      const int64_t *runs=self->sargs+f[5];
+      if(f[2]<0 || f[2]>=src->rows || f[4]<0 || f[4]>=dst->rows || src->width!=dst->width
+         || !hmf_runs_fit(runs,f[6],src->width)) HMF_BAD();
+      const float *sp=src->ptr+(size_t)f[2]*(size_t)src->width*2;
+      float *dp=dst->ptr+(size_t)f[4]*(size_t)dst->width*2;
+      for(int64_t k=0;k<f[6];k++){
+        const int64_t a=runs[2*k], b=runs[2*k+1];
+        if(b<=a) continue;
+        if(f[7]){ ap_mf_stream_copy(dp+2*a,sp+2*a,(size_t)(b-a)*8); streamed=1; }
+        else memcpy(dp+2*a,sp+2*a,(size_t)(b-a)*8);
       }
       break;
     }

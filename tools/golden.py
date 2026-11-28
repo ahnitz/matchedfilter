@@ -21,6 +21,9 @@ The cases:
 - the first top again with every window answer cut into three windows with gaps;
 - the first top again with an injection job's windows (one 9-second window per block, four
   leaves live), with an envelope and follow-ups;
+- the first top's chunks (the correlation and leaf jobs its search's walk makes, with its own
+  windows and with the injection job's) through correlate_and_filter_many, untiled and tiled
+  at a 4 MB tile;
 - a small synthetic search with an envelope and refilter calls;
 - the low-level entry points on small synthetic inputs: filter_series (every template, a
   window list with a bin size, one template, a threshold below the bank's), on a gated and
@@ -31,8 +34,9 @@ The cases:
   outputs reused through out_support; correlate_and_filter_many; and the tiled cascade's
   middle calls (two windows its blocks bridge, scales, time chunks forced by a small tile)
   with the middle output written (scaled, and unscaled: the case "mirrored", named after the
-  streaming copy that once made it), not written, and kept around peaks. Every case
-  that tiles is recorded again under the other schedule (``.untiled``, ``.other``,
+  streaming copy that once made it), not written, and kept around peaks. A search never
+  tiles (tiling is an explicit choice of correlate_and_filter_many); every
+  correlate_and_filter_many case is recorded under both schedules (``.untiled``, ``.other``,
   ``.tiled``), and ``schedules`` checks that a record's two schedules gave the same peaks
   and series (and, where both wrote it, the same middle output).
 
@@ -268,29 +272,6 @@ def _injection_windows(search, inputs, live_leaves=4, half_width=int(4.5 * 2048)
     return windows
 
 
-class _Schedule:
-    """Within it, the search's middle-to-leaf work runs under one schedule: "untiled" (the
-    middle rows correlated whole, then the leaves), "tiled" (every cohort the tiled cascade
-    can run runs tiled, in one time chunk per group), or None (the library's own choice)."""
-
-    def __init__(self, schedule):
-        self.schedule = schedule
-
-    def __enter__(self):
-        from matchedfilter.time_domain import TimeDomainFilterBank
-        self.saved = TimeDomainFilterBank._TILE_BYTES
-        if self.schedule == "untiled":
-            TimeDomainFilterBank._TILE_BYTES = 0
-        elif self.schedule == "tiled":
-            TimeDomainFilterBank._TILE_BYTES = 1 << 40
-        return self
-
-    def __exit__(self, *exc):
-        from matchedfilter.time_domain import TimeDomainFilterBank
-        TimeDomainFilterBank._TILE_BYTES = self.saved
-        return False
-
-
 def _capture_cases(rec, tops, device):
     """Every capture top, then the first again with follow-ups, with split windows and with
     an injection job's windows, each searched on `device`."""
@@ -304,10 +285,8 @@ def _capture_cases(rec, tops, device):
         if i == 0:
             variants += [("followup", _envelope_of, _follow_up(205, 50), None),
                          ("split", None, None, None),
-                         ("injection", _envelope_of, _follow_up(205, 50), None),
-                         ("injection.untiled", _envelope_of, _follow_up(205, 50), "untiled"),
-                         ("plain.tiled", None, None, "tiled")]
-        for variant, envelope, refilter, schedule in variants:
+                         ("injection", _envelope_of, _follow_up(205, 50), None)]
+        for variant, envelope, refilter, _ in variants:
             search, inputs, windows, _, _ = search_bench.build(capture, device)
             search_threshold = search.threshold
             if variant == "split":
@@ -325,10 +304,38 @@ def _capture_cases(rec, tops, device):
                     on_peaks(ctx)
                 h["on_peaks"] = with_threshold
                 return h
-            with _Schedule(schedule):
-                _search_case(rec, "%s.%s" % (top, variant), search, inputs, windows, hooks)
+            _search_case(rec, "%s.%s" % (top, variant), search, inputs, windows, hooks)
             print("recorded %s.%s (%d arrays so far)" % (top, variant, len(rec.arrays)),
                   flush=True)
+        if i == 0:
+            _chunk_cases(rec, top, capture, device)
+
+
+def _chunk_cases(rec, top, capture, device):
+    """The first top's chunks (the correlation and leaf jobs a CPU search's walk makes, with
+    its own windows and with an injection job's) through correlate_and_filter_many, untiled
+    (the default) and tiled at a 4 MB tile (``.tiled``): the leaves' peaks and the middle
+    outputs."""
+    import schedule_bench
+    import search_bench
+    from matchedfilter.time_domain import TimeDomainFilterBank
+    for variant in ("plain", "injection"):
+        search, inputs, windows, _, _ = search_bench.build(capture, device)
+        if variant == "injection":
+            windows = _injection_windows(search, inputs)
+        chunks = schedule_bench.chunk_jobs(search, inputs, windows)
+        for suffix, kw in (("", {}), (".tiled", dict(tile_bytes=4 << 20))):
+            rec.case = "%s.%s.chunks%s" % (top, variant, suffix)
+            for n, (corr_jobs, leaf_jobs) in enumerate(chunks):
+                for _, _, c_kw in corr_jobs:
+                    c_kw["out"][:] = 0
+                res = TimeDomainFilterBank.correlate_and_filter_many(corr_jobs, leaf_jobs, **kw)
+                for k, r in enumerate(res):
+                    rec.add_results("chunk%d.leaf%d" % (n, k), r)
+                for k, (_, _, c_kw) in enumerate(corr_jobs):
+                    rec.add("chunk%d.middle%d" % (n, k), c_kw["out"])
+        print("recorded %s.%s.chunks (%d arrays so far)" % (top, variant, len(rec.arrays)),
+              flush=True)
 
 
 def _reference(n_bins=16385, delta_f=1.0 / 16.0):
@@ -397,8 +404,6 @@ def _synthetic_search_case(rec, device):
         h["on_peaks"] = with_threshold
         return h
     _search_case(rec, "synthetic.search", search, inputs, windows, hooks)
-    with _Schedule("untiled"):
-        _search_case(rec, "synthetic.search.untiled", search, inputs, windows, hooks)
 
 
 def _entry_point_cases(rec, device):
@@ -524,11 +529,11 @@ def _entry_point_cases(rec, device):
             rec.add_results("%s.leaf%d" % (series_name, k), res)
         for k, o in enumerate(outs):
             rec.add("%s.middle%d" % (series_name, k), o)
-        # the same calls under the other schedule (the small cohort runs tiled by default)
+        # the same calls under the other schedule (tiled)
         for o in outs:
             o[:] = 0
         for k, res in enumerate(TimeDomainFilterBank.correlate_and_filter_many(
-                corr_jobs, leaf_jobs, tile_bytes=0 if series_name == "small" else 1 << 40)):
+                corr_jobs, leaf_jobs, tile_bytes=1 << 40)):
             rec.add_results("%s.other.leaf%d" % (series_name, k), res)
         for k, o in enumerate(outs):
             rec.add("%s.other.middle%d" % (series_name, k), o)

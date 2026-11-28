@@ -195,16 +195,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   it just found), run by the table's one C call with the untiled correlations and leaves of the
   same call. Its Python compiler and run loop (`_CohortPrep`, `_run_tiled_group`, the collar,
   margin, copy and stale-scratch helpers, `_assemble_leaf_results`, `HMFTable.run_slices`) are
-  removed. A CPU search keeps a tiled chunk's table as it keeps an untiled one. Results are
-  unchanged, to the bit and in order, under both schedules.
-- Where the middle output is written whole (`retain_radius` None, every search with hooks), the
-  tiled schedule has no scratch: per time tile the correlation steps of every run of a
-  group's templates that is one run of the output (the untiled steps on the tile's blocks,
-  through the same template-batched kernel path) write the output, and the leaf slabs that
-  are ready read it in place. The kernel's streaming mirror (`ap_mf_set_corr_mirror`), the
-  schedule's copy op and the mirror fields of a correlation step are removed. The scratch
-  schedule remains for `retain_radius` 0 and positive. Results are unchanged, to the bit
-  and in order, under both schedules.
+  removed. Results are unchanged, to the bit and in order, under both schedules.
+- `TimeDomainFilterBank.correlate_and_filter_many` runs untiled unless `tile_bytes` is
+  given: the 4 MB cap that tiled a cohort whose middle output fitted it (in practice the
+  injection-window chunks of a PyCBC injection job) and `TimeDomainFilterBank._TILE_BYTES` are
+  removed, and a search never tiles. Measured on one Zen 5 core, tiling forced was 1.05-1.6x
+  the untiled time on a PyCBC job's full-data chunks at every tile size and tied on its
+  injection-window chunks: the tiles re-read every leaf bank's templates, while what they
+  save, the leaves' read of the middle output from memory, is 2-3% of a full-data pass. The
+  tiled schedule stays, as an explicit choice; `tools/schedule_bench.py` times both
+  schedules on a capture's chunks, to repeat the measurement on other machines. The kernel's
+  streaming mirror of a tiled step's rows (`ap_mf_set_corr_mirror`) is removed: the schedule
+  copies the rows. Results are unchanged, to the bit and in order.
 - `HierarchicalSearch.timings["inner_compute"]`: of the inner stage, the seconds the CPU
   correlation steps spent in the extension (in the walk and in `correlate_and_filter_many`);
   `tools/search_bench.py` prints it as the inner stage's compute fraction.

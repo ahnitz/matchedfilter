@@ -3,8 +3,8 @@
 TimeDomainFilterBank.filter_series_many runs its jobs through _run_batch, which hands each
 kind of job to the path that takes many at once (follow-up windows, single-template calls,
 sparse CPU jobs) and runs the rest in turn. TimeDomainFilterBank.correlate_and_filter_many
-runs a hierarchical search's middle correlations and the leaf jobs that read them in
-cache-sized cohorts; the functions it is made of are here, in the order it calls them.
+runs a hierarchical search's middle correlations and the leaf jobs that read them as one
+table, or (with tile_bytes) in time tiles of multi-detector cohorts; the functions it is made of are here, in the order it calls them.
 
 time_domain imports this module last and its batch methods call into it; this module reads
 time_domain's helpers.
@@ -261,14 +261,11 @@ _TILED_CORR_KEYS = frozenset(("windows", "scales", "templates", "out", "out_supp
 _TILED_LEAF_KEYS = frozenset(("windows", "binsize", "threshold", "template_index", "profile"))
 
 
-def _template_batches(corr_bank, sel_arr, n_out_rows, direct):
+def _template_batches(corr_bank, sel_arr, n_out_rows):
     """The cohort's output rows by template group of the middle bank, each group's rows cut
-    into batches of consecutive templates that one correlation step fills: with ``direct``
-    (the steps write the output itself) every run of templates consecutive in the group and
-    in the output, as the untiled steps take them; otherwise (they write the scratch rows)
-    up to 8 at n <= 4096, 4 at 8192, else 1. Returns the groups as (group, [(local template,
-    output row)], batches), each output row's slot within its batch, and the largest
-    batch."""
+    into batches of consecutive templates (up to 8 at n <= 4096, 4 at 8192, else 1) that one
+    correlation call fills. Returns the groups as (group, [(local template, output row)],
+    batches), each output row's slot within its batch, and the largest batch."""
     grp_rows_map = {}
     if sel_arr is not None:
         for out_row, tmpl_id in enumerate(sel_arr):
@@ -295,7 +292,7 @@ def _template_batches(corr_bank, sel_arr, n_out_rows, direct):
     max_kr = 1
     for g_m, row_pairs in grp_work:
         nt_sel_g = len(row_pairs)
-        max_kr_g = nt_sel_g if direct else (8 if g_m.n <= 4096 else (4 if g_m.n == 8192 else 1))
+        max_kr_g = 8 if g_m.n <= 4096 else (4 if g_m.n == 8192 else 1)
         batches = []
         k_cur = 0
         while k_cur < nt_sel_g:
@@ -305,7 +302,6 @@ def _template_batches(corr_bank, sel_arr, n_out_rows, direct):
                 k_end < nt_sel_g
                 and k_end - k_cur < max_kr_g
                 and row_pairs[k_end][0] == li0 + (k_end - k_cur)
-                and (not direct or row_pairs[k_end][1] == row_pairs[k_cur][1] + (k_end - k_cur))
             ):
                 k_end += 1
             kr = k_end - k_cur
@@ -333,7 +329,7 @@ class _Ops:
     """A schedule being compiled: its ops (_core.c's HMF_OP_*, twelve int64 each) and the
     runs, rows and slices they read."""
 
-    CORR, POOL, STALE, ZERO, SCALE, COLLAR, LEAF, RETAIN, PENDING = 1, 3, 4, 5, 6, 8, 9, 10, 11
+    CORR, POOL, STALE, ZERO, SCALE, COPY, COLLAR, LEAF, RETAIN, PENDING = 1, 3, 4, 5, 6, 7, 8, 9, 10, 11
 
     def __init__(self):
         self.ops, self.args = [], []
@@ -380,12 +376,10 @@ def _tile_scratch(corr_bank, D, S, max_kr):
 
 
 def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
-    """Bind every leaf job of the cohort to the row its series will be read from.
+    """Bind every leaf job of the cohort to the scratch row its series will be read from.
 
     A leaf job's series is a row (or a real or imaginary lane) of a member's output; it is
-    filtered on the scratch row that holds that output row while its batch runs, or, with
-    tbuf_det None (the correlation steps write the output itself), on its own series in
-    place. Returns None
+    filtered on the scratch row that holds that output row while its batch runs. Returns None
     where a leaf job cannot run tiled (not a hierarchical bank on such a row, a threshold
     below the bank's, a plan that would have to switch its series mode within the cohort).
     Otherwise (the leaf calls on the scratch rows, as _compile_steps takes them; leaf job ->
@@ -409,8 +403,7 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
             out_row, rem_b = divmod(l_ser_raw.ctypes.data - out_lo, row_stride_bytes)
             if out_row < 0 or out_row >= n_out_rows:
                 return None
-            t_row_base = (info.out[out_row] if tbuf_det is None
-                          else tbuf_det[d_idx][row_slot[out_row]])
+            t_row_base = tbuf_det[d_idx][row_slot[out_row]]
             if l_ser_raw.dtype == np.complex64:
                 if rem_b != 0:
                     return None
@@ -444,10 +437,9 @@ def _bind_leaves(members, leaf_jobs, S, n_out_rows, row_slot, tbuf_det):
 
 def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
     """One chunk's work per template batch: the slices (step, first block, end block,
-    cluster, row slot in the batch) of every leaf slab that ends within the chunk's horizon
-    (the first sample a later chunk writes), and the earliest sample a slab still waiting
-    will read, which is what must be carried to the next chunk. Advances each sub's slab
-    cursor."""
+    cluster, scratch row) of every leaf slab that ends within the chunk's horizon (the first
+    sample a later chunk writes), and the earliest sample a slab still waiting will read,
+    which is what must be carried to the next chunk. Advances each sub's slab cursor."""
     chunk_batch_jobs = []
     for k_r0, li0, kr, b_rows in batches:
         items = []
@@ -500,32 +492,21 @@ def _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b, more_chunks):
 
 def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_out_rows,
                      eff_tile_bytes, retain_radius, retain_threshold, slots, carry_need):
-    """Compile one tiled cohort into the schedule, per template group of the middle bank and
-    time chunk (as many as keep a batch's span within eff_tile_bytes).
-
-    Where the output is written whole (retain_radius None) there is no scratch: per group the
-    output's margins are zeroed and scaled, then per time chunk and template batch the
-    batch's correlation steps (every detector) write its rows of the output itself, as the
-    untiled steps do over every block (a batch is every template of a group that is one run
-    of the output, _template_batches), and the leaf slabs that are ready read those rows in
-    place, while they are in cache. Nothing is copied or carried.
-
-    Otherwise (retain_radius 0, the output is not written, or positive, written around the
-    leaves' peaks) per group the stale scratch is cleared (and, with retain_radius > 0, the
-    output's margins zeroed and scaled), then per time chunk and template batch: the carried
-    collar restored, the batch's correlation steps into the scratch rows, the leaf slabs that
-    are ready filtered on them, the rows copied to the output around the batch's peaks (with
-    retain_radius > 0), and the collar a later chunk's leaves read carried.
+    """Compile one tiled cohort into the schedule: per template group of the middle bank, the
+    stale scratch cleared, the output's margins zeroed and scaled (where it is written), then
+    per time chunk (as many as keep a batch's span within eff_tile_bytes) and template batch:
+    the carried collar restored, the batch's correlation steps (every detector) into the
+    scratch rows, the rows copied to the output (or copied around the batch's peaks with
+    retain_radius > 0), the leaf slabs that are ready filtered, and the
+    collar a later chunk's leaves read carried.
 
     ``slots`` is (first series slot of the detectors' series, first output slot of their
-    scratch rows or None for none, first output slot of their outputs, first correlation
-    step, first scale vector, the pool state tile, the pool tile, the first carry tile).
-    carry_need[parity] is raised to the samples the carries of that chunk parity hold.
-    Returns the correlation step tuples, the correlation plans, and per group the work
-    counters (block length, counts)."""
+    scratch rows, first output slot of their outputs, first correlation step, first scale
+    vector, the pool state tile, the pool tile, the first carry tile). carry_need[parity] is
+    raised to the samples the carries of that chunk parity hold. Returns the correlation step
+    tuples, the correlation plans, and per group the work counters (block length, counts)."""
     D = len(members)
     ser0, scr0, out0, step0, vec0, _, _, carry0 = slots
-    direct = scr0 is None
     corr_bank = members[0][1].bank
     corr_steps, corr_plans, work = [], [], []
     r_pad = retain_radius if (retain_radius is not None and retain_radius > 0) else 0
@@ -571,11 +552,10 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                                         else g_m.template_indices[li_arr]).astype(np.int64)
 
         # the stale scratch an earlier group left where this group's blocks will not write
+        new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
         unwritten_at = ops.arg(unwritten_runs)
-        if not direct:
-            new_dirty = (int(col0[0]), int(col1[-1])) if M > 0 else (0, 0)
-            ops.op(_Ops.STALE, slots[5], D, max_batch_kr, unwritten_at, len(unwritten_runs),
-                   new_dirty[0], new_dirty[1], scr0)
+        ops.op(_Ops.STALE, slots[5], D, max_batch_kr, unwritten_at, len(unwritten_runs),
+               new_dirty[0], new_dirty[1], scr0)
         # the output's margins zeroed and its unwritten samples scaled, where it is written
         rows_at = ops.arg(row_indices_arr)
         if retain_radius != 0:
@@ -613,7 +593,7 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                         raw_chunks.append((m_prev, m_next, hz))
                         m_prev = m_next
         n_chunks, n_batches = len(raw_chunks), len(batches)
-        need_collars = n_chunks > 1 and n_batches > 1 and not direct
+        need_collars = n_chunks > 1 and n_batches > 1
         pending = retain_radius is not None and retain_radius > 0 and n_chunks > 1
         if pending:
             ops.op(_Ops.PENDING, nt_sel_g)
@@ -640,31 +620,12 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                                  else np.empty((0, 2), dtype=np.int64))
                 bridges = (np.ascontiguousarray(chunk_bridges, np.int64)
                            if chunk_bridges.size else None)
+                t_runs_at = ops.arg(np.asarray(t_runs, np.int64).reshape(-1, 2))
             chunk_jobs = _chunk_batch_jobs(batches, subs_by_row, D, S, horizon, has_b,
                                            ck_idx + 1 < n_chunks)
             write_off = 0
             parity = ck_idx & 1
             for b_idx, (k_r0, li0, kr, b_rows, items, min_fut) in enumerate(chunk_jobs):
-                if direct:
-                    # the batch's correlation steps into the output, then its ready slabs
-                    # on the rows in place (a slice's row slot is read only by OP_RETAIN)
-                    if has_b:
-                        first = step0 + len(corr_steps)
-                        for d_idx, (_, info) in enumerate(members):
-                            scaled = info.scales is not None
-                            corr_steps.append((
-                                ep_m, ser0 + d_idx, int(info.series.dtype == np.float32),
-                                out0 + d_idx, b_rows[0], None, li0, kr, st_c, bnd_c, lo_v,
-                                hi_v, bridges, vec0 + d_idx if scaled else -1,
-                                scale_entries[d_idx][k_r0:k_r0 + kr] if scaled else None,
-                                np.asarray(t_runs, dtype=np.int64).reshape(-1, 2) if scaled
-                                else None))
-                        ops.op(_Ops.CORR, first, first + D)
-                    if items:
-                        ops.op(_Ops.LEAF, ops.arg([(st, r0, r1, cl, 0)
-                                                   for st, r0, r1, cl, _ in items]),
-                               len(items), 0, thr_bits)
-                    continue
                 # the collar the previous chunk carried for this batch
                 if saved[b_idx] is not None:
                     lo_s, hi_s, par_s, off_s = saved[b_idx]
@@ -677,7 +638,7 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                     valid_lo = grp_min_col
                 else:
                     valid_lo = c_start if has_b else 0
-                # the batch's correlation steps, every detector, into the scratch rows
+                # the batch's correlation steps, every detector, then its rows to the output
                 if has_b:
                     first = step0 + len(corr_steps)
                     for d_idx, (_, info) in enumerate(members):
@@ -689,6 +650,11 @@ def _cohort_schedule(ops, members, pre_grp_batches, subs_by_row, S, W_corr, n_ou
                             scale_entries[d_idx][k_r0:k_r0 + kr] if scaled else None,
                             np.asarray(t_runs, dtype=np.int64).reshape(-1, 2) if scaled else None))
                     ops.op(_Ops.CORR, first, first + D)
+                    if retain_radius is None:
+                        for d_idx in range(D):
+                            for q, r_out in enumerate(b_rows):
+                                ops.op(_Ops.COPY, scr0 + d_idx, q, out0 + d_idx, r_out,
+                                       t_runs_at, len(t_runs), 1)
                 # the leaf slabs this batch made ready, every detector, as one batch
                 if items or r_pad:
                     ops.op(_Ops.LEAF, ops.arg(items), len(items), int(r_pad > 0), thr_bits)
@@ -726,7 +692,7 @@ class _Cascade(NamedTuple):
     ephemeral: bool       # retain_radius 0 and every correlation tiled: no output written
 
 
-def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_bytes,
+def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, eff_tile_bytes,
                    retain_radius, retain_threshold):
     """Compile correlate_and_filter_many's calls, where some cohort runs tiled, into one
     table with a schedule: the untiled correlations first (one OP_CORR), then each tiled
@@ -736,19 +702,11 @@ def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_
     ops = _Ops()
     untiled_cohort_jobs, tiled_parts, tiled_calls, placed_all, empty = [], [], [], {}, []
     for members in cohorts:
-        if not any(members is m for m in tiled):
-            untiled_cohort_jobs.extend(ci for ci, _ in members)
-            continue
         first = members[0][1]
-        # where the output is written whole, the steps write it and the leaves read it in
-        # place; otherwise through the bank's scratch rows
-        direct = retain_radius is None
         pre_grp_batches, row_slot, max_kr = _template_batches(
-            first.bank, first.selection, first.out.shape[0], direct)
-        pool = state = stride_det = tbuf_det = need_total = None
-        if not direct:
-            pool, state, stride_det, tbuf_det, need_total = _tile_scratch(
-                first.bank, len(members), first.S, max_kr)
+            first.bank, first.selection, first.out.shape[0])
+        pool, state, stride_det, tbuf_det, need_total = _tile_scratch(
+            first.bank, len(members), first.S, max_kr)
         bound = _bind_leaves(members, leaf_jobs, first.S, first.out.shape[0], row_slot, tbuf_det)
         if bound is None:
             untiled_cohort_jobs.extend(ci for ci, _ in members)
@@ -801,13 +759,11 @@ def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_
     for members, _, pool, state, _, tbuf_det, _ in tiled_parts:
         layouts.append((len(series), len(outs), len(scales), len(tiles)))
         series.extend(info.series for _, info in members)
-        if tbuf_det is not None:
-            outs.extend(tbuf_det)
+        outs.extend(tbuf_det)
         outs.extend(info.out for _, info in members)
         scales.extend(np.empty(0, np.float32) if info.scales is None else info.scales
                       for _, info in members)
-        if pool is not None:
-            tiles.extend((state, pool))
+        tiles.extend((state, pool))
     carry0 = len(tiles)
     carry_need = [0, 0]
 
@@ -825,18 +781,16 @@ def _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled, eff_tile_
                 subs_by_row[p][out_row][d_idx].append(
                     _LeafSub(k, _layout_slabs(sl, int(ep.series_group()), g_f.n, S)))
         more_corrs, plans, banks, work = [], [], [], []
-        for p, ((members, pre_grp_batches, pool, _, stride_det, _, need_total),
+        for p, ((members, pre_grp_batches, _, _, stride_det, _, need_total),
                 (ser0, out0, vec0, tile0)) in enumerate(zip(tiled_parts, layouts)):
             D = len(members)
             first = members[0][1]
-            if pool is not None:
-                ops.op(_Ops.POOL, tile0, first.S, stride_det, tile0 + 1, need_total)
+            ops.op(_Ops.POOL, tile0, first.S, stride_det, tile0 + 1, need_total)
             c_steps, c_plans, c_work = _cohort_schedule(
                 ops, members, pre_grp_batches, subs_by_row[p], first.S, first.windows,
                 first.out.shape[0], eff_tile_bytes, retain_radius, retain_threshold,
-                (ser0, None if pool is None else out0, out0 if pool is None else out0 + D,
-                 n_untiled_steps + len(more_corrs), vec0, tile0, tile0 + 1, carry0),
-                carry_need)
+                (ser0, out0, out0 + D, n_untiled_steps + len(more_corrs), vec0, tile0,
+                 tile0 + 1, carry0), carry_need)
             more_corrs.extend(c_steps)
             plans.extend(c_plans)
             banks.append((weakref.ref(first.bank), first.bank._groups))
@@ -2001,11 +1955,9 @@ def _untiled_batch(corr_jobs, corr_indices, leaf_jobs, leaf_indices, corr_times)
     return results
 
 
-def _tiling_cohorts(corr_jobs, leaf_by_corr, tile_bytes):
+def _tiling_cohorts(corr_jobs, leaf_by_corr):
     """Which correlation jobs the tiled cascade runs: (the jobs it cannot run, the cohorts
-    of the others (_cohorts), the cohorts that run tiled). A cohort runs tiled when
-    tile_bytes is given, or else when its middle output fits the automatic budget
-    (TimeDomainFilterBank._TILE_BYTES, at least 4 MB)."""
+    of the others (_cohorts))."""
     cand_jobs, screened_out = [], []
     for ci, (corr_bank, corr_series, corr_kw) in enumerate(corr_jobs):
         corr_kw = corr_kw or {}
@@ -2022,41 +1974,19 @@ def _tiling_cohorts(corr_jobs, leaf_by_corr, tile_bytes):
             screened_out.append(ci)
         else:
             cand_jobs.append((ci, info))
-    cohorts = _cohorts(cand_jobs)
-    auto_cohort_cap = (max(TimeDomainFilterBank._TILE_BYTES, 4 << 20) if tile_bytes is None
-                       else None)
-    tiled = [members for members in cohorts
-             if auto_cohort_cap is None
-             or len(members) * members[0][1].out.shape[0]
-             * int((members[0][1].windows[:, 1] - members[0][1].windows[:, 0]).sum()) * 8
-             <= auto_cohort_cap]
-    return screened_out, cohorts, tiled
+    return screened_out, _cohorts(cand_jobs)
 
 
-def _chunk_steps(corr_jobs, leaf_jobs, retain_radius=None):
+def _chunk_steps(corr_jobs, leaf_jobs):
     """The steps of a search chunk's correlation jobs and the leaf jobs that read them, as
-    correlate_and_filter_many(corr_jobs, leaf_jobs, retain_radius=retain_radius) runs them,
-    compiled into one table (with the tiled schedule where a cohort is tiled): (the compiled
-    steps, the series they bind, the outputs they write, the tiles of the schedule or None,
-    whether the outputs are left unwritten), or None where not every job is in it (a job off
-    the CPU, a trial undecided, a leaf job the leaf steps do not run or with no window, a
-    series read through a copy of memory a correlation writes). Running them (_run_steps)
-    gives the results correlate_and_filter_many gives, in the order of leaf_jobs."""
+    correlate_and_filter_many(corr_jobs, leaf_jobs) runs them (untiled), compiled into one
+    table: (the compiled steps, the series they bind, the outputs they write), or None where
+    not every job is in it (a job off the CPU, a trial undecided, a leaf job the leaf steps do
+    not run or with no window, a series read through a copy of memory a correlation writes).
+    Running them (_run_steps) gives the results correlate_and_filter_many gives, in the order
+    of leaf_jobs."""
     if not _trials_decided(leaf_jobs):
         return None
-    if TimeDomainFilterBank._TILE_BYTES > 0:
-        screened_out, cohorts, tiled = _tiling_cohorts(
-            corr_jobs, _leaves_by_producer(corr_jobs, leaf_jobs)[0], None)
-        if tiled:
-            cascade = _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled,
-                                     TimeDomainFilterBank._TILE_BYTES, retain_radius, 0.0)
-            if cascade is not None:
-                if (cascade.before or cascade.leftover or cascade.empty
-                        or cascade.scales is not None
-                        or len(cascade.steps.calls) != len(leaf_jobs)):
-                    return None
-                return (cascade.steps, cascade.series, cascade.outs, cascade.tiles,
-                        cascade.ephemeral)
     corr_calls, corr_scales = [], []
     for bank, series, kw in corr_jobs:
         kw = kw or {}
@@ -2083,7 +2013,7 @@ def _chunk_steps(corr_jobs, leaf_jobs, retain_radius=None):
     if compiled is None or len(compiled.calls) != len(calls):
         return None
     return (compiled, [c[1] for c in corr_calls] + [c[2] for c in calls],
-            [c[5] for c in corr_calls], None, False)
+            [c[5] for c in corr_calls])
 
 
 def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
@@ -2091,8 +2021,7 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
                               retain_threshold=None):
     """TimeDomainFilterBank.correlate_and_filter_many, which documents it."""
 
-    eff_tile_bytes = (TimeDomainFilterBank._TILE_BYTES
-                      if tile_bytes is None else int(tile_bytes))
+    eff_tile_bytes = 0 if tile_bytes is None else int(tile_bytes)
     if retain_radius is not None:
         retain_radius = int(retain_radius)
         if retain_radius < 0:
@@ -2131,13 +2060,13 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
         return _run_untiled()
 
     leaf_by_corr, _ = _leaves_by_producer(corr_jobs, leaf_jobs)
-    screened_out, cohorts, tiled = _tiling_cohorts(corr_jobs, leaf_by_corr, tile_bytes)
-    # No cohort runs tiled: every job untiled, the correlations and the leaves in one table.
-    if not tiled:
+    screened_out, cohorts = _tiling_cohorts(corr_jobs, leaf_by_corr)
+    # No cohort can run tiled: every job untiled, the correlations and the leaves in one table.
+    if not cohorts:
         return _run_untiled()
     _settle_device_writes()
-    cascade = _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, tiled,
-                             eff_tile_bytes, retain_radius, eff_ret_thr)
+    cascade = _cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, eff_tile_bytes,
+                             retain_radius, eff_ret_thr)
     if cascade is None:
         return _run_untiled()
 

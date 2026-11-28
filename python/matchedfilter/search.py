@@ -569,7 +569,6 @@ class _ChunkPlan(NamedTuple):
     held: dict          # channel -> inner node id -> its series
     support: dict       # channel -> inner node id -> its computed spans
     commits: list       # (slot state, slots written, their spans, slot state key after)
-    tiles: object       # the tiled schedule's pool states, pools and carries, or None
 
 
 #: A chunk shape whose jobs do not all run as one table (HierarchicalSearch._cpu_chunk).
@@ -1160,9 +1159,9 @@ class HierarchicalSearch:
         """Run a CPU chunk's inner correlations and its leaf searches as the steps of one
         table, in one C call (_batches._run_steps): compiled from the chunk's walk the first
         time its key is seen (_batches._chunk_steps) and kept, the eight most recent, by the
-        search. Returns what _submit_leaves returns. A chunk the table does not run (a
-        cohort the tiled cascade runs, a job the steps do not take) runs as the walk and
-        _submit_leaves make it, and its shape is kept as declined.
+        search. Returns what _submit_leaves returns. A chunk the table does not run (a job the
+        steps do not take) runs as the walk and _submit_leaves make it, and its shape is kept
+        as declined.
 
         A plan holds the inner nodes' slots it writes and reads; a chunk that replaces a
         node's slots (more rows than before) drops every kept plan."""
@@ -1184,9 +1183,7 @@ class HierarchicalSearch:
                     b.reallocated = False
             corr_jobs = [cj[0] for cj in step.corr_jobs]
             t1 = time.perf_counter()
-            compiled = (_batches._chunk_steps(corr_jobs, built[1],
-                                              0 if step.on_peaks is None else None)
-                        if built[1] else None)
+            compiled = _batches._chunk_steps(corr_jobs, built[1]) if built[1] else None
             if compiled is None:
                 # a shape the table does not run: not compiled again
                 self._chunk_plans[key] = _DECLINED
@@ -1207,21 +1204,17 @@ class HierarchicalSearch:
                 step.support[c].update(plan.support[c])
             series = [step.held[step.active[src]][id(step.root)] if type(src) is int else src
                       for src in plan.sources]
-            results, corr_seconds = _batches._run_steps(plan.steps, series, plan.outs, None,
-                                                        plan.tiles)
+            results, corr_seconds = _batches._run_steps(plan.steps, series, plan.outs)
             for state, k, regions, after in plan.commits:
                 state["support"][:k] = [regions] * k
                 state["key"] = after
             leaves, lengths, where = plan.leaves, plan.lengths, plan.where
         else:
-            steps, series, outs, tiles, ephemeral = compiled
-            results, corr_seconds = _batches._run_steps(steps, series, outs, None, tiles)
-            # the slots now hold what the correlations wrote (nothing, when the tiled schedule
-            # left the outputs unwritten)
+            steps, series, outs = compiled
+            results, corr_seconds = _batches._run_steps(steps, series, outs)
+            # the slots now hold what the correlations wrote
             commits = []
             for _, batch, c, k in step.corr_jobs:
-                if ephemeral:
-                    continue
                 batch.commit(c, k)
                 state = batch._chan[c]
                 commits.append((state, k, state["regions"], state["key"]))
@@ -1232,7 +1225,6 @@ class HierarchicalSearch:
             roots = [step.held[c][id(step.root)] for c in step.active]
             slot_arrays = [state["slots"] for b in self._inner.values()
                            for state in b._chan.values() if state["slots"] is not None]
-            slot_arrays.extend(outs)            # and the schedule's scratch rows
             sources = []
             for a in series:
                 src = next((i for i, r in enumerate(roots)
@@ -1252,7 +1244,7 @@ class HierarchicalSearch:
                      for c in step.active},
                     {c: {nid: v for nid, v in step.support[c].items() if nid in inner_ids}
                      for c in step.active},
-                    commits, tiles)
+                    commits)
                 while len(self._chunk_plans) > 8:
                     self._chunk_plans.popitem(last=False)
         # the correlation steps' seconds are the inner stage's, the rest the leaves'
@@ -1281,13 +1273,9 @@ class HierarchicalSearch:
             if step.corr_jobs:
                 cjobs = [cj[0] for cj in step.corr_jobs]
                 t_info = {}
-                TimeDomainFilterBank.correlate_and_filter_many(
-                    cjobs, [], timings=t_info,
-                    retain_radius=0 if step.on_peaks is None else None,
-                )
-                if not t_info.get("ephemeral_used", False):
-                    for _, batch, c, k in step.corr_jobs:
-                        batch.commit(c, k)
+                TimeDomainFilterBank.correlate_and_filter_many(cjobs, [], timings=t_info)
+                for _, batch, c, k in step.corr_jobs:
+                    batch.commit(c, k)
                 self.timings["inner"] += t_info["correlate"]
                 self.timings["inner_compute"] += _batches.CORR_COMPUTE_SECONDS - corr0
             return None
@@ -1300,12 +1288,9 @@ class HierarchicalSearch:
             cjobs = [cj[0] for cj in step.corr_jobs]
             t_info = {}
             results = TimeDomainFilterBank.correlate_and_filter_many(
-                cjobs, jobs, wait=True, timings=t_info,
-                retain_radius=0 if step.on_peaks is None else None,
-            )
-            if not t_info.get("ephemeral_used", False):
-                for _, batch, c, k in step.corr_jobs:
-                    batch.commit(c, k)
+                cjobs, jobs, wait=True, timings=t_info)
+            for _, batch, c, k in step.corr_jobs:
+                batch.commit(c, k)
             dt_total = time.perf_counter() - t0
             self.timings["inner"] += t_info["correlate"]
             self.timings["leaf"] += max(0.0, dt_total - t_info["correlate"])

@@ -1,11 +1,11 @@
 """The tiled cascade of correlate_and_filter_many is a schedule of the step table
 (_batches._cascade_steps, _core.HMFTable's ops): per time tile the middle correlation steps
-and the leaf slices that are ready. Where the output is written whole the steps write it and
-the leaves read it in place; otherwise the steps write a scratch slot, and copies to the
-output and collars are carried. Its peaks are, to the bit and in order, the untiled
-schedule's in every retain mode; its middle output is too wherever it is written whole; and
-with retain_radius > 0 the executor writes the output exactly around the leaf peaks it found
-(a data-dependent copy)."""
+into a scratch slot, the leaf slices that are ready, the copies to the output and the collars
+carried. It runs only where a caller asks for it (tile_bytes). Its peaks are, to the bit and
+in order, the untiled schedule's in every retain mode (a machine whose two schedules diverge
+fails here); its middle output is too wherever it is written whole; and with
+retain_radius > 0 the executor writes the output exactly around the leaf peaks it found (a
+data-dependent copy)."""
 import numpy as np
 import pytest
 
@@ -56,18 +56,17 @@ def _same_results(a, b):
             assert u.dtype == v.dtype and u.tobytes() == v.tobytes()
 
 
-@pytest.mark.parametrize("mode", ["written", "mirrored", "ephemeral", "retained", "auto"])
+@pytest.mark.parametrize("mode", ["written", "unscaled", "ephemeral", "retained"])
 def test_the_tiled_schedule_gives_the_untiled_schedule(mode):
     corr, leaf, pair = _banks()
-    kw = dict(written=dict(tile_bytes=1 << 18), mirrored=dict(tile_bytes=1 << 18),
+    kw = dict(written=dict(tile_bytes=1 << 18), unscaled=dict(tile_bytes=1 << 18),
               ephemeral=dict(tile_bytes=1 << 18, retain_radius=0),
-              retained=dict(tile_bytes=1 << 18, retain_radius=700, retain_threshold=3.5),
-              auto=dict())[mode]
-    scaled = mode != "mirrored"
+              retained=dict(tile_bytes=1 << 18, retain_radius=700, retain_threshold=3.5))[mode]
+    scaled = mode != "unscaled"
     outs_t, res_t, t_t = _run(corr, leaf, pair, scaled, **kw)
     outs_u, res_u, _ = _run(corr, leaf, pair, scaled, **dict(kw, tile_bytes=0))
     _same_results(res_t, res_u)
-    if mode in ("written", "mirrored", "auto"):
+    if mode in ("written", "unscaled"):
         for a, b in zip(outs_t, outs_u):
             assert a.tobytes() == b.tobytes()
     elif mode == "ephemeral":
@@ -106,24 +105,20 @@ def test_retained_output_is_written_around_the_peaks_the_executor_found():
     assert checked > 0
 
 
-@pytest.mark.parametrize("retain_radius", [None, 0])
-def test_a_written_output_is_the_tile_the_leaves_read(retain_radius):
-    """Where the output is written whole, the tiled schedule's leaf steps read the output's
-    rows in place and the table holds no scratch pool (its tiles are the two carries); where
-    it is not written, they read the middle bank's scratch rows."""
+
+def test_no_call_tiles_unless_tile_bytes_is_given(monkeypatch):
+    """Untiled is the default schedule: correlate_and_filter_many compiles a tiled schedule
+    only for a positive tile_bytes, whatever the cohort's size."""
+    compiled = []
+    cascade_steps = _batches._cascade_steps
+
+    def counting(*args):
+        compiled.append(args)
+        return cascade_steps(*args)
+    monkeypatch.setattr(_batches, "_cascade_steps", counting)
     corr, leaf, pair = _banks()
-    outs = [np.zeros((3, S), np.complex64) for _ in pair]
-    corr_jobs = [(corr, s, dict(windows=[(6000, 30000), (30300, S - 6000)],
-                                templates=[0, 2, 3], out=o)) for s, o in zip(pair, outs)]
-    leaf_jobs = [(leaf, o[r], dict(windows=[(9000, 29000), (36000, S - 9000)]))
-                 for o in outs for r in range(3)]
-    leaf_by_corr, _ = _batches._leaves_by_producer(corr_jobs, leaf_jobs)
-    screened_out, cohorts, _ = _batches._tiling_cohorts(corr_jobs, leaf_by_corr, 1 << 18)
-    cascade = _batches._cascade_steps(corr_jobs, leaf_jobs, screened_out, cohorts, cohorts,
-                                      1 << 18, retain_radius, 0.0)
-    leaf_series = cascade.series[-len(cascade.steps.calls):]
-    in_place = [any(np.shares_memory(a, o) for o in outs) for a in leaf_series]
-    if retain_radius is None:
-        assert all(in_place) and len(cascade.tiles) == 2
-    else:
-        assert not any(in_place) and len(cascade.tiles) == 4
+    for kw in (dict(), dict(tile_bytes=None), dict(tile_bytes=0), dict(retain_radius=0)):
+        _, res, t = _run(corr, leaf, pair, True, **kw)
+        assert not compiled and not t["ephemeral_used"]
+    _run(corr, leaf, pair, True, tile_bytes=1 << 18)
+    assert len(compiled) == 1

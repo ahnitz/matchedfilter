@@ -271,7 +271,8 @@ library chooses the execution.
   schedule=...)`); the Python run loop and its helpers, `_assemble_leaf_results` and
   `HMFTable.run_slices` are deleted. A CPU search keeps tiled chunks as it keeps untiled ones.
   Goldens (24,593 arrays, every tiling case under both schedules) 0 differ from ac35c8b2, and
-  the two schedules agree on 4,550 arrays. Injection-window cases 6-12% faster a steady pass,
+  the two schedules agree on 4,550 arrays. Injection-window cases 6-12% faster a steady pass
+  than with part A's tiled cascade (both tiled: against the untiled schedule they tie, part C1),
   their inner + leaf Python share 18.5-28% -> 4-13%. Not folded in: inner nodes with inner
   children (a lane copy step would do it) and the root.
 - 2026-11-28: conversion step 6, part C1: where the middle output is written whole, the tiled
@@ -291,3 +292,46 @@ library chooses the execution.
   within noise of the old there (-4% to +3%). At these shapes on this machine tiling does not
   pay; it was the idea, not the kernel. Part C2 (the cap as a measured choice) waits for that
   reading.
+- 2026-11-28: conversion step 6, part C2: untiled is the default schedule everywhere. The 4 MB
+  cap (`auto_cohort_cap`) and `TimeDomainFilterBank._TILE_BYTES` are deleted; no shape is
+  decided by a size threshold. The tiled schedule stays a schedule of the same table, an
+  explicit choice of `correlate_and_filter_many(..., tile_bytes=B)`; a search never tiles.
+  Why not the default, from part C1's table (dev2, one core, tiling forced, ratio to the
+  untiled pass of the same tree; instructions within 1.4% in every arm, so the differences are
+  cycles):
+
+  | shape | in-place 1 / 4 / 16 / 32 MB | scratch 4 / 16 MB | DRAM fills (in-place) |
+  |---|---|---|---|
+  | capture top 1 | 1.50 / 1.48 / 1.53 / 1.30 | 1.09 / 1.16 | 4.2-6.7x |
+  | capture top 2 | 1.55 / 1.58 / 1.58 / 1.35 | 1.14 / 1.14 | 5.2-7.5x |
+  | capture top 3 | 1.51 / 1.47 / 1.48 / 1.28 | 1.05 / 1.13 | 4.3-6.8x |
+  | real PyCBC CPU job | 4 MB 1.15, 32 MB 1.05 | | 2.2x, 1.5x |
+  | injection windows (inj1, inj2, inj4, synthetic) | | the default until now: ties untiled (-2% to +9%, noise about 5%) | |
+
+  Time-major tiles re-read every leaf bank's templates per tile; the leaves' read of the
+  middle output from memory, which is what tiling saves, is 2-3% of a full-data pass here.
+  One tiled schedule is kept, the scratch one (time tiles of up to 8 templates, collars, the
+  rows copied to the output), which serves every retain mode; C1's in-place variant for a
+  written output is deleted again (_batches.py 2169 -> 2098 lines, _core.c +17 for the copy
+  op it needs; the kernel's streaming mirror stays deleted, the copy op replaces it). Forced,
+  this schedule costs 1.06-1.27x the untiled chunks on the capture tops (1, 4, 16, 32 MB:
+  1.26/1.07/1.08/1.08, 1.27/1.07/1.09/1.09, 1.22/1.06/1.13/1.13; `tools/schedule_bench.py`,
+  chunk time only) and 1.00-1.06x on the injection-window chunks, against 1.28-1.58x of a
+  whole pass for the in-place variant: the simpler arrangement is also the faster one. A
+  trial between the schedules is not built. It would be added when a shape or machine where
+  tiling wins is found: `tools/golden.py schedules` checks that both schedules give the same
+  results (the first capture top's chunks, plain and with injection windows, and the entry
+  points' cascade cases), and `tools/schedule_bench.py` times them on a capture's chunks with
+  a perf recipe for instruction, cycle and memory-fill counts; the cluster's Xeons and older
+  CPUs (other cache shapes; an earlier slab-grouping change helped Ivy Bridge and not dev2)
+  are where to run it first.
+  The default before and after (the injection-window chunks were tiled by the cap and now run
+  untiled; dev2 core 13, alternated, 3 rounds at load 3.0-3.4): inj1 0.995, inj2 0.970, inj4
+  1.013, synthetic search 0.974, injstd 1.001 of the old wall, instructions 0.993-1.000,
+  cycles 0.98-1.04; capture tops 1.001-1.003 (load 4.1-6.6). Real PyCBC CPU job, seeded: old
+  70.94/69.85/70.75 s, new 70.43/72.14/70.17 s, triggers identical.
+  Part C3: direct `correlate_and_filter_many` calls with `tile_bytes` compile their schedule
+  on every call (8-13 ms a full-data chunk, against about 110 ms to run it); with tiling
+  explicit-only their callers are tools/ladder.py (`LADDER_TILE_BYTES`), the tests and
+  golden.py (schedule_bench.py compiles once and reruns); PyCBC never calls it directly. No
+  kept plan is added for them.

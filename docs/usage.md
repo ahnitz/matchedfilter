@@ -185,8 +185,8 @@ sample rates that are not positive, and tap counts outside their templates.
 
 `filter_series_many(jobs)` runs several `(bank, series, kwargs)` calls as one
 batch, and `correlate_and_filter_many(corr_jobs, leaf_jobs)` runs a middle
-correlation and the leaf banks that read its output together, in cache-sized
-pieces. Each returns what the calls made one at a time return.
+correlation and the leaf banks that read its output together (one table on the CPU;
+with `tile_bytes`, interleaved in time tiles of that size). Each returns what the calls made one at a time return.
 
 A bank can hold several noise profiles over one set of templates:
 `set_reference(profile, delta_f=..., profile=name)` adds a calibration under a

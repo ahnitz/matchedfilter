@@ -2438,24 +2438,26 @@ class TimeDomainFilterBank:
             res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in res]
         return res
 
-    #: Default L3-resident middle-output tile target in bytes for CPU
-    #: correlate_and_filter_many execution (0 disables tiling).
-    _TILE_BYTES = 4 << 20
-
     @staticmethod
     def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
                                   tile_bytes=None, retain_radius=None,
                                   retain_threshold=None):
-        """Correlate middle-stage banks and filter dependent leaf banks in L3-resident tiles.
+        """Correlate middle-stage banks and filter the leaf banks that read their outputs.
 
-        On CPU when ``wait`` is True and no joint autotuning trial is open, correlation jobs
-        that share a middle bank and window layout are grouped into multi-detector cohorts
-        and executed row-by-row in L3-resident sample chunks. Each middle block's forward
-        transform is computed once per input series and reused across the group's templates,
-        writing into a persistent L3-resident scratch buffer that all dependent leaf banks
-        filter immediately across all detectors before moving to the next row. Any GPU,
-        deferred, trial-playing, or non-sparse job falls back cleanly to untiled
-        ``correlate_series`` and ``filter_series_many``.
+        By default the jobs run untiled: on the CPU the correlations and the leaf calls that
+        read them are the steps of one table, run in one C call; elsewhere they are
+        ``correlate_series`` calls followed by ``filter_series_many``.
+
+        With a positive ``tile_bytes`` the CPU runs them tiled, as an explicit choice: the
+        correlation jobs that share a middle bank and window layout form a multi-detector
+        cohort, correlated per time tile and template batch into the middle bank's scratch
+        rows, and the leaf blocks that are ready are filtered on those rows while they are in
+        cache. Tiling is not the default because it did not pay on the shapes measured (a
+        PyCBC search's full-data and injection-window chunks on one Zen 5 machine, 2026-11-28):
+        the tiles re-read every leaf bank's templates, while what they save, the leaves' read
+        of the middle output from memory, is 2-3% of a full-data pass there.
+        ``tools/schedule_bench.py`` measures both schedules on another machine's shapes. GPU,
+        deferred and trial-playing jobs always run untiled.
 
         Parameters
         ----------
@@ -2476,18 +2478,16 @@ class TimeDomainFilterBank:
             ``"filter"`` (total leaf-filtering wall seconds), and ``"ephemeral_used"``
             (True when ``retain_radius == 0`` skipped writing ``out``).
         tile_bytes : int, optional
-            Target byte footprint per L3-resident middle-row chunk (default ``None``, which
-            uses ``_TILE_BYTES`` when the cohort's active middle output fits within the L3
-            budget and falls back to untiled non-temporal streaming on oversized full-segment
-            cohorts). Passing a positive integer forces tiled execution at that chunk budget;
-            passing ``0`` disables tiling and runs untiled ``correlate_series`` followed by
-            ``filter_series_many``.
+            The byte footprint of one time tile of a cohort's middle output (every detector,
+            a template batch's rows): a positive value runs the cohorts tiled at that budget.
+            Default None (or 0): untiled.
         retain_radius : int, optional
             Controls how much of each ``kwargs["out"]`` array is materialized in DRAM:
             ``None`` (default) writes every sample so ``out`` is byte-for-byte identical to
             ``correlate_series``; ``0`` treats ``out`` as an addressing descriptor only and
             writes nothing to DRAM; a positive integer ``R`` writes ``[c0 - R, c0 + R)``
-            around every leaf peak with ``|snr| >= retain_threshold`` across the cohort.
+            around every leaf peak with ``|snr| >= retain_threshold`` across the cohort. It
+            applies to tiled cohorts; an untiled call writes every sample.
         retain_threshold : float, optional
             Minimum ``|snr|`` of leaf peaks that trigger ``retain_radius`` retention when
             ``retain_radius > 0`` (default ``0.0``).
