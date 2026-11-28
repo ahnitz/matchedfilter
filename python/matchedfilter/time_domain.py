@@ -2111,7 +2111,9 @@ class TimeDomainFilterBank:
                         return res
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
-        if template_index is None and not getattr(self, '_defer', False) and self.engine == 'hier':
+        # Every template on the CPU: compiled leaf steps (gated, or flat for a flat bank and
+        # a call below a hierarchical bank's threshold), peaks assembled in the extension.
+        if template_index is None and not getattr(self, '_defer', False):
             single_out = [None]
             if _batches._cpu_sparse_batch(
                 None, single_out,

@@ -1629,12 +1629,14 @@ def _plan_is_gated_cpu(plan):
 
 
 class _LeafSteps(NamedTuple):
-    """The gated leaf steps of a set of bank calls, compiled once (_compile_leaf_steps): the
+    """The leaf steps of a set of bank calls, compiled once (_compile_leaf_steps): the
     extension's table (_core.HMFTable) and what a run checks and updates around it.
 
-    Each step is one template group's blocks of one bin count, on the compiled plan of the
-    call's profile; ``steps`` holds per step (call index, group, block starts in output order,
-    SeriesLayout, plan, compiled plan, templates, bin size, threshold, real, stride).
+    A gated step is one template group's blocks of one bin count, on the compiled plan of the
+    call's profile; ``steps`` holds per gated step (call index, group, block starts in output
+    order, SeriesLayout, plan, compiled plan, templates, bin size, threshold, real, stride). A
+    flat step is the same on the group's ungated plan (a flat bank's plan, or a hierarchical
+    group's flat plan for a call below the bank's threshold).
 
     The banks are held by weak reference: the first call's bank keeps its compiled steps, so
     a strong reference to it from them would make a cycle, and a leaf bank would then live
@@ -1646,17 +1648,23 @@ class _LeafSteps(NamedTuple):
     steps: list
     plans: list          # distinct (plan, profile name, compiled plan, resolution) checked on reuse
     banks: list          # (weak reference to a bank, its template groups) checked on reuse
+    flat_plans: list     # distinct (ungated plan, its compiled plan) of the flat steps
 
 
 def _compile_leaf_steps(calls, split_modes=True):
-    """The gated leaf steps of bank calls, or None where a call cannot run as such.
+    """The leaf steps of bank calls, or None where no call can run as such.
 
     The calls are compiled in order, each template group's blocks of one bin count a step,
-    exactly as the bank's assembly once laid them out call by call. Compiling configures each
-    plan as a call did (its profile, templates, compiled plan, series mode and direct prices),
-    and the table keeps that configuration per step, so a run sets a plan's mode again only
-    where another call left it otherwise. A plan asked for two series modes starts a new phase
-    (the steps before it run as one batch), as the per-call assembly flushed its batch.
+    exactly as the bank's assembly once laid them out call by call. A call at or above a
+    hierarchical bank's threshold has gated steps; a call of a flat bank, or below a
+    hierarchical bank's threshold, has flat steps, on each group's ungated plan (a CPU
+    MatchedFilter of one data row; a call whose plans are not that is left out). Compiling
+    configures each gated plan as a call did (its profile, templates, compiled plan, series
+    mode and direct prices), and the table keeps that configuration per step, so a run sets a
+    plan's mode again only where another call left it otherwise. A plan asked for two series
+    modes starts a new phase (the steps before it run as one batch), as the per-call assembly
+    flushed its batch. A flat step reads a real series widened to complex in the extension,
+    over the samples its blocks read, as the call did in Python.
 
     Parameters
     ----------
@@ -1676,6 +1684,7 @@ def _compile_leaf_steps(calls, split_modes=True):
         the real series it is given.
     """
     steps, step_args, jobs, plans, banks, compiled_calls, merges = [], [], [], {}, {}, [], []
+    flat_args, flat_plans = [], {}
     modes = {}
     phase = 0
     series = []
@@ -1684,12 +1693,24 @@ def _compile_leaf_steps(calls, split_modes=True):
             bank.use_profile(profile)
         plan_profile = bank._plan_profile(bank.__dict__.get("_profile"))
         # A call these steps do not run is left to the caller (filter_series' own path).
-        if (bank.engine != 'hier' or _parse_device(bank.device).kind != 'cpu'
-                or not np.isfinite(eff_threshold) or eff_threshold < bank.threshold
-                or eff_threshold <= 0.0 or (binsize is not None and int(binsize) < 1)):
+        if (_parse_device(bank.device).kind != 'cpu' or not np.isfinite(eff_threshold)
+                or eff_threshold < 0.0 or (binsize is not None and int(binsize) < 1)):
             continue
         groups = bank._groups
-        if not all(g.is_hier and _plan_is_gated_cpu(g.plan) for g in groups):
+        # Ungated (flat steps): a flat bank's call, or a hierarchical bank's below its
+        # threshold, on each group's ungated plan, as filter_series chose it.
+        flat = bank.engine != 'hier' or eff_threshold < bank.threshold or eff_threshold <= 0.0
+        if flat:
+            group_plans = [g.get_flat_plan() if bank.engine == 'hier' else g.plan
+                           for g in groups]
+            if not all(type(p) is MatchedFilter and p._gpu is None and p.ndata == 1
+                       and not getattr(p, '_bandlimited', False)
+                       and 'run_series' not in p.__dict__ and '_series_flags' not in p.__dict__
+                       for p in group_plans):
+                continue
+        elif all(g.is_hier and _plan_is_gated_cpu(g.plan) for g in groups):
+            group_plans = [g.plan for g in groups]
+        else:
             continue
         slot = len(series)
         series.append(ser)
@@ -1699,7 +1720,7 @@ def _compile_leaf_steps(calls, split_modes=True):
         stride = 2 if real and ser.strides == (8,) else 1
         aligned = binsize is not None or bank.binsize is not None
         merge_bs = []
-        for g in groups:
+        for g, plan in zip(groups, group_plans):
             N = g.n
             bstarts, bws, bwe = bank._group_blocks(g, W, S, cache_key)
             if bstarts.size == 0:
@@ -1707,17 +1728,30 @@ def _compile_leaf_steps(calls, split_modes=True):
             bs = int(binsize) if binsize is not None else (bank.binsize or N)
             bph = None
             if aligned:
-                bph = _bin_phases(g, g.plan, W, cache_key, bs, bstarts, bws, bwe)
+                bph = _bin_phases(g, plan, W, cache_key, bs, bstarts, bws, bwe)
                 if bph is not None and bs not in merge_bs:
                     merge_bs.append(bs)
-            for sub_st, sub_ws, sub_we, sub_ph in _blocks_by_bin_count(g.plan, N, bs, bstarts,
+            for sub_st, sub_ws, sub_we, sub_ph in _blocks_by_bin_count(plan, N, bs, bstarts,
                                                                        bws, bwe, bph):
                 layout = SeriesLayout(N, np.ascontiguousarray(sub_st, dtype=np.uintp),
                                       np.ascontiguousarray(sub_ws, dtype=np.uintp),
                                       np.ascontiguousarray(sub_we, dtype=np.uintp), bs,
                                       ragged=False, phase=sub_ph)
+                if flat:
+                    # One ungated run over the blocks in the caller's order (a plan of one
+                    # data row does not group them).
+                    nt = plan.ntemplates
+                    plan._require_templates(0, nt)
+                    ep = plan._execution_plan()
+                    flat_plans[id(plan)] = (plan, ep)
+                    flat_args.append((ep, slot, int(real), stride, layout.starts, layout.low,
+                                      layout.high, layout.phase, nt, bs, float(eff_threshold),
+                                      slot,
+                                      np.ascontiguousarray(g.template_indices, dtype=np.int64),
+                                      np.ascontiguousarray(sub_st, dtype=np.int64),
+                                      plan._step_stats))
+                    continue
                 layout.group(materialize=False)
-                plan = g.plan
                 plan.use_profile(plan_profile)
                 nt = plan.ntemplates
                 plan._require_templates(0, nt)
@@ -1768,9 +1802,9 @@ def _compile_leaf_steps(calls, split_modes=True):
         merges.append((W, merge_bs))
     if not compiled_calls:
         return None
-    table = _core.HMFTable(step_args, jobs, len(series))
+    table = _core.HMFTable(step_args, jobs, len(series), (), flat_args)
     return _LeafSteps(table, compiled_calls, merges, steps, list(plans.values()),
-                      list(banks.values()))
+                      list(banks.values()), list(flat_plans.values()))
 
 
 def _leaf_steps_valid(compiled):
@@ -1787,11 +1821,16 @@ def _leaf_steps_valid(compiled):
                 or state.get("_resolved") is not resolved
                 or state.get("_applied_plan") is not ep or state.get("_applied_res") is not resolved):
             return False
+    for plan, ep in compiled.flat_plans:
+        if plan.__dict__.get("_mf") is not ep:
+            return False
     return True
 
 
 def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
-    """Run the gated CPU hierarchical calls of a batch as compiled leaf steps, in one C call.
+    """Run the CPU every-template calls of a batch as compiled leaf steps, in one C call: a
+    hierarchical bank's at or above its threshold as gated steps, and a flat bank's or a call
+    below a hierarchical bank's threshold as flat steps.
 
     The calls' steps are compiled once per call shape (_compile_leaf_steps) and kept by the
     first call's bank under a key of every call's bank, layout, profile, series length,
@@ -1827,12 +1866,12 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
             if j in skip:
                 continue
             kw = kw or {}
-            if (bank.engine != 'hier' or kw.get("template_index") is not None
+            if (kw.get("template_index") is not None
                     or (set(kw) - {"windows", "binsize", "threshold", "template_index", "profile"})):
                 continue
             thr_arg = kw.get("threshold")
             eff_threshold = bank.threshold if thr_arg is None else float(thr_arg)
-            if not np.isfinite(eff_threshold) or eff_threshold < bank.threshold or eff_threshold <= 0.0:
+            if not np.isfinite(eff_threshold) or eff_threshold < 0.0:
                 continue
             if _parse_device(bank.device).kind != 'cpu':
                 continue
@@ -1881,6 +1920,11 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
         plan._dataset = False
         if plan._data_ready:
             plan._data_ready = set()
+    # An ungated plan read its series as complex, as its run_series once left it.
+    for plan, _ in compiled.flat_plans:
+        plan._dataset = False
+        plan._want_real = False
+        plan._data_ready = set()
     global STEP_COMPUTE_SECONDS
     STEP_COMPUTE_SECONDS += kernel
     offs = np.frombuffer(offs_b, np.int64)

@@ -204,3 +204,12 @@ library chooses the execution.
   to 1.61-1.63 s and setup from 1.17-1.24 s to 2.16-2.20 s (sum 3.75-3.92 s either way);
   device busy 0.142-0.144 s a pass, 70-74% of the steady wall, equal to the submissions'
   summed device time; peaks identical.
+- 2026-11-27: conversion step 4, flat steps. The other every-template CPU calls, a flat bank's
+  and a hierarchical bank's below its threshold, are flat steps of `_core.HMFTable`: a
+  template group's blocks of one bin count on its ungated `MatchedFilter`, run with
+  `ap_mf_run_series` in the table's run (a real series widened to complex there, over the
+  samples the blocks read), assembled with the gated steps' assembly. Goldens 0 differ. On the
+  CPU, filter_series' loop over groups and bin counts and its Python assembly now run only for
+  what the steps decline: plans in a trial or wrapped, correlation and band-limited plans, the
+  one-template plan of a single-template fallback; the tiled cascade's
+  `_assemble_leaf_results` remains until step 6, and the GPU's calls until phase 2.

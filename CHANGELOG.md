@@ -135,6 +135,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   each call looked up in Python. `_core.td_followup_batch` is removed. Results are unchanged,
   to the bit and in order. A follow-up call runs about 7,000 fewer instructions (one Zen 5
   core: 0.8-1.6 us less Python a call, the extension's side unchanged).
+- The other every-template CPU calls, a flat bank's (`engine="flat"`) and a hierarchical
+  bank's below its threshold (or at threshold 0), run as flat steps of the same step table:
+  each template group's blocks of one bin count on its ungated plan, run in the extension, a
+  real series widened to complex there, the peaks assembled and their window bins merged in
+  the same arena as the gated steps'. The Python loop over groups and bin counts and its
+  assembly no longer run for them. Results are unchanged, to the bit and in order.
 - `HierarchicalSearch.timings["hooks_compute"]`: of the hooks, the seconds the steps their
   refilter calls ran (single-template steps, and gated leaf steps for every template) spent in
   the extension; `tools/search_bench.py --followups` makes pycbc_inspiral_fir's follow-ups in

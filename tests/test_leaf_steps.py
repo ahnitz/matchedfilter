@@ -1,7 +1,9 @@
-"""Gated CPU leaf calls run as compiled leaf steps (_batches._compile_leaf_steps and
-_core.HMFTable): the steps of a call shape are compiled once and reused, a window list given
-again as a new list reuses them, and their peaks are, to the bit and in order, those of the
-call-at-a-time path (each template group's plan run_series, assembled in Python)."""
+"""Every-template CPU calls run as compiled leaf steps (_batches._compile_leaf_steps and
+_core.HMFTable): gated steps for a hierarchical bank's calls, flat steps for a flat bank's and
+for calls below a hierarchical bank's threshold. The steps of a call shape are compiled once and
+reused, a window list given again as a new list reuses them, and their peaks are, to the bit and
+in order, those of the call-at-a-time path (each template group's plan run_series, assembled in
+Python)."""
 import numpy as np
 import pytest
 
@@ -19,7 +21,7 @@ def _profile(n_bins=16385, delta_f=1.0 / 16.0):
     return np.where((f >= 24.0) & (f <= 850.0), np.maximum(f, 1.0) ** (-7.0 / 3.0), 0.0), delta_f
 
 
-def _bank(rng, n_templates=20, complex_taps=False, binsize=None):
+def _bank(rng, n_templates=20, complex_taps=False, binsize=None, engine="hier"):
     counts = rng.integers(150, 1500, size=n_templates)
     taps = np.zeros((n_templates, int(counts.max())),
                     dtype=np.complex64 if complex_taps else np.float32)
@@ -28,7 +30,7 @@ def _bank(rng, n_templates=20, complex_taps=False, binsize=None):
         phase = 2 * np.pi * ((30 + 7 * i) * t + 0.5 * (150 + 11 * i) * t * t)
         row = (np.exp(1j * phase) if complex_taps else np.cos(phase)) * np.hanning(c)
         taps[i, :c] = row / np.linalg.norm(row)
-    bank = TimeDomainFilterBank(taps, counts, engine="hier", threshold=3.6,
+    bank = TimeDomainFilterBank(taps, counts, engine=engine, threshold=3.6,
                                 false_dismissal=1e-2, device="cpu", binsize=binsize)
     w, df = _profile()
     bank.set_reference(w, delta_f=df)
@@ -131,5 +133,66 @@ def test_banks_with_compiled_steps_are_freed_without_the_cyclic_collector():
     try:
         del first, second, got
         assert [r() is None for r in refs] == [True, True]
+    finally:
+        gc.enable()
+
+
+def test_flat_steps_give_the_call_at_a_time_peaks(monkeypatch):
+    """A flat bank's calls and a hierarchical bank's calls below its threshold, of every series
+    kind (complex, real, a real lane of a complex series), with and without window bins, run
+    as flat steps of the table (none goes through a plan's run_series) and give the peaks of
+    the same calls made one at a time through each group's ungated plan."""
+    from matchedfilter import time_domain
+    rng = np.random.default_rng(15)
+    flat_bank, hier_bank = _bank(rng, engine="flat", binsize=400), _bank(rng, complex_taps=True)
+    S = 1 << 17
+    x = rng.standard_normal(S).astype(np.float32)
+    z = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
+    jobs = [(flat_bank, z, dict(windows=[(3000, 41000), (47000, 101000)], threshold=4.0)),
+            (flat_bank, x, dict(binsize=300, threshold=3.0)),
+            (hier_bank, z.imag, dict(windows=slice(9000, 120000), threshold=2.5)),
+            (hier_bank, z, dict(windows=[(20000, 30000), (31000, 90000)], binsize=512,
+                                threshold=0.0)),
+            (hier_bank, x, dict(windows=[(20000, 70000)], threshold=3.0))]
+    consume_into = time_domain._consume_into
+    consumed = []
+    monkeypatch.setattr(time_domain, "_consume_into",
+                        lambda *a: consumed.append(1) or consume_into(*a))
+    got = TimeDomainFilterBank.filter_series_many(jobs)
+    assert not consumed                         # no call was assembled in Python
+    assert [len(r.snr) > 0 for r in got] == [True] * len(jobs)
+    flat_steps = [len(c.flat_plans) for c in flat_bank.__dict__["_leaf_steps"].values()]
+    assert flat_steps and all(n > 0 for n in flat_steps)
+    monkeypatch.setattr(_batches, "_cpu_sparse_batch", lambda *a, **k: set())
+    want = [bank.filter_series(series, **kw) for bank, series, kw in jobs]
+    for g, w in zip(got, want):
+        _same(g, w)
+
+
+def test_flat_steps_compile_once_and_free_their_bank_without_the_collector(monkeypatch):
+    """A flat bank's call shape compiles once; its plans' stats count the steps' batches; and
+    the bank, which keeps the steps, dies without the cyclic collector."""
+    import gc
+    import weakref
+    rng = np.random.default_rng(16)
+    bank = _bank(rng, engine="flat")
+    x = rng.standard_normal(1 << 17).astype(np.float32)
+    compiled = []
+    compile_steps = _batches._compile_leaf_steps
+    monkeypatch.setattr(_batches, "_compile_leaf_steps",
+                        lambda *a, **k: compiled.append(1) or compile_steps(*a, **k))
+    plans = {id(g.plan): g.plan for g in bank._groups}
+    before = {k: p.performance_stats["timed_calls"] for k, p in plans.items()}
+    first = bank.filter_series(x, windows=[(4000, 50000)], threshold=3.0)
+    again = bank.filter_series(x, windows=[(4000, 50000)], threshold=3.0)
+    assert len(compiled) == 1 and len(first.snr) > 0
+    _same(first, again)
+    after = {k: p.performance_stats["timed_calls"] for k, p in plans.items()}
+    assert all(after[k] == before[k] + 2 for k in plans)
+    ref = weakref.ref(bank)
+    gc.disable()
+    try:
+        del bank, plans
+        assert ref() is None
     finally:
         gc.enable()

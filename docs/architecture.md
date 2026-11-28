@@ -103,8 +103,9 @@ here: `simulate` (the one simulation, below; its kernel is `src/simulate.c`),
 `plan_best` (a chain's candidate plans priced on a cost model; reference in
 `gatechain.plan_chain`, selected by `gatechain._C_PRICING`), the shared-screener routines
 (`tier0_match`, `tier0_pair_level`, `tier0_pass`, `tier0_mwu`), `gauss_fill`, and the step
-table `HMFTable` (gated leaf steps, run with `ap_hmf_run_series_batch_sparse`, and
-single-template steps, run with the follow-up kernel of `src/followup.c`). Buffers are checked at
+table `HMFTable` (gated leaf steps, run with `ap_hmf_run_series_batch_sparse`; flat steps,
+run with `ap_mf_run_series`; and single-template steps, run with the follow-up kernel of
+`src/followup.c`). Buffers are checked at
 the boundary independently of the Python API. `MF` and `HMF` share one implementation of
 ingest, `run` and `run_series` (`bind_set`, `bind_set_batch`, `bind_run`,
 `bind_run_series`, reading a `filter_view` of the object); every buffer a binding takes is
@@ -197,7 +198,11 @@ count are a step on the plan of the call's profile, compiled once per call shape
 calls' banks, layouts, profiles, series lengths and kinds, windows, bin sizes and
 thresholds) and kept by the first call's bank; a run is one C call that sets each plan's
 series mode, clusters the steps whose series share cache lines, runs them and returns every
-call's peaks in one arena, window bins merged. Single-template CPU calls (`template_index`,
+call's peaks in one arena, window bins merged. The other every-template CPU calls (a flat
+bank's, and a hierarchical bank's below its threshold) are flat steps of the same table: each
+template group's blocks of one bin count on the group's ungated plan (a `MatchedFilter` of one
+data row), run with `ap_mf_run_series` (a real series widened to complex over the samples the
+blocks read) and assembled in the same arena. Single-template CPU calls (`template_index`,
 a search's follow-ups) are single-template steps of the same table type: a template group's
 step (its block geometry, its templates' taps and bank indices, and the group's store of
 template spectra, `_batches._single_step`) is compiled once and kept by the group, or for a
