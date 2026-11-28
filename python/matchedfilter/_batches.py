@@ -46,6 +46,15 @@ _BATCH_TOKEN = 0
 #: around its calls (HierarchicalSearch.timings).
 STEP_COMPUTE_SECONDS = 0.0
 
+#: Seconds the process's correlation steps have spent in the extension (their kernels, the
+#: clearing and the scaling): correlate_series, correlate_series_channels and the middle
+#: correlations of correlate_and_filter_many on the CPU. Read as a difference, as
+#: STEP_COMPUTE_SECONDS is (HierarchicalSearch.timings["inner_compute"]).
+CORR_COMPUTE_SECONDS = 0.0
+
+#: A plan's set of data rows that hold data, when none do (MatchedFilter._data_ready).
+_NO_DATA_READY = frozenset()
+
 
 def _fuse_close(jobs):
     """Fuse this batch's submissions (_gpuexec.fused) where it has GPU banks: the batch's
@@ -1939,6 +1948,233 @@ def _cpu_sparse_batch(jobs, out, skip=None, pre_jobs=None):
     return done
 
 
+class _CorrSteps(NamedTuple):
+    """Correlation calls on CPU banks compiled into the correlation steps of one table
+    (_compile_corr_steps): the extension's table and what a run checks and updates around it.
+
+    The banks are held by weak reference, as the leaf steps hold theirs: the first call's bank
+    keeps the compiled steps, and a strong reference from them would put it in a cycle."""
+    table: Any
+    banks: list          # distinct (weak reference to a bank, its template groups), checked
+    #                      on reuse
+    plans: list          # distinct (correlation plan, its compiled plan), checked on reuse
+    work: list           # per distinct bank: (its index in banks, [(block length, work
+    #                      counters)], input samples the windows read), added per run
+
+
+def _compile_corr_steps(calls, scaled):
+    """The correlation steps of correlation calls on CPU banks.
+
+    Call c reads input slot c and writes output slot c. Its output rows are its bank's
+    templates in order, or the templates ``rows`` lists. A step is one block-size group's
+    templates adjacent both in the group and in the output, over the group's blocks that a
+    window reaches, written into those rows; then the samples outside what the windows hold
+    (and, with a support, inside it) are cleared on them, and with scales (``scaled[c]``) each
+    row is scaled by entry ``row`` of scale vector c. Every template of a bank whose group's
+    templates are not one run of the output is one step written through a scratch of the
+    group's rows, cleared over every sample the windows do not hold, then copied to its rows.
+    These are the calls, clearing and scaling correlate_series made group by group.
+
+    Parameters
+    ----------
+    calls : sequence of tuple
+        ``(bank, series, windows, support, rows)``: the series 1-D float32 (read at half-size
+        transforms) or complex64, ``windows`` and ``support`` normalised (``(K, 2)`` int64;
+        ``support`` None where the output may hold anything), ``rows`` None or an int64 array
+        of distinct template indices.
+    scaled : sequence of bool
+        Per call, whether the run gives it a scale vector.
+
+    Returns
+    -------
+    _CorrSteps
+    """
+    steps, banks, plans, work = [], [], {}, {}
+    bank_index = {}
+    for c, ((bank, ser, W, support, rows), with_scales) in enumerate(zip(calls, scaled)):
+        S = ser.size
+        b = bank_index.get(id(bank))
+        if b is None:
+            b = bank_index[id(bank)] = len(banks)
+            banks.append((weakref.ref(bank), bank._groups))
+            work[b] = ({}, 0)
+        counters, in_samples = work[b]
+        work[b] = (counters, in_samples + int((W[:, 1] - W[:, 0]).sum()))
+        if S == 0:
+            continue
+        # the runs of output rows each step writes: (group, first local, count, first row,
+        # rows through a scratch or None)
+        runs = []
+        if rows is None:
+            for g in bank._groups:
+                g_indices = g.template_indices
+                cnt = len(g_indices)
+                if cnt == 0:
+                    continue
+                if g_indices[-1] - g_indices[0] + 1 == cnt and np.array_equal(
+                        g_indices, np.arange(g_indices[0], g_indices[0] + cnt)):
+                    runs.append((g, 0, cnt, int(g_indices[0]), None))
+                else:
+                    runs.append((g, 0, cnt, 0, np.ascontiguousarray(g_indices, np.int64)))
+        else:
+            for j, t in enumerate(rows):
+                g, li = bank._template_map[int(t)]
+                if runs and runs[-1][0] is g and runs[-1][1] + runs[-1][2] == li:
+                    runs[-1][2] += 1
+                else:
+                    runs.append([g, li, 1, j, None])
+        for g, li, cnt, row0, scattered in runs:
+            cplan = g.get_correlation_plan()
+            cplan._require_templates(li, cnt)
+            ep = cplan._continuous_plan()
+            plans[id(cplan)] = (cplan, ep)
+            lo, hi = cplan.valid
+            # a scratch holds anything: every sample the windows do not hold is cleared
+            st, bounds, keep, edges = bank._windows_layout(
+                g, S, W, support if scattered is None else None)
+            clear = edges.reshape(-1, 2)
+            clear = np.ascontiguousarray(clear[clear[:, 1] > clear[:, 0]], np.int64)
+            out_rows = (np.arange(row0, row0 + cnt, dtype=np.int64) if scattered is None
+                        else scattered)
+            steps.append((ep, c, int(ser.dtype == np.float32), c, row0, scattered, li, cnt,
+                          st if st.size else None, bounds if st.size else None, lo, hi, clear,
+                          c if with_scales else -1, out_rows if with_scales else None,
+                          np.array([[0, S]], np.int64) if with_scales else None, -1, -1))
+            if st.size:
+                n_work = counters.setdefault(g.n, dict(blocks=0, pairs=0, out_samples=0,
+                                                       tmpl_values=0))
+                n_work["blocks"] += int(st.size)
+                n_work["pairs"] += int(st.size) * cnt
+                n_work["out_samples"] += int((keep[:, 1] - keep[:, 0]).sum()) * cnt
+                n_work["tmpl_values"] += cnt * _stored_bins(g)
+    table = _core.HMFTable((), (), len(calls), (), (), steps, len(calls))
+    return _CorrSteps(table, banks, list(plans.values()),
+                      [(b, list(counters.items()), in_samples)
+                       for b, (counters, in_samples) in work.items()])
+
+
+def _corr_steps_valid(compiled):
+    """Whether compiled correlation steps still describe their banks and plans: the same
+    template groups, and each correlation plan's compiled plan as when compiled."""
+    for ref, groups in compiled.banks:
+        bank = ref()
+        if bank is None or bank.__dict__.get("_built") is not groups:
+            return False
+    for plan, ep in compiled.plans:
+        if plan.__dict__.get("_mf") is not ep:
+            return False
+    return True
+
+
+def _cpu_correlate(calls, scales=None):
+    """Run correlation calls on CPU banks as correlation steps, in one C call.
+
+    The steps of a call shape are compiled once (_compile_corr_steps) and kept by the first
+    call's bank under a key of every call's bank, layout, series length and kind, windows,
+    support, rows and whether it is scaled; a run binds the series, outputs and scale vectors
+    and runs every step (_core.HMFTable.run_corr), which writes every output sample the
+    calls' windows and supports ask for.
+
+    Parameters
+    ----------
+    calls : sequence of tuple
+        ``(bank, series, windows, support, rows, out)``: as _compile_corr_steps takes them,
+        with ``out`` the call's ``(rows, len(series))`` C-contiguous complex64 output.
+    scales : sequence, optional
+        Per call None or a float32 vector with one scale per output row. Default None: no
+        call is scaled.
+
+    Returns
+    -------
+    float
+        The seconds the steps spent in the extension.
+    """
+    scaled = (False,) * len(calls) if scales is None else tuple(s is not None for s in scales)
+    key = tuple((id(bank), bank.__dict__.get("_layout_rank"), ser.size, ser.dtype.char,
+                 W.tobytes(), None if support is None else support.tobytes(),
+                 None if rows is None else rows.tobytes(), with_scales)
+                for (bank, ser, W, support, rows, _), with_scales in zip(calls, scaled))
+    memo = calls[0][0].__dict__.setdefault("_corr_steps", OrderedDict())
+    compiled = memo.get(key)
+    if compiled is not None and _corr_steps_valid(compiled):
+        memo.move_to_end(key)
+    else:
+        compiled = _compile_corr_steps([c[:5] for c in calls], scaled)
+        memo[key] = compiled
+        while len(memo) > 8:
+            memo.popitem(last=False)
+    seconds = compiled.table.run_corr(
+        0, compiled.table.corrs, [c[1] for c in calls], [c[5] for c in calls],
+        None if scales is None else [np.empty(0, np.float32) if s is None else s
+                                     for s in scales])
+    global CORR_COMPUTE_SECONDS
+    CORR_COMPUTE_SECONDS += seconds
+    # The kernels overwrote the plans' data buffers.
+    for plan, _ in compiled.plans:
+        plan._dataset = False
+        if plan._data_ready != _NO_DATA_READY:
+            plan._data_ready = set()
+    for b, counters, in_samples in compiled.work:
+        bank = compiled.banks[b][0]()
+        bank._add_corr_in(in_samples)
+        for n, counts in counters:
+            bank._add_corr_work(n, counts)
+    return seconds
+
+
+#: correlate_series' keyword arguments.
+_CORR_KEYS = frozenset(("windows", "scales", "template_index", "out", "wait", "templates",
+                        "out_support"))
+
+
+def _correlate_jobs(corr_jobs, indices, corr_times):
+    """``bank.correlate_series(series, **kwargs)`` for the (bank, series, kwargs) jobs at
+    indices, in order: consecutive jobs on CPU banks as the correlation steps of one table
+    (one C call, _cpu_correlate), any other job by its own call. A job whose series may lie in
+    the output of an earlier job of the batch starts a new batch, so it reads that output
+    written. Each job's wall seconds go into corr_times at its index; a batch's are shared
+    evenly between its jobs."""
+    batch, batch_scales, batch_index = [], [], []
+
+    def flush():
+        if batch:
+            t0 = time.perf_counter()
+            _cpu_correlate(batch, batch_scales if any(s is not None for s in batch_scales)
+                           else None)
+            share = (time.perf_counter() - t0) / len(batch)
+            for ci in batch_index:
+                corr_times[ci] += share
+            batch.clear()
+            batch_scales.clear()
+            batch_index.clear()
+
+    for ci in indices:
+        bank, series, kw = corr_jobs[ci]
+        kw = kw or {}
+        if not (set(kw) <= _CORR_KEYS) or not bank._correlates_on_cpu():
+            flush()
+            t0 = time.perf_counter()
+            bank.correlate_series(series, **kw)
+            corr_times[ci] += time.perf_counter() - t0
+            continue
+        if isinstance(series, np.ndarray) and any(np.may_share_memory(series, call[5])
+                                                  for call in batch):
+            flush()
+        t0 = time.perf_counter()
+        templates, out_support = kw.get("templates"), kw.get("out_support")
+        ser = bank._series_input(series)
+        W, _ = bank._call_windows(kw.get("windows"), ser.size)
+        rows, row_scales, result, _, support = bank._correlation_call(
+            ser, W, kw.get("scales"), kw.get("template_index"), kw.get("out"),
+            None if templates is None else bank._template_selection(templates),
+            None if out_support is None else _normalize_windows(out_support, ser.size))
+        corr_times[ci] += time.perf_counter() - t0
+        batch.append((bank, ser, W, support, rows, result))
+        batch_scales.append(row_scales)
+        batch_index.append(ci)
+    flush()
+
+
 def _corr_stream_hooks():
     """Return lazily bound C non-temporal streaming helpers from _core."""
     hooks = TimeDomainFilterBank._STREAM_HOOKS
@@ -1976,11 +2212,8 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
     eff_ret_thr = 0.0 if retain_threshold is None else float(retain_threshold)
 
     def _run_untiled():
-        corr_times = []
-        for c_bank, c_ser, c_kw in corr_jobs:
-            t_c0 = time.perf_counter()
-            c_bank.correlate_series(c_ser, **(c_kw or {}))
-            corr_times.append(time.perf_counter() - t_c0)
+        corr_times = [0.0] * len(corr_jobs)
+        _correlate_jobs(corr_jobs, range(len(corr_jobs)), corr_times)
         t_f0 = time.perf_counter()
         res = TimeDomainFilterBank.filter_series_many(leaf_jobs, wait=wait) if leaf_jobs else []
         dt_f = time.perf_counter() - t_f0
@@ -2018,15 +2251,12 @@ def correlate_and_filter_many(corr_jobs, leaf_jobs, wait=True, timings=None,
     all_ephemeral = retain_radius == 0
 
     def _correlate_untiled(indices):
-        """Correlate these jobs with correlate_series and leave their leaves to
+        """Correlate these jobs as correlate_series does and leave their leaves to
         filter_series_many."""
         nonlocal all_ephemeral
         all_ephemeral = False
+        _correlate_jobs(corr_jobs, indices, corr_times)
         for ci in indices:
-            c_bank, c_ser, c_kw = corr_jobs[ci]
-            t_c0 = time.perf_counter()
-            c_bank.correlate_series(c_ser, **(c_kw or {}))
-            corr_times[ci] = time.perf_counter() - t_c0
             fallback_leaves.extend(leaf_by_corr[ci])
 
     # Screen candidate correlation jobs and group compatible multi-detector jobs into cohorts.

@@ -104,8 +104,9 @@ here: `simulate` (the one simulation, below; its kernel is `src/simulate.c`),
 `gatechain.plan_chain`, selected by `gatechain._C_PRICING`), the shared-screener routines
 (`tier0_match`, `tier0_pair_level`, `tier0_pass`, `tier0_mwu`), `gauss_fill`, and the step
 table `HMFTable` (gated leaf steps, run with `ap_hmf_run_series_batch_sparse`; flat steps,
-run with `ap_mf_run_series`; and single-template steps, run with the follow-up kernel of
-`src/followup.c`). Buffers are checked at
+run with `ap_mf_run_series`; single-template steps, run with the follow-up kernel of
+`src/followup.c`; and correlation steps, run with `ap_mf_correlate_series_continuous` or its
+real-series form, then zeroed and scaled in C, by `run_corr`). Buffers are checked at
 the boundary independently of the Python API. `MF` and `HMF` share one implementation of
 ingest, `run` and `run_series` (`bind_set`, `bind_set_batch`, `bind_run`,
 `bind_run_series`, reading a `filter_view` of the object); every buffer a binding takes is
@@ -211,12 +212,24 @@ windows, bin size and threshold and runs in the same C call, which lays its bloc
 correlates (time-domain for a narrow window, else by transforms), bins and merges in C. A
 template's spectrum is made from its taps when a call first needs it and kept in a slot of
 the group's store (256 slots at most, the least recently used given up first).
+CPU correlation calls (`correlate_series`, and `correlate_series_channels` for all its
+channels) are correlation steps of the same table type (`_batches._cpu_correlate`,
+`_batches._compile_corr_steps`): a step is one template group's templates adjacent in the
+group and in the output, over the group's blocks that a window reaches, written into rows of
+an output, with the samples it clears (outside the windows, and inside the output's support)
+and, for a scaled call, each row's scale vector entry and the samples it scales. A group whose
+templates are not one run of the output writes through a scratch and copies its rows. The
+steps of a call shape (the calls' banks, layouts, series lengths and kinds, windows,
+supports, rows and whether scaled) are compiled once and kept by the first call's bank; a run
+binds the series, outputs and scale vectors and is one C call for every channel and group.
 `TimeDomainFilterBank.correlate_and_filter_many` runs a
 hierarchical search's middle correlations together with the leaf calls that read them: jobs
 on one middle bank and window layout form a cohort (the detectors of one search), which is
 correlated in cache-sized chunks into a scratch buffer that the leaf banks filter before
 the next chunk. The functions it is made of are in `_batches`, in the order it calls them.
-Its results equal those of `correlate_series` followed by `filter_series_many`.
+Its results equal those of `correlate_series` followed by `filter_series_many`. The middle
+correlations it does not tile run as the correlation steps of one table, consecutive CPU jobs
+in one C call (`_batches._correlate_jobs`).
 
 ## The gate model
 

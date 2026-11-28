@@ -144,6 +144,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
   real series widened to complex there, the peaks assembled and their window bins merged in
   the same arena as the gated steps'. The Python loop over groups and bin counts and its
   assembly no longer run for them. Results are unchanged, to the bit and in order.
+- CPU correlation calls run as correlation steps of the same step table: `correlate_series`
+  in one C call for every template group, `correlate_series_channels` in one C call for every
+  channel and group (it called `correlate_series` channel by channel), and the middle
+  correlations `correlate_and_filter_many` does not tile in one C call for consecutive CPU
+  jobs. A step is a template group's run of output rows over the blocks a window reaches; the
+  samples outside the windows are zeroed and the rows scaled in the extension, where numpy did
+  it per group. The steps of a call shape are compiled once; a call binds its series, outputs
+  and scales. Results are unchanged, to the bit. The binary-pulsar dense pass (complex series,
+  21 channels a call) spends about 96% of its profiled time in the extension, against about
+  86% before.
 - `HierarchicalSearch.timings["hooks_compute"]`: of the hooks, the seconds the steps their
   refilter calls ran (single-template steps, and gated leaf steps for every template) spent in
   the extension; `tools/search_bench.py --followups` makes pycbc_inspiral_fir's follow-ups in

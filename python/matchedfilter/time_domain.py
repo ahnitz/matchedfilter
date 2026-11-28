@@ -2511,46 +2511,26 @@ class TimeDomainFilterBank:
         return _interval_runs(S, b0, np.minimum(b0 + (hi - lo), S))
 
     def _correlate_group(self, g: "_TemplateGroup", ser: np.ndarray, st: np.ndarray,
-                         t0: int, nt: int, dest: np.ndarray, bounds=None) -> None:
-        """Correlate rows [t0, t0+nt) of group g over blocks st into dest (nt, S).
+                         t0: int, nt: int, dest: np.ndarray) -> None:
+        """Correlate rows [t0, t0+nt) of group g over blocks st into dest (nt, S) on g's
+        device.
 
-        Writes only the samples the blocks cover; leaves the rest of dest alone. On the CPU,
-        bounds (nblocks, 2) narrows what block b writes to [st[b]+bounds[b,0],
-        st[b]+bounds[b,1]) within its valid span (the block is computed the same; only its
-        copy-out is shorter).
-        The GPU path cannot write into caller memory, so it computes into a
-        cached shared workspace and copies the covered samples out.  Mirrors
-        what CorrelationFilter.run_series does before touching the execution
-        layer, so the plan's invariants hold without going through it."""
+        Writes only the samples the blocks cover; leaves the rest of dest alone. The device
+        cannot write into caller memory unless it shares it, so otherwise it computes into a
+        cached shared workspace and copies the covered samples out. Mirrors what
+        CorrelationFilter.run_series does before touching the execution layer, so the plan's
+        invariants hold without going through it. (A CPU group's correlation runs as
+        correlation steps, _batches._cpu_correlate.)"""
         if st.size == 0:
             return
         cplan = g.get_correlation_plan()
+        if cplan._gpu is None:
+            raise RuntimeError("a CPU group's correlation runs as correlation steps")
         S = ser.size
         cplan._require_templates(t0, nt)
         cplan._dataset = False
         cplan._data_ready = set()
         lo, hi = cplan.valid
-        if cplan._gpu is None:
-            ep = cplan._continuous_plan()
-            run = (ep.correlate_series_continuous_real if ser.dtype == np.float32
-                   and hasattr(ep, "correlate_series_continuous_real")
-                   else ep.correlate_series_continuous)
-            if run is ep.correlate_series_continuous and ser.dtype != np.complex64:
-                ser = _host_copy(ser, np.complex64)
-            bnd = bounds
-            if dest.flags.c_contiguous and dest.flags.writeable:
-                run(ser, st, lo, hi, t0, nt, dest, bnd)
-            else:
-                tmp = _page_aligned_empty((nt, S), dtype=np.complex64)
-                run(ser, st, lo, hi, t0, nt, tmp, bnd)
-                if bounds is None:
-                    runs = self._block_coverage(S, st, lo, hi)
-                else:
-                    s64, bnd64 = st.astype(np.int64), bounds.astype(np.int64)
-                    runs = _interval_runs(S, s64 + bnd64[:, 0], s64 + bnd64[:, 1])
-                for a, b in runs:
-                    dest[:, a:b] = tmp[:, a:b]                # see below
-            return
         if ser.dtype != np.complex64 and not _gpu_reads_real(cplan._gpu, g.n):
             ser = _host_copy(ser, np.complex64)   # this plan reads complex
         # Unified memory (Metal): write straight into dest, and read the series where it
@@ -2673,7 +2653,7 @@ class TimeDomainFilterBank:
         S = ser.size
         st, bounds, keep, edges = self._windows_layout(g, S, W, support)
         if st.size:
-            self._correlate_group(g, ser, st, t0, nt, dest, bounds)
+            self._correlate_group(g, ser, st, t0, nt, dest)
             self._count_windows_work(g, st, keep, nt)
         self._clear_outside(g, W, dest, edges, settle)
 
@@ -2820,86 +2800,31 @@ class TimeDomainFilterBank:
             complex64, ``(n_templates, len(series))``, ``(len(templates), len(series))``, or with
             ``template_index`` ``(len(series),)``. It is ``out`` when that was given.
         """
-
         ser = self._series_input(series)
-        S = ser.size
-        nt = self.n_templates
-        W = _normalize_windows(windows, S)
-        if out_support is not None:
-            if out is None:
-                raise ValueError("out_support describes out; pass out")
-            support = _normalize_windows(out_support, S)
-        else:
-            support = None
+        W, _ = self._call_windows(windows, ser.size)
+        rows, row_scales, result, ret, support = self._correlation_call(
+            ser, W, scales, template_index, out,
+            None if templates is None else self._template_selection(templates),
+            None if out_support is None else _normalize_windows(out_support, ser.size))
+        if self._correlates_on_cpu():
+            # one C call: every group's correlation steps (_batches._cpu_correlate)
+            _batches._cpu_correlate([(self, ser, W, support, rows, result)],
+                                    None if row_scales is None else [row_scales])
+            return ret
         # Input samples the windows read (matchedfilter._roofline), once per call.
-        w_span = int((W[:, 1] - W[:, 0]).sum())
-        self._add_corr_in(w_span)
-
+        self._add_corr_in(int((W[:, 1] - W[:, 0]).sum()))
         if template_index is not None:
-            if template_index < 0 or template_index >= nt:
-                raise IndexError(f"template_index {template_index} out of range [0, {nt})")
-            self._groups
             target_g, ti_local = self._template_map[template_index]
-
-            if scales is not None:
-                sc_arr = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
-                if sc_arr.size == nt:
-                    single_scale = sc_arr[template_index:template_index + 1]
-                elif sc_arr.size == 1:
-                    single_scale = sc_arr.ravel()[:1]
-                else:
-                    raise ValueError(f"scales must have length {nt} or 1 for single template")
-            else:
-                single_scale = None
-
-            if out is not None:
-                if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
-                   or not out.flags.c_contiguous or not out.flags.writeable:
-                    raise ValueError("out must be a writable C-contiguous complex64 array")
-                if out.shape == (S,):
-                    out_2d = out.reshape(1, S)
-                elif out.shape == (1, S):
-                    out_2d = out
-                else:
-                    raise ValueError(f"out shape {out.shape} must match ({S},) or (1, {S})")
-            else:
-                out_2d, support = self._alloc_corr_output((1, S), S, w_span)
-
-            self._correlate_windows(target_g, ser, W, ti_local, 1, out_2d, support=support)
-            if single_scale is not None:
-                np.multiply(out_2d, single_scale[:, None], out=out_2d)
-
-            if out is not None and out.ndim == 1:
-                return out
-            return out_2d[0] if out is None else out_2d
-
+            self._correlate_windows(target_g, ser, W, ti_local, 1, result, support=support)
+            if row_scales is not None:
+                np.multiply(result, row_scales[:, None], out=result)
+            return ret
         if templates is not None:
-            if template_index is not None:
-                raise ValueError("give template_index or templates, not both")
-            return self._correlate_selected(ser, W, templates, scales, out, support, wait=wait)
-
-        # Full bank correlation across all groups
-        shape = (nt, S)
-        if scales is not None:
-            scales_arr = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
-            if scales_arr.ndim != 1 or scales_arr.size != nt:
-                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {scales_arr.shape}")
-        else:
-            scales_arr = None
-
-        if out is not None:
-            if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
-               or out.shape != shape or not out.flags.c_contiguous \
-               or not out.flags.writeable:
-                raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
-            result = out
-        else:
-            result, support = self._alloc_corr_output(shape, S, w_span)
-
+            return self._correlate_selected(ser, W, rows, row_scales, result, support, wait=wait)
         settle = []
         ok = False
         try:
-            self._correlate_bank(ser, W, scales_arr, result, settle, support)
+            self._correlate_bank(ser, W, row_scales, result, settle, support)
             ok = True
         finally:
             gpus = list({id(x): x for x in settle}.values())
@@ -2911,9 +2836,102 @@ class TimeDomainFilterBank:
                     gpu._x_idle()
         return result
 
+    def _template_selection(self, templates):
+        """correlate_series' templates as distinct int64 bank indices, checked."""
+        sel = np.asarray(templates, dtype=np.int64).ravel()
+        if sel.size and (sel.min() < 0 or sel.max() >= self.n_templates):
+            raise IndexError(f"templates out of range [0, {self.n_templates})")
+        if np.unique(sel).size != sel.size:
+            raise ValueError("templates must be distinct")
+        return sel
+
+    def _correlation_call(self, ser, W, scales, template_index, out, selection, support):
+        """A correlate_series call's other arguments checked, and its output.
+
+        Parameters
+        ----------
+        ser : ndarray
+            The series as :meth:`_series_input` returns it.
+        W : ndarray
+            The windows, normalised.
+        scales, template_index, out
+            As :meth:`correlate_series` takes them.
+        selection : ndarray or None
+            The ``templates`` argument as :meth:`_template_selection` returns it.
+        support : ndarray or None
+            The ``out_support`` argument normalised, or None.
+
+        Returns
+        -------
+        tuple
+            ``(rows, row_scales, result, returned, support)``: the bank templates of the
+            output's rows (None: every template in the bank's order), one float32 scale per
+            output row or None, the 2-D output the rows are written into (``out``, or a new
+            array), what :meth:`correlate_series` returns, and the output's support (None
+            where the output may hold anything).
+        """
+        S = ser.size
+        nt = self.n_templates
+        if support is not None and out is None:
+            raise ValueError("out_support describes out; pass out")
+
+        if template_index is not None:
+            if template_index < 0 or template_index >= nt:
+                raise IndexError(f"template_index {template_index} out of range [0, {nt})")
+            row_scales = None
+            if scales is not None:
+                sc_arr = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+                if sc_arr.size == nt:
+                    row_scales = sc_arr[template_index:template_index + 1]
+                elif sc_arr.size == 1:
+                    row_scales = sc_arr.ravel()[:1]
+                else:
+                    raise ValueError(f"scales must have length {nt} or 1 for single template")
+            if out is not None:
+                if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
+                   or not out.flags.c_contiguous or not out.flags.writeable:
+                    raise ValueError("out must be a writable C-contiguous complex64 array")
+                if out.shape == (S,):
+                    result = out.reshape(1, S)
+                elif out.shape == (1, S):
+                    result = out
+                else:
+                    raise ValueError(f"out shape {out.shape} must match ({S},) or (1, {S})")
+                returned = out
+            else:
+                result, support = self._alloc_corr_output(
+                    (1, S), S, int((W[:, 1] - W[:, 0]).sum()))
+                returned = result[0]
+            return (np.array([template_index], dtype=np.int64), row_scales, result, returned,
+                    support)
+
+        if selection is not None:
+            shape = (selection.size, S)
+        else:
+            shape = (nt, S)
+        if out is not None:
+            if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
+               or out.shape != shape or not out.flags.c_contiguous or not out.flags.writeable:
+                raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
+            result = out
+        else:
+            result, support = self._alloc_corr_output(shape, S, int((W[:, 1] - W[:, 0]).sum()))
+        row_scales = None
+        if scales is not None:
+            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+            if sc.ndim != 1 or sc.size != nt:
+                if selection is not None:
+                    raise ValueError(f"scales must be a 1D array of length {nt}")
+                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
+            row_scales = sc if selection is None else sc[selection]
+        return selection, row_scales, result, result, support
+
     def _series_input(self, series):
         """The series correlate_series correlates: 1-D, real where every group reads a real
         series, else complex64."""
+        if (type(series) is np.ndarray and series.dtype == np.complex64 and series.ndim == 1
+                and series.flags.c_contiguous):
+            return series
         a = _from_any(series)
         # A real series stays real (a real-real-complex hierarchy's middle stage filtering
         # the real top output) where every group reads one: on the CPU, half-size block
@@ -2968,6 +2986,28 @@ class TimeDomainFilterBank:
                                              list(out_support))
         if not (len(series) == len(windows) == len(out) == len(out_support)):
             raise ValueError("give one series, windows, out and out_support per channel")
+        if self._correlates_on_cpu():
+            # Every channel's every group: the correlation steps of one table, one C call.
+            # Channels often share one windows or support object: each is normalised once.
+            sel = None if templates is None else self._template_selection(templates)
+            normalised, calls = {}, []
+            for a, w, o, sup in zip(series, windows, out, out_support):
+                ser = self._series_input(a)
+                S = ser.size
+                W = normalised.get((id(w), S))
+                if W is None:
+                    W = normalised[(id(w), S)] = self._call_windows(w, S)[0]
+                support = None
+                if sup is not None:
+                    support = normalised.get((id(sup), S, "support"))
+                    if support is None:
+                        support = normalised[(id(sup), S, "support")] = _normalize_windows(sup, S)
+                rows, _, result, _, support = self._correlation_call(ser, W, None, None, o, sel,
+                                                                     support)
+                calls.append((self, ser, W, support, rows, result))
+            if calls:
+                _batches._cpu_correlate(calls)
+            return out
         self._groups
         sel = (np.arange(self.n_templates) if templates is None
                else np.asarray(templates, dtype=np.int64).ravel())
@@ -2992,8 +3032,8 @@ class TimeDomainFilterBank:
                        if getattr(g.get_correlation_plan(), '_gpu', None) is not None)
                 or any(getattr(g.get_correlation_plan(), '_gpu', None) is None
                        for g, _, _, _ in runs)):
-            # Channel by channel (a CPU bank, a series outside device memory, one channel,
-            # or arguments correlate_series rejects with its own message).
+            # Channel by channel (a series outside device memory, one channel, a group on the
+            # CPU, or arguments correlate_series rejects with its own message).
             for a, w, o, sup in zip(series, windows, out, out_support):
                 self.correlate_series(a, windows=w, out=o, out_support=sup, templates=templates,
                                       wait=wait)
@@ -3089,6 +3129,17 @@ class TimeDomainFilterBank:
         finally:
             self._staging_done()
 
+    def _correlates_on_cpu(self) -> bool:
+        """Whether every group's correlation plan is a CPU plan: the bank's correlation calls
+        then run as correlation steps (_batches._cpu_correlate). Kept per set of groups."""
+        built = self._groups
+        known = self.__dict__.get('_corr_on_cpu')
+        if known is None or known[0] is not built:
+            known = (built, all(getattr(g.get_correlation_plan(), '_gpu', None) is None
+                                for g in built))
+            self._corr_on_cpu = known
+        return known[1]
+
     def _correlation_reads_real(self) -> bool:
         """Whether every group's correlation plan reads a real series itself: the CPU's, or a
         GPU's whose forward takes real samples (one-stage, n <= 65536)."""
@@ -3139,27 +3190,9 @@ class TimeDomainFilterBank:
         return (_aligned_zeros(shape, dtype=dtype, align=16384),
                 np.empty((0, 2), dtype=np.int64))
 
-    def _correlate_selected(self, ser, W, templates, scales, out, support=None, wait=True):
-        """correlate_series(templates=...): row j of the result is template templates[j]."""
-        S = ser.size
-        sel = np.asarray(templates, dtype=np.int64).ravel()
-        if sel.size and (sel.min() < 0 or sel.max() >= self.n_templates):
-            raise IndexError(f"templates out of range [0, {self.n_templates})")
-        if np.unique(sel).size != sel.size:
-            raise ValueError("templates must be distinct")
-        shape = (sel.size, S)
-        if out is not None:
-            if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
-               or out.shape != shape or not out.flags.c_contiguous or not out.flags.writeable:
-                raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
-            result = out
-        else:
-            w_span = int((W[:, 1] - W[:, 0]).sum())
-            result, support = self._alloc_corr_output(shape, S, w_span)
-        if scales is not None:
-            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
-            if sc.ndim != 1 or sc.size != self.n_templates:
-                raise ValueError(f"scales must be a 1D array of length {self.n_templates}")
+    def _correlate_selected(self, ser, W, sel, row_scales, result, support=None, wait=True):
+        """correlate_series(templates=...) on a device: row j of result is template sel[j],
+        scaled by row_scales[j] when given (arguments checked by _correlation_call)."""
         self._groups
         # runs of rows adjacent in the result and in one group: (group, first local, first row, count)
         runs = []
@@ -3185,12 +3218,12 @@ class TimeDomainFilterBank:
             gpus = list({id(x): x for x in settle}.values())
             for gpu in gpus:
                 gpu.zero_columns_done(wait=False)
-            if not (ok and not wait and scales is None):
+            if not (ok and not wait and row_scales is None):
                 for gpu in gpus:
                     gpu.settle_writes()
                     gpu._x_idle()
-        if scales is not None:
-            np.multiply(result, sc[sel][:, None], out=result)
+        if row_scales is not None:
+            np.multiply(result, row_scales[:, None], out=result)
         return result
 
     def _correlate_groups(self, ser, W, scales_arr, result, settle, support=None):

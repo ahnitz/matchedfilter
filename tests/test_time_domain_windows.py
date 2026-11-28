@@ -556,13 +556,16 @@ def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch)
     from matchedfilter._filter import _automatic_series_layout
     bank = _corr_bank(layout)
     calls = []
-    orig = TimeDomainFilterBank._correlate_group
+    orig = TimeDomainFilterBank._windows_layout
 
-    def spy(self, g, ser, st, t0, nt, dest, *bounds):
-        calls.append((id(g), np.asarray(st).tolist()))      # per group: several may share a size
-        return orig(self, g, ser, st, t0, nt, dest, *bounds)
+    # the blocks each group's correlation steps compute (_batches._compile_corr_steps)
+    def spy(self, g, S_, W_, support):
+        layout = orig(self, g, S_, W_, support)
+        if layout[0].size:
+            calls.append((id(g), np.asarray(layout[0]).tolist()))  # per group: several may share a size
+        return layout
 
-    monkeypatch.setattr(TimeDomainFilterBank, "_correlate_group", spy)
+    monkeypatch.setattr(TimeDomainFilterBank, "_windows_layout", spy)
     w = GEOMETRIES["narrow"]
     W = _normalize_windows(w, S)
     bank.correlate_series(_analytic(14), windows=w)
