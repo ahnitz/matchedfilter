@@ -571,3 +571,40 @@ def test_a_gpu_search_after_others_on_the_arena_finds_its_own_peaks(monkeypatch)
         assert ref() is None and all(b() is None for b in banks)
     finally:
         gc.enable()
+
+
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_a_gpu_search_leaves_no_cyclic_garbage(monkeypatch):
+    """A GPU search built, run and dropped with the collector off leaves no object of the
+    library for the collector: its banks, plans, contexts, records and leases go with their
+    last holder, and nothing it made on the way (device queries, pipelines, descriptor sets,
+    chain searches) is a reference cycle. A cycle there held a PyCBC job's dead plans until
+    the next full collection."""
+    from test_hierarchical_search import _collect, _inputs, _profiles, _tree
+    from matchedfilter.search import HierarchicalSearch
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    opts = dict(engine="hier", binsize=512, device="gpu:0")
+    root = _tree(np.random.default_rng(37), inner_counts=(301, 351))
+    root.profile = _profiles()
+    inputs = _inputs(np.random.default_rng(43), nblocks=2)
+    gc.collect()
+    gc.disable()
+    try:
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        search = HierarchicalSearch([root], threshold=4.0, leaf_options=opts)
+        got = _collect(search, inputs)
+        assert got
+        refs = [weakref.ref(search)] + [weakref.ref(b) for b in search._leaf_banks.values()]
+        del search, got
+        alive = [r() is not None for r in refs]
+        gc.collect()
+        # library objects, functions and ctypes types (a type's __module__ is its maker's)
+        left = sorted({"%s.%s" % (o.__module__, getattr(o, "__qualname__", type(o).__qualname__))
+                       for o in gc.garbage
+                       if str(getattr(o, "__module__", "")).startswith("matchedfilter")})
+    finally:
+        gc.garbage.clear()
+        gc.set_debug(0)
+        gc.enable()
+    assert alive == [False] * len(refs)
+    assert left == [], left
