@@ -216,7 +216,8 @@ class Record:
     """A cached recording of one operation shape: the buffers it binds (`owned` are the
     context's, freed with it; the rest are callers' shared allocations) and the driver's
     native recording, and the tuple naming the buffers its result is read from
-    (`readback`, made by its first collection; _gpuhier's Readback)."""
+    (`readback`, made by its first collection, _gpuhier.HierOps._readback, and dropped when
+    the record is evicted, _exec_evict: its views read the record's buffers in place)."""
     __slots__ = ("buffers", "owned", "native", "readback")
 
     def __init__(self):
@@ -471,6 +472,10 @@ class Executor(HierOps):
         self._x_release(rec.native, done)        # waits for the record's runs unless done
         for name in rec.owned:
             self._free_owned(rec.buffers[name])
+        # Its readback views name those bytes, which an arena gives to the next tenant (or a
+        # pool to the next buffer): they go now, not when the last holder of the record (a
+        # call plan's handle) lets it go.
+        rec.readback = None
         for resident in self._uploaded.values():
             resident.pop(key, None)
 
